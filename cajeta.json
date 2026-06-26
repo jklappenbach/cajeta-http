@@ -1,0 +1,79 @@
+{
+    // cajeta-http — HTTP/1.1·2·3 + WebSocket + Server-Sent Events, client and
+    // server, built ON the stdlib transport layer `cajeta.io.net` (sockets,
+    // TCP/UDP, the cross-platform reactor, TLS).
+    //
+    // HTTP is an APPLICATION protocol, not transport: HTTP/1.1+2 ride TCP,
+    // HTTP/3 rides QUIC over UDP — so it sits ABOVE `cajeta.io.net` and ships
+    // as a LIBRARY, not in the language stdlib. Programs that only speak raw
+    // TCP/UDP never pull it in. Frameworks (e.g. primavera) layer their
+    // web/REST policy on top of this library.
+    //
+    // A LIBRARY project: no `entry-method`, compiles to a reusable `.cja`.
+
+    "details": {
+        "name":               "org.cajeta.http",
+        "version":            "0.1.0",
+        "description":        "cajeta-http — HTTP/1.1·2·3 + WebSocket + SSE client/server over cajeta.io.net",
+        "license":            "Apache-2.0",
+        "authors":            ["Julian Klappenbach"],
+        "cajeta-lang-version": "1.0"
+    },
+
+    "settings": {
+        // Uses the network transport stack (sockets + TLS via cajeta.io.net).
+        "capabilities": ["network"],
+
+        // The core stdlib (cajeta.lang, cajeta.io, cajeta.io.net, cajeta.codec,
+        // cajeta.hash, …) is built into the toolchain — not declared, not
+        // fetched — and only the parts used are linked (dead-code elimination).
+        "dependencies": {},
+
+        "dev-dependencies": {
+            "cajeta.testkit": "1.0.*"
+        },
+
+        "repositories": [
+            { "name": "central", "url": "https://repo.cajeta.org",
+              "priority": 0 }
+        ],
+
+        // NO `entry-method` — this is a library; the build emits a .cja.
+        "build": {
+            "target": "host"
+        }
+    },
+
+    "tasks": {
+
+        "build": {
+            "description": "Compile sources to a .cja library archive",
+            "actions": [
+                { "action": "build", "flavor": "debug", "id": "art" }
+            ],
+            "outputs": { "path": "${art.path}", "sha256": "${art.sha256}" }
+        },
+
+        "test": {
+            "description": "Build + run the library's unit tests",
+            "actions": [
+                { "action": "build", "flavor": "debug", "profile": "test",
+                  "id": "art" },
+                { "action": "test", "params": { "input": "${art.path}" } }
+            ]
+        },
+
+        "release": {
+            "description": "Optimized release build of the library (.cja)",
+            "actions": [
+                { "action": "build", "flavor": "release", "id": "art" }
+            ],
+            "outputs": { "path": "${art.path}", "sha256": "${art.sha256}" }
+        },
+
+        "clean": {
+            "description": "Wipe build outputs",
+            "actions": [ { "action": "clean" } ]
+        }
+    }
+}
