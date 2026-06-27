@@ -1,4 +1,4 @@
-package org.cajeta.http;
+package dev.cajeta.http;
 
 // cajeta-http — HTTP/1.1·2·3 + WebSocket + SSE over cajeta.io.net.
 //

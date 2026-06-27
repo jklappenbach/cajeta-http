@@ -12,7 +12,7 @@
     // A LIBRARY project: no `entry-method`, compiles to a reusable `.cja`.
 
     "details": {
-        "name":               "org.cajeta.http",
+        "name":               "dev.cajeta.http",
         "version":            "0.1.0",
         "description":        "cajeta-http — HTTP/1.1·2·3 + WebSocket + SSE client/server over cajeta.io.net",
         "license":            "Apache-2.0",

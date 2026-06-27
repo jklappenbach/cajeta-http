@@ -10,7 +10,7 @@ this library; the HTTP/2, middleware, and SSE surface is new design layered on t
 
 - Move the shipped HTTP/1.1 client + server + router and the RFC 6455 WebSocket
   out of the `cajeta.io.net.http` / `cajeta.io.net.ws` stdlib roots into
-  `org.cajeta.http` / `org.cajeta.http.ws` here.
+  `dev.cajeta.http` / `dev.cajeta.http.ws` here.
 - Re-target onto the stdlib transport API (`cajeta.io.net` sockets + reactor +
   `cajeta.io.net.tls`); HTTP consumes TLS, does not own it.
 - Server execution model comes from `cajeta.io.net`'s accept models

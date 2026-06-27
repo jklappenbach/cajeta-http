@@ -53,20 +53,20 @@ There is no `AsyncHandler`; fibers make "blocking" handlers non-blocking for fre
 ## Package layout
 
 ```
-org.cajeta.http              — Method, Status, Headers, Url, Version, MediaType
-org.cajeta.http.body         — Body: in-memory + streaming; chunked; multipart
-org.cajeta.http.client       — HttpClient: pooling, redirects, retry, timeouts
-org.cajeta.http.server       — HttpServer, request lifecycle, graceful shutdown
-org.cajeta.http.routing      — Router: typed path params, route trees, dispatch
-org.cajeta.http.middleware   — Middleware + bundled set
-org.cajeta.http.h1           — HTTP/1.1 wire protocol (internal)
-org.cajeta.http.h2           — HTTP/2: HPACK, framing, multiplexing, flow control (internal)
-org.cajeta.http.compression  — gzip / deflate / brotli
-org.cajeta.http.sse          — Server-Sent Events
-org.cajeta.http.ws           — WebSocket frame protocol + client/server
+dev.cajeta.http              — Method, Status, Headers, Url, Version, MediaType
+dev.cajeta.http.body         — Body: in-memory + streaming; chunked; multipart
+dev.cajeta.http.client       — HttpClient: pooling, redirects, retry, timeouts
+dev.cajeta.http.server       — HttpServer, request lifecycle, graceful shutdown
+dev.cajeta.http.routing      — Router: typed path params, route trees, dispatch
+dev.cajeta.http.middleware   — Middleware + bundled set
+dev.cajeta.http.h1           — HTTP/1.1 wire protocol (internal)
+dev.cajeta.http.h2           — HTTP/2: HPACK, framing, multiplexing, flow control (internal)
+dev.cajeta.http.compression  — gzip / deflate / brotli
+dev.cajeta.http.sse          — Server-Sent Events
+dev.cajeta.http.ws           — WebSocket frame protocol + client/server
 ```
 
-Deferred to follow-ups: `org.cajeta.http.h3` (HTTP/3 over QUIC), and `cajeta-grpc`
+Deferred to follow-ups: `dev.cajeta.http.h3` (HTTP/3 over QUIC), and `cajeta-grpc`
 (a separate library over HTTP/2).
 
 ---
@@ -272,7 +272,7 @@ selects `http/1.1` / `h2`. This library does **not** redefine TLS.
 
 ## Error model
 
-`org.cajeta.http` HTTP/WS exceptions extend `cajeta.io.net.NetException` (itself a
+`dev.cajeta.http` HTTP/WS exceptions extend `cajeta.io.net.NetException` (itself a
 `cajeta.error.RecoverableException`): `MalformedMessage`, `HeadersTooLarge`,
 `InvalidChunkEncoding`, `UnexpectedEof` (HTTP); `HandshakeRejected`,
 `ProtocolViolation`, `MessageTooLarge`, `ConnectionClosed` (WS, carrying the close
