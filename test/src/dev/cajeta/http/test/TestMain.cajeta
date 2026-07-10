@@ -13,6 +13,7 @@ public final class TestMain {
         c.eqStr(v, "0.1.0", "Http.version()");
 
         CodecTests.run(c);
+        ServerTests.run(c);
 
         System.stdout.println("");
         System.stdout.println("=== {} passed, {} failed ===",
