@@ -1,0 +1,264 @@
+package tour.http;
+
+import dev.cajeta.http.BodyReader;
+import dev.cajeta.http.HttpClient;
+import dev.cajeta.http.HttpParser;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.HttpSerializer;
+import dev.cajeta.http.HttpServer;
+import dev.cajeta.http.HttpServerBuilder;
+import dev.cajeta.http.Router;
+import dev.cajeta.http.ws.WebSocket;
+import dev.cajeta.http.ws.WsClientHandshake;
+import dev.cajeta.http.ws.WsMessage;
+import dev.cajeta.http.ws.WsServerHandshake;
+import dev.cajeta.http.ws.WsUpgrade;
+import cajeta.io.net.AsyncReader;
+import cajeta.io.net.AsyncWriter;
+import cajeta.io.net.IpAddress;
+import cajeta.io.net.Server;
+import cajeta.io.net.SocketAddress;
+import cajeta.io.net.TcpListener;
+import cajeta.io.net.TcpStream;
+import cajeta.io.net.uri.Uri;
+import cajeta.time.Duration;
+
+/**
+ * The cajeta-http tour — a self-checking walkthrough of the library
+ * surface, one section per layer:
+ *
+ *   1. the message model + HTTP/1.1 wire codec (serialize → parse),
+ *   2. the Router (typed path params, 404/405 defaults),
+ *   3. a live HttpServer + HttpClient exchange over loopback,
+ *   4. WebSocket: the pure RFC 6455 handshake, then a live echo.
+ *
+ * Every section asserts what it demonstrates; the exit code is the
+ * number of failed checks (0 = tour passed).
+ */
+public final class HttpTour {
+
+    static int32 failures;
+    static int32 passes;
+
+    static void check(boolean cond, String label) {
+        if (cond) {
+            passes = passes + 1;
+            System.stdout.println("  ok   {}", label);
+        } else {
+            failures = failures + 1;
+            System.stdout.println("  FAIL {}", label);
+        }
+    }
+
+    // ── 1. Message model + wire codec ────────────────────────────────
+
+    static void wireCodec() {
+        System.stdout.println("");
+        System.stdout.println("-- The message model and the HTTP/1.1 wire codec --");
+
+        String payload = "name=ada";
+        HttpRequest req = HttpRequest.post("/form");
+        req.setHeader("Host", "tour.example");
+        req.body(payload.bytes, payload.byteLength);
+
+        HttpSerializer s = heap HttpSerializer();
+        s.writeRequest(req);
+        int32 wireLen = s.size();
+        String wireText = s.toStringValue();
+        System.stdout.println("  serialized {} bytes:", wireLen);
+        System.stdout.println("{}", wireText);
+
+        HttpParser p = HttpParser.forRequest();
+        int8[] wire = s.toBytes();
+        p.feed(wire, wireLen);
+        check(p.isComplete(), "parser completes on the serialized bytes");
+        HttpRequest back = p.takeRequest();
+        check(back.getMethod().equals("POST"), "method round-trips");
+        check(back.getHeaders().get("host").equals("tour.example"),
+              "headers are case-insensitive");
+        BodyReader body = BodyReader.forFraming(p.getFraming());
+        body.feed(p.leftover(), p.leftoverLength());
+        check(body.isComplete() && body.decodedLength() == 8,
+              "content-length body decodes (8 bytes)");
+    }
+
+    // ── 2. The router ────────────────────────────────────────────────
+
+    static void router() {
+        System.stdout.println("");
+        System.stdout.println("-- The Router: typed path params, 404/405 defaults --");
+
+        (HttpRequest) -> #HttpResponse userRoute = (req) -> {
+            String id = req.pathParam("id");
+            String body = "user " + id;
+            return HttpResponse.ok().body(body.bytes, body.byteLength);
+        };
+        Router router = heap Router();
+        router.route("GET", "/users/{id}", userRoute);
+        router.route("GET", "/health", (req) -> HttpResponse.of(204));
+
+        HttpResponse hit = router.dispatch(HttpRequest.of("GET", "/users/42"));
+        check(hit.statusCode() == 200, "/users/{id} matches and binds id");
+        HttpResponse miss = router.dispatch(HttpRequest.of("GET", "/nope"));
+        check(miss.statusCode() == 404, "unknown path answers 404");
+        HttpResponse wrong = router.dispatch(HttpRequest.of("POST", "/health"));
+        String allow = wrong.getHeaders().get("Allow");
+        check(wrong.statusCode() == 405 && allow != null && allow.equals("GET"),
+              "wrong method answers 405 with Allow");
+    }
+
+    // ── 3. Live server + client over loopback ───────────────────────
+
+    // The live handler: static and capture-free. GET /hello answers a
+    // greeting; POST echoes the request body; anything else is a
+    // bodied 404 (a body gives the response Content-Length framing).
+    public static #HttpResponse handle(HttpRequest req) {
+        if (req.getMethod().equals("POST")) {
+            return HttpResponse.ok().body(req.body, req.bodyLength());
+        }
+        if (req.getTarget().equals("/hello")) {
+            String hello = "hello from cajeta-http";
+            return HttpResponse.ok().body(hello.bytes, hello.byteLength);
+        }
+        String nf = "not found";
+        return HttpResponse.of(404).body(nf.bytes, nf.byteLength);
+    }
+
+    public static async int32 clientGet(int32 port) {
+        HttpClient client = heap HttpClient();
+        Uri uri = Uri.builder()
+            .scheme("http").host("127.0.0.1").port(port).path("/hello")
+            .build();
+        HttpRequest req = HttpRequest.fromUri("GET", uri);
+        HttpResponse resp = client.send(uri, req);
+        if (resp.statusCode() != 200) {
+            return -1;
+        }
+        return resp.bodyLength();
+    }
+
+    public static async int32 clientPost(int32 port) {
+        HttpClient client = heap HttpClient();
+        Uri uri = Uri.builder()
+            .scheme("http").host("127.0.0.1").port(port).path("/echo")
+            .build();
+        HttpRequest req = HttpRequest.fromUri("POST", uri);
+        String ping = "ping";
+        req.body(ping.bytes, ping.byteLength);
+        HttpResponse resp = client.send(uri, req);
+        if (resp.statusCode() != 200) {
+            return -1;
+        }
+        return resp.bodyLength();
+    }
+
+    static void liveHttp() {
+        System.stdout.println("");
+        System.stdout.println("-- A live HttpServer + HttpClient over loopback --");
+
+        scope {
+            HttpServerBuilder b = HttpServer.builder();
+            b.bind("127.0.0.1:0");
+            (HttpRequest) -> #HttpResponse h = (req) -> HttpTour.handle(req);
+            b.handler(h);
+            HttpServer srv = b.build();
+            Server core = srv.server;
+            int32 port = core.listener.boundPort();
+            System.stdout.println("  bound 127.0.0.1:{} (ephemeral)", port);
+            check(port > 0, "server bound an ephemeral port");
+
+            Task<int32> tg = spawn clientGet(port);
+            TcpStream c1 = core.acceptNext();
+            core.dispatch(#c1);
+            int32 got = await tg;
+            check(got == 22, "GET /hello answered the 22-byte greeting");
+
+            Task<int32> tp = spawn clientPost(port);
+            TcpStream c2 = core.acceptNext();
+            core.dispatch(#c2);
+            int32 gotPost = await tp;
+            check(gotPost == 4, "POST /echo round-tripped the 4-byte body");
+
+            boolean drained = core.drainInflight(Duration.ofSeconds(5));
+            check(drained, "connection fibers drained clean");
+            core.listener.close();
+        }
+    }
+
+    // ── 4. WebSocket ─────────────────────────────────────────────────
+
+    public static async int32 wsServer(#TcpListener listener) {
+        TcpStream sock = listener.acceptAsync();
+        AsyncReader reader = heap AsyncReader(sock);
+        AsyncWriter writer = heap AsyncWriter(sock);
+        WebSocket ws = WsUpgrade.acceptServer(reader, writer);
+        WsMessage m = ws.receive();
+        String text = heap String(m.getPayload(), m.length());
+        ws.send(text);
+        sock.close();
+        return m.length();
+    }
+
+    static void webSocket() {
+        System.stdout.println("");
+        System.stdout.println("-- WebSocket: RFC 6455 handshake + live echo --");
+
+        // The opening handshake, pure — no socket involved.
+        String accept = WsServerHandshake.acceptKey("dGhlIHNhbXBsZSBub25jZQ==");
+        check(accept.equals("s3pPLMBiTxaQ9kYGzzhZRbK+xOo="),
+              "Sec-WebSocket-Accept matches the RFC 6455 example");
+        Uri huri = Uri.builder()
+            .scheme("ws").host("example.test").port(80).path("/chat")
+            .build();
+        String key = WsClientHandshake.placeholderKey(42);
+        HttpRequest upgrade = WsClientHandshake.buildRequest(huri, key);
+        HttpResponse hresp = WsServerHandshake.accept(upgrade);
+        check(hresp.statusCode() == 101
+                  && WsClientHandshake.validateAccept(hresp, key),
+              "Upgrade -> 101 -> accept token validated");
+
+        // Live echo over loopback.
+        scope {
+            IpAddress la = IpAddress.loopbackV4();
+            SocketAddress bindAddr = SocketAddress.of(#la, 0);
+            TcpListener listener = TcpListener.bind(bindAddr);
+            int32 port = listener.boundPort();
+            Task<int32> t = spawn wsServer(#listener);
+
+            IpAddress ca = IpAddress.loopbackV4();
+            SocketAddress connAddr = SocketAddress.of(#ca, port);
+            TcpStream sock = TcpStream.connectAsync(#connAddr);
+            AsyncReader reader = heap AsyncReader(sock);
+            AsyncWriter writer = heap AsyncWriter(sock);
+            Uri curi = Uri.builder()
+                .scheme("ws").host("127.0.0.1").port(port).path("/")
+                .build();
+            WebSocket ws = WsUpgrade.connectClient(reader, writer, curi, 1234567);
+
+            ws.send("marco");
+            WsMessage echo = ws.receive();
+            check(echo.isText() && echo.length() == 5,
+                  "text message echoed intact over the upgraded socket");
+            int32 sret = await t;
+            sock.close();
+            check(sret == 5, "server fiber saw the 5-byte message");
+        }
+    }
+
+    public static int32 main(String[] args) {
+        System.stdout.println("=== cajeta-http tour ===");
+        failures = 0;
+        passes = 0;
+
+        wireCodec();
+        router();
+        liveHttp();
+        webSocket();
+
+        System.stdout.println("");
+        System.stdout.println("=== tour complete: {} checks passed, {} failed ===",
+                              passes, failures);
+        return failures;
+    }
+}
