@@ -44,7 +44,7 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
   - TDD first: loopback client↔server exchange (GET + POST body, status,
     headers).
   - Acceptance: client suite passes against the 0.3 server.
-- [ ] **0.5 Extract WebSocket** — the RFC 6455 stack (`WebSocket`, frame
+- [x] **0.5 Extract WebSocket** — the RFC 6455 stack (`WebSocket`, frame
   codec, handshakes, control frames, assembler, close codes, exceptions)
   from `cajeta.io.net.ws` into `dev.cajeta.http.ws`.
   - TDD first: frame encode/decode round-trips (masking, 7/16/64-bit
