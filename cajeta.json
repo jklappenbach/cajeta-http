@@ -55,11 +55,19 @@
         },
 
         "test": {
+            // The designed src/test/cajeta + cajeta.testkit pipeline is not
+            // in the toolchain yet (no test-source-root support; testkit
+            // unpublished), so the suite is an ordinary self-checking binary:
+            // test/src compiled against the built .cja via --classpath.
             "description": "Build + run the library's unit tests",
             "actions": [
-                { "action": "build", "flavor": "debug", "profile": "test",
-                  "id": "art" },
-                { "action": "test", "params": { "input": "${art.path}" } }
+                { "action": "build", "flavor": "debug", "id": "art" },
+                { "action": "exec", "command": "cajeta",
+                  "args": [ "dev.cajeta.http.test.TestMain::main",
+                            "test/src", "build/test",
+                            "--emit=exe", "--classpath=${art.path}",
+                            "-o", "build/test/http-tests" ] },
+                { "action": "test", "input": "build/test/http-tests" }
             ]
         },
 

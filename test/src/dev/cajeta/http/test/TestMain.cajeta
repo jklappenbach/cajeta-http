@@ -1,0 +1,17 @@
+package dev.cajeta.http.test;
+
+import dev.cajeta.http.Http;
+
+// Smoke probe for the harness mechanism: compiles against the library
+// .cja via --classpath and self-checks. Real suites land per plan unit.
+public final class TestMain {
+    public static int32 main(String[] args) {
+        String v = Http.version();
+        if (!v.equals("0.1.0")) {
+            System.stdout.println("FAIL: Http.version() = {}", v);
+            return 1;
+        }
+        System.stdout.println("smoke: Http.version() ok");
+        return 0;
+    }
+}
