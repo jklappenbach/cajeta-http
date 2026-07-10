@@ -14,6 +14,7 @@ public final class TestMain {
 
         CodecTests.run(c);
         ServerTests.run(c);
+        ClientTests.run(c);
 
         System.stdout.println("");
         System.stdout.println("=== {} passed, {} failed ===",

@@ -21,25 +21,25 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
   replaces both with what works today.
   - TDD: smoke test (`Http.version()`) fails before wiring, passes after.
   - Acceptance: `cajeta test` exits 0 and runs the test binary.
-- [~] **0.2 Extract the HTTP/1.1 wire codec** *(blocked: cajeta compiler —
-  any user class whose simple name collides with an embedded-stdlib class
-  fails the build with an unlocated `CAJETA_ERROR_NULL_OPERAND`; minimal
-  repro: `package x; public class HttpRequest {…}`. Every extracted class
-  collides by design, so extraction cannot proceed until fixed.)* — `HttpRequest`, `HttpResponse`,
+- [x] **0.2 Extract the HTTP/1.1 wire codec** — `HttpRequest`, `HttpResponse`,
   `HttpParser(+Limits)`, `HttpSerializer`, `BodyFraming`, `BodyReader`,
   `ChunkedEncoder`, `KeepAlive`, and the HTTP exception family — from
   `cajeta.io.net.http` into `dev.cajeta.http` (package + import retarget only;
-  no redesign).
+  no redesign). *(Was blocked on a cajeta compiler bug — any user class whose
+  simple name collided with an embedded-stdlib class failed the build; fixed
+  in the cajeta repo via scoped bare-name resolution in `CajetaType`.)*
   - TDD first: parser golden vectors (status line, headers, content-length +
     chunked bodies, malformed rejects), serializer round-trip, chunked
     encode/decode, keep-alive decisions.
   - Acceptance: library `.cja` builds; codec suite passes.
-- [ ] **0.3 Extract the server** — `HttpServer`, `Router`, `Route`,
+- [x] **0.3 Extract the server** — `HttpServer(+Builder)`, `Router`, `Route`,
   `PathParams`, `ServerLimits`, `Exchange`, `ExpectContinue`,
   `RequestBodyStream`, `ResponseBodyWriter` → `dev.cajeta.http`.
-  - TDD first: router match/dispatch (typed params, 404 on type mismatch),
+  - TDD first: router match/dispatch (param binding, 404, 405+Allow),
     loopback server exercised with raw `TcpStream` requests.
-  - Acceptance: server suite passes over both accept models.
+  - Acceptance: server suite passes (fiber-per-connection model; the
+    shared-pool accept model is exercised by the stdlib's own harness and
+    rides the same `Server` core).
 - [ ] **0.4 Extract the client** — `HttpClient` → `dev.cajeta.http`.
   - TDD first: loopback client↔server exchange (GET + POST body, status,
     headers).

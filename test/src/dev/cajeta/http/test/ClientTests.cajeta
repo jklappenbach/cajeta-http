@@ -1,0 +1,101 @@
+package dev.cajeta.http.test;
+
+import dev.cajeta.http.HttpClient;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.HttpServer;
+import dev.cajeta.http.HttpServerBuilder;
+import cajeta.io.net.Server;
+import cajeta.io.net.TcpStream;
+import cajeta.io.net.uri.Uri;
+import cajeta.time.Duration;
+
+/**
+ * http:0.4 — client suite. HttpClient exchanges against the 0.3
+ * loopback server (ServerTests.liveHandle): GET /hello and a POST
+ * echo, response status/headers/body through the full client path
+ * (DNS-less loopback connect, serialize, parse). Mirrors the tour's
+ * HttpDemo client fibers.
+ */
+public final class ClientTests {
+
+    public static void run(Check c) {
+        System.stdout.println("-- client: loopback --");
+        liveClient(c);
+    }
+
+    // Client fiber: GET /hello, expect 200 + the 5-byte "hello" body.
+    public static async int32 clientGet(int32 port) {
+        HttpClient client = heap HttpClient();
+        Uri uri = Uri.builder()
+            .scheme("http").host("127.0.0.1").port(port).path("/hello")
+            .build();
+        HttpRequest req = HttpRequest.fromUri("GET", uri);
+        HttpResponse resp = client.send(uri, req);
+        if (resp.statusCode() != 200) {
+            return -1;
+        }
+        if (resp.bodyLength() != 5) {
+            return -2;
+        }
+        int8[] b = resp.body;
+        if (b[0] != (int8) 104 || b[4] != (int8) 111) {   // 'h' .. 'o'
+            return -3;
+        }
+        return 1;
+    }
+
+    // Client fiber: POST /echo with a 4-byte "ping" body — the handler
+    // echoes it back byte-for-byte.
+    public static async int32 clientPost(int32 port) {
+        HttpClient client = heap HttpClient();
+        Uri uri = Uri.builder()
+            .scheme("http").host("127.0.0.1").port(port).path("/echo")
+            .build();
+        HttpRequest req = HttpRequest.fromUri("POST", uri);
+        String ping = "ping";
+        req.body(ping.bytes, ping.byteLength);
+        HttpResponse resp = client.send(uri, req);
+        if (resp.statusCode() != 200) {
+            return -1;
+        }
+        if (resp.bodyLength() != 4) {
+            return -2;
+        }
+        int8[] b = resp.body;
+        if (b[0] != (int8) 112 || b[3] != (int8) 103) {   // 'p' .. 'g'
+            return -3;
+        }
+        return 2;
+    }
+
+    static void liveClient(Check c) {
+        scope {
+            HttpServerBuilder b = HttpServer.builder();
+            b.bind("127.0.0.1:0");
+            (HttpRequest) -> #HttpResponse h =
+                (req) -> ServerTests.liveHandle(req);
+            b.handler(h);
+            HttpServer srv = b.build();
+            Server core = srv.server;
+            int32 port = core.listener.boundPort();
+            c.that(port > 0, "server bound an ephemeral port");
+
+            Task<int32> tg = spawn clientGet(port);
+            TcpStream c1 = core.acceptNext();
+            core.dispatch(#c1);
+            int32 got = await tg;
+            c.eqInt((int64) got, 1, "HttpClient GET /hello");
+
+            Task<int32> tp = spawn clientPost(port);
+            TcpStream c2 = core.acceptNext();
+            core.dispatch(#c2);
+            int32 gotPost = await tp;
+            c.eqInt((int64) gotPost, 2, "HttpClient POST /echo round-trip");
+
+            boolean drained = core.drainInflight(Duration.ofSeconds(5));
+            c.that(drained, "connection fibers drained");
+            core.listener.close();
+        }
+    }
+}
