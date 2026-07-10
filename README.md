@@ -28,15 +28,16 @@ serialization-to-object-model are **primavera's** job, layered on top.
 
 | Capability | State |
 |---|---|
-| HTTP/1.1 message model, client, server, router | ◻ porting from the stdlib `Net.md` reality |
-| WebSocket (RFC 6455) client + server | ◻ porting |
+| HTTP/1.1 message model, wire codec, client, server, router | ✓ extracted from the stdlib (`dev.cajeta.http`), loopback-tested |
+| WebSocket (RFC 6455) client + server | ✓ extracted (`dev.cajeta.http.ws`), loopback echo tested |
 | HTTP/2 (HPACK, multiplexing, flow control) | ▢ planned |
 | Middleware (logging, CORS, auth, compression, rate-limit, …) | ▢ planned |
 | Server-Sent Events | ▢ planned |
 | HTTP/3 over QUIC (UDP) | ▢ deferred (needs QUIC) |
 
-See [`docs/http-spec.md`](docs/http-spec.md) for the design and
-[`plan/http-plan.md`](plan/http-plan.md) for the build order.
+See [`docs/http-spec.md`](docs/http-spec.md) for the design,
+[`plan/http-plan.md`](plan/http-plan.md) for the build order, and
+[`samples/tour`](samples/tour) for a runnable, self-checking walkthrough.
 
 ## Build & test
 
