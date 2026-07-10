@@ -51,7 +51,7 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
     lengths), `Sec-WebSocket-Accept` derivation, fragmentation reassembly,
     loopback echo over an upgraded connection.
   - Acceptance: WS suite passes.
-- [ ] **0.6 samples/tour** — a self-checking tour of the library surface,
+- [x] **0.6 samples/tour** — a self-checking tour of the library surface,
   modeled on `cajeta/samples/tour`: HttpServer + Router over loopback, an
   HttpClient exchange against it, and a WebSocket echo; README + run script;
   exits non-zero on any failed check.
