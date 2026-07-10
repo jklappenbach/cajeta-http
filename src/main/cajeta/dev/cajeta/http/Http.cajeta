@@ -2,8 +2,10 @@ package dev.cajeta.http;
 
 // cajeta-http — HTTP/1.1·2·3 + WebSocket + SSE over cajeta.io.net.
 //
-// Scaffold only. The design is in docs/http-spec.md; the build order is in
-// plan/http-plan.md. Implementation is tracked as "Complete the library" in the
+// The HTTP/1.1 stack (codec, client, server, router) and the RFC 6455
+// WebSocket live here, extracted from the stdlib; the design is in
+// docs/http-spec.md and the build order in plan/http-plan.md. HTTP/2,
+// middleware, and SSE are tracked as "Complete the library" in the
 // cajeta project's external completion plan.
 public final class Http {
     public static String version() { return "0.1.0"; }
