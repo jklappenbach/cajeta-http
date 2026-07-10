@@ -1,0 +1,214 @@
+package dev.cajeta.http.test;
+
+import dev.cajeta.http.HttpParser;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.HttpSerializer;
+import dev.cajeta.http.BodyFraming;
+import dev.cajeta.http.BodyReader;
+import dev.cajeta.http.ChunkedEncoder;
+import dev.cajeta.http.KeepAlive;
+import dev.cajeta.http.HttpException;
+import cajeta.io.net.Headers;
+
+/**
+ * http:0.2 — HTTP/1.1 wire-codec suite. Golden cases ported from the
+ * stdlib's `test/net/golden/http` vectors; exercises the extracted
+ * parser, serializer, body framing, chunked codec, and keep-alive.
+ */
+public final class CodecTests {
+
+    public static void run(Check c) {
+        System.stdout.println("-- codec: parser --");
+        parseSimpleGet(c);
+        parsePostContentLength(c);
+        parseResponseChunked(c);
+        parseIncrementalSplit(c);
+        rejectMalformed(c);
+        System.stdout.println("-- codec: serializer --");
+        requestRoundTrip(c);
+        responseRoundTrip(c);
+        System.stdout.println("-- codec: chunked --");
+        chunkedEncode(c);
+        chunkedDecodeExtensionsAndTrailers(c);
+        System.stdout.println("-- codec: keep-alive --");
+        keepAliveDefaults(c);
+    }
+
+    static void parseSimpleGet(Check c) {
+        String wire = "GET /hello.txt HTTP/1.1\r\nHost: www.example.test\r\nUser-Agent: cajeta-net/1.0\r\nAccept: */*\r\n\r\n";
+        HttpParser p = HttpParser.forRequest();
+        boolean done = p.feed(wire.bytes, wire.byteLength);
+        c.that(done, "simple GET head completes");
+        c.that(p.isComplete(), "parser reports complete");
+        HttpRequest req = p.takeRequest();
+        c.eqStr(req.getMethod(), "GET", "method");
+        c.eqStr(req.getTarget(), "/hello.txt", "target");
+        c.eqStr(req.getVersion(), "HTTP/1.1", "version");
+        c.eqStr(req.getHeaders().get("host"), "www.example.test", "host header");
+        c.eqStr(req.getHeaders().get("User-Agent"), "cajeta-net/1.0",
+                "case-insensitive header get");
+    }
+
+    static void parsePostContentLength(Check c) {
+        String wire = "POST /submit HTTP/1.1\r\nHost: h\r\nContent-Length: 5\r\n\r\nhello";
+        HttpParser p = HttpParser.forRequest();
+        p.feed(wire.bytes, wire.byteLength);
+        c.that(p.isComplete(), "POST head completes");
+        BodyFraming framing = p.getFraming();
+        c.that(framing.isContentLength(), "framing is content-length");
+        c.eqInt(framing.length, 5, "framing length");
+        BodyReader body = BodyReader.forFraming(framing);
+        int8[] left = p.leftover();
+        body.feed(left, p.leftoverLength());
+        c.that(body.isComplete(), "body completes");
+        int32 decodedLen = body.decodedLength();
+        int8[] decoded = body.drain();
+        c.eqBytes(decoded, decodedLen, "hello", "POST body bytes");
+    }
+
+    static void parseResponseChunked(Check c) {
+        String head = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\n\r\n";
+        String chunks = "4\r\nWiki\r\n5\r\npedia\r\nE\r\n in\r\n\r\nchunks.\r\n0\r\n\r\n";
+        HttpParser p = HttpParser.forResponse();
+        p.feed(head.bytes, head.byteLength);
+        c.that(p.isComplete(), "chunked response head completes");
+        HttpResponse resp = p.takeResponse();
+        c.eqInt((int64) resp.statusCode(), 200, "status 200");
+        c.eqStr(resp.getReason(), "OK", "reason OK");
+        BodyFraming framing = p.getFraming();
+        c.that(framing.isChunked(), "framing is chunked");
+        BodyReader body = BodyReader.forFraming(framing);
+        body.feed(chunks.bytes, chunks.byteLength);
+        c.that(body.isComplete(), "chunked body completes");
+        int32 decodedLen = body.decodedLength();
+        int8[] decoded = body.drain();
+        c.eqBytes(decoded, decodedLen, "Wikipedia in\r\n\r\nchunks.",
+                  "wikipedia golden vector");
+    }
+
+    static void parseIncrementalSplit(Check c) {
+        String a = "GET /split HTTP/1.1\r\nHo";
+        String b = "st: example\r\n\r\n";
+        HttpParser p = HttpParser.forRequest();
+        boolean early = p.feed(a.bytes, a.byteLength);
+        c.that(!early, "incomplete head not complete");
+        boolean done = p.feed(b.bytes, b.byteLength);
+        c.that(done, "split head completes on second feed");
+        HttpRequest req = p.takeRequest();
+        c.eqStr(req.getHeaders().get("host"), "example",
+                "header spanning feed boundary");
+    }
+
+    static void rejectMalformed(Check c) {
+        // No SP separators at all — parseRequestLine must throw.
+        String wire = "GARBAGE\r\n\r\n";
+        HttpParser p = HttpParser.forRequest();
+        boolean threw = false;
+        try {
+            p.feed(wire.bytes, wire.byteLength);
+        } catch (HttpException e) {
+            threw = true;
+        }
+        c.that(threw, "malformed start line raises HttpException");
+    }
+
+    static void requestRoundTrip(Check c) {
+        String payload = "name=x";
+        HttpRequest req = HttpRequest.post("/form");
+        req.setHeader("Host", "rt.example");
+        req.body(payload.bytes, payload.byteLength);
+        // Instance API: size() gives the wire length (arrays carry no
+        // length accessor in the language today).
+        HttpSerializer s = heap HttpSerializer();
+        s.writeRequest(req);
+        int32 wireLen = s.size();
+        int8[] wire = s.toBytes();
+
+        HttpParser p = HttpParser.forRequest();
+        p.feed(wire, wireLen);
+        c.that(p.isComplete(), "serialized request parses");
+        HttpRequest back = p.takeRequest();
+        c.eqStr(back.getMethod(), "POST", "round-trip method");
+        c.eqStr(back.getTarget(), "/form", "round-trip target");
+        c.eqStr(back.getHeaders().get("host"), "rt.example", "round-trip host");
+        BodyReader body = BodyReader.forFraming(p.getFraming());
+        body.feed(p.leftover(), p.leftoverLength());
+        int32 decodedLen = body.decodedLength();
+        int8[] decoded = body.drain();
+        c.eqBytes(decoded, decodedLen, "name=x", "round-trip body");
+    }
+
+    static void responseRoundTrip(Check c) {
+        String payload = "hi";
+        HttpResponse resp = HttpResponse.of(200);
+        resp.setHeader("Content-Type", "text/plain");
+        resp.body(payload.bytes, payload.byteLength);
+        HttpSerializer s = heap HttpSerializer();
+        s.writeResponse(resp);
+        int32 wireLen = s.size();
+        int8[] wire = s.toBytes();
+
+        HttpParser p = HttpParser.forResponse();
+        p.feed(wire, wireLen);
+        c.that(p.isComplete(), "serialized response parses");
+        HttpResponse back = p.takeResponse();
+        c.eqInt((int64) back.statusCode(), 200, "round-trip status");
+        BodyReader body = BodyReader.forFraming(p.getFraming());
+        body.feed(p.leftover(), p.leftoverLength());
+        int32 decodedLen = body.decodedLength();
+        int8[] decoded = body.drain();
+        c.eqBytes(decoded, decodedLen, "hi", "round-trip response body");
+    }
+
+    static void chunkedEncode(Check c) {
+        // The encoders return exactly-sized buffers; compare against the
+        // expected text's length (a short buffer bounds-traps, a long one
+        // is invisible here — acceptable until arrays expose a length).
+        String payload = "hello";
+        String expChunk = "5\r\nhello\r\n";
+        int8[] chunk = ChunkedEncoder.encodeChunk(payload.bytes,
+                                                  payload.byteLength);
+        c.eqBytes(chunk, expChunk.byteLength, expChunk, "encodeChunk");
+        String expLast = "0\r\n\r\n";
+        int8[] last = ChunkedEncoder.encodeLast();
+        c.eqBytes(last, expLast.byteLength, expLast, "encodeLast");
+    }
+
+    static void chunkedDecodeExtensionsAndTrailers(Check c) {
+        // Golden vectors: chunk-extension and trailers are consumed but
+        // not part of the decoded body.
+        String ext = "5;foo=bar\r\nhello\r\n0\r\n\r\n";
+        BodyReader r1 = BodyReader.forChunked();
+        r1.feed(ext.bytes, ext.byteLength);
+        c.that(r1.isComplete(), "chunk-extension body completes");
+        int32 len1 = r1.decodedLength();
+        int8[] d1 = r1.drain();
+        c.eqBytes(d1, len1, "hello", "chunk-extension ignored");
+
+        String trailers = "4\r\ndata\r\n0\r\nX-Checksum: abc\r\n\r\n";
+        BodyReader r2 = BodyReader.forChunked();
+        r2.feed(trailers.bytes, trailers.byteLength);
+        c.that(r2.isComplete(), "trailered body completes");
+        int32 len2 = r2.decodedLength();
+        int8[] d2 = r2.drain();
+        c.eqBytes(d2, len2, "data", "trailers consumed not decoded");
+    }
+
+    static void keepAliveDefaults(Check c) {
+        Headers none = heap Headers();
+        c.that(KeepAlive.messageAllowsReuse("HTTP/1.1", none),
+               "1.1 defaults to keep-alive");
+        Headers close = heap Headers();
+        close.add("Connection", "close");
+        c.that(!KeepAlive.messageAllowsReuse("HTTP/1.1", close),
+               "1.1 Connection: close disables reuse");
+        Headers none10 = heap Headers();
+        c.that(!KeepAlive.messageAllowsReuse("HTTP/1.0", none10),
+               "1.0 defaults to close");
+        Headers ka10 = heap Headers();
+        ka10.add("Connection", "keep-alive");
+        c.that(KeepAlive.messageAllowsReuse("HTTP/1.0", ka10),
+               "1.0 Connection: keep-alive enables reuse");
+    }
+}

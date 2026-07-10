@@ -1,0 +1,66 @@
+package dev.cajeta.http.test;
+
+// Minimal assertion collector: prints ok/FAIL per check, counts failures.
+// The suite passes iff failures == 0 (TestMain's exit code).
+public final class Check {
+    public int32 failures;
+    public int32 passes;
+
+    public Check() {
+        this.failures = 0;
+        this.passes = 0;
+    }
+
+    public void that(boolean cond, String label) {
+        if (cond) {
+            this.passes = this.passes + 1;
+        } else {
+            this.failures = this.failures + 1;
+            System.stdout.println("  FAIL {}", label);
+        }
+    }
+
+    public void eqStr(String actual, String expected, String label) {
+        if (actual.equals(expected)) {
+            this.passes = this.passes + 1;
+        } else {
+            this.failures = this.failures + 1;
+            System.stdout.println("  FAIL {}: expected '{}', got '{}'",
+                                  label, expected, actual);
+        }
+    }
+
+    public void eqInt(int64 actual, int64 expected, String label) {
+        if (actual == expected) {
+            this.passes = this.passes + 1;
+        } else {
+            this.failures = this.failures + 1;
+            System.stdout.println("  FAIL {}: expected {}, got {}",
+                                  label, expected, actual);
+        }
+    }
+
+    // Compare a byte buffer's first `length` bytes against a string's bytes.
+    public void eqBytes(int8[] actual, int32 length, String expected,
+                        String label) {
+        boolean same = length == expected.byteLength;
+        if (same) {
+            int32 i = 0;
+            while (i < length) {
+                if (actual[i] != expected.bytes[i]) {
+                    same = false;
+                    i = length;
+                } else {
+                    i = i + 1;
+                }
+            }
+        }
+        if (same) {
+            this.passes = this.passes + 1;
+        } else {
+            this.failures = this.failures + 1;
+            System.stdout.println("  FAIL {}: byte mismatch (len {} vs {})",
+                                  label, length, expected.byteLength);
+        }
+    }
+}

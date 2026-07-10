@@ -21,7 +21,11 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
   replaces both with what works today.
   - TDD: smoke test (`Http.version()`) fails before wiring, passes after.
   - Acceptance: `cajeta test` exits 0 and runs the test binary.
-- [ ] **0.2 Extract the HTTP/1.1 wire codec** — `HttpRequest`, `HttpResponse`,
+- [~] **0.2 Extract the HTTP/1.1 wire codec** *(blocked: cajeta compiler —
+  any user class whose simple name collides with an embedded-stdlib class
+  fails the build with an unlocated `CAJETA_ERROR_NULL_OPERAND`; minimal
+  repro: `package x; public class HttpRequest {…}`. Every extracted class
+  collides by design, so extraction cannot proceed until fixed.)* — `HttpRequest`, `HttpResponse`,
   `HttpParser(+Limits)`, `HttpSerializer`, `BodyFraming`, `BodyReader`,
   `ChunkedEncoder`, `KeepAlive`, and the HTTP exception family — from
   `cajeta.io.net.http` into `dev.cajeta.http` (package + import retarget only;

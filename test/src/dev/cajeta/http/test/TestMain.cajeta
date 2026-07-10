@@ -2,16 +2,24 @@ package dev.cajeta.http.test;
 
 import dev.cajeta.http.Http;
 
-// Smoke probe for the harness mechanism: compiles against the library
-// .cja via --classpath and self-checks. Real suites land per plan unit.
+// Entry point for the library's self-checking test binary (see the
+// manifest's `test` task). Exit 0 iff every check passes.
 public final class TestMain {
     public static int32 main(String[] args) {
+        System.stdout.println("=== cajeta-http tests ===");
+        Check c = heap Check();
+
         String v = Http.version();
-        if (!v.equals("0.1.0")) {
-            System.stdout.println("FAIL: Http.version() = {}", v);
+        c.eqStr(v, "0.1.0", "Http.version()");
+
+        CodecTests.run(c);
+
+        System.stdout.println("");
+        System.stdout.println("=== {} passed, {} failed ===",
+                              c.passes, c.failures);
+        if (c.failures > 0) {
             return 1;
         }
-        System.stdout.println("smoke: Http.version() ok");
         return 0;
     }
 }
