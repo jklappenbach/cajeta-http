@@ -40,7 +40,7 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
   - Acceptance: server suite passes (fiber-per-connection model; the
     shared-pool accept model is exercised by the stdlib's own harness and
     rides the same `Server` core).
-- [ ] **0.4 Extract the client** — `HttpClient` → `dev.cajeta.http`.
+- [x] **0.4 Extract the client** — `HttpClient` → `dev.cajeta.http`.
   - TDD first: loopback client↔server exchange (GET + POST body, status,
     headers).
   - Acceptance: client suite passes against the 0.3 server.
