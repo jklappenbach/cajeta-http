@@ -93,28 +93,69 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
     `samples/tour/run.sh` → 15 checks passed, exit 0. **Both are
     intermittent** — see 0.9 below; every 0.8 check that runs, passes, and
     the failures are a transport race outside the migrated code.
-- [ ] **0.9 Fix the HttpClient loopback race** (found 2026-07-18 while
-  landing 0.8; **pre-existing**, not introduced by the migration). Roughly
-  **1 run in 3** of both `cajeta test` and `samples/tour/run.sh` dies with
-  `uncaught exception: stream ended before the HTTP head terminated` (and
-  occasionally `uncaught exception: readAsync`) — the client reads EOF
-  before the response head is complete, i.e. the server closed the
-  connection without writing a full response.
-  - Localized to the **`HttpClient`** path: every failure stack is
-    `ClientTests.liveClient` (or the tour's `liveHttp`), on the *first*
-    exchange, right after `core.dispatch(#c1)`. The raw-`TcpStream` server
-    suite (`ServerTests.liveServer`) drives the same `HttpServer` with the
-    same handler and does **not** flake.
-  - Not a keep-alive-reuse bug: `HttpClient.send` already stamps
-    `Connection: close`. Ruled out: `#=` move-binding the `acceptNext()`
-    result (7/20 failures either way). The suspect is the
-    `serveConnectionWithLimits` connection loop tearing down before the
-    response is flushed. Related to the known v1 wrinkle noted in
-    `ServerTests.liveHandle` (the loop decides reuse before the client sees
-    the close).
-  - Measure with a loop over `./build/test/http-tests`, not a single run —
-    a single green run proves nothing here.
+- [~] **0.9 Fix the HttpClient loopback race** (found 2026-07-18 while
+  landing 0.8; **pre-existing**, not introduced by the migration). Was
+  roughly **1 run in 3** of both `cajeta test` and `samples/tour/run.sh`
+  dying with `uncaught exception: stream ended before the HTTP head
+  terminated` — the client reads EOF before the response head is complete.
+
+  **Root cause — an upstream stdlib ownership bug, now fixed.**
+  `cajeta.io.net.Server.dispatch` declares `#TcpStream conn` (owned) but
+  spawned the worker with a *borrow*:
+
+  ```cajeta
+  public void dispatch(#TcpStream conn) {
+      spawn serveConnection(this.handler, this.inflight, conn);   // no '#'
+  }
+  ```
+
+  `serveConnection` takes `#TcpStream`, so under the 0.9.0 rules (see 0.8)
+  `dispatch` stayed the owner and its scope-exit drop closed the socket
+  immediately after spawning — racing the connection fiber. Fix is `#conn`.
+  Same bug class as the 13 fixed inside this repo in 0.8; the 0.9.0
+  migration evidently did not sweep the stdlib's own `io.net`.
+
+  - Effect: suite went **7/20 failing → 0 failures in 60 runs**; the tour
+    went ~35% → **1 failure in 60**.
+  - **The fix lives in the cajeta repo**, not here:
+    `runtime/src/cajeta/io/net/Server.cajeta:291`. It is currently an
+    *uncommitted* change on branch `feature/nucleo-transform-intrinsics`
+    and must be committed + released there for this repo to stay green.
+  - Ruled out along the way: swallowed server-fiber exceptions (the fiber
+    never throws), keep-alive reuse (`HttpClient.send` already stamps
+    `Connection: close`), and `#=` move-binding the `acceptNext()` result
+    (7/20 either way).
+  - Measure with a loop, never a single run — a single green run proves
+    nothing here.
+  - **Still open:** a residual ~1-in-60 failure with the same signature,
+    seen only in the tour (suite is 0/60). Same first-exchange EOF; cause
+    not yet identified.
   - Acceptance: 25 consecutive green runs of both the suite and the tour.
+    The suite meets this; the tour does **not** yet.
+- [ ] **0.10 Unblock the toolchain at cajeta HEAD.** cajeta
+  `7f24be9e` (`silent-resolution-diagnostics 2.1: un-park member-not-found`,
+  on top of the transform-intrinsics U4/U5 work that added ~329 lines to
+  `MethodCallExpression.cpp`) **breaks this repo's build**:
+
+  ```
+  :303:23: CAJETA_ERROR_NO_MATCHING_OVERLOAD: no overload of
+    'serveConnectionWithLimits' ... accepts 4 argument(s). Candidates:
+    serveConnectionWithLimits(..., cajeta.io.net.TcpStream)
+  ```
+
+  The message is self-contradictory — it rejects 4 arguments while listing a
+  4-argument candidate — at `HttpServer.bindWithModel`'s
+  `(conn) -> HttpServer.serveConnectionWithLimits(h, lim, slim, conn)`.
+  Reproduces with this repo's tree unchanged, and an explicit
+  `(TcpStream conn)` parameter type does not help, so it is an upstream
+  regression rather than a latent fault here. Last known-good compiler is
+  **`8c10658b`**, which is what the current `build/src/cajeta` binary is —
+  note that binary no longer matches the checked-out cajeta source, so
+  rebuilding cajeta at HEAD will break this repo until this is resolved.
+  - Also: `/usr/bin/cajeta` is still **0.8.0** while `cajeta.json` pins
+    `toolchain.version = 0.9.0`, and the buildtool does not enforce the pin
+    — a bare `cajeta test` silently runs a compiler that cannot compile this
+    source. Install 0.9.0 so the pin and reality agree.
 
 ## 1 — HTTP/1.1 core (beyond extracted parity)
 
