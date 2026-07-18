@@ -127,11 +127,18 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
     (7/20 either way).
   - Measure with a loop, never a single run — a single green run proves
     nothing here.
-  - **Still open:** a residual ~1-in-60 failure with the same signature,
-    seen only in the tour (suite is 0/60). Same first-exchange EOF; cause
-    not yet identified.
+  - **Still open — a second, distinct race.** Same
+    `stream ended before the HTTP head terminated` message, but it now hits
+    the **second** exchange (`POST /echo`) after `GET /hello` has already
+    passed; the pre-fix race always killed the *first*. Measured with the
+    installed 0.9.0+fix compiler: **tour ~15 failures / ~183 runs (~8%)**
+    vs **suite 0 failures / 200 runs**. Both drive structurally identical
+    code (`HttpClient.send` → `HttpServer` → a capture-free handler that
+    echoes `req.body`), so the asymmetry is unexplained and is the thread
+    to pull. Ruled out: CPU contention (0 failures in 40 runs at 8-way
+    parallelism).
   - Acceptance: 25 consecutive green runs of both the suite and the tour.
-    The suite meets this; the tour does **not** yet.
+    The suite meets this; the tour does **not**.
 - [ ] **0.10 Unblock the toolchain at cajeta HEAD.** cajeta
   `7f24be9e` (`silent-resolution-diagnostics 2.1: un-park member-not-found`,
   on top of the transform-intrinsics U4/U5 work that added ~329 lines to
@@ -152,10 +159,16 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
   **`8c10658b`**, which is what the current `build/src/cajeta` binary is —
   note that binary no longer matches the checked-out cajeta source, so
   rebuilding cajeta at HEAD will break this repo until this is resolved.
-  - Also: `/usr/bin/cajeta` is still **0.8.0** while `cajeta.json` pins
-    `toolchain.version = 0.9.0`, and the buildtool does not enforce the pin
-    — a bare `cajeta test` silently runs a compiler that cannot compile this
-    source. Install 0.9.0 so the pin and reality agree.
+  - **Resolved for local dev (2026-07-18):** `/usr/bin/cajeta` was 0.8.0
+    while the manifest pinned 0.9.0, and the buildtool does not enforce the
+    pin — a bare `cajeta test` silently ran a compiler that cannot compile
+    this source. A `.deb` built from `8c10658b` + the 0.9 fix
+    (`cpack -G DEB` in `cajeta/build`) is now installed, so plain
+    `cajeta test` works and carries the fix. Note this deliberately omits
+    the four newest cajeta commits (transform-intrinsics U4/U5, Vmap,
+    silent-resolution-diagnostics) — reinstalling the **official** GitHub
+    0.9.0 deb would regress 0.9, since tag `v0.9.0` (`32942b53`) predates
+    the fix. The real fix is to land `#conn` upstream and cut a release.
 
 ## 1 — HTTP/1.1 core (beyond extracted parity)
 
