@@ -38,7 +38,7 @@ public final class CodecTests {
     static void parseSimpleGet(Check c) {
         String wire = "GET /hello.txt HTTP/1.1\r\nHost: www.example.test\r\nUser-Agent: cajeta-net/1.0\r\nAccept: */*\r\n\r\n";
         HttpParser p = HttpParser.forRequest();
-        boolean done = p.feed(wire.bytes, wire.byteLength);
+        boolean done = p.feed(wire.toBytes(), wire.byteLength());
         c.that(done, "simple GET head completes");
         c.that(p.isComplete(), "parser reports complete");
         HttpRequest req = p.takeRequest();
@@ -53,7 +53,7 @@ public final class CodecTests {
     static void parsePostContentLength(Check c) {
         String wire = "POST /submit HTTP/1.1\r\nHost: h\r\nContent-Length: 5\r\n\r\nhello";
         HttpParser p = HttpParser.forRequest();
-        p.feed(wire.bytes, wire.byteLength);
+        p.feed(wire.toBytes(), wire.byteLength());
         c.that(p.isComplete(), "POST head completes");
         BodyFraming framing = p.getFraming();
         c.that(framing.isContentLength(), "framing is content-length");
@@ -71,7 +71,7 @@ public final class CodecTests {
         String head = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\n\r\n";
         String chunks = "4\r\nWiki\r\n5\r\npedia\r\nE\r\n in\r\n\r\nchunks.\r\n0\r\n\r\n";
         HttpParser p = HttpParser.forResponse();
-        p.feed(head.bytes, head.byteLength);
+        p.feed(head.toBytes(), head.byteLength());
         c.that(p.isComplete(), "chunked response head completes");
         HttpResponse resp = p.takeResponse();
         c.eqInt((int64) resp.statusCode(), 200, "status 200");
@@ -79,7 +79,7 @@ public final class CodecTests {
         BodyFraming framing = p.getFraming();
         c.that(framing.isChunked(), "framing is chunked");
         BodyReader body = BodyReader.forFraming(framing);
-        body.feed(chunks.bytes, chunks.byteLength);
+        body.feed(chunks.toBytes(), chunks.byteLength());
         c.that(body.isComplete(), "chunked body completes");
         int32 decodedLen = body.decodedLength();
         int8[] decoded = body.drain();
@@ -91,9 +91,9 @@ public final class CodecTests {
         String a = "GET /split HTTP/1.1\r\nHo";
         String b = "st: example\r\n\r\n";
         HttpParser p = HttpParser.forRequest();
-        boolean early = p.feed(a.bytes, a.byteLength);
+        boolean early = p.feed(a.toBytes(), a.byteLength());
         c.that(!early, "incomplete head not complete");
-        boolean done = p.feed(b.bytes, b.byteLength);
+        boolean done = p.feed(b.toBytes(), b.byteLength());
         c.that(done, "split head completes on second feed");
         HttpRequest req = p.takeRequest();
         c.eqStr(req.getHeaders().get("host"), "example",
@@ -106,7 +106,7 @@ public final class CodecTests {
         HttpParser p = HttpParser.forRequest();
         boolean threw = false;
         try {
-            p.feed(wire.bytes, wire.byteLength);
+            p.feed(wire.toBytes(), wire.byteLength());
         } catch (HttpException e) {
             threw = true;
         }
@@ -117,7 +117,7 @@ public final class CodecTests {
         String payload = "name=x";
         HttpRequest req = HttpRequest.post("/form");
         req.setHeader("Host", "rt.example");
-        req.body(payload.bytes, payload.byteLength);
+        req.body(payload.toBytes(), payload.byteLength());
         // Instance API: size() gives the wire length (arrays carry no
         // length accessor in the language today).
         HttpSerializer s = heap HttpSerializer();
@@ -143,7 +143,7 @@ public final class CodecTests {
         String payload = "hi";
         HttpResponse resp = HttpResponse.of(200);
         resp.setHeader("Content-Type", "text/plain");
-        resp.body(payload.bytes, payload.byteLength);
+        resp.body(payload.toBytes(), payload.byteLength());
         HttpSerializer s = heap HttpSerializer();
         s.writeResponse(resp);
         int32 wireLen = s.size();
@@ -167,12 +167,12 @@ public final class CodecTests {
         // is invisible here — acceptable until arrays expose a length).
         String payload = "hello";
         String expChunk = "5\r\nhello\r\n";
-        int8[] chunk = ChunkedEncoder.encodeChunk(payload.bytes,
-                                                  payload.byteLength);
-        c.eqBytes(chunk, expChunk.byteLength, expChunk, "encodeChunk");
+        int8[] chunk = ChunkedEncoder.encodeChunk(payload.toBytes(),
+                                                  payload.byteLength());
+        c.eqBytes(chunk, expChunk.byteLength(), expChunk, "encodeChunk");
         String expLast = "0\r\n\r\n";
         int8[] last = ChunkedEncoder.encodeLast();
-        c.eqBytes(last, expLast.byteLength, expLast, "encodeLast");
+        c.eqBytes(last, expLast.byteLength(), expLast, "encodeLast");
     }
 
     static void chunkedDecodeExtensionsAndTrailers(Check c) {
@@ -180,7 +180,7 @@ public final class CodecTests {
         // not part of the decoded body.
         String ext = "5;foo=bar\r\nhello\r\n0\r\n\r\n";
         BodyReader r1 = BodyReader.forChunked();
-        r1.feed(ext.bytes, ext.byteLength);
+        r1.feed(ext.toBytes(), ext.byteLength());
         c.that(r1.isComplete(), "chunk-extension body completes");
         int32 len1 = r1.decodedLength();
         int8[] d1 = r1.drain();
@@ -188,7 +188,7 @@ public final class CodecTests {
 
         String trailers = "4\r\ndata\r\n0\r\nX-Checksum: abc\r\n\r\n";
         BodyReader r2 = BodyReader.forChunked();
-        r2.feed(trailers.bytes, trailers.byteLength);
+        r2.feed(trailers.toBytes(), trailers.byteLength());
         c.that(r2.isComplete(), "trailered body completes");
         int32 len2 = r2.decodedLength();
         int8[] d2 = r2.drain();

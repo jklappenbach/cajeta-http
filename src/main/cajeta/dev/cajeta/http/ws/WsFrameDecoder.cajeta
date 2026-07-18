@@ -363,7 +363,7 @@ public class WsFrameDecoder {
             // it with a fresh empty buffer) so the decoder no longer
             // aliases the bytes it is about to hand to the frame — the
             // BufferPool.acquire hand-off discipline.
-            int8[] pay = this.payBuf;
+            int8[] pay #= this.payBuf;
             this.payBuf = heap int8[0];
             // Bind the boolean/int header fields to named locals before the
             // call — a boolean field loaded directly into a call argument can
@@ -411,7 +411,7 @@ public class WsFrameDecoder {
         // (so the decoder's queue-drop won't reclaim it), and `#`-return it to
         // the caller. The signature is `#WsFrame` so the caller becomes the
         // sole owner — the hand-off discipline the doc above describes.
-        WsFrame f = this.queue[this.qHead];
+        WsFrame f #= this.queue[this.qHead];
         this.queue[this.qHead] = null;
         this.qHead = (this.qHead + 1) % this.qCap;
         this.qCount = this.qCount - 1;

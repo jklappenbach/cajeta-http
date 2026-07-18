@@ -54,7 +54,7 @@ public final class ClientTests {
             .build();
         HttpRequest req = HttpRequest.fromUri("POST", uri);
         String ping = "ping";
-        req.body(ping.bytes, ping.byteLength);
+        req.body(ping.toBytes(), ping.byteLength());
         HttpResponse resp = client.send(uri, req);
         if (resp.statusCode() != 200) {
             return -1;

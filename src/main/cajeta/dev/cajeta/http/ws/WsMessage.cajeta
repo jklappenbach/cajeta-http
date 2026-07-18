@@ -57,7 +57,7 @@ public class WsMessage {
     public static #WsMessage of(int32 opcode, #int8[] payload) {
         WsMessage m = heap WsMessage();
         m.opcode = opcode;
-        m.payload = payload;
+        m.payload = #payload;
         return #m;
     }
 
@@ -84,5 +84,28 @@ public class WsMessage {
     /** `true` when this is a binary message (`WsOpcode.BINARY`). */
     public boolean isBinary() {
         return this.opcode == WsOpcode.BINARY;
+    }
+
+    /**
+     * The payload decoded as a UTF-8 [`String`](../../../../cajeta/lang/String.cajeta)
+     * — a **fresh, caller-owned** copy; the message keeps its
+     * [`payload`](#payload).
+     *
+     * The `String(#int8[], int32)` constructor *adopts* the buffer it is
+     * given, so building a `String` straight from
+     * [`getPayload`](#getPayload) (a **borrow** of the message's own
+     * bytes) would hand the message's buffer to the String and leave the
+     * message dangling. This copies first, which is what a caller wants
+     * from a TEXT message anyway.
+     */
+    public #String text() {
+        int32 n = this.payload.count();
+        int8[] copy = heap int8[n];
+        int32 i = 0;
+        while (i < n) {
+            copy[i] = this.payload[i];
+            i = i + 1;
+        }
+        return heap String(#copy, n);
     }
 }

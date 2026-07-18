@@ -21,6 +21,18 @@
     },
 
     "settings": {
+        // The compiler build this library is developed against. Distinct from
+        // `details.cajeta-lang-version` above: that pins the LANGUAGE/stdlib
+        // API surface (major.minor, "will this source compile?"), this pins
+        // the exact COMPILER BUILD ("will this produce the same bytes?").
+        // 0.9.0 is the first toolchain carrying the scoped bare-name
+        // resolution fix in `CajetaType` that unit 0.2 of the extraction
+        // needed — see plan/http-plan.md.
+        // `distribution` defaults to "official" and `fetch` to "auto".
+        "toolchain": {
+            "version": "0.9.0"
+        },
+
         // Uses the network transport stack (sockets + TLS via cajeta.io.net).
         "capabilities": ["network"],
 

@@ -60,7 +60,7 @@ public final class HttpTour {
         String payload = "name=ada";
         HttpRequest req = HttpRequest.post("/form");
         req.setHeader("Host", "tour.example");
-        req.body(payload.bytes, payload.byteLength);
+        req.body(payload.toBytes(), payload.byteLength());
 
         HttpSerializer s = heap HttpSerializer();
         s.writeRequest(req);
@@ -92,7 +92,7 @@ public final class HttpTour {
         (HttpRequest) -> #HttpResponse userRoute = (req) -> {
             String id = req.pathParam("id");
             String body = "user " + id;
-            return HttpResponse.ok().body(body.bytes, body.byteLength);
+            return HttpResponse.ok().body(body.toBytes(), body.byteLength());
         };
         Router router = heap Router();
         router.route("GET", "/users/{id}", userRoute);
@@ -119,10 +119,10 @@ public final class HttpTour {
         }
         if (req.getTarget().equals("/hello")) {
             String hello = "hello from cajeta-http";
-            return HttpResponse.ok().body(hello.bytes, hello.byteLength);
+            return HttpResponse.ok().body(hello.toBytes(), hello.byteLength());
         }
         String nf = "not found";
-        return HttpResponse.of(404).body(nf.bytes, nf.byteLength);
+        return HttpResponse.of(404).body(nf.toBytes(), nf.byteLength());
     }
 
     public static async int32 clientGet(int32 port) {
@@ -145,7 +145,7 @@ public final class HttpTour {
             .build();
         HttpRequest req = HttpRequest.fromUri("POST", uri);
         String ping = "ping";
-        req.body(ping.bytes, ping.byteLength);
+        req.body(ping.toBytes(), ping.byteLength());
         HttpResponse resp = client.send(uri, req);
         if (resp.statusCode() != 200) {
             return -1;
@@ -194,7 +194,7 @@ public final class HttpTour {
         AsyncWriter writer = heap AsyncWriter(sock);
         WebSocket ws = WsUpgrade.acceptServer(reader, writer);
         WsMessage m = ws.receive();
-        String text = heap String(m.getPayload(), m.length());
+        String text = m.text();
         ws.send(text);
         sock.close();
         return m.length();

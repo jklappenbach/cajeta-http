@@ -74,7 +74,7 @@ public class WsCloseReason {
         WsCloseReason r = heap WsCloseReason();
         r.code = code;
         r.hasCode = true;
-        r.reason = reason;
+        r.reason = #reason;
         return #r;
     }
 

@@ -39,7 +39,7 @@ public final class ServerTests {
                 return HttpResponse.of(500);
             }
             String body = "id=" + id;
-            return HttpResponse.ok().body(body.bytes, body.byteLength);
+            return HttpResponse.ok().body(body.toBytes(), body.byteLength());
         };
         Router router = heap Router();
         router.route("GET", "/users/{id}", userRoute);
@@ -117,14 +117,14 @@ public final class ServerTests {
         }
         if (req.getTarget().equals("/hello")) {
             String hello = "hello";
-            return HttpResponse.ok().body(hello.bytes, hello.byteLength);
+            return HttpResponse.ok().body(hello.toBytes(), hello.byteLength());
         }
         // Body the 404 so it frames as Content-Length. A bodyless
         // handler response serializes with no framing header, which a
         // raw client can only read to EOF — and the connection loop
         // decides reuse before the client sees a close (v1 wrinkle).
         String nf = "nf";
-        return HttpResponse.of(404).body(nf.bytes, nf.byteLength);
+        return HttpResponse.of(404).body(nf.toBytes(), nf.byteLength());
     }
 
     static void liveServer(Check c) {
@@ -148,7 +148,7 @@ public final class ServerTests {
             // POST /echo with a 4-byte body -> 200, 4 bytes back.
             HttpRequest post = HttpRequest.post("/echo");
             String ping = "ping";
-            post.body(ping.bytes, ping.byteLength);
+            post.body(ping.toBytes(), ping.byteLength());
             Task<int32> tp = spawn rawExchange(port, #post);
             TcpStream c2 = core.acceptNext();
             core.dispatch(#c2);

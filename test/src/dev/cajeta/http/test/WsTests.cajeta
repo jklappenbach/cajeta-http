@@ -64,7 +64,7 @@ public final class WsTests {
         WebSocket ws = WsUpgrade.acceptServer(reader, writer);
 
         WsMessage m1 = ws.receive();
-        String text = heap String(m1.getPayload(), m1.length());
+        String text = m1.text();
         ws.send(text);
 
         WsMessage m2 = ws.receive();

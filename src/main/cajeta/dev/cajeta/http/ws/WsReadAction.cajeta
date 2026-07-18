@@ -97,7 +97,7 @@ public class WsReadAction {
     public static #WsReadAction message(#WsMessage message) {
         WsReadAction a = heap WsReadAction();
         a.kind = WsReadAction.MESSAGE;
-        a.message = message;
+        a.message = #message;
         return #a;
     }
 
@@ -105,7 +105,7 @@ public class WsReadAction {
     public static #WsReadAction sendFrame(#WsFrame frame) {
         WsReadAction a = heap WsReadAction();
         a.kind = WsReadAction.SEND_FRAME;
-        a.frame = frame;
+        a.frame = #frame;
         return #a;
     }
 
@@ -113,7 +113,7 @@ public class WsReadAction {
     public static #WsReadAction ping(#WsFrame ping) {
         WsReadAction a = heap WsReadAction();
         a.kind = WsReadAction.PING;
-        a.frame = ping;
+        a.frame = #ping;
         return #a;
     }
 
@@ -125,8 +125,8 @@ public class WsReadAction {
     public static #WsReadAction closed(#WsCloseReason reason, #WsFrame reply) {
         WsReadAction a = heap WsReadAction();
         a.kind = WsReadAction.CLOSED;
-        a.closeReason = reason;
-        a.frame = reply;
+        a.closeReason = #reason;
+        a.frame = #reply;
         return #a;
     }
 
@@ -168,10 +168,10 @@ public class WsReadAction {
      * ownership and returns it to the application. `null` if this is not a
      * [`MESSAGE`](#MESSAGE) action.
      */
-    public WsMessage takeMessage() {
-        WsMessage m = this.message;
+    public #WsMessage takeMessage() {
+        WsMessage m #= this.message;
         this.message = null;
-        return m;
+        return #m;
     }
 
     /**
@@ -179,10 +179,10 @@ public class WsReadAction {
      * action no longer aliases it. The caller writes the frame to the peer.
      * `null` if this action carries no frame.
      */
-    public WsFrame takeFrame() {
-        WsFrame f = this.frame;
+    public #WsFrame takeFrame() {
+        WsFrame f #= this.frame;
         this.frame = null;
-        return f;
+        return #f;
     }
 
     /** The parsed close `{ code, reason }` ([`CLOSED`](#CLOSED) only; else `null`). */

@@ -61,6 +61,60 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
   **Cajeta-repo-side work** — tracked there (see
   `cajeta/agents/cajeta/external/cajeta-http-completion.md`); not workable
   from this repo.
+- [x] **0.8 Migrate to toolchain 0.9.0.** Pin `settings.toolchain` in
+  `cajeta.json` and carry the library, tests, and tour onto the 0.9.0
+  language/stdlib. Two rule changes drove it, both of which compile clean
+  and fail only at runtime:
+  - *String re-core* — `byteLength` is a method, not a field; the raw
+    `.bytes` field is gone in favor of `toBytes()` (a fresh **owned** copy);
+    `String(#int8[], int32)` **adopts** its buffer, so constructing a String
+    from a borrowed array hands away bytes the caller doesn't own.
+  - *Move semantics at the use site* — an owned (`#`) param, field, or array
+    slot consumed with a plain `=` is treated as a **borrow**, so the
+    original owner's drop still fires and frees memory the new holder
+    references. Storing an owned value needs `= #x` (including through a
+    local receiver, e.g. `m.payload = #payload` in a static factory);
+    hoisting an owned field/slot into a local to move it out needs the
+    `#=` move-bind. Symptoms were SIGSEGV on first use, `count()` on a freed
+    array returning garbage that flowed into `heap T[n]`, and bogus lengths
+    tripping limit checks.
+
+    Fixed: `Router.append`, `Route.appendSegment`, `PathParams.put`,
+    `HttpRequest.bindPathParams`, `WsFrame.of`, `WsMessage.of`,
+    `WsCloseReason.of`, the four `WsReadAction` factories, and
+    `WsFrameDecoder.{nextFrame,finishIfPayloadComplete}`. Added
+    `WsMessage.text()` so callers get a text message's `String` without
+    hand-rolling the adopt-a-borrow trap.
+
+    Note: the builder chain `HttpResponse.ok().body(...)` returned as
+    `#HttpResponse` is **correct** despite `body()` returning a borrow — it
+    reads like the same defect and is not one; leave it alone.
+  - Acceptance: on a passing run `cajeta test` → 63 passed / 0 failed and
+    `samples/tour/run.sh` → 15 checks passed, exit 0. **Both are
+    intermittent** — see 0.9 below; every 0.8 check that runs, passes, and
+    the failures are a transport race outside the migrated code.
+- [ ] **0.9 Fix the HttpClient loopback race** (found 2026-07-18 while
+  landing 0.8; **pre-existing**, not introduced by the migration). Roughly
+  **1 run in 3** of both `cajeta test` and `samples/tour/run.sh` dies with
+  `uncaught exception: stream ended before the HTTP head terminated` (and
+  occasionally `uncaught exception: readAsync`) — the client reads EOF
+  before the response head is complete, i.e. the server closed the
+  connection without writing a full response.
+  - Localized to the **`HttpClient`** path: every failure stack is
+    `ClientTests.liveClient` (or the tour's `liveHttp`), on the *first*
+    exchange, right after `core.dispatch(#c1)`. The raw-`TcpStream` server
+    suite (`ServerTests.liveServer`) drives the same `HttpServer` with the
+    same handler and does **not** flake.
+  - Not a keep-alive-reuse bug: `HttpClient.send` already stamps
+    `Connection: close`. Ruled out: `#=` move-binding the `acceptNext()`
+    result (7/20 failures either way). The suspect is the
+    `serveConnectionWithLimits` connection loop tearing down before the
+    response is flushed. Related to the known v1 wrinkle noted in
+    `ServerTests.liveHandle` (the loop decides reuse before the client sees
+    the close).
+  - Measure with a loop over `./build/test/http-tests`, not a single run —
+    a single green run proves nothing here.
+  - Acceptance: 25 consecutive green runs of both the suite and the tour.
 
 ## 1 — HTTP/1.1 core (beyond extracted parity)
 
