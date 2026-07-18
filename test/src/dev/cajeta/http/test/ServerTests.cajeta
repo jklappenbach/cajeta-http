@@ -7,7 +7,7 @@ import dev.cajeta.http.HttpSerializer;
 import dev.cajeta.http.BodyReader;
 import dev.cajeta.http.HttpServer;
 import dev.cajeta.http.HttpServerBuilder;
-import dev.cajeta.http.Router;
+import dev.cajeta.http.routing.Router;
 import cajeta.io.net.IpAddress;
 import cajeta.io.net.Server;
 import cajeta.io.net.SocketAddress;

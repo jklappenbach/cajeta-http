@@ -8,7 +8,7 @@ import dev.cajeta.http.HttpResponse;
 import dev.cajeta.http.HttpSerializer;
 import dev.cajeta.http.HttpServer;
 import dev.cajeta.http.HttpServerBuilder;
-import dev.cajeta.http.Router;
+import dev.cajeta.http.routing.Router;
 import dev.cajeta.http.ws.WebSocket;
 import dev.cajeta.http.ws.WsClientHandshake;
 import dev.cajeta.http.ws.WsMessage;

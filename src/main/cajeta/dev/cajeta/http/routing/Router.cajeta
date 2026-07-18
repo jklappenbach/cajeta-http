@@ -1,9 +1,9 @@
-package dev.cajeta.http;
+package dev.cajeta.http.routing;
 
 import cajeta.lang.String;
 import dev.cajeta.http.HttpRequest;
 import dev.cajeta.http.HttpResponse;
-import dev.cajeta.http.Route;
+import dev.cajeta.http.routing.Route;
 import dev.cajeta.http.PathParams;
 
 /**
