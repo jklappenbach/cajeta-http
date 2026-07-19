@@ -2,6 +2,10 @@ package dev.cajeta.http;
 
 import cajeta.lang.String;
 import cajeta.io.net.Headers;
+import dev.cajeta.http.Status;
+import dev.cajeta.http.Version;
+import dev.cajeta.http.MediaType;
+import dev.cajeta.http.HeaderValues;
 
 /**
  * An HTTP/1.1 **response** message — the status-line triple
@@ -127,54 +131,15 @@ public class HttpResponse {
     }
 
     /**
-     * The standard reason phrase for a status code (RFC 7231 + the
-     * common additions), or an **empty** string for codes this table
-     * doesn't know. The phrase is advisory; clients key off the code.
+     * The standard reason phrase for a status code, or an **empty**
+     * string for an unregistered code. Delegates to the consolidated
+     * RFC 9110 §15 registry on [`Status`](Status.cajeta) (http:1.2b) —
+     * this type's own table is gone, and codes the old table lacked
+     * (203, 205, 300, 410, 422, …) now carry their canonical phrase.
+     * The phrase is advisory; clients key off the code.
      */
     public static #String reasonFor(int32 status) {
-        // 1xx
-        if (status == 100) { return HttpResponse.lit("Continue"); }
-        if (status == 101) { return HttpResponse.lit("Switching Protocols"); }
-        // 2xx
-        if (status == 200) { return HttpResponse.lit("OK"); }
-        if (status == 201) { return HttpResponse.lit("Created"); }
-        if (status == 202) { return HttpResponse.lit("Accepted"); }
-        if (status == 204) { return HttpResponse.lit("No Content"); }
-        if (status == 206) { return HttpResponse.lit("Partial Content"); }
-        // 3xx
-        if (status == 301) { return HttpResponse.lit("Moved Permanently"); }
-        if (status == 302) { return HttpResponse.lit("Found"); }
-        if (status == 303) { return HttpResponse.lit("See Other"); }
-        if (status == 304) { return HttpResponse.lit("Not Modified"); }
-        if (status == 307) { return HttpResponse.lit("Temporary Redirect"); }
-        if (status == 308) { return HttpResponse.lit("Permanent Redirect"); }
-        // 4xx
-        if (status == 400) { return HttpResponse.lit("Bad Request"); }
-        if (status == 401) { return HttpResponse.lit("Unauthorized"); }
-        if (status == 403) { return HttpResponse.lit("Forbidden"); }
-        if (status == 404) { return HttpResponse.lit("Not Found"); }
-        if (status == 405) { return HttpResponse.lit("Method Not Allowed"); }
-        if (status == 408) { return HttpResponse.lit("Request Timeout"); }
-        if (status == 409) { return HttpResponse.lit("Conflict"); }
-        if (status == 413) { return HttpResponse.lit("Payload Too Large"); }
-        if (status == 429) { return HttpResponse.lit("Too Many Requests"); }
-        // 5xx
-        if (status == 500) { return HttpResponse.lit("Internal Server Error"); }
-        if (status == 501) { return HttpResponse.lit("Not Implemented"); }
-        if (status == 502) { return HttpResponse.lit("Bad Gateway"); }
-        if (status == 503) { return HttpResponse.lit("Service Unavailable"); }
-        if (status == 504) { return HttpResponse.lit("Gateway Timeout"); }
-        return HttpResponse.lit("");
-    }
-
-    /**
-     * Copy a `String` literal into a fresh owned `String`. The reason
-     * table returns owned phrases (not aliases of the literal pool) so
-     * the response owns its `reason` field consistently with the rest
-     * of the type.
-     */
-    private static #String lit(String s) {
-        return s.substring(0, s.byteLength());
+        return Status.reasonFor(status);
     }
 
     // -- chainable mutators -------------------------------------------------
@@ -244,6 +209,39 @@ public class HttpResponse {
     /** The header map (live; mutating it mutates the response). */
     public Headers getHeaders() {
         return this.headers;
+    }
+
+    // -- typed views (http:1.2b) --------------------------------------------
+
+    /**
+     * The status as a [`Status`](Status.cajeta) — code plus this
+     * response's actual reason phrase (which may differ from the
+     * registry's if it was overridden via [`reason`](#reason)).
+     */
+    public #Status statusType() {
+        return Status.of(this.status, this.reason);
+    }
+
+    /** The [`Version`](Version.cajeta) for the HTTP-version string. */
+    public Version versionType() {
+        return Version.of(this.version);
+    }
+
+    /**
+     * The `Content-Type` header as a [`MediaType`](MediaType.cajeta), or
+     * `null` when absent/malformed. See
+     * [`HeaderValues.contentType`](HeaderValues.cajeta).
+     */
+    public #MediaType contentType() {
+        return HeaderValues.contentType(this.headers);
+    }
+
+    /**
+     * The `Content-Length` value, or `-1` when absent or not a pure digit
+     * run. See [`HeaderValues.contentLength`](HeaderValues.cajeta).
+     */
+    public int64 contentLength() {
+        return HeaderValues.contentLength(this.headers);
     }
 
     /** Length of the in-memory body, or 0 when `hasBody` is false. */

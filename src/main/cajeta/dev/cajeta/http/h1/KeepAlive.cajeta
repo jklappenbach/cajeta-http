@@ -2,6 +2,7 @@ package dev.cajeta.http.h1;
 
 import cajeta.lang.String;
 import cajeta.io.net.Headers;
+import dev.cajeta.http.Version;
 
 /**
  * HTTP/1.1 **keep-alive policy** (NET-7.6) — the connection-reuse
@@ -79,7 +80,6 @@ public final class KeepAlive {
      * serializer/client/server without holding a parser.
      */
     public static boolean messageAllowsReuse(String version, Headers headers) {
-        boolean isHttp10 = KeepAlive.isHttp10(version);
         String conn = headers.get("connection");
         if (conn != null) {
             String lc = conn.toLowerCase();
@@ -91,7 +91,11 @@ public final class KeepAlive {
                 return true;
             }
         }
-        return !isHttp10;
+        // No explicit Connection decision: the version default rules
+        // (http:1.2b — [`Version.supportsKeepAlive`](../Version.cajeta):
+        // false only for HTTP/1.0, and an unrecognized version string
+        // defaults to 1.1 semantics, same as the old isHttp10 check).
+        return Version.of(version).supportsKeepAlive();
     }
 
     // -- the exchange-level reuse decision ----------------------------------

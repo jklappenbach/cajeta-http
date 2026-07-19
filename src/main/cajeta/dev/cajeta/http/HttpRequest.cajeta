@@ -4,6 +4,10 @@ import cajeta.lang.String;
 import cajeta.io.net.Headers;
 import cajeta.io.net.uri.Uri;
 import dev.cajeta.http.PathParams;
+import dev.cajeta.http.Method;
+import dev.cajeta.http.Version;
+import dev.cajeta.http.MediaType;
+import dev.cajeta.http.HeaderValues;
 
 /**
  * An HTTP/1.1 **request** message — the request-line triple
@@ -352,6 +356,44 @@ public class HttpRequest {
     /** The header map (live; mutating it mutates the request). */
     public Headers getHeaders() {
         return this.headers;
+    }
+
+    // -- typed views (http:1.2b) --------------------------------------------
+    //
+    // The raw String fields stay authoritative — extension tokens are legal
+    // on the wire (RFC 9110 §16.1) and the serializer emits the fields
+    // verbatim. These accessors layer the semantic core types on top.
+
+    /**
+     * The [`Method`](Method.cajeta) for the method token —
+     * [`Method.EXTENSION`](Method.cajeta#EXTENSION) when the token is not
+     * one of the registered nine (read the raw token via
+     * [`getMethod`](#getMethod) then).
+     */
+    public Method methodType() {
+        return Method.of(this.method);
+    }
+
+    /** The [`Version`](Version.cajeta) for the HTTP-version string. */
+    public Version versionType() {
+        return Version.of(this.version);
+    }
+
+    /**
+     * The `Content-Type` header as a [`MediaType`](MediaType.cajeta), or
+     * `null` when absent/malformed. See
+     * [`HeaderValues.contentType`](HeaderValues.cajeta).
+     */
+    public #MediaType contentType() {
+        return HeaderValues.contentType(this.headers);
+    }
+
+    /**
+     * The `Content-Length` value, or `-1` when absent or not a pure digit
+     * run. See [`HeaderValues.contentLength`](HeaderValues.cajeta).
+     */
+    public int64 contentLength() {
+        return HeaderValues.contentLength(this.headers);
     }
 
     /** Length of the in-memory body, or 0 when `hasBody` is false. */
