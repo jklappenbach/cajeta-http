@@ -400,9 +400,19 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
     store, like tools/mcp does), route HTTP content-coding through
     `Gzip`/`Zlib`/`Deflate`, and pin interop with golden vectors
     (fixtures produced by system zlib — test-only).
-    - TDD: round-trips through the dependency; malformed/truncation/
-      trailing-garbage rejects at the HTTP boundary; wrong-`destLen`
-      handling for `Zlib.decompress`.
+    **Known upstream blocker (found 2026-07-19 via the MCP inbound-gzip
+    crash):** `Deflate.inflate` mishandles real-world DEFLATE — a stock
+    `gzip` of a 46-byte JSON (fixed-Huffman + LZ77 back-references)
+    decompresses to an *empty* buffer standalone, and in-server dies
+    with `array index -4 out of bounds for dimension size 46` (a
+    back-reference copy with `dist > outPos` into the ISIZE output).
+    Its own deflate output round-trips, which is how it hid. Fix is
+    cajeta-codec-side; the 1.6a system-zlib vectors are exactly the
+    regression net.
+    - TDD: round-trips through the dependency; **system-zlib/gzip
+      produced fixtures must inflate correctly** (the case above is
+      vector #1); malformed/truncation/trailing-garbage rejects at the
+      HTTP boundary; wrong-`destLen` handling for `Zlib.decompress`.
   - [ ] **1.6b Streaming surface.** The gap the dependency does not
     cover: incremental inflate/deflate with the dictionary/window
     preserved across calls plus flush modes — what 4.1's context
