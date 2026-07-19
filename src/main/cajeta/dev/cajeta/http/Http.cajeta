@@ -8,5 +8,5 @@ package dev.cajeta.http;
 // middleware, and SSE are tracked as "Complete the library" in the
 // cajeta project's external completion plan.
 public final class Http {
-    public static String version() { return "0.1.0"; }
+    public static String version() { return "0.1.1"; }
 }

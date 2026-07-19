@@ -18,7 +18,7 @@ SCRIPT_DIR="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 REPO_ROOT="$( cd -- "${SCRIPT_DIR}/../.." &> /dev/null && pwd )"
 
 CAJETA_BIN="${CAJETA_BIN:-cajeta}"
-LIB_CJA="${REPO_ROOT}/build/archive/dev.cajeta.http-0.1.0.cja"
+LIB_CJA="${REPO_ROOT}/build/archive/dev.cajeta.http-0.1.1.cja"
 OUT="${SCRIPT_DIR}/build/http-tour"
 
 # 1. The library .cja — build it when missing or older than any source.

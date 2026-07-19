@@ -24,7 +24,7 @@ cajeta-http provides the **imperative HTTP engine** (`HttpClient`, `HttpServer`,
 `Router`, `WebSocket`). Annotation-driven endpoints and automatic
 serialization-to-object-model are **primavera's** job, layered on top.
 
-## Status — v0.1.0 (early)
+## Status — v0.1.1 (early)
 
 | Capability | State |
 |---|---|
