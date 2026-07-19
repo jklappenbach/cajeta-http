@@ -1,0 +1,112 @@
+package dev.cajeta.http;
+
+import cajeta.lang.String;
+
+/**
+ * An HTTP **request method** (RFC 9110 §9) — the nine registered tokens
+ * plus [`EXTENSION`](#EXTENSION), with the semantic predicates the spec's
+ * §Core types calls for: [`isSafe`](#isSafe), [`isIdempotent`](#isIdempotent),
+ * [`allowsBody`](#allowsBody).
+ *
+ * ```cajeta
+ * Method m = Method.of(req.getMethod());
+ * boolean retryable = m.isIdempotent();
+ * ```
+ *
+ * ## The `EXTENSION` sentinel
+ *
+ * An enum value is an i32 ordinal and can never be `null`, so "not one of
+ * the nine" needs a representation: [`of`](#of) answers
+ * [`EXTENSION`](#EXTENSION) for any unregistered token, and
+ * [`isRegistered`](#isRegistered) is the predicate form. This is not a
+ * compromise — extension methods (`PROPFIND`, `PURGE`, …) are legitimate
+ * on the wire (RFC 9110 §16.1), so the message model keeps the raw token
+ * `String` and this type layers *semantics* over the registered set. An
+ * `EXTENSION` method is conservatively neither safe nor idempotent and is
+ * assumed to allow a body.
+ *
+ * ## Case sensitivity
+ *
+ * Method tokens are **case-sensitive** (RFC 9110 §9.1): `"get"` is not
+ * `GET`, and [`of`](#of)/[`isRegistered`](#isRegistered) match verbatim.
+ */
+public enum Method {
+    GET,
+    HEAD,
+    POST,
+    PUT,
+    DELETE,
+    PATCH,
+    OPTIONS,
+    CONNECT,
+    TRACE,
+    /** Any syntactically-valid token outside the registered nine. */
+    EXTENSION;
+
+    /**
+     * The registered `Method` for `token` (case-sensitive), or
+     * [`EXTENSION`](#EXTENSION) when the token is not one of the nine.
+     */
+    public static Method of(String token) {
+        if (token == null) { return Method.EXTENSION; }
+        if (token.equals("GET")) { return Method.GET; }
+        if (token.equals("HEAD")) { return Method.HEAD; }
+        if (token.equals("POST")) { return Method.POST; }
+        if (token.equals("PUT")) { return Method.PUT; }
+        if (token.equals("DELETE")) { return Method.DELETE; }
+        if (token.equals("PATCH")) { return Method.PATCH; }
+        if (token.equals("OPTIONS")) { return Method.OPTIONS; }
+        if (token.equals("CONNECT")) { return Method.CONNECT; }
+        if (token.equals("TRACE")) { return Method.TRACE; }
+        return Method.EXTENSION;
+    }
+
+    /** True iff `token` names one of the nine registered methods (verbatim). */
+    public static boolean isRegistered(String token) {
+        if (token == null) { return false; }
+        return Method.of(token) != Method.EXTENSION;
+    }
+
+    /** The method token, verbatim (`"GET"`); empty for `EXTENSION`. */
+    public String token() {
+        if (this == Method.GET) { return "GET"; }
+        if (this == Method.HEAD) { return "HEAD"; }
+        if (this == Method.POST) { return "POST"; }
+        if (this == Method.PUT) { return "PUT"; }
+        if (this == Method.DELETE) { return "DELETE"; }
+        if (this == Method.PATCH) { return "PATCH"; }
+        if (this == Method.OPTIONS) { return "OPTIONS"; }
+        if (this == Method.CONNECT) { return "CONNECT"; }
+        if (this == Method.TRACE) { return "TRACE"; }
+        return "";
+    }
+
+    /**
+     * RFC 9110 §9.2.1 — essentially read-only; no request-side side
+     * effects. GET, HEAD, OPTIONS, TRACE.
+     */
+    public boolean isSafe() {
+        return this == Method.GET || this == Method.HEAD
+            || this == Method.OPTIONS || this == Method.TRACE;
+    }
+
+    /**
+     * RFC 9110 §9.2.2 — repeating the request has the same intended
+     * effect. Every safe method, plus PUT and DELETE.
+     */
+    public boolean isIdempotent() {
+        return this.isSafe() || this == Method.PUT || this == Method.DELETE;
+    }
+
+    /**
+     * RFC 9110 §9.3 — a request body is meaningful for this method:
+     * POST, PUT, PATCH, DELETE (and, conservatively, EXTENSION).
+     * GET/HEAD/TRACE must not carry one; OPTIONS/CONNECT bodies have no
+     * defined semantics.
+     */
+    public boolean allowsBody() {
+        return this == Method.POST || this == Method.PUT
+            || this == Method.PATCH || this == Method.DELETE
+            || this == Method.EXTENSION;
+    }
+}

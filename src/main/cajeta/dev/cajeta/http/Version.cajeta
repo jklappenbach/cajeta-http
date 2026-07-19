@@ -1,0 +1,56 @@
+package dev.cajeta.http;
+
+import cajeta.lang.String;
+
+/**
+ * An HTTP **protocol version** (spec §Core types) — the wire string and
+ * the per-version connection-reuse default.
+ *
+ * ```cajeta
+ * Version v = Version.of(resp.getVersion());
+ * boolean reuse = v.supportsKeepAlive();     // false for HTTP/1.0
+ * ```
+ *
+ * `HTTP/2` and `HTTP/3` never carry their version in a start line (it is
+ * negotiated via ALPN / Alt-Svc), so their [`wireString`](#wireString) is
+ * informational; `HTTP/1.0` / `HTTP/1.1` are the literal start-line
+ * tokens (RFC 9112 §2.3).
+ */
+public enum Version {
+    HTTP_1_0,
+    HTTP_1_1,
+    HTTP_2,
+    HTTP_3;
+
+    /**
+     * The `Version` for a start-line token, defaulting to
+     * [`HTTP_1_1`](#HTTP_1_1) for anything unrecognized — the parser has
+     * already validated the version syntactically, and 1.1 semantics are
+     * the compatible default for an unknown minor.
+     */
+    public static Version of(String wire) {
+        if (wire == null) { return Version.HTTP_1_1; }
+        if (wire.equals("HTTP/1.0")) { return Version.HTTP_1_0; }
+        if (wire.equals("HTTP/1.1")) { return Version.HTTP_1_1; }
+        if (wire.equals("HTTP/2")) { return Version.HTTP_2; }
+        if (wire.equals("HTTP/3")) { return Version.HTTP_3; }
+        return Version.HTTP_1_1;
+    }
+
+    /** The wire form (`"HTTP/1.1"`). */
+    public String wireString() {
+        if (this == Version.HTTP_1_0) { return "HTTP/1.0"; }
+        if (this == Version.HTTP_1_1) { return "HTTP/1.1"; }
+        if (this == Version.HTTP_2) { return "HTTP/2"; }
+        return "HTTP/3";
+    }
+
+    /**
+     * Whether the connection persists after an exchange by default:
+     * `false` only for `HTTP/1.0` (RFC 9112 §9.3; 1.0 required an
+     * explicit `Connection: keep-alive`). 2 and 3 multiplex.
+     */
+    public boolean supportsKeepAlive() {
+        return this != Version.HTTP_1_0;
+    }
+}

@@ -1,0 +1,98 @@
+package dev.cajeta.http.test;
+
+import dev.cajeta.http.Method;
+import dev.cajeta.http.Version;
+
+/**
+ * http:1.2 — the core HTTP value types (spec §Core types). Pure logic
+ * over enum ordinals, so these are golden-vector checks with no socket
+ * in sight.
+ */
+public final class CoreTypeTests {
+
+    public static void run(Check c) {
+        System.stdout.println("-- core types: Method --");
+        methodTokens(c);
+        methodSemantics(c);
+        methodLookup(c);
+        System.stdout.println("-- core types: Version --");
+        versionWire(c);
+        versionSemantics(c);
+    }
+
+    static void methodTokens(Check c) {
+        c.eqStr(Method.GET.token(), "GET", "GET token");
+        c.eqStr(Method.HEAD.token(), "HEAD", "HEAD token");
+        c.eqStr(Method.POST.token(), "POST", "POST token");
+        c.eqStr(Method.PUT.token(), "PUT", "PUT token");
+        c.eqStr(Method.DELETE.token(), "DELETE", "DELETE token");
+        c.eqStr(Method.PATCH.token(), "PATCH", "PATCH token");
+        c.eqStr(Method.OPTIONS.token(), "OPTIONS", "OPTIONS token");
+        c.eqStr(Method.CONNECT.token(), "CONNECT", "CONNECT token");
+        c.eqStr(Method.TRACE.token(), "TRACE", "TRACE token");
+    }
+
+    // RFC 9110 §9.2.1 (safe), §9.2.2 (idempotent). Safe implies idempotent;
+    // POST/PATCH/CONNECT are neither.
+    static void methodSemantics(Check c) {
+        c.that(Method.GET.isSafe(), "GET is safe");
+        c.that(Method.HEAD.isSafe(), "HEAD is safe");
+        c.that(Method.OPTIONS.isSafe(), "OPTIONS is safe");
+        c.that(Method.TRACE.isSafe(), "TRACE is safe");
+        c.that(!Method.POST.isSafe(), "POST is not safe");
+        c.that(!Method.PUT.isSafe(), "PUT is not safe");
+        c.that(!Method.DELETE.isSafe(), "DELETE is not safe");
+        c.that(!Method.PATCH.isSafe(), "PATCH is not safe");
+        c.that(!Method.CONNECT.isSafe(), "CONNECT is not safe");
+
+        c.that(Method.PUT.isIdempotent(), "PUT is idempotent");
+        c.that(Method.DELETE.isIdempotent(), "DELETE is idempotent");
+        c.that(Method.GET.isIdempotent(), "GET is idempotent (safe implies it)");
+        c.that(!Method.POST.isIdempotent(), "POST is not idempotent");
+        c.that(!Method.PATCH.isIdempotent(), "PATCH is not idempotent");
+        c.that(!Method.CONNECT.isIdempotent(), "CONNECT is not idempotent");
+
+        // A body is meaningful on POST/PUT/PATCH/DELETE; GET/HEAD/TRACE
+        // must not carry one (RFC 9110 §9.3.1/§9.3.2/§9.3.8).
+        c.that(Method.POST.allowsBody(), "POST allows a body");
+        c.that(Method.PUT.allowsBody(), "PUT allows a body");
+        c.that(Method.PATCH.allowsBody(), "PATCH allows a body");
+        c.that(Method.DELETE.allowsBody(), "DELETE allows a body");
+        c.that(!Method.GET.allowsBody(), "GET does not allow a body");
+        c.that(!Method.HEAD.allowsBody(), "HEAD does not allow a body");
+        c.that(!Method.TRACE.allowsBody(), "TRACE does not allow a body");
+    }
+
+    // Methods are case-SENSITIVE (RFC 9110 §9): "get" is not GET. An enum
+    // value is an i32 and cannot be null, so absence is reported through
+    // isRegistered(); of() on an unregistered token answers the sentinel
+    // Method.EXTENSION (extension methods are legal on the wire).
+    static void methodLookup(Check c) {
+        c.that(Method.of("POST") == Method.POST, "of(\"POST\") resolves");
+        c.that(Method.of("DELETE") == Method.DELETE, "of(\"DELETE\") resolves");
+        c.that(!Method.isRegistered("get"), "lookup is case-sensitive: \"get\" unknown");
+        c.that(!Method.isRegistered("BREW"), "unregistered token is unknown");
+        c.that(Method.isRegistered("TRACE"), "TRACE is registered");
+        c.that(Method.of("BREW") == Method.EXTENSION,
+               "of() answers EXTENSION for an unregistered token");
+        c.that(Method.GET == Method.GET, "identity: GET is GET");
+        c.that(Method.GET != Method.POST, "GET is not POST");
+    }
+
+    static void versionWire(Check c) {
+        c.eqStr(Version.HTTP_1_0.wireString(), "HTTP/1.0", "1.0 wire string");
+        c.eqStr(Version.HTTP_1_1.wireString(), "HTTP/1.1", "1.1 wire string");
+        c.eqStr(Version.HTTP_2.wireString(), "HTTP/2", "2 wire string");
+        c.eqStr(Version.HTTP_3.wireString(), "HTTP/3", "3 wire string");
+        c.that(Version.of("HTTP/1.1") == Version.HTTP_1_1, "of round-trips 1.1");
+        c.that(Version.of("HTTP/1.0") == Version.HTTP_1_0, "of round-trips 1.0");
+    }
+
+    static void versionSemantics(Check c) {
+        // HTTP/1.0 closes by default; 1.1+ keep the connection alive.
+        c.that(!Version.HTTP_1_0.supportsKeepAlive(), "1.0 has no default keep-alive");
+        c.that(Version.HTTP_1_1.supportsKeepAlive(), "1.1 keeps alive by default");
+        c.that(Version.HTTP_2.supportsKeepAlive(), "2 keeps alive (multiplexed)");
+        c.that(Version.HTTP_3.supportsKeepAlive(), "3 keeps alive (QUIC)");
+    }
+}

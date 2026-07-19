@@ -12,6 +12,7 @@ public final class TestMain {
         String v = Http.version();
         c.eqStr(v, "0.1.0", "Http.version()");
 
+        CoreTypeTests.run(c);
         CodecTests.run(c);
         ServerTests.run(c);
         ClientTests.run(c);
