@@ -118,9 +118,9 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
   - Effect: suite went **7/20 failing → 0 failures in 60 runs**; the tour
     went ~35% → **1 failure in 60**.
   - **The fix lives in the cajeta repo**, not here:
-    `runtime/src/cajeta/io/net/Server.cajeta:291`. It is currently an
-    *uncommitted* change on branch `feature/nucleo-transform-intrinsics`
-    and must be committed + released there for this repo to stay green.
+    `runtime/src/cajeta/io/net/Server.cajeta:291`. *(Since committed
+    upstream as cajeta `9295a16f` — on `main`, and carried by the
+    installed `13fef7a4` deb along with the fiber-parking fix below.)*
   - Ruled out along the way: swallowed server-fiber exceptions (the fiber
     never throws), keep-alive reuse (`HttpClient.send` already stamps
     `Connection: close`), and `#=` move-binding the `acceptNext()` result
@@ -184,13 +184,16 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
   - **Resolved for local dev (2026-07-18):** `/usr/bin/cajeta` was 0.8.0
     while the manifest pinned 0.9.0, and the buildtool does not enforce the
     pin — a bare `cajeta test` silently ran a compiler that cannot compile
-    this source. A `.deb` built from `8c10658b` + the 0.9 fix
-    (`cpack -G DEB` in `cajeta/build`) is now installed, so plain
-    `cajeta test` works and carries the fix. Note this deliberately omits
-    the four newest cajeta commits (transform-intrinsics U4/U5, Vmap,
-    silent-resolution-diagnostics) — reinstalling the **official** GitHub
-    0.9.0 deb would regress 0.9, since tag `v0.9.0` (`32942b53`) predates
-    the fix. The real fix is to land `#conn` upstream and cut a release.
+    this source. An interim `.deb` built from `8c10658b` + the 0.9 fix
+    bridged the gap. **Superseded 2026-07-19:** the installed deb is now
+    **`cajeta 0.9.0 (13fef7a4)`** — cajeta `main`, carrying the `#conn`
+    fix (`9295a16f`), the enum-body work (1.2's dependency), the
+    silent-resolution-diagnostics that exposed 0.10, and the fiber-parking
+    timed wait (0.9's fix). Plain `cajeta test` runs the right compiler.
+    Still true: the buildtool doesn't enforce the manifest's toolchain pin,
+    and the official GitHub `v0.9.0` tag (`32942b53`) predates all of these
+    fixes — don't "upgrade" to it. A proper upstream release remains the
+    durable fix.
 
 - [ ] **0.11 Residual ~2.5% heap-corruption crash in the client loopback.**
   Surfaced 2026-07-19 while pre-flighting the `13fef7a4` compiler deb:
@@ -201,6 +204,12 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
   long-open lambda-capture double-free); it hid under 0.9's 25% rate and
   a lucky 0/60 post-fix loop (P≈22% of missing a 2.5% flake in 60).
   Cajeta-repo-side. Loop ≥100 runs when measuring anything against this.
+  - **Re-measured 2026-07-19 with the `13fef7a4` deb installed:** 1/120
+    suite failures + 0/40 tour (direct-binary loop), same signature —
+    SIGABRT `array index 0 out of bounds for dimension size 0` in
+    `client: loopback`, ~4ms in, drop-chain entries rooted at
+    `ClientTests.cajeta:29-33`. Cumulative 3/185 ≈ **1.6%**. Everything
+    else green: suite 165/165, tour 15/15 on every non-crashing run.
 
 ## 1 — HTTP/1.1 core (beyond extracted parity)
 
@@ -209,7 +218,7 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
   `.body`/`.middleware`/etc. come with the units that populate them).
   `PathParams` stays at the root — `HttpRequest` carries it as a field and
   `.routing` depends on `HttpRequest`, so moving it would be circular.
-- [~] **1.2** Core-type completion. The four types exist in spec shape with
+- [x] **1.2** Core-type completion. The four types exist in spec shape with
   49+35 golden-vector checks (suite 148/148): **`Method`/`Version` as real
   enums with methods** (`isSafe`/`isIdempotent`/`allowsBody`,
   `wireString`/`supportsKeepAlive`) — enum bodies were a compiler gap,
@@ -219,18 +228,70 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
   predicate). **`Status`** (RFC 9110 §15 registry + class predicates) and
   **`MediaType`** (RFC 6838 parse, lowercased type/subtype/param-names,
   quoted values, `essence`/`is`/`parameter`) as final classes.
-  **Remaining:** adopt the types across the message model —
-  `HttpRequest.method`/`HttpResponse.status` are still raw
-  `String`/`int32`, `HttpResponse.reasonFor` duplicates `Status`'s
-  registry, and the typed `Headers` accessors (`contentType()` etc.) are
-  unwritten. That adoption changes parser/serializer/router signatures and
-  should ride its own commit(s).
-- [ ] **1.2b** Core-type adoption: retype `Method`/`Status`/`Version`
-  through `HttpRequest`/`HttpResponse`/`Router`/`h1`, consolidate the
-  reason-phrase registry into `Status`, add `Headers`' typed accessors
-  helpers per spec (`isSafe`, registry, typed accessors).
+  Adoption across the message model rode its own commit — 1.2b.
+- [x] **1.2b** Core-type adoption (`cd8afa9`): `HeaderValues` hosts the
+  spec's typed header reads library-side (`contentLength()` → `int64`,
+  −1 for absent/malformed per RFC 9110 §8.6; `contentType()` →
+  `MediaType` or null) since `Headers` is stdlib-owned
+  (`cajeta.io.net.Headers`); `HttpRequest`/`HttpResponse` grow typed
+  views (`methodType()`/`versionType()`/`statusType()`/`contentType()`/
+  `contentLength()`) while the raw `String`/`int32` wire fields stay
+  authoritative (extension tokens are legal on the wire and the
+  serializer emits fields verbatim); `HttpResponse.reasonFor` delegates
+  to `Status`'s consolidated RFC 9110 §15 registry (own 27-entry table
+  deleted); `KeepAlive`'s version default rides
+  `Version.supportsKeepAlive()`. 17 new checks; suite 165/165.
 - [ ] **1.3** `Body` abstraction: in-memory + streaming, form, multipart
-  (+ `MultipartParser`).
+  (+ `MultipartParser`). Broken to TDD granularity 2026-07-19; decisions
+  encoded from the spec's leans: body-size limits reject **early** (413 at
+  parse, global + per-route), and streaming bodies **drain implicitly** on
+  handler return with an opt-out for handlers that take ownership.
+  Substrate note: there is **no stdlib `InputStream`** — bodies stream
+  over `cajeta.io.net`'s `AsyncReader`/`AsyncWriter`/`ByteBuffer`, and the
+  h1 plumbing (`BodyReader`, `RequestBodyStream`, `ResponseBodyWriter`)
+  already speaks it. Ownership discipline throughout: adopting
+  constructors take `#` buffers explicitly; accessors hand out borrows
+  (the 0.8 migration's `= #x` / `#=` rules apply to every factory).
+  - [ ] **1.3a `Body` core + in-memory bodies.** Abstract `Body`
+    (`contentLength()` −1 = unknown/chunked, `contentType()`,
+    `reader()` → an `AsyncReader`-shaped source), `BytesBody`,
+    `StringBody`. If the stdlib lacks a buffer-backed reader, a small
+    adapter over `ByteBuffer` ships here (library-side).
+    - TDD: length/type reporting, full-read round-trip (bytes + string,
+      UTF-8), zero-length body, reader yields exactly contentLength bytes.
+    - Acceptance: body suite green; no message-model changes yet.
+  - [ ] **1.3b `FormBody`** — `application/x-www-form-urlencoded` encode
+    + a decode helper (percent-encoding per the stdlib `Uri` rules,
+    `+` for space, UTF-8).
+    - TDD: golden vectors (reserved chars, UTF-8 multibyte, empty
+      values, repeated keys), encode/decode round-trip.
+  - [ ] **1.3c `StreamBody`** — wrap a caller-supplied reader; unknown
+    length serializes chunked (rides `ChunkedEncoder`), known length
+    rides content-length framing; never materializes.
+    - TDD: large body (≫ one buffer) streamed through the h1 serializer
+      and re-parsed over loopback without full-payload buffering;
+      unknown-length → chunked on the wire; known-length → exact framing.
+  - [ ] **1.3d Multipart** — `MultipartBody` (part composition + boundary
+    generation), `MultipartPart` (headers, name/filename, body),
+    `MultipartParser` (boundary scan over a streaming source, per-part
+    headers, part bodies as readers; max-part / max-parts limits).
+    - TDD: RFC 2046 golden vectors (preamble/epilogue tolerance, CRLF
+      edges, quoted boundary), compose→parse round-trip, malformed
+      rejects (missing terminal boundary, oversize part → early 413-class
+      error), binary part payloads.
+  - [ ] **1.3e Message-model adoption.** `HttpRequest`/`HttpResponse`
+    carry an optional `Body`; `Exchange`/`RequestBodyStream` expose the
+    request body as a `Body`; `ResponseBodyWriter` accepts one; client
+    `send` takes a `Body` overload; raw byte-array paths stay (wire
+    compatibility, small-body fast path). Early 413 enforcement lands
+    here (parse-time, global + per-route thresholds); implicit drain on
+    handler return with the ownership opt-out.
+    - TDD: loopback POST of each body kind client→server and a streamed
+      response server→client; 413 on an over-limit body **before** the
+      handler runs; drained-connection reuse after a handler ignores its
+      body.
+    - Acceptance: full suite + tour green (loop ≥100 runs — 0.11 is
+      still live at ~1.6%, so judge by signature, not by a single red).
 - [ ] **1.4** Client: connection pool + keep-alive, redirects, retry,
   timeouts, streaming bodies, `getJson<T>`, transparent gzip/deflate.
 - [ ] **1.5** Server hardening: request timeout, max body size, slowloris

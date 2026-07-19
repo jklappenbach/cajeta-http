@@ -53,7 +53,9 @@ There is no `AsyncHandler`; fibers make "blocking" handlers non-blocking for fre
 ## Package layout
 
 ```
-dev.cajeta.http              — Method, Status, Headers, Url, Version, MediaType
+dev.cajeta.http              — Method, Status, Version, MediaType, HeaderValues,
+                               PathParams, HttpRequest/HttpResponse, exceptions
+                               (Headers and Uri are consumed from cajeta.io.net)
 dev.cajeta.http.body         — Body: in-memory + streaming; chunked; multipart
 dev.cajeta.http.client       — HttpClient: pooling, redirects, retry, timeouts
 dev.cajeta.http.server       — HttpServer, request lifecycle, graceful shutdown
@@ -73,30 +75,49 @@ Deferred to follow-ups: `dev.cajeta.http.h3` (HTTP/3 over QUIC), and `cajeta-grp
 
 ## Core types
 
+Shipped (`http:1.2` / `1.2b`) — signatures as implemented:
+
 ```cajeta
-public enum Method { GET, HEAD, POST, PUT, DELETE, PATCH, OPTIONS, CONNECT, TRACE;
+public enum Method {                  // RFC 9110 §9 registry + EXTENSION sentinel
+    GET, HEAD, POST, PUT, DELETE, PATCH, OPTIONS, CONNECT, TRACE, EXTENSION;
+    public static Method of(String token);           // unregistered → EXTENSION
+    public static boolean isRegistered(String token);
+    public String token();
     public boolean isSafe(); public boolean isIdempotent(); public boolean allowsBody();
 }
 public enum Version { HTTP_1_0, HTTP_1_1, HTTP_2, HTTP_3;
+    public static Version of(String wire);
     public String wireString(); public boolean supportsKeepAlive();
 }
-public final class Status {            // full RFC 9110 registry + helpers
-    public int16 code; public String reason;
-    public static Status OK; /* … */ public static Status NOT_FOUND; /* … */
-    public static Status of(int16 code); public static Status of(int16 code, String reason);
-    public boolean isSuccess(); public boolean isClientError(); public boolean isServerError();
+public final class Status {           // full RFC 9110 §15 registry + class predicates
+    public static #Status of(int32 code); public static #Status of(int32 code, String reason);
+    public int32 code(); public String reason();
+    public static #String reasonFor(int32 code);     // THE reason-phrase registry
+    public boolean isInformational(); public boolean isSuccess(); public boolean isRedirection();
+    public boolean isClientError(); public boolean isServerError();
 }
-public final class Headers {           // case-insensitive (lowercased keys), multi-value,
-    public Headers put(String n, String v); public Headers add(String n, String v);
-    public String get(String n); public String[] getAll(String n);   // insertion-order-preserving
-    public boolean contains(String n); public Headers remove(String n);
-    public int64 contentLength(); public MediaType contentType(); /* typed accessors */
-}
-public final class MediaType { public String type; public String subtype;
-    public Map<String,String> parameters; public static MediaType parse(String s);
-    public static MediaType APPLICATION_JSON; /* … */
+public final class MediaType {        // RFC 6838 parse; lowercased type/subtype/param names
+    public static #MediaType parse(String input);    // quoted values handled
+    public String type(); public String subtype(); public #String essence();
+    public boolean is(String t, String sub); public #String parameter(String name);
+    public static #MediaType applicationJson(); /* … textPlain, textHtml,
+        applicationOctetStream, applicationFormUrlencoded, multipartFormData */
 }
 ```
+
+An enum value is an i32 and cannot be null, so `Method.of` answers the tenth
+`EXTENSION` constant for unregistered tokens (`isRegistered` is the predicate).
+
+**`Headers` is the stdlib's** (`cajeta.io.net.Headers` — case-insensitive,
+multi-value, insertion-order-preserving), not redefined here. The typed reads
+live library-side in **`HeaderValues`** statics — `contentLength(Headers)` →
+`int64` (−1 for absent/malformed, RFC 9110 §8.6 `1*DIGIT`) and
+`contentType(Headers)` → `MediaType` (null on absent/malformed) — and are
+mirrored as typed views on the messages themselves:
+`HttpRequest.methodType()/versionType()/contentType()/contentLength()` and
+`HttpResponse.statusType()/versionType()/contentType()/contentLength()`. The
+raw `String`/`int32` wire fields stay authoritative — extension tokens are
+legal on the wire and the serializer emits fields verbatim.
 
 URLs use the stdlib `cajeta.io.net.uri.Uri` (RFC 3986 parse/build, percent-encoding,
 ordered query multi-map, reference resolution for relative `Location` headers).
@@ -109,8 +130,8 @@ ordered query multi-map, reference resolution for relative `Location` headers).
 public abstract class Body {
     public abstract int64 contentLength();       // -1 = unknown/chunked
     public abstract MediaType contentType();
-    public abstract InputStream stream();         // cajeta.io InputStream
-}
+    public abstract AsyncReader reader();        // cajeta.io.net reader (there is
+}                                                // no stdlib InputStream)
 public final class BytesBody extends Body { ... }
 public final class StringBody extends Body { ... }
 public final class StreamBody extends Body { ... }   // upload/download, no materialize
@@ -292,10 +313,12 @@ and HTTP/2 lifts the wire protocol without changing the surface above.
 
 - **HTTP/2 server push** — include with a "deprecated upstream" note (some
   non-browser clients still use it), or omit? Lean: include.
-- **Streaming body lifecycle** — implicit drain on handler return vs explicit.
-  Lean: implicit drain with an opt-out for handlers that own the body (proxies).
-- **Body-size enforcement timing** — reject early (413 at parse) with global +
-  per-route thresholds. Lean: yes.
+- ~~**Streaming body lifecycle**~~ — **decided** (1.3 breakdown, 2026-07-19):
+  implicit drain on handler return, with an opt-out for handlers that take
+  ownership of the body (proxies). Lands with `http:1.3e`.
+- ~~**Body-size enforcement timing**~~ — **decided** (1.3 breakdown,
+  2026-07-19): reject early — 413 at parse time, before the handler runs —
+  with global + per-route thresholds. Lands with `http:1.3e`.
 - **Routing trie vs regex** — trie with `*`/`**` wildcards covers ~95% without
   regex complexity. Lean: trie.
 - **Client cookie jar** — off by default; explicit `CookieJar` opt-in (avoid the
