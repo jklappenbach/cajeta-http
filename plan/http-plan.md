@@ -139,26 +139,33 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
     parallelism).
   - Acceptance: 25 consecutive green runs of both the suite and the tour.
     The suite meets this; the tour does **not**.
-- [ ] **0.10 Unblock the toolchain at cajeta HEAD.** cajeta
-  `7f24be9e` (`silent-resolution-diagnostics 2.1: un-park member-not-found`,
-  on top of the transform-intrinsics U4/U5 work that added ~329 lines to
-  `MethodCallExpression.cpp`) **breaks this repo's build**:
+- [x] **0.10 Unblock the toolchain at cajeta HEAD.** *(Fixed 2026-07-19,
+  cajeta `a70084b8`.)* The `NO_MATCHING_OVERLOAD` at
+  `HttpServer.bindWithModel` was not one bug but **three scoped-resolution
+  gaps**, all silent misses that `silent-resolution-diagnostics` correctly
+  turned into errors:
 
-  ```
-  :303:23: CAJETA_ERROR_NO_MATCHING_OVERLOAD: no overload of
-    'serveConnectionWithLimits' ... accepts 4 argument(s). Candidates:
-    serveConnectionWithLimits(..., cajeta.io.net.TcpStream)
-  ```
+  1. `scopePackageOf` fell through to the merged stdlib module's meaningless
+     `cajeta.runtime` package when no current method was set, so the
+     *stdlib's own* bare `HttpServer.serveConnectionWithLimits(...)` receiver
+     resolved via the global short-name key to **this repo's** `HttpServer`
+     (the un-retired `http:0.7` twin colliding with its own extraction) and
+     matched stdlib-typed args against dev formals. The error's `:303` was
+     the stdlib twin's line, unlocatable due to the known unlocated-
+     diagnostics gap. Fix: consult the structure stack before the module
+     qName.
+  2. `NewExpression::resolveTypes` ran the global short-name key *before*
+     the scoped lookup (backwards from its own `generateCode`), so a bare
+     `heap X()` stamped a same-named class from another package into the
+     call's arg types.
+  3. `BinaryOpExpression::resolveTypes` typed comparisons/logicals as their
+     LHS operand type; `s != null && s.equals(...)` typed as `String` and
+     missed every overload. Now boolean. **This had silently elided
+     `ServerTests`' `"405 carries Allow: GET"` check since it was written —
+     the suite counts 64 checks now, not 63.**
 
-  The message is self-contradictory — it rejects 4 arguments while listing a
-  4-argument candidate — at `HttpServer.bindWithModel`'s
-  `(conn) -> HttpServer.serveConnectionWithLimits(h, lim, slim, conn)`.
-  Reproduces with this repo's tree unchanged, and an explicit
-  `(TcpStream conn)` parameter type does not help, so it is an upstream
-  regression rather than a latent fault here. Last known-good compiler is
-  **`8c10658b`**, which is what the current `build/src/cajeta` binary is —
-  note that binary no longer matches the checked-out cajeta source, so
-  rebuilding cajeta at HEAD will break this repo until this is resolved.
+  Diagnosed with a new env-gated tracer: `CAJETA_DBG_RESOLVE=<method>`
+  dumps call keys, arg canonicals, and indexed buckets per resolve attempt.
   - **Resolved for local dev (2026-07-18):** `/usr/bin/cajeta` was 0.8.0
     while the manifest pinned 0.9.0, and the buildtool does not enforce the
     pin — a bare `cajeta test` silently ran a compiler that cannot compile
