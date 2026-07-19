@@ -228,7 +228,8 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
     now rooted at `ClientTests.cajeta:51-55` — moved with the binary,
     body/form code not involved). History: 25-30% → 0/60 → 2.5% → 7.5%
     across layouts. Judge regressions by *signature*, and expect the
-    rate to wander as the library grows.
+    rate to wander as the library grows. At 1.3c the same signature
+    (rooted `ClientTests.cajeta:29-33` again) ran 6/130 ≈ **4.6%**.
 
 ## 1 — HTTP/1.1 core (beyond extracted parity)
 
@@ -299,12 +300,24 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
     the branch-scoped-owned-local trap found during TDD (decode value
     assigned inside an `if` → borrow of a dying temp; restructured to a
     single adopting init-decl).
-  - [ ] **1.3c `StreamBody`** — wrap a caller-supplied reader; unknown
+  - [x] **1.3c `StreamBody`** — wrap a caller-supplied reader; unknown
     length serializes chunked (rides `ChunkedEncoder`), known length
     rides content-length framing; never materializes.
     - TDD: large body (≫ one buffer) streamed through the h1 serializer
       and re-parsed over loopback without full-payload buffering;
       unknown-length → chunked on the wire; known-length → exact framing.
+    - **Shipped:** `body/StreamBody` adopts a caller-supplied
+      `AsyncReader` (`of` = unknown length/−1 → chunked; `sized` = exact
+      `Content-Length`; typed variants of each). Single-shot by design —
+      `reader()` returns the same never-rewound reader; the backing
+      channel stays the caller's and must outlive the body. Tests pump a
+      64 KiB pattern in 1 KiB pieces: known-length re-parses through
+      `BodyReader.forContentLength` exactly; unknown-length frames each
+      piece via `ChunkedEncoder.encodeChunk` as read (nothing
+      accumulated encode-side) and round-trips through
+      `BodyReader.forChunked`. Suite 214 → **235** checks. (The
+      socket-loopback streaming pass rides 1.3e/1.4d where the
+      serializer/client actually drive a Body.)
   - [ ] **1.3d Multipart** — `MultipartBody` (part composition + boundary
     generation), `MultipartPart` (headers, name/filename, body),
     `MultipartParser` (boundary scan over a streaming source, per-part

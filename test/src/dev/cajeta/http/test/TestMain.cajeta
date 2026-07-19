@@ -15,6 +15,7 @@ public final class TestMain {
         CoreTypeTests.run(c);
         BodyTests.run(c);
         FormTests.run(c);
+        StreamTests.run(c);
         CodecTests.run(c);
         ServerTests.run(c);
         ClientTests.run(c);

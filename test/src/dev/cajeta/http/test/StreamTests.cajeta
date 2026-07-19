@@ -1,0 +1,172 @@
+package dev.cajeta.http.test;
+
+import cajeta.io.net.AsyncReader;
+import dev.cajeta.http.MediaType;
+import dev.cajeta.http.body.Body;
+import dev.cajeta.http.body.BytesChannel;
+import dev.cajeta.http.body.StreamBody;
+import dev.cajeta.http.h1.BodyReader;
+import dev.cajeta.http.h1.ChunkedEncoder;
+
+/**
+ * http:1.3c — StreamBody: wrap a caller-supplied reader; known length
+ * rides content-length framing, unknown length rides the chunked codec;
+ * the body never materializes its payload. The pump loops below hold at
+ * most one read-buffer piece at a time — the decode side accumulating is
+ * the test's witness, not the body's doing.
+ */
+public final class StreamTests {
+
+    /** One read-buffer's worth; the streamed payload is 64x this. */
+    static final int32 PIECE = 1024;
+    static final int32 BIG = 65536;
+
+    public static void run(Check c) {
+        System.stdout.println("-- body: stream known-length --");
+        knownLengthExactFraming(c);
+        System.stdout.println("-- body: stream chunked --");
+        unknownLengthChunkedWire(c);
+        System.stdout.println("-- body: stream semantics --");
+        singleShotReader(c);
+        typedAndUntyped(c);
+    }
+
+    /** Deterministic pattern byte for offset i. */
+    static int32 patternAt(int32 i) {
+        return ((i * 31) + 7) % 256;
+    }
+
+    static #int8[] pattern(int32 n) {
+        int8[] d = heap int8[n];
+        int32 i = 0;
+        while (i < n) {
+            d[i] = (int8) StreamTests.patternAt(i);
+            i = i + 1;
+        }
+        return #d;
+    }
+
+    static boolean matchesPattern(int8[] got, int32 n) {
+        int32 i = 0;
+        while (i < n) {
+            if ((((int32) got[i]) & 0xFF) != StreamTests.patternAt(i)) {
+                return false;
+            }
+            i = i + 1;
+        }
+        return true;
+    }
+
+    /**
+     * Known length: contentLength reports it, and pumping the reader
+     * piecewise through content-length framing re-parses to the exact
+     * payload — no chunk overhead, byte count == contentLength.
+     */
+    static void knownLengthExactFraming(Check c) {
+        int8[] data = StreamTests.pattern(StreamTests.BIG);
+        BytesChannel ch = heap BytesChannel(data, (int64) StreamTests.BIG);
+        AsyncReader r = heap AsyncReader(ch);
+        StreamBody b = StreamBody.sized(#r, (int64) StreamTests.BIG);
+        c.eqInt(b.contentLength(), (int64) StreamTests.BIG,
+            "sized StreamBody reports its length");
+        c.that(b.contentType() == null, "untyped sized body has null type");
+
+        BodyReader br = BodyReader.forContentLength((int64) StreamTests.BIG);
+        AsyncReader src = b.reader();
+        c.that(src != null, "sized body hands out its reader");
+        int8[] buf = heap int8[StreamTests.PIECE];
+        int32 total = 0;
+        int32 reads = 0;
+        int32 n = src.read(buf, 0, StreamTests.PIECE);
+        while (n > 0) {
+            total = total + n;
+            reads = reads + 1;
+            br.feed(buf, n);
+            n = src.read(buf, 0, StreamTests.PIECE);
+        }
+        c.eqInt((int64) total, (int64) StreamTests.BIG,
+            "streamed byte count equals contentLength");
+        c.that(reads > 1, "payload spans many reads (>> one buffer)");
+        c.that(br.isComplete(), "content-length framing completes exactly");
+        int32 decLen = br.decodedLength();
+        int8[] dec = br.drain();
+        c.eqInt((int64) decLen, (int64) StreamTests.BIG, "decoded length exact");
+        c.that(StreamTests.matchesPattern(dec, decLen),
+            "decoded bytes match the streamed payload");
+    }
+
+    /**
+     * Unknown length: contentLength is -1, and each piece frames through
+     * ChunkedEncoder as it is read — fed to the chunked decoder as
+     * produced, never accumulated on the encode side — then the
+     * terminator closes the stream and the decode matches.
+     */
+    static void unknownLengthChunkedWire(Check c) {
+        int8[] data = StreamTests.pattern(StreamTests.BIG);
+        BytesChannel ch = heap BytesChannel(data, (int64) StreamTests.BIG);
+        AsyncReader r = heap AsyncReader(ch);
+        StreamBody b = StreamBody.of(#r);
+        c.eqInt(b.contentLength(), (int64) 0 - (int64) 1,
+            "unknown-length StreamBody reports -1");
+
+        BodyReader br = BodyReader.forChunked();
+        AsyncReader src = b.reader();
+        int8[] buf = heap int8[StreamTests.PIECE];
+        int32 n = src.read(buf, 0, StreamTests.PIECE);
+        while (n > 0) {
+            int8[] wire = ChunkedEncoder.encodeChunk(buf, n);
+            br.feed(wire, wire.count());
+            n = src.read(buf, 0, StreamTests.PIECE);
+        }
+        int8[] last = ChunkedEncoder.encodeLast();
+        boolean done = br.feed(last, last.count());
+        c.that(done, "chunked stream completes at the terminator");
+        c.that(br.isComplete(), "chunked decoder complete");
+        int32 decLen = br.decodedLength();
+        int8[] dec = br.drain();
+        c.eqInt((int64) decLen, (int64) StreamTests.BIG,
+            "chunked round-trip preserves length");
+        c.that(StreamTests.matchesPattern(dec, decLen),
+            "chunked round-trip preserves bytes");
+    }
+
+    /** The reader is single-shot: once drained it stays at EOF. */
+    static void singleShotReader(Check c) {
+        int8[] data = StreamTests.pattern(8);
+        BytesChannel ch = heap BytesChannel(data, (int64) 8);
+        AsyncReader r = heap AsyncReader(ch);
+        StreamBody b = StreamBody.sized(#r, (int64) 8);
+        AsyncReader src = b.reader();
+        int8[] buf = heap int8[16];
+        c.eqInt((int64) src.read(buf, 0, 16), (int64) 8, "single-shot: content");
+        c.eqInt((int64) src.read(buf, 0, 16), (int64) 0, "single-shot: EOF");
+        AsyncReader again = b.reader();
+        c.eqInt((int64) again.read(buf, 0, 16), (int64) 0,
+            "reader() does not restart the stream");
+    }
+
+    static void typedAndUntyped(Check c) {
+        int8[] d1 = StreamTests.pattern(4);
+        BytesChannel ch1 = heap BytesChannel(d1, (int64) 4);
+        AsyncReader r1 = heap AsyncReader(ch1);
+        MediaType t1 = MediaType.applicationOctetStream();
+        StreamBody typedChunked = StreamBody.of(#r1, #t1);
+        c.eqInt(typedChunked.contentLength(), (int64) 0 - (int64) 1,
+            "typed unknown-length is still -1");
+        c.that(typedChunked.contentType().is("application", "octet-stream"),
+            "typed unknown-length carries its type");
+
+        int8[] d2 = StreamTests.pattern(4);
+        BytesChannel ch2 = heap BytesChannel(d2, (int64) 4);
+        AsyncReader r2 = heap AsyncReader(ch2);
+        MediaType t2 = MediaType.applicationJson();
+        StreamBody typedSized = StreamBody.sized(#r2, (int64) 4, #t2);
+        c.eqInt(typedSized.contentLength(), (int64) 4, "typed sized length");
+        c.eqStr(typedSized.contentType().essence(), "application/json",
+            "typed sized carries its type");
+
+        AsyncReader r3 = heap AsyncReader(ch2);
+        Body asBody = StreamBody.sized(#r3, (int64) 4);
+        c.eqInt(asBody.contentLength(), (int64) 4, "Body base dispatch: sized");
+    }
+}

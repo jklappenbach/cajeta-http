@@ -1,0 +1,82 @@
+package dev.cajeta.http.body;
+
+import cajeta.io.net.AsyncReader;
+import dev.cajeta.http.MediaType;
+
+/**
+ * A streaming [`Body`](Body.cajeta) over a **caller-supplied reader**
+ * (`http:1.3c`) — the never-materializing body. Where
+ * [`BytesBody`](BytesBody.cajeta)/[`StringBody`](StringBody.cajeta) hold
+ * their payload, a StreamBody holds only the reader: content flows from
+ * whatever channel backs it (a file, a pipe, an upstream response)
+ * straight into the h1 framing, one buffer at a time.
+ *
+ * Length declares the framing: [`sized`](#sized) bodies serialize with
+ * exact `Content-Length` framing; [`of`](#of) bodies report `-1`
+ * (unknown) and serialize chunked, each piece framed through
+ * [`ChunkedEncoder`](../h1/ChunkedEncoder.cajeta) as it is read.
+ *
+ * The body **adopts** the reader (`#AsyncReader`); the channel behind
+ * it stays the caller's — keep that channel alive for the body's
+ * lifetime. Unlike the in-memory bodies, the stream is **single-shot**:
+ * [`reader`](#reader) hands back the same reader every call and never
+ * rewinds — once drained (or partially consumed) it stays where it is.
+ */
+public final class StreamBody extends Body {
+
+    AsyncReader rdr;
+    int64 len;
+    MediaType type;
+
+    StreamBody() {
+        this.rdr = null;
+        this.len = (int64) 0 - (int64) 1;
+        this.type = null;
+    }
+
+    /** An unknown-length (chunked-framing) body; adopts the reader. */
+    public static #StreamBody of(#AsyncReader reader) {
+        StreamBody b = heap StreamBody();
+        b.rdr = #reader;
+        return #b;
+    }
+
+    /** An unknown-length typed body; adopts the reader and the type. */
+    public static #StreamBody of(#AsyncReader reader, #MediaType type) {
+        StreamBody b = heap StreamBody();
+        b.rdr = #reader;
+        b.type = #type;
+        return #b;
+    }
+
+    /** A known-length (`Content-Length` framing) body; adopts the reader. */
+    public static #StreamBody sized(#AsyncReader reader, int64 length) {
+        StreamBody b = heap StreamBody();
+        b.rdr = #reader;
+        b.len = length;
+        return #b;
+    }
+
+    /** A known-length typed body; adopts the reader and the type. */
+    public static #StreamBody sized(#AsyncReader reader, int64 length,
+                                    #MediaType type) {
+        StreamBody b = heap StreamBody();
+        b.rdr = #reader;
+        b.len = length;
+        b.type = #type;
+        return #b;
+    }
+
+    public int64 contentLength() {
+        return this.len;
+    }
+
+    public MediaType contentType() {
+        return this.type;
+    }
+
+    /** The wrapped reader — same instance every call, never rewound. */
+    public AsyncReader reader() {
+        return this.rdr;
+    }
+}
