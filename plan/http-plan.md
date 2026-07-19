@@ -56,11 +56,24 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
   HttpClient exchange against it, and a WebSocket echo; README + run script;
   exits non-zero on any failed check.
   - Acceptance: `samples/tour/run.sh` prints the walkthrough and exits 0.
-- [ ] **0.7 Retire the stdlib copies** — remove `cajeta.io.net.http` /
-  `cajeta.io.net.ws` from the cajeta repo stdlib and migrate its tests/docs.
-  **Cajeta-repo-side work** — tracked there (see
-  `cajeta/agents/cajeta/external/cajeta-http-completion.md`); not workable
-  from this repo.
+- [x] **0.7 Retire the stdlib copies** — *(done 2026-07-19, cajeta
+  `f23e3e59` on `main`)* `cajeta.io.net.http` / `.ws` removed from the
+  stdlib (the stdlib keeps the transport: TCP/UDP/reactor/TLS/DNS/URI);
+  skills/docs retargeted; 19 protocol test suites deleted (coverage is
+  this repo's suite), compiler-feature tests refixtured; cajeta's
+  `tools/mcp` now depends on `dev.cajeta.http@0.1.0` from the `~/.olla`
+  store. Verified: full cajeta ctest with every failure A/B-attributed
+  to pre-existing causes, MCP stdio + HTTP transports green.
+  Two follow-ups this created **here**:
+  - The stdlib's HTTP-on-shared-pool parity coverage retired with it —
+    this suite runs fiber-per-connection only, so add a both-models
+    loopback run (fits 1.5c's accept-control work).
+  - The retired `test/net/golden/http|ws` corpus (RFC message/abuse/
+    frame vectors, deleted at `f23e3e59~1`) is worth adopting into this
+    repo's golden tests.
+  - Note: the installed 0.9.1 deb (`880f334f`) predates the removal and
+    still embeds the stdlib twins — harmless (0.10's collision fix
+    handles it); the next cut deb drops them.
 - [x] **0.8 Migrate to toolchain 0.9.0.** Pin `settings.toolchain` in
   `cajeta.json` and carry the library, tests, and tour onto the 0.9.0
   language/stdlib. Two rule changes drove it, both of which compile clean
@@ -374,31 +387,29 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
     - TDD: capacity + shed behavior observable under concurrent
       connects; shutdown mid-exchange completes that exchange and
       refuses new ones; a hung exchange is cut at the deadline.
-- [ ] **1.6** Compression codec (`dev.cajeta.http.compression`) — a
-  **prerequisite for 1.4e, 2.2c, and 4.1**. Planned 2026-07-19 after
-  confirming the stdlib ships **only the interfaces**
-  (`cajeta.wire.Compressor`/`Decompressor` — no DEFLATE implementation
-  anywhere, native layer included, and no CRC32/Adler-32 in
-  `cajeta.hash`). Pure-cajeta implementations of the stdlib interfaces
-  (matching the stdlib's stated no-third-party policy), so they can
-  migrate into `cajeta.wire` later. Brotli **deferred** — nothing gates
-  on it.
-  - [ ] **1.6a DEFLATE (RFC 1951).** Inflate + deflate: stored blocks,
-    fixed and dynamic Huffman, LZ77 with the 32KB window;
-    block-oriented first.
-    - TDD: golden vectors both directions; round-trip on structured /
-      random / empty / incompressible inputs; malformed rejects (bad
-      Huffman tables, distance-too-far); window-edge matches.
-  - [ ] **1.6b Wrappers + checksums.** zlib (RFC 1950, Adler-32) and
-    gzip (RFC 1952, CRC32) framing; CRC32 and Adler-32 ship in this
-    unit.
-    - TDD: checksum vectors; interop fixtures produced by system zlib
-      (test fixtures only — no runtime dependency); trailing-garbage
-      and truncation rejects.
-  - [ ] **1.6c Streaming surface.** Incremental inflate/deflate with the
-    dictionary/window preserved across calls, plus flush modes — the
-    shape 4.1's context takeover and 2.2c's streamed bodies need.
-    - TDD: chunk-at-a-time equals one-shot on every 1.6a vector; sync
+- [ ] **1.6** Compression — a **prerequisite for 1.4e, 2.2c, and 4.1**.
+  *(Re-planned 2026-07-19: the original from-scratch DEFLATE plan is
+  obsolete — the external **`dev.cajeta.codec`** library
+  (`~/code/cpp/cajeta-codec`, published in `~/.olla` at 0.5.0) already
+  ships block-mode `compress.Deflate` (fixed + dynamic Huffman,
+  `deflate`/`inflate`/`inflateGrow`), `Gzip` (+`crc32`), and `Zlib`
+  (+`adler32`) — pure cajeta, already consumed by cajeta's `tools/mcp`.
+  The stdlib itself still has only the `cajeta.wire`
+  Compressor/Decompressor interfaces.)* Brotli stays deferred.
+  - [ ] **1.6a Adopt `dev.cajeta.codec`.** Add the dependency (olla
+    store, like tools/mcp does), route HTTP content-coding through
+    `Gzip`/`Zlib`/`Deflate`, and pin interop with golden vectors
+    (fixtures produced by system zlib — test-only).
+    - TDD: round-trips through the dependency; malformed/truncation/
+      trailing-garbage rejects at the HTTP boundary; wrong-`destLen`
+      handling for `Zlib.decompress`.
+  - [ ] **1.6b Streaming surface.** The gap the dependency does not
+    cover: incremental inflate/deflate with the dictionary/window
+    preserved across calls plus flush modes — what 4.1's context
+    takeover and 2.2c's streamed bodies need. Build it **against
+    cajeta-codec's block core, preferably upstreamed there** (it is
+    that repo's natural API growth), with cajeta-http consuming it.
+    - TDD: chunk-at-a-time equals one-shot on the 1.6a vectors; sync
       flush boundaries decode standalone; context carries across
       messages.
 - [ ] **1.7** Router completeness — found unplanned during the
@@ -544,7 +555,7 @@ acceptance bar.
 
 ## 4 — WebSocket completeness + SSE
 
-- [ ] **4.1** `permessage-deflate` (RFC 7692) *(gated on 1.6c)*:
+- [ ] **4.1** `permessage-deflate` (RFC 7692) *(gated on 1.6b)*:
   offer/accept negotiation (window bits, `*_no_context_takeover`
   params), RSV1 discipline, per-message deflate with the sliding window
   shared across messages under context takeover. Decision per the
