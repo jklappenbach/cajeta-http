@@ -1,4 +1,4 @@
-package dev.cajeta.http;
+package dev.cajeta.http.h1;
 
 /**
  * The streaming HTTP/1.1 **chunked transfer-*encoding*** primitive

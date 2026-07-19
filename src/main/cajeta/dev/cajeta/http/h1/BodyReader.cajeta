@@ -1,6 +1,8 @@
-package dev.cajeta.http;
+package dev.cajeta.http.h1;
 
 import cajeta.lang.String;
+import dev.cajeta.http.InvalidChunkEncodingException;
+import dev.cajeta.http.UnexpectedEofException;
 
 /**
  * The streaming HTTP/1.1 **body decoder** (NET-7.4) — the layer that

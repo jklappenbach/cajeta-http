@@ -1,10 +1,10 @@
-package dev.cajeta.http;
+package dev.cajeta.http.server;
 
 import cajeta.io.net.AsyncWriter;
 import dev.cajeta.http.HttpResponse;
-import dev.cajeta.http.HttpSerializer;
-import dev.cajeta.http.ChunkedEncoder;
-import dev.cajeta.http.KeepAlive;
+import dev.cajeta.http.h1.HttpSerializer;
+import dev.cajeta.http.h1.ChunkedEncoder;
+import dev.cajeta.http.h1.KeepAlive;
 
 /**
  * The server-side **streaming response body writer** — plan item

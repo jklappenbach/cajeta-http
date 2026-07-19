@@ -1,10 +1,10 @@
 package dev.cajeta.http.test;
 
-import dev.cajeta.http.HttpClient;
+import dev.cajeta.http.client.HttpClient;
 import dev.cajeta.http.HttpRequest;
 import dev.cajeta.http.HttpResponse;
-import dev.cajeta.http.HttpServer;
-import dev.cajeta.http.HttpServerBuilder;
+import dev.cajeta.http.server.HttpServer;
+import dev.cajeta.http.server.HttpServerBuilder;
 import cajeta.io.net.Server;
 import cajeta.io.net.TcpStream;
 import cajeta.io.net.uri.Uri;

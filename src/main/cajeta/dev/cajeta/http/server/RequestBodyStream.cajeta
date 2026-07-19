@@ -1,8 +1,8 @@
-package dev.cajeta.http;
+package dev.cajeta.http.server;
 
 import cajeta.io.net.AsyncReader;
-import dev.cajeta.http.BodyReader;
-import dev.cajeta.http.HttpParser;
+import dev.cajeta.http.h1.BodyReader;
+import dev.cajeta.http.h1.HttpParser;
 
 /**
  * The server-side **streaming request body reader** — plan item

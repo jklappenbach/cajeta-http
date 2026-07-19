@@ -1,12 +1,12 @@
 package dev.cajeta.http.test;
 
-import dev.cajeta.http.HttpParser;
+import dev.cajeta.http.h1.HttpParser;
 import dev.cajeta.http.HttpRequest;
 import dev.cajeta.http.HttpResponse;
-import dev.cajeta.http.HttpSerializer;
-import dev.cajeta.http.BodyReader;
-import dev.cajeta.http.HttpServer;
-import dev.cajeta.http.HttpServerBuilder;
+import dev.cajeta.http.h1.HttpSerializer;
+import dev.cajeta.http.h1.BodyReader;
+import dev.cajeta.http.server.HttpServer;
+import dev.cajeta.http.server.HttpServerBuilder;
 import dev.cajeta.http.routing.Router;
 import cajeta.io.net.IpAddress;
 import cajeta.io.net.Server;

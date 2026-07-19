@@ -1,13 +1,13 @@
 package dev.cajeta.http.test;
 
-import dev.cajeta.http.HttpParser;
+import dev.cajeta.http.h1.HttpParser;
 import dev.cajeta.http.HttpRequest;
 import dev.cajeta.http.HttpResponse;
-import dev.cajeta.http.HttpSerializer;
-import dev.cajeta.http.BodyFraming;
-import dev.cajeta.http.BodyReader;
-import dev.cajeta.http.ChunkedEncoder;
-import dev.cajeta.http.KeepAlive;
+import dev.cajeta.http.h1.HttpSerializer;
+import dev.cajeta.http.h1.BodyFraming;
+import dev.cajeta.http.h1.BodyReader;
+import dev.cajeta.http.h1.ChunkedEncoder;
+import dev.cajeta.http.h1.KeepAlive;
 import dev.cajeta.http.HttpException;
 import cajeta.io.net.Headers;
 

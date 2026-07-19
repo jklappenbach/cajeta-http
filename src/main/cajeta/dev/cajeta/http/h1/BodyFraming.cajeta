@@ -1,4 +1,4 @@
-package dev.cajeta.http;
+package dev.cajeta.http.h1;
 
 /**
  * The **body-framing decision** the incremental parser

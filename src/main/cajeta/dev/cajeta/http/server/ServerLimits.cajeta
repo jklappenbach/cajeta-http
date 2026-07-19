@@ -1,4 +1,4 @@
-package dev.cajeta.http;
+package dev.cajeta.http.server;
 
 /**
  * **Server-side request limits + hardening knobs** — plan item

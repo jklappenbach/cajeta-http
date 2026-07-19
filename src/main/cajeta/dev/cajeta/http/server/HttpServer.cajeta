@@ -1,4 +1,4 @@
-package dev.cajeta.http;
+package dev.cajeta.http.server;
 
 import cajeta.lang.String;
 import cajeta.io.net.Server;
@@ -11,17 +11,17 @@ import cajeta.io.net.TimedOutException;
 import cajeta.error.Exception;
 import dev.cajeta.http.HttpRequest;
 import dev.cajeta.http.HttpResponse;
-import dev.cajeta.http.HttpParser;
-import dev.cajeta.http.HttpParserLimits;
-import dev.cajeta.http.ServerLimits;
-import dev.cajeta.http.ExpectContinue;
+import dev.cajeta.http.h1.HttpParser;
+import dev.cajeta.http.h1.HttpParserLimits;
+import dev.cajeta.http.server.ServerLimits;
+import dev.cajeta.http.server.ExpectContinue;
 import dev.cajeta.http.PayloadTooLargeException;
-import dev.cajeta.http.BodyReader;
-import dev.cajeta.http.BodyFraming;
-import dev.cajeta.http.HttpSerializer;
-import dev.cajeta.http.KeepAlive;
+import dev.cajeta.http.h1.BodyReader;
+import dev.cajeta.http.h1.BodyFraming;
+import dev.cajeta.http.h1.HttpSerializer;
+import dev.cajeta.http.h1.KeepAlive;
 import dev.cajeta.http.HttpException;
-import dev.cajeta.http.Exchange;
+import dev.cajeta.http.server.Exchange;
 import cajeta.io.net.tls.TlsStream;
 import cajeta.time.Duration;
 

@@ -1,4 +1,4 @@
-package dev.cajeta.http;
+package dev.cajeta.http.client;
 
 import cajeta.lang.String;
 import cajeta.io.net.ByteChannel;
@@ -11,10 +11,10 @@ import cajeta.io.net.tls.TlsStream;
 import cajeta.io.net.uri.Uri;
 import dev.cajeta.http.HttpRequest;
 import dev.cajeta.http.HttpResponse;
-import dev.cajeta.http.HttpParser;
-import dev.cajeta.http.HttpSerializer;
-import dev.cajeta.http.BodyReader;
-import dev.cajeta.http.BodyFraming;
+import dev.cajeta.http.h1.HttpParser;
+import dev.cajeta.http.h1.HttpSerializer;
+import dev.cajeta.http.h1.BodyReader;
+import dev.cajeta.http.h1.BodyFraming;
 
 /**
  * The **HTTP/1.1 client** — plan item **NET-8.1**. It drives one

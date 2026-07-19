@@ -1,4 +1,4 @@
-package dev.cajeta.http;
+package dev.cajeta.http.server;
 
 import dev.cajeta.http.HttpResponse;
 
