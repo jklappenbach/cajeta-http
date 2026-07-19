@@ -2,6 +2,8 @@ package dev.cajeta.http.test;
 
 import dev.cajeta.http.Method;
 import dev.cajeta.http.Version;
+import dev.cajeta.http.Status;
+import dev.cajeta.http.MediaType;
 
 /**
  * http:1.2 — the core HTTP value types (spec §Core types). Pure logic
@@ -18,6 +20,13 @@ public final class CoreTypeTests {
         System.stdout.println("-- core types: Version --");
         versionWire(c);
         versionSemantics(c);
+        System.stdout.println("-- core types: Status --");
+        statusRegistry(c);
+        statusClasses(c);
+        System.stdout.println("-- core types: MediaType --");
+        mediaTypeParse(c);
+        mediaTypeParams(c);
+        mediaTypeConstants(c);
     }
 
     static void methodTokens(Check c) {
@@ -94,5 +103,74 @@ public final class CoreTypeTests {
         c.that(Version.HTTP_1_1.supportsKeepAlive(), "1.1 keeps alive by default");
         c.that(Version.HTTP_2.supportsKeepAlive(), "2 keeps alive (multiplexed)");
         c.that(Version.HTTP_3.supportsKeepAlive(), "3 keeps alive (QUIC)");
+    }
+
+    // RFC 9110 §15 registry: of(code) carries the canonical reason phrase;
+    // of(code, reason) overrides it; an unregistered code gets an empty
+    // reason rather than an invented one.
+    static void statusRegistry(Check c) {
+        Status ok = Status.of(200);
+        c.eqInt((int64) ok.code(), 200, "of(200) code");
+        c.eqStr(ok.reason(), "OK", "of(200) canonical reason");
+        c.eqStr(Status.of(404).reason(), "Not Found", "404 reason");
+        c.eqStr(Status.of(503).reason(), "Service Unavailable", "503 reason");
+        c.eqStr(Status.of(418).reason(), "", "unregistered code: empty reason");
+        Status custom = Status.of(499, "Client Closed Request");
+        c.eqInt((int64) custom.code(), 499, "custom code");
+        c.eqStr(custom.reason(), "Client Closed Request", "custom reason kept");
+    }
+
+    static void statusClasses(Check c) {
+        c.that(Status.of(100).isInformational(), "100 informational");
+        c.that(Status.of(204).isSuccess(), "204 success");
+        c.that(Status.of(302).isRedirection(), "302 redirection");
+        c.that(Status.of(404).isClientError(), "404 client error");
+        c.that(Status.of(500).isServerError(), "500 server error");
+        c.that(!Status.of(200).isClientError(), "200 is not a client error");
+        c.that(!Status.of(399).isClientError(), "399 is not a client error");
+        c.that(!Status.of(600).isServerError(), "600 is out of the 5xx class");
+    }
+
+    // RFC 6838: type and subtype are case-insensitive (canonicalized to
+    // lowercase); parameter NAMES are case-insensitive, values verbatim
+    // (quotes stripped).
+    static void mediaTypeParse(Check c) {
+        MediaType t = MediaType.parse("text/html");
+        c.eqStr(t.type(), "text", "type parsed");
+        c.eqStr(t.subtype(), "html", "subtype parsed");
+        c.eqStr(t.essence(), "text/html", "essence");
+
+        MediaType upper = MediaType.parse("Text/HTML");
+        c.eqStr(upper.essence(), "text/html", "type/subtype lowercased");
+
+        c.that(MediaType.parse("garbage") == null, "no slash: null");
+        c.that(MediaType.parse("") == null, "empty: null");
+        c.that(MediaType.parse("/x") == null, "empty type: null");
+        c.that(MediaType.parse("x/") == null, "empty subtype: null");
+    }
+
+    static void mediaTypeParams(Check c) {
+        MediaType t = MediaType.parse("text/html; charset=UTF-8; q=\"0.9\"");
+        c.eqStr(t.essence(), "text/html", "essence ignores params");
+        c.eqStr(t.parameter("charset"), "UTF-8", "param value verbatim");
+        c.eqStr(t.parameter("CHARSET"), "UTF-8", "param name case-insensitive");
+        c.eqStr(t.parameter("q"), "0.9", "quoted param value unquoted");
+        c.that(t.parameter("nope") == null, "absent param: null");
+        c.eqStr(MediaType.parse("a/b;c=d").parameter("c"), "d",
+                "params parse without spaces");
+    }
+
+    static void mediaTypeConstants(Check c) {
+        c.eqStr(MediaType.applicationJson().essence(), "application/json",
+                "applicationJson");
+        c.eqStr(MediaType.textPlain().essence(), "text/plain", "textPlain");
+        c.eqStr(MediaType.applicationOctetStream().essence(),
+                "application/octet-stream", "octetStream");
+        c.eqStr(MediaType.applicationFormUrlencoded().essence(),
+                "application/x-www-form-urlencoded", "formUrlencoded");
+        c.that(MediaType.applicationJson().is("application", "json"),
+               "is() matches essence");
+        c.that(!MediaType.applicationJson().is("text", "json"),
+               "is() rejects a different type");
     }
 }

@@ -179,9 +179,30 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
 
 ## 1 — HTTP/1.1 core (beyond extracted parity)
 
-- [ ] **1.1** Spec package layout: split flat `dev.cajeta.http` into
-  `.body` / `.client` / `.server` / `.routing` / `.h1` per the spec.
-- [ ] **1.2** Core-type completion: `Method`/`Status`/`Headers`/`MediaType`
+- [x] **1.1** Spec package layout: split flat `dev.cajeta.http` into
+  `.client` / `.server` / `.routing` / `.h1` per the spec (`9092f7e`;
+  `.body`/`.middleware`/etc. come with the units that populate them).
+  `PathParams` stays at the root — `HttpRequest` carries it as a field and
+  `.routing` depends on `HttpRequest`, so moving it would be circular.
+- [~] **1.2** Core-type completion. The four types exist in spec shape with
+  49+35 golden-vector checks (suite 148/148): **`Method`/`Version` as real
+  enums with methods** (`isSafe`/`isIdempotent`/`allowsBody`,
+  `wireString`/`supportsKeepAlive`) — enum bodies were a compiler gap,
+  built for this unit in cajeta `1c98c3a8`+`55a62950`+`4d601e3a`; an enum
+  value is an i32 and can't be null, so `Method.of()` answers a tenth
+  `EXTENSION` constant for unregistered tokens (`isRegistered` is the
+  predicate). **`Status`** (RFC 9110 §15 registry + class predicates) and
+  **`MediaType`** (RFC 6838 parse, lowercased type/subtype/param-names,
+  quoted values, `essence`/`is`/`parameter`) as final classes.
+  **Remaining:** adopt the types across the message model —
+  `HttpRequest.method`/`HttpResponse.status` are still raw
+  `String`/`int32`, `HttpResponse.reasonFor` duplicates `Status`'s
+  registry, and the typed `Headers` accessors (`contentType()` etc.) are
+  unwritten. That adoption changes parser/serializer/router signatures and
+  should ride its own commit(s).
+- [ ] **1.2b** Core-type adoption: retype `Method`/`Status`/`Version`
+  through `HttpRequest`/`HttpResponse`/`Router`/`h1`, consolidate the
+  reason-phrase registry into `Status`, add `Headers`' typed accessors
   helpers per spec (`isSafe`, registry, typed accessors).
 - [ ] **1.3** `Body` abstraction: in-memory + streaming, form, multipart
   (+ `MultipartParser`).

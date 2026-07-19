@@ -1,0 +1,244 @@
+package dev.cajeta.http;
+
+import cajeta.lang.String;
+
+/**
+ * A parsed **media type** (spec §Core types; RFC 6838 / RFC 9110 §8.3) —
+ * `type "/" subtype *( ";" parameter )`, e.g.
+ * `text/html; charset=utf-8`.
+ *
+ * ```cajeta
+ * MediaType mt = MediaType.parse(resp.getHeaders().get("Content-Type"));
+ * if (mt != null && mt.is("application", "json")) { ... }
+ * String cs = mt.parameter("charset");   // value verbatim, or null
+ * ```
+ *
+ * Case handling per RFC 6838 §4.2: the **type**, **subtype**, and
+ * parameter **names** are case-insensitive (canonicalized to lowercase
+ * here); parameter **values** are kept verbatim, with surrounding
+ * double-quotes stripped. [`parse`](#parse) answers `null` for input that
+ * is not `type "/" subtype` shaped — absence of a usable media type, not
+ * an exception, mirroring [`Method.of`](Method.cajeta)'s registry
+ * philosophy.
+ *
+ * Parameters live in insertion-order parallel arrays (the
+ * [`PathParams`](PathParams.cajeta) shape) — a media type carries a
+ * handful at most, so a map structure would be ceremony.
+ */
+public final class MediaType {
+    String typeName;
+    String subtypeName;
+    String[] paramNames;
+    String[] paramValues;
+    int32 paramCount;
+
+    MediaType() {
+        int8[] e1 = heap int8[0];
+        this.typeName = heap String(#e1, 0);
+        int8[] e2 = heap int8[0];
+        this.subtypeName = heap String(#e2, 0);
+        this.paramNames = heap String[4];
+        this.paramValues = heap String[4];
+        this.paramCount = 0;
+    }
+
+    // -- constants ----------------------------------------------------------
+
+    /** `application/json`. */
+    public static #MediaType applicationJson() {
+        return MediaType.parse("application/json");
+    }
+
+    /** `text/plain`. */
+    public static #MediaType textPlain() {
+        return MediaType.parse("text/plain");
+    }
+
+    /** `text/html`. */
+    public static #MediaType textHtml() {
+        return MediaType.parse("text/html");
+    }
+
+    /** `application/octet-stream`. */
+    public static #MediaType applicationOctetStream() {
+        return MediaType.parse("application/octet-stream");
+    }
+
+    /** `application/x-www-form-urlencoded`. */
+    public static #MediaType applicationFormUrlencoded() {
+        return MediaType.parse("application/x-www-form-urlencoded");
+    }
+
+    /** `multipart/form-data`. */
+    public static #MediaType multipartFormData() {
+        return MediaType.parse("multipart/form-data");
+    }
+
+    // -- parsing ------------------------------------------------------------
+
+    /**
+     * Parse `input` as `type "/" subtype *( OWS ";" OWS parameter )`.
+     * Returns `null` when the essence is not well-formed (no `/`, empty
+     * type or subtype). Parameters that lack an `=` are skipped rather
+     * than failing the whole value.
+     */
+    public static #MediaType parse(String input) {
+        if (input == null) {
+            return null;
+        }
+        String s = input.trim();
+        int32 n = s.byteLength();
+        if (n == 0) {
+            return null;
+        }
+        // The essence runs to the first ';' (or the end).
+        int32 essEnd = n;
+        int32 i = 0;
+        while (i < n) {
+            if ((((int32) s.byteAt(i)) & 0xff) == 59) {   // ';'
+                essEnd = i;
+                i = n;
+            } else {
+                i = i + 1;
+            }
+        }
+        // Split the essence on its '/'.
+        int32 slash = -1;
+        int32 j = 0;
+        while (j < essEnd) {
+            if ((((int32) s.byteAt(j)) & 0xff) == 47) {   // '/'
+                slash = j;
+                j = essEnd;
+            } else {
+                j = j + 1;
+            }
+        }
+        if (slash <= 0 || slash >= essEnd - 1) {
+            return null;                 // no '/', empty type, or empty subtype
+        }
+        MediaType mt = heap MediaType();
+        String rawType = s.substring(0, slash);
+        String rawSub = s.substring(slash + 1, essEnd);
+        String trimmedType = rawType.trim();
+        String trimmedSub = rawSub.trim();
+        if (trimmedType.byteLength() == 0 || trimmedSub.byteLength() == 0) {
+            return null;
+        }
+        mt.typeName = trimmedType.toLowerCase();
+        mt.subtypeName = trimmedSub.toLowerCase();
+
+        // Parameters: ';'-separated name=value pairs after the essence.
+        int32 pos = essEnd + 1;
+        while (pos < n) {
+            int32 segEnd = pos;
+            while (segEnd < n && (((int32) s.byteAt(segEnd)) & 0xff) != 59) {
+                segEnd = segEnd + 1;
+            }
+            MediaType.parseParam(mt, s, pos, segEnd);
+            pos = segEnd + 1;
+        }
+        return #mt;
+    }
+
+    /** Parse one `name=value` segment of `s[start .. end)` into `mt`. */
+    static void parseParam(MediaType mt, String s, int32 start, int32 end) {
+        int32 eq = -1;
+        int32 k = start;
+        while (k < end) {
+            if ((((int32) s.byteAt(k)) & 0xff) == 61) {   // '='
+                eq = k;
+                k = end;
+            } else {
+                k = k + 1;
+            }
+        }
+        if (eq < 0) {
+            return;                       // no '=': skip the malformed param
+        }
+        String name = s.substring(start, eq).trim().toLowerCase();
+        String value = s.substring(eq + 1, end).trim();
+        int32 vlen = value.byteLength();
+        // Strip one layer of surrounding double-quotes.
+        if (vlen >= 2
+                && (((int32) value.byteAt(0)) & 0xff) == 34
+                && (((int32) value.byteAt(vlen - 1)) & 0xff) == 34) {
+            value = value.substring(1, vlen - 1);
+        }
+        if (name.byteLength() == 0) {
+            return;
+        }
+        mt.appendParam(#name, #value);
+    }
+
+    /** Append one parameter, growing the parallel arrays on demand. */
+    void appendParam(#String name, #String value) {
+        if (this.paramCount >= this.paramNames.count()) {
+            int32 newCap = this.paramNames.count() * 2;
+            String[] nn = heap String[newCap];
+            String[] nv = heap String[newCap];
+            int32 i = 0;
+            while (i < this.paramCount) {
+                nn[i] = this.paramNames[i];
+                nv[i] = this.paramValues[i];
+                i = i + 1;
+            }
+            this.paramNames = nn;
+            this.paramValues = nv;
+        }
+        this.paramNames[this.paramCount] = #name;
+        this.paramValues[this.paramCount] = #value;
+        this.paramCount = this.paramCount + 1;
+    }
+
+    // -- accessors ----------------------------------------------------------
+
+    /** The primary type, lowercase (`"text"`). */
+    public String type() {
+        return this.typeName;
+    }
+
+    /** The subtype, lowercase (`"html"`). */
+    public String subtype() {
+        return this.subtypeName;
+    }
+
+    /** `type "/" subtype` without parameters (`"text/html"`). */
+    public #String essence() {
+        return this.typeName + "/" + this.subtypeName;
+    }
+
+    /** True iff type and subtype equal `t`/`sub` (both compared lowercase). */
+    public boolean is(String t, String sub) {
+        if (t == null || sub == null) {
+            return false;
+        }
+        return this.typeName.equals(t.toLowerCase())
+            && this.subtypeName.equals(sub.toLowerCase());
+    }
+
+    /** Number of parameters, in insertion order. */
+    public int32 parameterCount() {
+        return this.paramCount;
+    }
+
+    /**
+     * The value of the parameter `name` (name matched case-insensitively),
+     * or `null` when absent. A fresh caller-owned copy, the
+     * [`PathParams.get`](PathParams.cajeta) ownership convention.
+     */
+    public #String parameter(String name) {
+        if (name == null) {
+            return null;
+        }
+        String want = name.toLowerCase();
+        int32 i = 0;
+        while (i < this.paramCount) {
+            if (this.paramNames[i].equals(want)) {
+                String v = this.paramValues[i];
+                return v.substring(0, v.byteLength());
+            }
+            i = i + 1;
+        }
+        return null;
+    }
+}
