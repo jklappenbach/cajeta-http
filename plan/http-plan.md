@@ -192,6 +192,16 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
     0.9.0 deb would regress 0.9, since tag `v0.9.0` (`32942b53`) predates
     the fix. The real fix is to land `#conn` upstream and cut a release.
 
+- [ ] **0.11 Residual ~2.5% heap-corruption crash in the client loopback.**
+  Surfaced 2026-07-19 while pre-flighting the `13fef7a4` compiler deb:
+  2 failures in 65 runs, both `SIGABRT: array index 0 out of bounds for
+  dimension size 0` in `ClientTests` (crash in ~4ms — NOT the fixed
+  0.9 starvation mode, which pinned at the 30s budget). Distinct,
+  pre-existing bug in the memory/ownership family (likely kin to the
+  long-open lambda-capture double-free); it hid under 0.9's 25% rate and
+  a lucky 0/60 post-fix loop (P≈22% of missing a 2.5% flake in 60).
+  Cajeta-repo-side. Loop ≥100 runs when measuring anything against this.
+
 ## 1 — HTTP/1.1 core (beyond extracted parity)
 
 - [x] **1.1** Spec package layout: split flat `dev.cajeta.http` into
