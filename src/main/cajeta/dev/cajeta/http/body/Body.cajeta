@@ -1,0 +1,53 @@
+package dev.cajeta.http.body;
+
+import cajeta.io.net.AsyncReader;
+import dev.cajeta.http.MediaType;
+
+/**
+ * An HTTP message body — the spec's Body abstraction (`http:1.3`).
+ *
+ * A body knows its **length** ([`contentLength`](#contentLength); `-1`
+ * means unknown, which serializes chunked), its **media type**
+ * ([`contentType`](#contentType); null when the producer declared none),
+ * and can stream its **content** ([`reader`](#reader)) through the same
+ * `cajeta.io.net.AsyncReader` surface the h1 plumbing already speaks —
+ * there is no separate stream vocabulary, and nothing forces a payload
+ * to materialize.
+ *
+ * This is a **base class**, not an interface: dispatching an
+ * object-typed return through a user-defined interface miscompiles
+ * today (scalar returns dispatch correctly; object returns come back
+ * corrupt — cajeta interface-call ABI gap, tracked upstream), while
+ * class-inheritance virtual dispatch is exercised and sound. The base
+ * is the "no body" identity: unknown length, no type, no content.
+ * (`abstract` is not in the language; the sentinel defaults stand in.)
+ *
+ * In-memory implementations: [`BytesBody`](BytesBody.cajeta),
+ * [`StringBody`](StringBody.cajeta). Streaming/form/multipart arrive
+ * with `http:1.3b`-`1.3d`.
+ */
+public class Body {
+
+    public Body() {
+        return;
+    }
+
+    /** Decoded content length in bytes; `-1` = unknown (chunked framing). */
+    public int64 contentLength() {
+        return (int64) 0 - (int64) 1;
+    }
+
+    /** The declared media type, or null when none was declared. */
+    public MediaType contentType() {
+        return null;
+    }
+
+    /**
+     * The body's reader, positioned at the start of the content and
+     * **owned by the body** (valid while the body lives). The base
+     * body has no content: null.
+     */
+    public AsyncReader reader() {
+        return null;
+    }
+}

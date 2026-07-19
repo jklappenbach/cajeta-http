@@ -1,0 +1,73 @@
+package dev.cajeta.http.body;
+
+import cajeta.io.net.AsyncReader;
+import dev.cajeta.http.MediaType;
+
+/**
+ * An in-memory [`Body`](Body.cajeta) over a `String`'s UTF-8 bytes
+ * (`http:1.3a`). The source String is copied at construction
+ * (`toBytes()` — a fresh owned buffer), so the body is independent of
+ * the caller's String from then on.
+ *
+ * The default media type is `text/plain; charset=utf-8`; the
+ * [typed factory](#of) overrides it.
+ */
+public final class StringBody extends Body {
+
+    int8[] data;
+    int32 len;
+    MediaType type;
+    BytesChannel channel;
+    AsyncReader rdr;
+
+    StringBody() {
+        this.data = null;
+        this.len = 0;
+        this.type = null;
+        this.channel = null;
+        this.rdr = null;
+    }
+
+    /** A `text/plain; charset=utf-8` body over `s`'s UTF-8 bytes. */
+    public static #StringBody of(String s) {
+        StringBody b = heap StringBody();
+        int8[] d = s.toBytes();
+        b.data = #d;
+        b.len = s.byteLength();
+        MediaType t = MediaType.parse("text/plain; charset=utf-8");
+        b.type = #t;
+        StringBody.wire(b);
+        return #b;
+    }
+
+    /** A body over `s`'s UTF-8 bytes with an explicit media type. */
+    public static #StringBody of(String s, #MediaType type) {
+        StringBody b = heap StringBody();
+        int8[] d = s.toBytes();
+        b.data = #d;
+        b.len = s.byteLength();
+        b.type = #type;
+        StringBody.wire(b);
+        return #b;
+    }
+
+    /** Build the body-owned channel + reader over the adopted buffer. */
+    static void wire(StringBody b) {
+        BytesChannel ch = heap BytesChannel(b.data, (int64) b.len);
+        b.channel = #ch;
+        AsyncReader r = heap AsyncReader(b.channel);
+        b.rdr = #r;
+    }
+
+    public int64 contentLength() {
+        return (int64) this.len;
+    }
+
+    public MediaType contentType() {
+        return this.type;
+    }
+
+    public AsyncReader reader() {
+        return this.rdr;
+    }
+}

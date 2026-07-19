@@ -13,6 +13,7 @@ public final class TestMain {
         c.eqStr(v, "0.1.1", "Http.version()");
 
         CoreTypeTests.run(c);
+        BodyTests.run(c);
         CodecTests.run(c);
         ServerTests.run(c);
         ClientTests.run(c);

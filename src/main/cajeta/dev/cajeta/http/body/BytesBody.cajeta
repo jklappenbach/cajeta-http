@@ -1,0 +1,70 @@
+package dev.cajeta.http.body;
+
+import cajeta.io.net.AsyncReader;
+import dev.cajeta.http.MediaType;
+
+/**
+ * An in-memory [`Body`](Body.cajeta) over an owned byte buffer
+ * (`http:1.3a`). The body **adopts** its buffer (`of` takes `#int8[]`)
+ * — hand it a fresh or surrendered array, never one you intend to keep.
+ *
+ * [`reader`](#reader) restarts from the first byte on every call; the
+ * channel behind the returned reader is owned by this body, so the
+ * reader is valid for as long as the body lives. A new `reader()` call
+ * replaces the body-owned channel — treat any earlier reader as done.
+ */
+public final class BytesBody extends Body {
+
+    int8[] data;
+    int32 len;
+    MediaType type;
+    BytesChannel channel;
+    AsyncReader rdr;
+
+    BytesBody() {
+        this.data = null;
+        this.len = 0;
+        this.type = null;
+        this.channel = null;
+        this.rdr = null;
+    }
+
+    /** An untyped body over `data[0..len)`; adopts the buffer. */
+    public static #BytesBody of(#int8[] data, int32 len) {
+        BytesBody b = heap BytesBody();
+        b.data = #data;
+        b.len = len;
+        BytesBody.wire(b);
+        return #b;
+    }
+
+    /** A typed body over `data[0..len)`; adopts the buffer and the type. */
+    public static #BytesBody of(#int8[] data, int32 len, #MediaType type) {
+        BytesBody b = heap BytesBody();
+        b.data = #data;
+        b.len = len;
+        b.type = #type;
+        BytesBody.wire(b);
+        return #b;
+    }
+
+    /** Build the body-owned channel + reader over the adopted buffer. */
+    static void wire(BytesBody b) {
+        BytesChannel ch = heap BytesChannel(b.data, (int64) b.len);
+        b.channel = #ch;
+        AsyncReader r = heap AsyncReader(b.channel);
+        b.rdr = #r;
+    }
+
+    public int64 contentLength() {
+        return (int64) this.len;
+    }
+
+    public MediaType contentType() {
+        return this.type;
+    }
+
+    public AsyncReader reader() {
+        return this.rdr;
+    }
+}

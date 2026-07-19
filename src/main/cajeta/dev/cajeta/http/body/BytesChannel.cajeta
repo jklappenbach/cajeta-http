@@ -1,0 +1,66 @@
+package dev.cajeta.http.body;
+
+import cajeta.io.net.ByteChannel;
+import dev.cajeta.http.HttpException;
+
+/**
+ * A read-only, memory-backed `cajeta.io.net.ByteChannel` — the buffer
+ * adapter the stdlib lacks (`http:1.3a`). Serves a borrowed byte range
+ * sequentially; `readAsync` never parks (the bytes are already here)
+ * and returns `0` at end-of-content, matching the transport EOF
+ * contract, so an `AsyncReader` over it behaves exactly like one over
+ * a drained socket.
+ *
+ * The channel **borrows** its backing array — the owner (a
+ * [`BytesBody`](BytesBody.cajeta) / [`StringBody`](StringBody.cajeta))
+ * must outlive it, which the bodies guarantee by owning both the array
+ * and the channel as fields.
+ */
+public final class BytesChannel implements ByteChannel {
+
+    int8[] data;
+    int64 len;
+    int64 pos;
+    boolean closed;
+
+    public BytesChannel(int8[] data, int64 len) {
+        this.data = data;
+        this.len = len;
+        this.pos = (int64) 0;
+        this.closed = false;
+    }
+
+    public int64 readAsync(int8[] buf, int64 offset, int64 length) {
+        if (this.closed) {
+            return (int64) 0;
+        }
+        int64 remaining = this.len - this.pos;
+        if (remaining <= (int64) 0) {
+            return (int64) 0;
+        }
+        int64 n = length;
+        if (n > remaining) {
+            n = remaining;
+        }
+        int64 i = (int64) 0;
+        while (i < n) {
+            buf[offset + i] = this.data[this.pos + i];
+            i = i + (int64) 1;
+        }
+        this.pos = this.pos + n;
+        return n;
+    }
+
+    public void writeAllAsync(int8[] data, int64 offset, int64 length) {
+        throw heap HttpException("BytesChannel is read-only");
+    }
+
+    public int64 readWithin(int8[] buf, int64 offset, int64 length, int32 timeoutMs) {
+        // Memory-backed: nothing ever blocks, so the deadline is moot.
+        return this.readAsync(buf, offset, length);
+    }
+
+    public void close() {
+        this.closed = true;
+    }
+}

@@ -129,22 +129,30 @@ ordered query multi-map, reference resolution for relative `Location` headers).
 ## Body — streaming by default
 
 ```cajeta
-public abstract class Body {
-    public abstract int64 contentLength();       // -1 = unknown/chunked
-    public abstract MediaType contentType();
-    public abstract AsyncReader reader();        // cajeta.io.net reader (there is
-}                                                // no stdlib InputStream)
-public final class BytesBody extends Body { ... }
-public final class StringBody extends Body { ... }
+public class Body {                              // base class: `abstract` isn't in the
+    public int64 contentLength();                //   language; the base is the "no body"
+    public MediaType contentType();              //   identity (-1 / null / null).
+    public AsyncReader reader();                 // body-OWNED cajeta.io.net reader (a
+}                                                //   borrow; no stdlib InputStream exists)
+public final class BytesBody extends Body { ... }   // shipped (1.3a) — adopts its buffer
+public final class StringBody extends Body { ... }  // shipped (1.3a) — copies the String
 public final class StreamBody extends Body { ... }   // upload/download, no materialize
 public final class FormBody extends Body { ... }     // x-www-form-urlencoded
 public final class MultipartBody extends Body { ... }
 public final class MultipartParser { public Iterator<MultipartPart> parts(); }
 ```
 
-Large uploads pull from `body.stream()` without materializing; small bodies use
+Large uploads pull from `body.reader()` without materializing; small bodies use
 `bytes`/`asString()`. Bodies stream through `cajeta.io.net`'s bounded
-`AsyncReader`/`AsyncWriter` — nothing forces a full payload into memory.
+`AsyncReader`/`AsyncWriter` — nothing forces a full payload into memory; the
+library-side `BytesChannel` (a read-only, memory-backed `ByteChannel`) is the
+buffer adapter behind the in-memory bodies.
+
+> **Design note (2026-07-19):** `Body` is a class, not an interface — cajeta
+> user-interface dispatch currently corrupts object-typed returns (scalar
+> returns are fine; compiler-side, tracked upstream), and class-based virtual
+> dispatch is sound. Readers are **body-owned borrows**: valid while the body
+> lives, restarted by a fresh `reader()` call on in-memory bodies.
 
 ---
 

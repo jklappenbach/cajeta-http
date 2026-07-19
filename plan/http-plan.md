@@ -265,14 +265,25 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
   already speaks it. Ownership discipline throughout: adopting
   constructors take `#` buffers explicitly; accessors hand out borrows
   (the 0.8 migration's `= #x` / `#=` rules apply to every factory).
-  - [ ] **1.3a `Body` core + in-memory bodies.** Abstract `Body`
+  - [x] **1.3a `Body` core + in-memory bodies.** `Body` base **class**
     (`contentLength()` −1 = unknown/chunked, `contentType()`,
-    `reader()` → an `AsyncReader`-shaped source), `BytesBody`,
-    `StringBody`. If the stdlib lacks a buffer-backed reader, a small
-    adapter over `ByteBuffer` ships here (library-side).
+    `reader()` → a **body-owned** `AsyncReader` borrow), `BytesBody`
+    (adopts its buffer), `StringBody` (copies via `toBytes()`), and
+    `BytesChannel` — the read-only memory-backed `ByteChannel` adapter
+    the stdlib lacked. 25 new checks; suite 190/190, 0/20 loop.
+    **Compiler bug found + worked around:** dispatching an
+    *object-typed return* through a user-defined **interface** returns
+    a corrupt object (scalar returns dispatch correctly; first plan was
+    `interface Body`) — SIGSEGV/garbage, cajeta-repo-side, first-ever
+    exercise of the path since stdlib interfaces are consumed
+    concretely. Class-based virtual dispatch is sound, so `Body` is a
+    concrete base with sentinel defaults (`abstract` isn't in the
+    language), which also matches the spec's original shape.
     - TDD: length/type reporting, full-read round-trip (bytes + string,
-      UTF-8), zero-length body, reader yields exactly contentLength bytes.
-    - Acceptance: body suite green; no message-model changes yet.
+      UTF-8 multibyte), zero-length bodies, chunked reads draining
+      exactly contentLength, EOF-on-0 contract, polymorphic dispatch
+      (param + upcast + reader through the base).
+    - Acceptance: body suite green; no message-model changes yet. Met.
   - [ ] **1.3b `FormBody`** — `application/x-www-form-urlencoded` encode
     + a decode helper (percent-encoding per the stdlib `Uri` rules,
     `+` for space, UTF-8).

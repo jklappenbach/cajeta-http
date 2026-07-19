@@ -1,0 +1,146 @@
+package dev.cajeta.http.test;
+
+import cajeta.io.net.AsyncReader;
+import dev.cajeta.http.MediaType;
+import dev.cajeta.http.body.Body;
+import dev.cajeta.http.body.BytesBody;
+import dev.cajeta.http.body.StringBody;
+
+/**
+ * http:1.3a — the Body core: in-memory bodies (BytesBody, StringBody)
+ * reporting length/type and streaming their content through an
+ * AsyncReader over a memory-backed channel. Pure in-memory checks —
+ * no socket, no server.
+ */
+public final class BodyTests {
+
+    public static void run(Check c) {
+        System.stdout.println("-- body: bytes --");
+        bytesBodyReportsLengthAndType(c);
+        bytesBodyReaderYieldsExactBytes(c);
+        bytesBodyReaderChunkedReads(c);
+        bytesBodyZeroLength(c);
+        System.stdout.println("-- body: string --");
+        stringBodyUtf8RoundTrip(c);
+        stringBodyDefaultType(c);
+        stringBodyExplicitType(c);
+        stringBodyEmpty(c);
+        System.stdout.println("-- body: interface --");
+        bodyPolymorphism(c);
+    }
+
+    static #int8[] sample(int32 n) {
+        int8[] d = heap int8[n];
+        int32 i = 0;
+        while (i < n) {
+            d[i] = (int8) (i + 1);
+            i = i + 1;
+        }
+        return #d;
+    }
+
+    static void bytesBodyReportsLengthAndType(Check c) {
+        int8[] d = BodyTests.sample(5);
+        MediaType t = MediaType.applicationOctetStream();
+        BytesBody b = BytesBody.of(#d, 5, #t);
+        c.eqInt(b.contentLength(), 5, "BytesBody.contentLength");
+        MediaType got = b.contentType();
+        c.that(got != null, "BytesBody.contentType present");
+        c.that(got.is("application", "octet-stream"), "BytesBody.contentType value");
+    }
+
+    static void bytesBodyReaderYieldsExactBytes(Check c) {
+        int8[] d = BodyTests.sample(5);
+        BytesBody b = BytesBody.of(#d, 5);
+        AsyncReader r = b.reader();
+        int8[] buf = heap int8[16];
+        int32 n = r.read(buf, 0, 16);
+        c.eqInt((int64) n, 5, "reader yields contentLength bytes");
+        boolean match = true;
+        int32 i = 0;
+        while (i < 5) {
+            if (((int32) buf[i]) != i + 1) { match = false; }
+            i = i + 1;
+        }
+        c.that(match, "reader bytes match body content");
+        int32 eof = r.read(buf, 0, 16);
+        c.eqInt((int64) eof, 0, "reader EOF after content");
+    }
+
+    static void bytesBodyReaderChunkedReads(Check c) {
+        int8[] d = BodyTests.sample(10);
+        BytesBody b = BytesBody.of(#d, 10);
+        AsyncReader r = b.reader();
+        int8[] buf = heap int8[4];
+        int32 n1 = r.read(buf, 0, 4);
+        int32 n2 = r.read(buf, 0, 4);
+        int32 n3 = r.read(buf, 0, 4);
+        c.eqInt((int64) (n1 + n2 + n3), 10, "chunked reads drain exactly the content");
+        c.eqInt((int64) r.read(buf, 0, 4), 0, "chunked reads end at EOF");
+    }
+
+    static void bytesBodyZeroLength(Check c) {
+        int8[] d = heap int8[1];
+        BytesBody b = BytesBody.of(#d, 0);
+        c.eqInt(b.contentLength(), 0, "zero-length BytesBody length");
+        AsyncReader r = b.reader();
+        int8[] buf = heap int8[4];
+        c.eqInt((int64) r.read(buf, 0, 4), 0, "zero-length body reads EOF immediately");
+    }
+
+    static void stringBodyUtf8RoundTrip(Check c) {
+        StringBody b = StringBody.of("héllo");
+        c.eqInt(b.contentLength(), 6, "StringBody UTF-8 byte length");
+        AsyncReader r = b.reader();
+        int8[] buf = heap int8[16];
+        int32 n = r.read(buf, 0, 16);
+        c.eqInt((int64) n, 6, "StringBody reader yields byte length");
+        int8[] exact = heap int8[n];
+        int32 i = 0;
+        while (i < n) { exact[i] = buf[i]; i = i + 1; }
+        String round = heap String(#exact, n);
+        c.eqStr(round, "héllo", "StringBody round-trips UTF-8");
+    }
+
+    static void stringBodyDefaultType(Check c) {
+        StringBody b = StringBody.of("x");
+        MediaType t = b.contentType();
+        c.that(t != null, "StringBody default contentType present");
+        c.eqStr(t.essence(), "text/plain", "StringBody default type essence");
+        c.eqStr(t.parameter("charset"), "utf-8", "StringBody default charset");
+    }
+
+    static void stringBodyExplicitType(Check c) {
+        MediaType json = MediaType.applicationJson();
+        StringBody b = StringBody.of("{}", #json);
+        c.eqStr(b.contentType().essence(), "application/json", "StringBody explicit type");
+        c.eqInt(b.contentLength(), 2, "StringBody explicit-type length");
+    }
+
+    static void stringBodyEmpty(Check c) {
+        StringBody b = StringBody.of("");
+        c.eqInt(b.contentLength(), 0, "empty StringBody length");
+        AsyncReader r = b.reader();
+        int8[] buf = heap int8[4];
+        c.eqInt((int64) r.read(buf, 0, 4), 0, "empty StringBody reads EOF");
+    }
+
+    static int64 lenViaInterface(Body b) {
+        return b.contentLength();
+    }
+
+    static void bodyPolymorphism(Check c) {
+        StringBody sb = StringBody.of("abc");
+        c.eqInt(BodyTests.lenViaInterface(sb), 3, "Body base: param dispatch");
+        Body asString = StringBody.of("abc");
+        c.eqInt(asString.contentLength(), 3, "Body base: upcast-decl dispatch");
+        int8[] d = BodyTests.sample(3);
+        Body asBytes = BytesBody.of(#d, 3);
+        c.eqInt(asBytes.contentLength(), 3, "Body base: BytesBody length");
+        MediaType mt = asString.contentType();
+        c.that(mt != null, "Body base: contentType dispatch");
+        AsyncReader r = asString.reader();
+        int8[] buf = heap int8[8];
+        c.eqInt((int64) r.read(buf, 0, 8), 3, "Body base: reader dispatch");
+    }
+}
