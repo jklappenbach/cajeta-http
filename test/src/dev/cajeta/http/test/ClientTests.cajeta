@@ -82,13 +82,13 @@ public final class ClientTests {
             c.that(port > 0, "server bound an ephemeral port");
 
             Task<int32> tg = spawn clientGet(port);
-            TcpStream c1 = core.acceptNext();
+            TcpStream c1 #= core.acceptNext();
             core.dispatch(#c1);
             int32 got = await tg;
             c.eqInt((int64) got, 1, "HttpClient GET /hello");
 
             Task<int32> tp = spawn clientPost(port);
-            TcpStream c2 = core.acceptNext();
+            TcpStream c2 #= core.acceptNext();
             core.dispatch(#c2);
             int32 gotPost = await tp;
             c.eqInt((int64) gotPost, 2, "HttpClient POST /echo round-trip");
