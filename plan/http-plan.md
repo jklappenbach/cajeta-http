@@ -127,18 +127,36 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
     (7/20 either way).
   - Measure with a loop, never a single run — a single green run proves
     nothing here.
-  - **Still open — a second, distinct race.** Same
-    `stream ended before the HTTP head terminated` message, but it now hits
-    the **second** exchange (`POST /echo`) after `GET /hello` has already
-    passed; the pre-fix race always killed the *first*. Measured with the
-    installed 0.9.0+fix compiler: **tour ~15 failures / ~183 runs (~8%)**
-    vs **suite 0 failures / 200 runs**. Both drive structurally identical
-    code (`HttpClient.send` → `HttpServer` → a capture-free handler that
-    echoes `req.body`), so the asymmetry is unexplained and is the thread
-    to pull. Ruled out: CPU contention (0 failures in 40 runs at 8-way
-    parallelism).
+  - **Residual ROOT-CAUSED (2026-07-19): fiber suspension duplicates
+    active drop entries.** Not an HTTP bug — a cajeta fiber-runtime bug,
+    proven by strace + a 25-line probe. Any fiber that **parks** (`await`,
+    `readAsync`, `acceptAsync`, …) while an owned local is live in its
+    frame ends up with the local's drop firing **twice**: the accepted
+    socket's fd shows exactly two `close(fd)` syscalls per exchange —
+    every exchange, even passing ones. The flake is fd-number roulette:
+    the second close usually hits a dead fd (harmless) but sometimes
+    lands on the next accepted/connected socket that reused the number →
+    the peer sees a FIN mid-exchange. Explains the layout sensitivity
+    (0% ↔ 30% across unrelated code moves), why the rate differs between
+    suite and tour, and — since an explicit `close()` masks the double
+    at the fd level (`fd = -1`) while a double *free* aborts — it is
+    almost certainly the same bug as the long-open **lambda-capture
+    double-free** in the stdlib wrinkles list.
+
+    Discriminating probe (scratchpad `probe/p/SockProbe.cajeta`): accept
+    a loopback connection into a local, `await` a task, drop — **two**
+    closes. Reorder so the `await` completes *before* the accept (no park
+    while the stream is live) — **one** close. Binding form (`=` vs
+    `#=`), dispatch, spawn, and handler calls are all exonerated: the
+    minimal shape is `own local` + `park` + `drop`.
+
+    Fix belongs in the cajeta fiber/drop-chain runtime (the drop chain is
+    a linked list threaded through stack-allocated entries via
+    `__cajeta_drop_top_ptr`; park/resume evidently re-registers or
+    re-links live entries). Cajeta-repo-side work — the http suite is the
+    reproducer, at ~25-30% per run under the current layout.
   - Acceptance: 25 consecutive green runs of both the suite and the tour.
-    The suite meets this; the tour does **not**.
+    Blocked on the runtime fix above.
 - [x] **0.10 Unblock the toolchain at cajeta HEAD.** *(Fixed 2026-07-19,
   cajeta `a70084b8`.)* The `NO_MATCHING_OVERLOAD` at
   `HttpServer.bindWithModel` was not one bug but **three scoped-resolution
