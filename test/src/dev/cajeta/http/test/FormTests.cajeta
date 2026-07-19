@@ -1,0 +1,108 @@
+package dev.cajeta.http.test;
+
+import cajeta.io.net.AsyncReader;
+import dev.cajeta.http.MediaType;
+import dev.cajeta.http.body.FormBody;
+
+/**
+ * http:1.3b — FormBody: application/x-www-form-urlencoded encode +
+ * decode. Golden vectors per the URL "urlencoded serializing" rules:
+ * unreserved [A-Za-z0-9*-._] verbatim, space as '+', everything else
+ * %XX (uppercase hex) over UTF-8 bytes; pairs joined n=v with '&',
+ * insertion order preserved.
+ */
+public final class FormTests {
+
+    public static void run(Check c) {
+        System.stdout.println("-- body: form encode --");
+        encodesSimplePairs(c);
+        encodesReservedAndSpaces(c);
+        encodesUtf8Multibyte(c);
+        emptyValuesAndRepeatedKeys(c);
+        emptyForm(c);
+        System.stdout.println("-- body: form decode --");
+        decodesPlusAndPercent(c);
+        roundTrips(c);
+        System.stdout.println("-- body: form as body --");
+        formIsABody(c);
+    }
+
+    static void encodesSimplePairs(Check c) {
+        FormBody f = FormBody.of();
+        f.add("a", "1");
+        f.add("b", "two");
+        c.eqStr(f.encoded(), "a=1&b=two", "simple pairs encode");
+        c.eqInt(f.count(), 2, "pair count");
+    }
+
+    static void encodesReservedAndSpaces(Check c) {
+        FormBody f = FormBody.of();
+        f.add("q", "two words");
+        f.add("expr", "a=b&c+d%e");
+        c.eqStr(f.encoded(), "q=two+words&expr=a%3Db%26c%2Bd%25e",
+            "spaces as + and reserved as %XX");
+        FormBody g = FormBody.of();
+        g.add("keep", "A-Za-z0-9*-._");
+        c.eqStr(g.encoded(), "keep=A-Za-z0-9*-._", "unreserved set verbatim");
+    }
+
+    static void encodesUtf8Multibyte(Check c) {
+        FormBody f = FormBody.of();
+        f.add("city", "café");
+        c.eqStr(f.encoded(), "city=caf%C3%A9", "UTF-8 multibyte percent-encodes");
+    }
+
+    static void emptyValuesAndRepeatedKeys(Check c) {
+        FormBody f = FormBody.of();
+        f.add("k", "");
+        f.add("k", "2");
+        f.add("", "v");
+        c.eqStr(f.encoded(), "k=&k=2&=v", "empty values, repeated keys, empty name");
+        c.eqStr(f.value("k"), "", "value() answers the FIRST occurrence");
+        c.eqStr(f.name(1), "k", "name(i) positional");
+        c.eqStr(f.valueAt(1), "2", "valueAt(i) positional");
+    }
+
+    static void emptyForm(Check c) {
+        FormBody f = FormBody.of();
+        c.eqStr(f.encoded(), "", "empty form encodes empty");
+        c.eqInt(f.contentLength(), 0, "empty form contentLength 0");
+    }
+
+    static void decodesPlusAndPercent(Check c) {
+        FormBody f = FormBody.parse("q=two+words&sym=%2B%25%3D&caf=caf%C3%A9");
+        c.eqInt(f.count(), 3, "parse pair count");
+        c.eqStr(f.value("q"), "two words", "+ decodes to space");
+        c.eqStr(f.value("sym"), "+%=", "%XX decodes");
+        c.eqStr(f.value("caf"), "café", "UTF-8 decodes");
+    }
+
+    static void roundTrips(Check c) {
+        FormBody f = FormBody.of();
+        f.add("a b", "c&d");
+        f.add("u", "café + tea");
+        FormBody back = FormBody.parse(f.encoded());
+        c.eqInt(back.count(), 2, "round-trip count");
+        c.eqStr(back.name(0), "a b", "round-trip name");
+        c.eqStr(back.valueAt(0), "c&d", "round-trip value");
+        c.eqStr(back.value("u"), "café + tea", "round-trip multibyte value");
+    }
+
+    static void formIsABody(Check c) {
+        FormBody f = FormBody.of();
+        f.add("a", "1");
+        MediaType t = f.contentType();
+        c.that(t != null, "form contentType present");
+        c.eqStr(t.essence(), "application/x-www-form-urlencoded", "form media type");
+        c.eqInt(f.contentLength(), 3, "form contentLength = encoded bytes");
+        AsyncReader r = f.reader();
+        int8[] buf = heap int8[8];
+        int32 n = r.read(buf, 0, 8);
+        c.eqInt((int64) n, 3, "form reader yields encoded bytes");
+        int8[] exact = heap int8[n];
+        int32 i = 0;
+        while (i < n) { exact[i] = buf[i]; i = i + 1; }
+        String s = heap String(#exact, n);
+        c.eqStr(s, "a=1", "form reader content");
+    }
+}

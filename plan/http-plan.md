@@ -223,6 +223,12 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
     `client: loopback`, ~4ms in, drop-chain entries rooted at
     `ClientTests.cajeta:29-33`. Cumulative 3/185 ≈ **1.6%**. Everything
     else green: suite 165/165, tour 15/15 on every non-crashing run.
+  - **Rate is layout-sensitive (re-confirmed at 1.3b):** with the body/
+    form code added the same signature runs ~**6/80 ≈ 7.5%** (drop chain
+    now rooted at `ClientTests.cajeta:51-55` — moved with the binary,
+    body/form code not involved). History: 25-30% → 0/60 → 2.5% → 7.5%
+    across layouts. Judge regressions by *signature*, and expect the
+    rate to wander as the library grows.
 
 ## 1 — HTTP/1.1 core (beyond extracted parity)
 
@@ -284,11 +290,15 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
       exactly contentLength, EOF-on-0 contract, polymorphic dispatch
       (param + upcast + reader through the base).
     - Acceptance: body suite green; no message-model changes yet. Met.
-  - [ ] **1.3b `FormBody`** — `application/x-www-form-urlencoded` encode
-    + a decode helper (percent-encoding per the stdlib `Uri` rules,
-    `+` for space, UTF-8).
-    - TDD: golden vectors (reserved chars, UTF-8 multibyte, empty
-      values, repeated keys), encode/decode round-trip.
+  - [x] **1.3b `FormBody`** — `application/x-www-form-urlencoded`
+    encode + `parse` decode: unreserved `[A-Za-z0-9*-._]` verbatim,
+    space↔`+`, uppercase `%XX` over UTF-8 bytes; insertion-ordered
+    pairs (repeats legal), lazy re-encode on `add`, stored strings are
+    owned copies, positional + first-match accessors. 24 new checks;
+    suite 214/214 when green (0.11 note above). One more instance of
+    the branch-scoped-owned-local trap found during TDD (decode value
+    assigned inside an `if` → borrow of a dying temp; restructured to a
+    single adopting init-decl).
   - [ ] **1.3c `StreamBody`** — wrap a caller-supplied reader; unknown
     length serializes chunked (rides `ChunkedEncoder`), known length
     rides content-length framing; never materializes.
