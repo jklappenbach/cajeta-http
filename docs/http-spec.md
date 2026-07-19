@@ -63,7 +63,9 @@ dev.cajeta.http.routing      — Router: typed path params, route trees, dispatc
 dev.cajeta.http.middleware   — Middleware + bundled set
 dev.cajeta.http.h1           — HTTP/1.1 wire protocol (internal)
 dev.cajeta.http.h2           — HTTP/2: HPACK, framing, multiplexing, flow control (internal)
-dev.cajeta.http.compression  — gzip / deflate / brotli
+dev.cajeta.http.compression  — gzip / deflate, built from scratch (the stdlib has
+                               only the cajeta.wire.Compressor/Decompressor
+                               interfaces — no DEFLATE, no CRC32); brotli deferred
 dev.cajeta.http.sse          — Server-Sent Events
 dev.cajeta.http.ws           — WebSocket frame protocol + client/server
 ```
@@ -168,8 +170,10 @@ int8[] body = resp.body;                            // buffered
   relative-`Location` resolution, cross-origin `Authorization` stripping.
 - **Timeouts / cancellation** via `cajeta.concurrent` `Tasks.withTimeout` — no
   HTTP-specific timeout vocabulary.
-- **Streaming bodies**, `downloadTo(path)` with running SHA-256, `getJson<T>`,
-  transparent gzip/deflate.
+- **Streaming bodies**, `downloadTo(path)` with running SHA-256 (stdlib
+  `cajeta.hash.Sha256`), `getJson()` returning stdlib `cajeta.codec.json`
+  values (a typed `getJson<T>` with auto-serde is **primavera's** layer, per
+  the boundary above), transparent gzip/deflate.
 
 A builder (`HttpClient.builder()…`) configures version, redirect/retry policy,
 pool sizes, proxy, TLS, default headers.
@@ -311,18 +315,25 @@ and HTTP/2 lifts the wire protocol without changing the surface above.
 
 ## Open questions
 
-- **HTTP/2 server push** — include with a "deprecated upstream" note (some
-  non-browser clients still use it), or omit? Lean: include.
+- ~~**HTTP/2 server push**~~ — **decided** (phase-3 breakdown, 2026-07-19):
+  include, with the deprecated-upstream note; client refuses pushes by
+  default (`SETTINGS_ENABLE_PUSH=0`). Lands with `http:3.5`.
 - ~~**Streaming body lifecycle**~~ — **decided** (1.3 breakdown, 2026-07-19):
   implicit drain on handler return, with an opt-out for handlers that take
   ownership of the body (proxies). Lands with `http:1.3e`.
 - ~~**Body-size enforcement timing**~~ — **decided** (1.3 breakdown,
   2026-07-19): reject early — 413 at parse time, before the handler runs —
   with global + per-route thresholds. Lands with `http:1.3e`.
-- **Routing trie vs regex** — trie with `*`/`**` wildcards covers ~95% without
-  regex complexity. Lean: trie.
-- **Client cookie jar** — off by default; explicit `CookieJar` opt-in (avoid the
-  "why is my client sending cookies" surprise).
-- **WebSocket `permessage-deflate` default** — on, matching browsers.
+- ~~**Routing trie vs regex**~~ — **decided**: segment matching, no regex
+  routes. The extracted Router ships literal + `{name}` segments today;
+  the typed (`{id:int64}`), wildcard (`*`/`**`), and `mount` forms are
+  planned as `http:1.7`.
+- ~~**Client cookie jar**~~ — **decided** (1.4 breakdown, 2026-07-19): off by
+  default; explicit `CookieJar` opt-in (avoid the "why is my client sending
+  cookies" surprise). Lands with `http:1.4g`.
+- ~~**WebSocket `permessage-deflate` default**~~ — **decided** (phase-4
+  breakdown, 2026-07-19): on, matching browsers. Lands with `http:4.1`.
+
+All open questions are now decided; new ones get logged here as they arise.
 
 (TLS choice is settled: the stdlib's bundled BoringSSL — not a per-library decision.)

@@ -93,7 +93,7 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
     `samples/tour/run.sh` → 15 checks passed, exit 0. **Both are
     intermittent** — see 0.9 below; every 0.8 check that runs, passes, and
     the failures are a transport race outside the migrated code.
-- [~] **0.9 Fix the HttpClient loopback race** (found 2026-07-18 while
+- [x] **0.9 Fix the HttpClient loopback race** (found 2026-07-18 while
   landing 0.8; **pre-existing**, not introduced by the migration). Was
   roughly **1 run in 3** of both `cajeta test` and `samples/tour/run.sh`
   dying with `uncaught exception: stream ended before the HTTP head
@@ -292,29 +292,309 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
       body.
     - Acceptance: full suite + tour green (loop ≥100 runs — 0.11 is
       still live at ~1.6%, so judge by signature, not by a single red).
-- [ ] **1.4** Client: connection pool + keep-alive, redirects, retry,
-  timeouts, streaming bodies, `getJson<T>`, transparent gzip/deflate.
-- [ ] **1.5** Server hardening: request timeout, max body size, slowloris
-  header deadline, backlog config.
+- [ ] **1.4** Client completeness. Broken to TDD granularity 2026-07-19.
+  Decision encoded from the spec's lean: **cookie jar off by default**,
+  explicit `CookieJar` opt-in (1.4g). `getJson` ships **untyped**
+  (`JsonValue` via the stdlib `cajeta.codec.json`) — typed `getJson<T>`
+  auto-serde is primavera's layer per the spec boundary. 1.4e is gated
+  on 1.6.
+  - [ ] **1.4a Connection pool + keep-alive.** `ConnectionPool` keyed
+    `(scheme, host, port)`; reuse honors `KeepAlive` decisions;
+    `maxConnectionsPerOrigin` with waiting fibers; idle reaping on the
+    timer wheel; drop `HttpClient.send`'s unconditional
+    `Connection: close` stamp (it exists to defeat reuse — pooling
+    supersedes it).
+    - TDD: two sequential exchanges ride one socket (server-side
+      connection count proves it); origin cap parks the over-cap fiber
+      until a lease frees; idle reap closes after the window; a
+      server-closed pooled connection is detected and replaced, not
+      surfaced to the caller.
+  - [ ] **1.4b Redirects.** 301/302/303/307/308 with a hop cap; 303 →
+    GET and drop the body, 307/308 preserve method + body; relative
+    `Location` resolved via the stdlib `Uri`; `Authorization` stripped
+    on cross-origin hops; loop → error.
+    - TDD: loopback chains per code (method/body rewrite table), hop-cap
+      trip, cross-origin auth strip, relative-Location resolution.
+  - [ ] **1.4c Timeouts, cancellation, retry.** Per-exchange budget over
+    `cajeta.concurrent.Tasks.withTimeout` (no HTTP-specific timeout
+    vocabulary) plus a connect timeout; auto-retry policy — idempotent
+    methods only (`Method.isIdempotent`), connect-failure or
+    pre-first-byte only, capped, with backoff.
+    - TDD: stalled-server exchange times out at the budget (measurable
+      now that 0.9's fiber-parking wait landed); POST never
+      auto-retries; GET retries once on refused-then-listening; a
+      cancelled exchange releases its pooled connection.
+  - [ ] **1.4d Streaming + download.** Request/response `Body` streaming
+    through the client (rides 1.3c/1.3e); `downloadTo(path)` over
+    `cajeta.io.file` returning a running `cajeta.hash.Sha256` digest.
+    - TDD: large download lands byte-identical, digest matches, memory
+      stays bounded; streamed upload arrives intact server-side.
+  - [ ] **1.4e `getJson()` + transparent decompression** *(gated on
+    1.6)*. `getJson()` → `JsonValue`; the client advertises
+    `Accept-Encoding: gzip, deflate` and inflates transparently,
+    clearing `Content-Encoding` and fixing lengths up.
+    - TDD: gzip/deflate/identity responses yield identical bodies;
+      corrupt compressed stream → clean error, not garbage; JSON
+      round-trip against the stdlib codec.
+  - [ ] **1.4f Builder + proxy.** `HttpClient.builder()` — default
+    headers, version pin, pool sizes, redirect/retry/timeout policy,
+    TLS trust, HTTP proxy (absolute-form for `http`, CONNECT tunnel
+    for `https`).
+    - TDD: builder defaults observable on the wire; proxied loopback
+      exchange through a minimal in-test proxy, both forms.
+  - [ ] **1.4g `CookieJar`** (decision: **off by default**, explicit
+    `.cookieJar(jar)` opt-in). RFC 6265 subset: `Set-Cookie` parse,
+    domain/path matching, expiry/max-age, `Secure`/`HttpOnly` honored.
+    - TDD: no jar → nothing echoed back; with jar → set/return across
+      exchanges, domain/path scoping, expiry drops the cookie.
+- [ ] **1.5** Server hardening. Broken to TDD granularity 2026-07-19.
+  Substrate check: the head-read deadline already exists (`readWithin`,
+  30s default), `HttpServer.shutdown(Duration)` already drains, and the
+  stdlib ships `ConnectionLimits`/`ConnectionLimiter`/`LoadShedPolicy`
+  for accept control — this unit makes budgets configurable, adds the
+  missing phases, and proves the existing pieces under test.
+  - [ ] **1.5a Deadlines.** Configurable per-phase budgets on
+    `ServerLimits`: header-read (slowloris) deadline, body inter-read
+    timeout, whole-request budget; 408 where a response is still
+    possible, close otherwise.
+    - TDD: drip-fed headers cut at the deadline (and not before);
+      stalled body read cut; handler overrun cut at the request budget;
+      timings asserted against configured values, not wall-clock
+      guesses.
+  - [ ] **1.5b Size limits.** Per-server max body size — early 413,
+    sharing 1.3e's parse-time enforcement (global cap here; per-route
+    came with 1.3e) — and `HttpParserLimits`' header caps surfaced on
+    `ServerLimits`.
+    - TDD: over-limit content-length 413s before the handler runs;
+      over-limit chunked cut mid-stream; exactly-at-limit passes.
+  - [ ] **1.5c Accept control + graceful shutdown.** Configurable
+    listener backlog; `ConnectionLimits` + shed policy wired through
+    `HttpServer.builder()`; `shutdown(Duration)` proven — stop
+    accepting, drain in-flight, hard-close at the deadline.
+    - TDD: capacity + shed behavior observable under concurrent
+      connects; shutdown mid-exchange completes that exchange and
+      refuses new ones; a hung exchange is cut at the deadline.
+- [ ] **1.6** Compression codec (`dev.cajeta.http.compression`) — a
+  **prerequisite for 1.4e, 2.2c, and 4.1**. Planned 2026-07-19 after
+  confirming the stdlib ships **only the interfaces**
+  (`cajeta.wire.Compressor`/`Decompressor` — no DEFLATE implementation
+  anywhere, native layer included, and no CRC32/Adler-32 in
+  `cajeta.hash`). Pure-cajeta implementations of the stdlib interfaces
+  (matching the stdlib's stated no-third-party policy), so they can
+  migrate into `cajeta.wire` later. Brotli **deferred** — nothing gates
+  on it.
+  - [ ] **1.6a DEFLATE (RFC 1951).** Inflate + deflate: stored blocks,
+    fixed and dynamic Huffman, LZ77 with the 32KB window;
+    block-oriented first.
+    - TDD: golden vectors both directions; round-trip on structured /
+      random / empty / incompressible inputs; malformed rejects (bad
+      Huffman tables, distance-too-far); window-edge matches.
+  - [ ] **1.6b Wrappers + checksums.** zlib (RFC 1950, Adler-32) and
+    gzip (RFC 1952, CRC32) framing; CRC32 and Adler-32 ship in this
+    unit.
+    - TDD: checksum vectors; interop fixtures produced by system zlib
+      (test fixtures only — no runtime dependency); trailing-garbage
+      and truncation rejects.
+  - [ ] **1.6c Streaming surface.** Incremental inflate/deflate with the
+    dictionary/window preserved across calls, plus flush modes — the
+    shape 4.1's context takeover and 2.2c's streamed bodies need.
+    - TDD: chunk-at-a-time equals one-shot on every 1.6a vector; sync
+      flush boundaries decode standalone; context carries across
+      messages.
+- [ ] **1.7** Router completeness — found unplanned during the
+  2026-07-19 sweep: the extracted Router matches only literal and
+  `{name}` (string) segments, but the spec promises typed params,
+  wildcards, and nesting.
+  - [ ] **1.7a Typed path params.** `{id:int64}` (and the other core
+    scalar types): parse at match time; a type mismatch is a **404**,
+    never reaches the handler; `PathParams` grows typed getters.
+    - TDD: match/404 matrix per type (overflow int64, leading zeros,
+      negatives), typed getter round-trip, string params unchanged.
+  - [ ] **1.7b Wildcards.** `{p:*}` — one segment; `{p:**}` — rest of
+    the path (bound with `/` separators preserved); precedence: literal
+    > typed/string param > `*` > `**`.
+    - TDD: precedence table proven, `**` binding incl. empty rest,
+      wildcard + trailing-route conflicts rejected at registration.
+  - [ ] **1.7c `mount(prefix, sub)`.** Nest a sub-router under a
+    prefix; path params allowed in the prefix; 405/Allow computed
+    across the merged tree.
+    - TDD: nested dispatch with prefix params, mount-shadowing rules,
+      405 aggregation across mounts.
+- [ ] **1.8** Server TLS termination — found unplanned during the
+  2026-07-19 sweep: the client speaks `https` (shipped: `wrapTls` +
+  ALPN offer + OS-trust verify) but `HttpServer` has **no TLS path**,
+  despite the spec's `.tls(serverTls)` builder line. `HttpServer.builder()
+  .tls(...)` accepting a stdlib `cajeta.io.net.tls` server config;
+  accept path wraps each connection in the stdlib `TlsListener`/
+  `TlsStream` handshake before h1; ALPN advertises `http/1.1` (3.4 adds
+  `h2` later); WSS falls out for free once the upgrade path rides the
+  same stream.
+  - TDD: loopback HTTPS exchange against the shipped client with a
+    test CA (client `trustAnchor` pin); plaintext request to a TLS
+    port fails cleanly (no hang, no crash); handshake-failure
+    connections don't leak inflight slots; WSS echo over the upgraded
+    TLS stream.
+  - Acceptance: suite + tour green with an HTTPS variant of the
+    loopback exchange in each.
 
 ## 2 — Middleware
 
-- [ ] **2.1** `Middleware` composition (registration order).
-- [ ] **2.2** Bundled set: RequestId, Logging, Recover, Timeout, CORS,
-  Compression/Decompression, RateLimit, BasicAuth, BearerAuth, StaticFile,
-  ETag, ProxyHeaders.
+- [ ] **2.1** Composition. `Middleware.wrap(HttpRequest, Handler) →
+  HttpResponse` with `Handler` as the shared handler shape; global
+  (server-level) and per-route registration; registration order =
+  wrapping order (first registered outermost); middleware and handlers
+  compose as plain functions.
+  - TDD: order proven by a trace-accumulating triple; a short-circuit
+    (auth deny) skips inner middleware and the handler; a handler
+    exception crosses the stack unharmed (catching it is `Recover`'s
+    job, 2.2a); per-route composes inside global.
+  - Acceptance: the Router/HttpServer wire-through lands here and is the
+    only core change the whole bundled set needs.
+- [ ] **2.2** Bundled set — grouped by dependency weight; every
+  middleware is golden-tested through a real loopback server, not just
+  unit-called.
+  - [ ] **2.2a `Recover` + `RequestId` + `Logging`.** Recover: uncaught →
+    500, but leaves the response alone if headers already streamed.
+    RequestId: generate or propagate, echo response header. Logging: one
+    line per exchange (method, path, status, duration).
+    - TDD: throwing handler → 500 + connection survives; mid-stream
+      throw → connection closed, no half-500; id propagation vs
+      generation; log line shape.
+  - [ ] **2.2b `Timeout` + `Cors`.** Timeout wraps `next` in
+    `Tasks.withTimeout` (504 on trip, exchange cut). Cors: preflight
+    OPTIONS, origin allowlist, allow/expose headers, max-age,
+    credentials flag.
+    - TDD: overrunning handler → 504 at the budget; preflight matrix
+      (allowed/denied origin, methods, headers), actual-request headers,
+      credentialed wildcards rejected per spec.
+  - [ ] **2.2c `Compression`/`Decompression`** *(gated on 1.6)*.
+    Response side: `Accept-Encoding` negotiation with q-values, min-size
+    and content-type gates, streaming compress of streamed bodies,
+    `Vary: Accept-Encoding`. Request side: inflate
+    `Content-Encoding`d bodies with the size limits applied
+    **post-inflate** (zip-bomb guard, interacts with 1.5b/1.3e).
+    - TDD: negotiation matrix incl. `identity;q=0`; already-encoded and
+      tiny bodies skipped; streamed body compresses incrementally;
+      bomb-guard 413s.
+  - [ ] **2.2d `RateLimit` + `BasicAuth`/`BearerAuth`.** RateLimit:
+    token bucket keyed by remote address or a caller-supplied extractor,
+    429 + `Retry-After`. Auth: constant-time comparison, 401 +
+    `WWW-Authenticate`; the credential verifier is a caller-supplied
+    lambda — no credential storage in this library.
+    - TDD: bucket refill over an injected clock; per-key isolation;
+      Basic round-trip via stdlib Base64 incl. colon-in-password;
+      malformed auth headers → 401 not 500.
+  - [ ] **2.2e `StaticFile` + `ETag` + `ProxyHeaders`.** StaticFile:
+    root-jailed path resolution, MediaType from extension, index files,
+    404/403 discipline. ETag: strong tag from content hash,
+    `If-None-Match` → 304. ProxyHeaders: `X-Forwarded-For/Proto/Host`
+    exposed as a request view, honored only from configured trusted
+    proxies.
+    - TDD: **traversal fuzz is the security floor** — `..`,
+      percent-encoded dots, backslashes, absolute paths, symlink escape
+      all stay jailed; 304 flow end-to-end; untrusted-source forwarded
+      headers ignored.
 
 ## 3 — HTTP/2
 
-- [ ] **3.1** HPACK; **3.2** frame framing (zero-copy `view`); **3.3** stream
-  multiplexing + flow control; **3.4** ALPN negotiation + h2c upgrade;
-  **3.5** opt-in server push. Behind the same client/server surface.
+Order: 3.1 and 3.2 are independent of each other; 3.3 needs both; 3.4
+turns it on; 3.5 rides 3.3. The user-facing surface (client / server /
+router / un-colored handlers) must not change — that is the phase's
+acceptance bar.
+
+- [ ] **3.1** HPACK (RFC 7541): integer/string primitives, static table,
+  size-bounded dynamic table with eviction and table-size updates,
+  Huffman encode/decode (the Appendix B code), never-indexed literals
+  for sensitive headers.
+  - TDD: Appendix C golden vectors verbatim (C.2–C.6 request/response
+    sequences, with and without Huffman, asserting dynamic-table state
+    after each block); decompressed-size bomb guard; eviction edges.
+- [ ] **3.2** Frame layer: the 9-byte frame header decoded **zero-copy
+  via `view`** over a pooled buffer (the spec's canonical `view` case);
+  encode/decode for all frame types (DATA, HEADERS, PRIORITY,
+  RST_STREAM, SETTINGS, PUSH_PROMISE, PING, GOAWAY, WINDOW_UPDATE,
+  CONTINUATION); padding; `SETTINGS_MAX_FRAME_SIZE` enforcement.
+  - TDD: per-type golden vectors + flag matrices; malformed frames →
+    the exact RFC 9113 error codes; oversize → FRAME_SIZE_ERROR.
+- [ ] **3.3** Streams: connection preface + SETTINGS handshake, the
+  stream state machine, connection- and stream-level flow control
+  (WINDOW_UPDATE accounting both directions), CONTINUATION reassembly,
+  multiplexed dispatch onto the same un-colored handler
+  (fiber-per-stream), RST_STREAM cancellation, GOAWAY. PRIORITY is
+  parsed and ignored (RFC 9113 deprecates the priority tree).
+  - TDD: interleaved concurrent streams over loopback settle correctly;
+    window exhaustion parks the writing fiber and WINDOW_UPDATE resumes
+    it; RST mid-body cancels the handler fiber; protocol-violation
+    catalogue (headers after end-stream, even/reused stream ids, …) →
+    GOAWAY/RST with the right codes.
+- [ ] **3.4** Negotiation: ALPN `h2` via the stdlib TLS (`supportAlpn`
+  exists on `TlsListener`/`TlsStream`), h2c via `Upgrade: h2c` +
+  `HTTP2-Settings`, prior-knowledge preface detection; the client
+  selects by ALPN with clean h1 fallback.
+  - TDD: alpn=h2 serves the same Router over h2; alpn=http/1.1 falls
+    back; h2c upgrade round-trip; a non-preface first byte on a
+    prior-knowledge port degrades to h1.
+- [ ] **3.5** Server push — decision per the spec's lean: **include**,
+  with the deprecated-upstream note (non-browser clients still use it).
+  Opt-in server API; the client defaults `SETTINGS_ENABLE_PUSH=0` and
+  surfaces pushes only when explicitly enabled.
+  - TDD: enabled → pushed resource delivered with correct cache keying;
+    PUSH_PROMISE while disabled → connection error per RFC;
+    disabled-by-default proven client-side.
 
 ## 4 — WebSocket completeness + SSE
 
-- [ ] **4.1** `permessage-deflate` (RFC 7692); **4.2** one-line
-  `connect`/upgrade convenience; **4.3** Autobahn conformance.
-- [ ] **4.4** SSE server + client (`text/event-stream`).
+- [ ] **4.1** `permessage-deflate` (RFC 7692) *(gated on 1.6c)*:
+  offer/accept negotiation (window bits, `*_no_context_takeover`
+  params), RSV1 discipline, per-message deflate with the sliding window
+  shared across messages under context takeover. Decision per the
+  spec's lean: **default on**, matching browsers.
+  - TDD: the RFC 7692 worked examples; round-trips with and without
+    context takeover in both roles; negotiation-reject falls back to
+    plain frames; RSV1 on a continuation frame rejects; compressed
+    control frames reject.
+- [ ] **4.2** Convenience surfaces.
+  - [ ] **4.2a One-line client connect.** `WebSocket.connect(url)` —
+    `ws`/`wss` dial (TLS via stdlib), upgrade request,
+    101 + `Sec-WebSocket-Accept` validation, subprotocol selection →
+    ready `WebSocket`.
+    - TDD: loopback connect against the extracted server upgrade; wrong
+      Accept or status → `HandshakeRejected`; subprotocol negotiation.
+  - [ ] **4.2b Server handler surface.** `WebSocketHandler`
+    (`onConnect`/`onMessage`/`onClose`) over a `WebSocketConnection`
+    (send/close), with the reader-fiber + writer-fiber pair and write
+    mutex managed by the library; registered on routes like HTTP
+    handlers (the spec's "richer server surface" paragraph).
+    - TDD: callback lifecycle order, close initiated from each side;
+      concurrent sends from multiple fibers interleave whole frames
+      (mutex proof); a throwing handler → 1011 close.
+- [ ] **4.3** Autobahn conformance: an external-harness runner
+  (`test/autobahn/run.sh`, wstest via docker or pip — a test-fixture
+  dependency only; long suite → the tagged-run discipline from
+  `~/code/CLAUDE.md`) plus a report parser turning the JSON results
+  into pass/fail.
+  - Acceptance: all cases green excluding 12.*/13.* before 4.1 lands,
+    including them after; "non-strict" allowed, no failures.
+- [ ] **4.4** SSE (`dev.cajeta.http.sse`).
+  - [ ] **4.4a Wire codec.** `SseEvent` (id / event / data / retry)
+    serialize + parse: multi-line `data:`, comment lines (keep-alive),
+    CR/LF/CRLF tolerance, UTF-8 + BOM tolerance.
+    - TDD: golden vectors both directions (the WHATWG parsing
+      examples); field-order and unknown-field tolerance.
+  - [ ] **4.4b Server.** `SseResponse.stream(events)` and
+    `.channel(Channel<SseEvent>)` (stdlib `cajeta.concurrent.Channel`):
+    `text/event-stream` + no-cache headers, flush per event, periodic
+    comment keep-alive, `Last-Event-ID` request view, client
+    disconnect ends the producing fiber.
+    - TDD: channel-pushed events arrive incrementally over loopback
+      (not buffered to stream end); disconnect stops the producer;
+      keep-alive cadence.
+  - [ ] **4.4c Client.** `SseClient.subscribe(url)` → event iteration;
+    auto-reconnect honoring `retry:` and replaying `Last-Event-ID`;
+    an explicit stop/close surface.
+    - TDD: a server-dropped stream reconnects and resumes from the last
+      id; `retry:` honored (asserted via injected timing, not
+      wall-clock sleeps); non-200 or wrong content-type → clean error.
 
 ## 5 — HTTP/3 (deferred)
 
@@ -322,8 +602,11 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
   `cajeta.io.net` UDP sockets. Designed-for in the transport abstraction;
   not in the near term.
 
-Phases 1–5 are headline-level; break a unit into TDD granularity (design
-skill) before implementing it.
+Phases 1–4 are broken to TDD granularity (2026-07-19). Phase 5 stays
+headline — gated on a QUIC transport in `cajeta.io.net`; re-plan it when
+that exists. Cross-phase dependencies: **1.6 (compression codec) gates
+1.4e, 2.2c, and 4.1**; 3.1 + 3.2 precede 3.3; 1.3c/1.3e precede 1.4d;
+everything else is order-independent within its phase.
 
 ## Out of scope (other layers own these)
 
