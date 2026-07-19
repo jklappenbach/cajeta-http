@@ -127,36 +127,33 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
     (7/20 either way).
   - Measure with a loop, never a single run — a single green run proves
     nothing here.
-  - **Residual ROOT-CAUSED (2026-07-19): fiber suspension duplicates
-    active drop entries.** Not an HTTP bug — a cajeta fiber-runtime bug,
-    proven by strace + a 25-line probe. Any fiber that **parks** (`await`,
-    `readAsync`, `acceptAsync`, …) while an owned local is live in its
-    frame ends up with the local's drop firing **twice**: the accepted
-    socket's fd shows exactly two `close(fd)` syscalls per exchange —
-    every exchange, even passing ones. The flake is fd-number roulette:
-    the second close usually hits a dead fd (harmless) but sometimes
-    lands on the next accepted/connected socket that reused the number →
-    the peer sees a FIN mid-exchange. Explains the layout sensitivity
-    (0% ↔ 30% across unrelated code moves), why the rate differs between
-    suite and tour, and — since an explicit `close()` masks the double
-    at the fd level (`fd = -1`) while a double *free* aborts — it is
-    almost certainly the same bug as the long-open **lambda-capture
-    double-free** in the stdlib wrinkles list.
+  - **FIXED (2026-07-19, cajeta `13fef7a4`) — carrier starvation in the
+    timed I/O wait.** `Reactor.awaitReadableTimed` ran the portable
+    blocking `select()` probe, which stalls the calling OS **thread**; on
+    a fiber that froze the whole carrier for up to the deadline, starving
+    every co-hosted fiber — including the peer whose bytes were being
+    awaited. The server's head-read (`readWithin`, 30s default budget)
+    would park its carrier while the client fiber sat un-runnable on the
+    same carrier's deque; the head read "timed out" against a peer never
+    allowed to run, the server dropped the connection with no response,
+    and the client read EOF mid-head. The proof was timing: passing runs
+    6ms, a failing run **30.016s** — the head budget exactly. Fiber
+    placement roulette explains the rate and the layout sensitivity.
 
-    Discriminating probe (scratchpad `probe/p/SockProbe.cajeta`): accept
-    a loopback connection into a local, `await` a task, drop — **two**
-    closes. Reorder so the `await` completes *before* the accept (no park
-    while the stream is live) — **one** close. Binding form (`=` vs
-    `#=`), dispatch, spawn, and handler calls are all exonerated: the
-    minimal shape is `own local` + `park` + `drop`.
+    *(An interim theory — "fiber park duplicates drop entries", recorded
+    here on 2026-07-19 — was **wrong**: the double `close(fd)` behind it
+    was an ephemeral reactor epoll fd coincidentally reusing the same
+    number. An `LD_PRELOAD` close-backtracer disproved it and led to the
+    real cause. Kept for honesty of the record.)*
 
-    Fix belongs in the cajeta fiber/drop-chain runtime (the drop chain is
-    a linked list threaded through stack-allocated entries via
-    `__cajeta_drop_top_ptr`; park/resume evidently re-registers or
-    re-links live entries). Cajeta-repo-side work — the http suite is the
-    reproducer, at ~25-30% per run under the current layout.
-  - Acceptance: 25 consecutive green runs of both the suite and the tour.
-    Blocked on the runtime fix above.
+    Fix: `__cajeta_io_wait_timed`, a deadline-bounded **fiber-parking**
+    wait combining the reactor's one-shot fd waiter with the timer wheel;
+    `awaitReadableTimed`/`awaitWritableTimed` ride it. Verified: suite
+    165/165 with **0 failures in 60 runs** (none over 2s), tour 15/15
+    with **0 failures in 25 runs**; cajeta Net/Task regression suites
+    64/64.
+  - [x] Acceptance: 25 consecutive green runs of both the suite and the
+    tour — **met** (60 + 25).
 - [x] **0.10 Unblock the toolchain at cajeta HEAD.** *(Fixed 2026-07-19,
   cajeta `a70084b8`.)* The `NO_MATCHING_OVERLOAD` at
   `HttpServer.bindWithModel` was not one bug but **three scoped-resolution
