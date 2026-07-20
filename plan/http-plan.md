@@ -479,15 +479,30 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
       RAISES leaks the lease permit (structured cleanup across a
       parking call). Tests +12 checks (suite 299 → **311**), 240
       consecutive clean runs, tour 15/15.
-    - **Land-mine (stdlib, by design): `Server.dispatch` JOINS the
-      connection fiber** — its discarded `spawn` Task is awaited at
-      scope exit (structured concurrency), so dispatch returns only
-      when the connection ends. Every loopback test passed by luck
-      (fibers end fast); a handler that PARKS mid-request deadlocks the
-      dispatching thread. The cap test drives dispatch from a helper
-      fiber and scopes the client so its pool-drop closes the socket
-      before the helper is awaited. Cost a full core-dump debug
-      session; wrote the fiber-registry gdb walk into the playbook.
+    - **Land-mine, ROOT-CAUSED + FIXED upstream (cajeta `4e7d68ab`):
+      `Server.dispatch` JOINED the connection fiber.** The cause was a
+      cajeta codegen bug, not the stdlib: a statement-position
+      `spawn f(...);` was wired into the *innermost block's drop frame*,
+      and the Task drop's wait-before-free joined it at that brace — a
+      per-site stack alloca that holds one Task, so `dispatch` blocked
+      until the connection fiber ENDED, and a spawn loop serialized
+      entirely (contra Concurrency.md's own concurrent-`scope`-`for`
+      example). A handler that parked mid-request deadlocked the
+      dispatcher. **Fix:** a discarded spawn now registers with the
+      runtime *scope frame* as scope-owned (joined AND freed at scope
+      exit, which holds N entries); `Server.serve` spawns inline in its
+      accept-loop `scope { }` so connections overlap. `dispatch()` keeps
+      its join-before-return semantics as the manual/harness surface.
+      Regression: `SpawnScopeJoinTests` (loop concurrency, brace-join,
+      throw-across-spawn). The cap test's fiber-dispatch dance is no
+      longer *required* but is left as-is (still correct). Cost a full
+      core-dump session (fiber-registry gdb walk in the playbook) plus a
+      second one when a first fix — unwinding the scope chain inside
+      `__cajeta_throw` — freed live frames (an exc-frame watermark can
+      name an already-popped scope frame); the catching function's
+      `scope_exit_to` already joins them, so the throw path needs no
+      scope walk. Verified: http 311/311 + 440 clean runs, tour 15/15,
+      cajeta concurrency suite 58/58.
     - **cajeta wrinkle found:** `#=` move from a **null** owned field
       throws (uncaught `0x3`) — null-guard before moving out of
       nullable owned fields (pool list ops do).
