@@ -19,5 +19,5 @@ jobs:
       # Toolchain that can compile this repo (0.9.x language + the scoped
       # bare-name resolution fix). The reusable workflow's default (v0.7.1)
       # predates both. Bump alongside future toolchain releases.
-      cajeta-version: v0.9.2
+      cajeta-version: v0.9.3
     secrets: inherit
