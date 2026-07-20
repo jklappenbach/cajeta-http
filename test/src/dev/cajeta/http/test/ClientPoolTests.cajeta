@@ -1,0 +1,322 @@
+package dev.cajeta.http.test;
+
+import cajeta.concurrent.AtomicInt32;
+import cajeta.concurrent.Channel;
+import cajeta.io.net.Server;
+import cajeta.io.net.SocketAddress;
+import cajeta.io.net.TcpListener;
+import cajeta.io.net.TcpStream;
+import cajeta.io.net.uri.Uri;
+import cajeta.lang.Optional;
+import cajeta.time.Clock;
+import cajeta.time.Duration;
+import cajeta.time.Instant;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.client.HttpClient;
+import dev.cajeta.http.server.HttpServer;
+import dev.cajeta.http.server.HttpServerBuilder;
+
+/**
+ * http:1.4a — connection pool + keep-alive. The proofs lean on accept
+ * accounting: the server side accepts exactly as many connections as the
+ * scenario predicts, and a client that dialed more would hang un-accepted
+ * (caught by `Tasks.withTimeout`-style await guards being unnecessary —
+ * every await here completes only if the pooling behaved).
+ */
+public final class ClientPoolTests {
+
+    /** Handler gate for the origin-cap test (see gateHandle). */
+    static Channel<int32> entered = null;
+    static Channel<int32> gate = null;
+    /** Set once the slow exchange has fully completed. */
+    static AtomicInt32 slowDone = null;
+    /** Observed by the fast fiber when its response lands. */
+    static AtomicInt32 orderOk = null;
+
+    public static void run(Check c) {
+        System.stdout.println("-- client pool: keep-alive reuse --");
+        reuseRidesOneSocket(c);
+        System.stdout.println("-- client pool: origin cap --");
+        originCapParks(c);
+        System.stdout.println("-- client pool: idle reap --");
+        idleReapClosesAfterWindow(c);
+        System.stdout.println("-- client pool: dead-connection revive --");
+        deadPooledConnectionReplaced(c);
+    }
+
+    // ---- 1: two sequential exchanges ride one socket ---------------------
+
+    public static async int32 twoGets(int32 port) {
+        HttpClient client = heap HttpClient();
+        Uri uri = Uri.builder()
+            .scheme("http").host("127.0.0.1").port(port).path("/hello")
+            .build();
+        HttpRequest r1 = HttpRequest.fromUri("GET", uri);
+        HttpResponse a = client.send(uri, r1);
+        if (a.statusCode() != 200) { return -1; }
+        HttpRequest r2 = HttpRequest.fromUri("GET", uri);
+        HttpResponse b = client.send(uri, r2);
+        if (b.statusCode() != 200) { return -2; }
+        return 1;
+    }
+
+    /**
+     * The server accepts exactly ONE connection. If the client dialed a
+     * second socket for its second exchange, that dial would never be
+     * accepted and the await could not complete — completion IS the
+     * proof of reuse.
+     */
+    static void reuseRidesOneSocket(Check c) {
+        scope {
+            HttpServerBuilder b = HttpServer.builder();
+            b.bind("127.0.0.1:0");
+            (HttpRequest) -> #HttpResponse h =
+                (req) -> ServerTests.liveHandle(req);
+            b.handler(h);
+            HttpServer srv = b.build();
+            Server core = srv.server;
+            int32 port = core.listener.boundPort();
+
+            Task<int32> t = spawn twoGets(port);
+            TcpStream c1 #= core.acceptNext();
+            core.dispatch(#c1);
+            c.eqInt((int64) await t, (int64) 1,
+                "two sequential exchanges complete over a single accepted socket");
+
+            boolean drained = core.drainInflight(Duration.ofSeconds(5));
+            c.that(drained, "reused connection drains");
+            core.listener.close();
+        }
+    }
+
+    // ---- 2: the origin cap parks the over-cap fiber ----------------------
+
+    /** `/slow` parks in the handler until the test releases the gate. */
+    public static #HttpResponse gateHandle(HttpRequest req) {
+        if (req.getTarget().equals("/slow")) {
+            ClientPoolTests.entered.send(1);
+            Optional<int32> go = ClientPoolTests.gate.receive();
+            String slow = "slow";
+            return HttpResponse.ok().body(slow.toBytes(), slow.byteLength());
+        }
+        String fast = "fast";
+        return HttpResponse.ok().body(fast.toBytes(), fast.byteLength());
+    }
+
+    public static async int32 slowGet(HttpClient client, int32 port) {
+        Uri uri = Uri.builder()
+            .scheme("http").host("127.0.0.1").port(port).path("/slow")
+            .build();
+        HttpRequest req = HttpRequest.fromUri("GET", uri);
+        HttpResponse resp = client.send(uri, req);
+        if (resp.statusCode() != 200) { return -1; }
+        ClientPoolTests.slowDone.store(1);
+        return 1;
+    }
+
+    public static async int32 fastGet(HttpClient client, int32 port) {
+        Uri uri = Uri.builder()
+            .scheme("http").host("127.0.0.1").port(port).path("/fast")
+            .build();
+        HttpRequest req = HttpRequest.fromUri("GET", uri);
+        HttpResponse resp = client.send(uri, req);
+        if (resp.statusCode() != 200) { return -1; }
+        // The cap is 1 and the slow exchange held the only lease: by the
+        // time OUR response lands, the slow one must have fully finished.
+        if (ClientPoolTests.slowDone.load() == 1) {
+            ClientPoolTests.orderOk.store(1);
+        }
+        return 1;
+    }
+
+    /**
+     * Accept one connection and dispatch it, on a FIBER — because
+     * `Server.dispatch`'s spawn is joined at its scope exit (structured
+     * concurrency), dispatch only returns when the connection fiber
+     * ends. A handler that parks mid-request would therefore wedge the
+     * caller: keep that join off the test's main thread.
+     */
+    public static async int32 acceptAndDispatch(Server core) {
+        TcpStream conn #= core.acceptNext();
+        core.dispatch(#conn);
+        return 1;
+    }
+
+    /**
+     * `maxPerOrigin = 1`, one shared client, two fibers. The fast GET
+     * must park on the origin semaphore until the slow GET's lease frees
+     * — and then it rides the SAME socket (the server accepts once).
+     */
+    static void originCapParks(Check c) {
+        Channel<int32> e = heap Channel<int32>(1);
+        ClientPoolTests.entered = #e;
+        Channel<int32> g = heap Channel<int32>(1);
+        ClientPoolTests.gate = #g;
+        AtomicInt32 sd = heap AtomicInt32(0);
+        ClientPoolTests.slowDone = #sd;
+        AtomicInt32 ok = heap AtomicInt32(0);
+        ClientPoolTests.orderOk = #ok;
+
+        scope {
+            HttpServerBuilder b = HttpServer.builder();
+            b.bind("127.0.0.1:0");
+            (HttpRequest) -> #HttpResponse h =
+                (req) -> ClientPoolTests.gateHandle(req);
+            b.handler(h);
+            HttpServer srv = b.build();
+            Server core = srv.server;
+            int32 port = core.listener.boundPort();
+
+            // Dispatch on a fiber — the gated handler parks mid-request,
+            // and dispatch joins the connection fiber (see acceptAndDispatch).
+            Task<int32> svc = spawn acceptAndDispatch(core);
+
+            scope {
+                HttpClient client = heap HttpClient();
+                client.poolLimits(1, 60000);
+
+                Task<int32> slow = spawn slowGet(client, port);
+
+                // Wait until the slow exchange is INSIDE the handler
+                // (lease held), then start the fast one — it must park.
+                Optional<int32> in = ClientPoolTests.entered.receive();
+                Task<int32> fast = spawn fastGet(client, port);
+
+                // Release the gate: slow completes, lease frees, fast
+                // rides the same (single) accepted connection.
+                ClientPoolTests.gate.send(1);
+                c.eqInt((int64) await slow, (int64) 1, "slow exchange completes");
+                c.eqInt((int64) await fast, (int64) 1, "over-cap exchange completes");
+                c.eqInt((int64) ClientPoolTests.orderOk.load(), (int64) 1,
+                    "the over-cap fiber parked until the lease freed");
+            }
+            // The client (and its pool) dropped at the inner brace — the
+            // pooled socket closed, so the connection fiber can end and
+            // the dispatcher join resolves.
+            c.eqInt((int64) await svc, (int64) 1, "single accepted connection served both");
+
+            boolean drained = core.drainInflight(Duration.ofSeconds(5));
+            c.that(drained, "cap-test connection drains");
+            core.listener.close();
+        }
+    }
+
+    // ---- 3: idle reap ----------------------------------------------------
+
+    public static async int32 twoGetsPause(int32 port, int32 pauseMs) {
+        HttpClient client = heap HttpClient();
+        client.poolLimits(6, 1);            // 1 ms idle window
+        Uri uri = Uri.builder()
+            .scheme("http").host("127.0.0.1").port(port).path("/hello")
+            .build();
+        HttpRequest r1 = HttpRequest.fromUri("GET", uri);
+        HttpResponse a = client.send(uri, r1);
+        if (a.statusCode() != 200) { return -1; }
+        // Outlive the idle window (spin on the wall clock; no fiber sleep
+        // in the stdlib yet, and a few ms of spin is harmless here).
+        Instant t0 = Clock.now();
+        int64 until = t0.toEpochMilli() + (int64) pauseMs;
+        boolean waiting = true;
+        while (waiting) {
+            Instant now = Clock.now();
+            if (now.toEpochMilli() >= until) { waiting = false; }
+        }
+        HttpRequest r2 = HttpRequest.fromUri("GET", uri);
+        HttpResponse b = client.send(uri, r2);
+        if (b.statusCode() != 200) { return -2; }
+        return 1;
+    }
+
+    /**
+     * With a 1 ms idle window and a 10 ms pause, the second acquire must
+     * DISCARD the aged idle connection and dial fresh — so the server
+     * accepts TWO connections, and the test only completes if it does.
+     */
+    static void idleReapClosesAfterWindow(Check c) {
+        scope {
+            HttpServerBuilder b = HttpServer.builder();
+            b.bind("127.0.0.1:0");
+            (HttpRequest) -> #HttpResponse h =
+                (req) -> ServerTests.liveHandle(req);
+            b.handler(h);
+            HttpServer srv = b.build();
+            Server core = srv.server;
+            int32 port = core.listener.boundPort();
+
+            Task<int32> t = spawn twoGetsPause(port, 10);
+            TcpStream c1 #= core.acceptNext();
+            core.dispatch(#c1);
+            // The reaped socket closes; the second exchange dials anew.
+            TcpStream c2 #= core.acceptNext();
+            core.dispatch(#c2);
+            c.eqInt((int64) await t, (int64) 1,
+                "an aged idle connection is discarded and a fresh dial accepted");
+
+            boolean drained = core.drainInflight(Duration.ofSeconds(5));
+            c.that(drained, "reap-test connections drain");
+            core.listener.close();
+        }
+    }
+
+    // ---- 4: a server-closed pooled connection is revived-around ----------
+
+    /**
+     * A raw one-shot server: accept, read the request head, answer with a
+     * keep-alive-looking response, then CLOSE — the client's pool now
+     * holds a corpse it believes reusable.
+     */
+    public static async int32 oneShotServe(TcpListener lst) {
+        scope {
+            TcpStream s #= lst.acceptAsync();
+            int8[] buf = heap int8[2048];
+            int64 n = s.readAsync(buf, (int64) 0, (int64) 2048);
+            String body = "ok";
+            String head = "HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n";
+            String wire = head + body;
+            int8[] w = wire.toBytes();
+            s.writeAllAsync(w, (int64) 0, (int64) wire.byteLength());
+            s.close();
+        }
+        return 1;
+    }
+
+    public static async int32 twoGetsRaw(int32 port) {
+        HttpClient client = heap HttpClient();
+        Uri uri = Uri.builder()
+            .scheme("http").host("127.0.0.1").port(port).path("/x")
+            .build();
+        HttpRequest r1 = HttpRequest.fromUri("GET", uri);
+        HttpResponse a = client.send(uri, r1);
+        if (a.statusCode() != 200) { return -1; }
+        HttpRequest r2 = HttpRequest.fromUri("GET", uri);
+        HttpResponse b = client.send(uri, r2);
+        if (b.statusCode() != 200) { return -2; }
+        return 1;
+    }
+
+    /**
+     * Exchange 1 lands on a server that closes right after responding
+     * (with headers that PERMIT reuse, so the client pools the corpse).
+     * Exchange 2 must detect the dead idle connection via the revive
+     * probe and dial fresh — served by the second one-shot accept. The
+     * caller never sees a failure.
+     */
+    static void deadPooledConnectionReplaced(Check c) {
+        scope {
+            SocketAddress addr = SocketAddress.parse("127.0.0.1:0");
+            TcpListener lst = TcpListener.bind(addr);
+            int32 port = lst.boundPort();
+
+            Task<int32> s1 = spawn oneShotServe(lst);
+            Task<int32> s2 = spawn oneShotServe(lst);
+            Task<int32> t = spawn twoGetsRaw(port);
+
+            c.eqInt((int64) await t, (int64) 1,
+                "a server-closed pooled connection is replaced, not surfaced");
+            c.eqInt((int64) await s1, (int64) 1, "first one-shot served");
+            c.eqInt((int64) await s2, (int64) 1, "second one-shot served");
+            lst.close();
+        }
+    }
+}

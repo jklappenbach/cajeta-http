@@ -1,0 +1,69 @@
+package dev.cajeta.http.client;
+
+import cajeta.concurrent.Semaphore;
+
+/**
+ * Per-origin pool state (`http:1.4a`): the connection-budget
+ * [`Semaphore`](Semaphore.cajeta) (its permits ARE the origin's
+ * `maxPerOrigin` — a fiber over the cap parks in `sem.acquire()` until a
+ * lease frees), and the LIFO idle stack threaded through
+ * [`PooledConnection.next`](PooledConnection.cajeta).
+ *
+ * Entries are created on first use and never removed; the arrays that
+ * hold them live in [`ConnectionPool`](ConnectionPool.cajeta).
+ */
+public final class OriginEntry {
+
+    /** The origin key (`host:port`). */
+    public String key;
+    /** Connection budget; permits = `maxPerOrigin` minus live leases. */
+    public Semaphore sem;
+    /** Head of the LIFO idle stack (owned chain), or null. */
+    PooledConnection idleHead;
+    /** Number of connections currently parked idle. */
+    public int32 idleCount;
+
+    OriginEntry() {
+        this.key = null;
+        this.sem = null;
+        this.idleHead = null;
+        this.idleCount = 0;
+    }
+
+    /** An entry for `key` with a `maxPerOrigin`-permit budget. */
+    public static #OriginEntry of(String key, int32 maxPerOrigin) {
+        OriginEntry e = heap OriginEntry();
+        int32 n = key.byteLength();
+        int8[] kb = key.toBytes();
+        String k = heap String(#kb, n);
+        e.key = #k;
+        Semaphore s = heap Semaphore(maxPerOrigin);
+        e.sem = #s;
+        return #e;
+    }
+
+    /** Park `pc` on the idle stack (LIFO); adopts it. */
+    public void pushIdle(#PooledConnection pc) {
+        if (this.idleHead != null) {
+            PooledConnection prev #= this.idleHead;
+            pc.next = #prev;
+        }
+        this.idleHead = #pc;
+        this.idleCount = this.idleCount + 1;
+    }
+
+    /** Pop the most recently parked connection, or null. Caller owns it. */
+    public #PooledConnection popIdle() {
+        if (this.idleHead == null) {
+            return null;
+        }
+        PooledConnection got #= this.idleHead;
+        this.idleHead = null;
+        if (got.next != null) {
+            PooledConnection rest #= got.next;
+            this.idleHead = #rest;
+        }
+        this.idleCount = this.idleCount - 1;
+        return #got;
+    }
+}

@@ -1,0 +1,46 @@
+package dev.cajeta.http.client;
+
+import cajeta.io.net.TcpStream;
+
+/**
+ * One pooled client connection (`http:1.4a`): an owned
+ * [`TcpStream`](TcpStream.cajeta) plus the origin it belongs to and the
+ * moment it went idle.
+ *
+ * Lifecycle: [`ConnectionPool.acquire`](ConnectionPool.cajeta#acquire)
+ * hands one out **owned** (fresh-dialed or revived from the idle list);
+ * the client runs its exchange over [`stream`](#stream) (a borrow), then
+ * gives it back through [`ConnectionPool.release`](ConnectionPool.cajeta#release),
+ * which either parks it on the idle list (reusable) or lets it drop
+ * (the stream's drop closes the socket).
+ *
+ * `next` makes the idle list intrusive — the pool threads its LIFO
+ * stack through the connections themselves, so parking and reviving are
+ * pointer moves with no side allocation.
+ */
+public final class PooledConnection {
+
+    /** The connected socket (owned; drop closes it). */
+    public TcpStream stream;
+    /** The pool key this connection belongs to (`host:port`). */
+    public String originKey;
+    /** Epoch millis when this connection was parked idle; 0 while leased. */
+    public int64 idleSince;
+    /** Next-idle link (owned chain); null when leased or last. */
+    public PooledConnection next;
+
+    PooledConnection() {
+        this.stream = null;
+        this.originKey = null;
+        this.idleSince = (int64) 0;
+        this.next = null;
+    }
+
+    /** Wrap an owned, connected stream for `originKey`; adopts both. */
+    public static #PooledConnection of(#TcpStream stream, #String originKey) {
+        PooledConnection pc = heap PooledConnection();
+        pc.stream = #stream;
+        pc.originKey = #originKey;
+        return #pc;
+    }
+}

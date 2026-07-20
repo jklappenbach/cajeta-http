@@ -1,0 +1,260 @@
+package dev.cajeta.http.client;
+
+import cajeta.concurrent.Lock;
+import cajeta.concurrent.LockGuard;
+import cajeta.concurrent.Semaphore;
+import cajeta.io.net.TcpStream;
+import cajeta.time.Clock;
+import cajeta.time.Instant;
+
+/**
+ * The client **connection pool** (`http:1.4a`) — keep-alive reuse keyed
+ * by origin (`host:port`), an origin cap that **parks over-cap fibers**,
+ * and lazy idle reaping.
+ *
+ * ```cajeta
+ * PooledConnection pc = pool.acquire(host, port);   // may park on the cap
+ * // ... exchange over pc.stream ...
+ * pool.release(#pc, reusable);                      // idle-park or close
+ * ```
+ *
+ * ## Shape
+ *
+ * One [`OriginEntry`](OriginEntry.cajeta) per origin, holding a
+ * fiber-parking [`Semaphore`](Semaphore.cajeta) whose permits are the
+ * origin's connection budget (`maxPerOrigin`), and a LIFO idle stack
+ * threaded through the connections themselves
+ * ([`PooledConnection.next`](PooledConnection.cajeta)). `acquire` takes
+ * a permit **first** — an over-cap fiber parks there until a lease
+ * frees — then revives an idle connection or reports none (the caller
+ * dials). LIFO keeps the hottest socket in play so the coldest ages out.
+ *
+ * Entry lookup is a linear scan under a spin-guard: a client talks to a
+ * handful of origins, entries are never removed, and the scan is a few
+ * string compares — a map would buy nothing here.
+ *
+ * ## Liveness: the revive probe
+ *
+ * An idle connection may have been closed by the server (idle timeout,
+ * graceful shutdown) — detected, not surfaced: [`takeIdle`](#takeIdle)
+ * probes each candidate with a **non-blocking** raw read before handing
+ * it out. `0` is EOF (the peer's FIN is already queued) and `> 0` is
+ * protocol garbage (an idle connection owes us nothing) — both evict;
+ * only would-block (no data, connection alive) revives. The probe runs
+ * before any request bytes are written, so a dead socket costs a
+ * redial, never a failed exchange. (A close that lands *between* probe
+ * and write is a race no probe closes; 1.4c's retry policy is the net
+ * for that.)
+ *
+ * ## Idle reaping
+ *
+ * Reaping is **lazy**: every [`acquire`](#acquire) discards revive
+ * candidates older than `idleMaxMs` on its way through the stack (their
+ * drop closes the socket). There is no background reaper fiber — a pool
+ * nobody calls holds only what its owner already accepted holding, and
+ * the owner's drop closes everything; a timer-wheel reaper can ride
+ * later without changing this surface.
+ *
+ * ## Scope (v1)
+ *
+ * Plaintext (`http://`) connections only — the revive probe needs the
+ * raw socket, and probing a TLS stream would consume record bytes. The
+ * client keeps `https://` on the dial-per-exchange path; TLS reuse
+ * rides once the stdlib exposes a consume-free readiness probe.
+ */
+public final class ConnectionPool {
+
+    /** Default per-origin connection budget (the common browser number). */
+    public static final int32 DEFAULT_MAX_PER_ORIGIN = 6;
+    /** Default idle lifetime, millis (60 s — inside common server timeouts). */
+    public static final int32 DEFAULT_IDLE_MAX_MS = 60000;
+
+    /**
+     * Guards the entry table and every idle stack. The semaphore parks
+     * happen OUTSIDE it (a fiber parked while holding the lock would
+     * wedge the pool); the guarded sections are pointer moves plus one
+     * non-blocking probe read, so contention is negligible.
+     */
+    Lock lock;
+    OriginEntry[] entries;
+    int32 entryCount;
+    int32 entryCap;
+    int32 maxPerOrigin;
+    int32 idleMaxMs;
+
+    ConnectionPool() {
+        this.lock = null;
+        this.entries = null;
+        this.entryCount = 0;
+        this.entryCap = 0;
+        this.maxPerOrigin = 0;
+        this.idleMaxMs = 0;
+    }
+
+    /** A pool at the defaults. */
+    public static #ConnectionPool of() {
+        return ConnectionPool.withLimits(
+            ConnectionPool.DEFAULT_MAX_PER_ORIGIN,
+            ConnectionPool.DEFAULT_IDLE_MAX_MS);
+    }
+
+    /** A pool with explicit per-origin cap + idle lifetime. */
+    public static #ConnectionPool withLimits(int32 maxPerOrigin, int32 idleMaxMs) {
+        ConnectionPool p = heap ConnectionPool();
+        Lock lk = heap Lock();
+        p.lock = #lk;
+        p.entryCap = 4;
+        OriginEntry[] es = heap OriginEntry[4];
+        p.entries = #es;
+        p.maxPerOrigin = maxPerOrigin;
+        p.idleMaxMs = idleMaxMs;
+        return #p;
+    }
+
+    /**
+     * Lease a connection slot for `host:port`, parking the calling fiber
+     * while the origin is at its cap. Returns a revived idle connection,
+     * or **null** — null means "the lease is yours, dial your own": the
+     * caller connects and wraps the stream via
+     * [`adopt`](#adopt). Either way the caller MUST end the lease with
+     * exactly one [`release`](#release).
+     */
+    public #PooledConnection acquire(String host, int32 port) {
+        String key = ConnectionPool.keyOf(host, port);
+        OriginEntry e = this.lockedEntryFor(key);
+        e.sem.acquire();                 // parks the over-cap fiber (no lock held)
+        PooledConnection idle = this.lockedTakeIdle(e);
+        return #idle;
+    }
+
+    /** Wrap a freshly-dialed stream under an already-held lease. */
+    public #PooledConnection adopt(#TcpStream stream, String host, int32 port) {
+        String key = ConnectionPool.keyOf(host, port);
+        return PooledConnection.of(#stream, #key);
+    }
+
+    /**
+     * End a lease. `reusable` parks the connection on its origin's idle
+     * stack; otherwise (or when `pc` is null — a dial that failed) the
+     * connection drops here and its socket closes. Always frees one
+     * permit, waking one parked fiber if any.
+     */
+    public void release(#PooledConnection pc, boolean reusable) {
+        if (pc == null) {
+            return;
+        }
+        OriginEntry e = this.lockedEntryFor(pc.originKey);
+        if (reusable) {
+            this.lockedPark(e, #pc);
+        }
+        // Not reusable: `pc` drops at scope exit; the stream's drop
+        // closes the socket.
+        e.sem.release();
+    }
+
+    /**
+     * Release the permit for a lease whose dial FAILED (no connection to
+     * give back). Split from [`release`](#release) because an owned-null
+     * argument cannot express "nothing" distinctly on every call path.
+     */
+    public void releaseFailed(String host, int32 port) {
+        String key = ConnectionPool.keyOf(host, port);
+        OriginEntry e = this.lockedEntryFor(key);
+        e.sem.release();
+    }
+
+    /** Idle connections currently parked for `host:port` (test/introspection). */
+    public int32 idleCount(String host, int32 port) {
+        String key = ConnectionPool.keyOf(host, port);
+        OriginEntry e = this.lockedEntryFor(key);
+        return e.idleCount;
+    }
+
+    /** [`entryFor`](#entryFor) under the pool lock. */
+    OriginEntry lockedEntryFor(String key) {
+        LockGuard g = this.lock.acquire();
+        return this.entryFor(key);
+    }
+
+    /** [`takeIdle`](#takeIdle) under the pool lock. */
+    #PooledConnection lockedTakeIdle(OriginEntry e) {
+        LockGuard g = this.lock.acquire();
+        return this.takeIdle(e);
+    }
+
+    /** Timestamp + park `pc` idle, under the pool lock. */
+    void lockedPark(OriginEntry e, #PooledConnection pc) {
+        LockGuard g = this.lock.acquire();
+        Instant now = Clock.now();
+        pc.idleSince = now.toEpochMilli();
+        e.pushIdle(#pc);
+    }
+
+    /**
+     * Pop idle candidates for `e`, discarding the expired and the dead,
+     * until one revives or the stack empties. Runs the liveness probe on
+     * every survivor (see the class doc). Caller holds the pool lock.
+     */
+    #PooledConnection takeIdle(OriginEntry e) {
+        Instant nowI = Clock.now();
+        int64 now = nowI.toEpochMilli();
+        while (true) {
+            PooledConnection cand = e.popIdle();
+            if (cand == null) {
+                return null;
+            }
+            boolean fresh = (now - cand.idleSince) <= (int64) this.idleMaxMs;
+            if (fresh && ConnectionPool.isAlive(cand.stream)) {
+                cand.idleSince = (int64) 0;
+                return #cand;
+            }
+            // Expired or dead: fall through — `cand` drops, socket closes.
+        }
+    }
+
+    /**
+     * The non-blocking liveness probe: would-block (negative) means no
+     * bytes queued and the connection is alive; `0` is the peer's FIN;
+     * `> 0` is unrequested data an idle connection must not have.
+     */
+    static boolean isAlive(TcpStream s) {
+        int8[] probe = heap int8[1];
+        int64 n = s.read(probe, (int64) 0, (int64) 1);
+        return n < (int64) 0;
+    }
+
+    /** Find or create the entry for `key`. */
+    OriginEntry entryFor(String key) {
+        int32 i = 0;
+        while (i < this.entryCount) {
+            if (this.entries[i].key.equals(key)) {
+                return this.entries[i];
+            }
+            i = i + 1;
+        }
+        if (this.entryCount == this.entryCap) {
+            int32 newCap = this.entryCap * 2;
+            OriginEntry[] es = heap OriginEntry[newCap];
+            int32 k = 0;
+            while (k < this.entryCount) {
+                es[k] = #(this.entries[k]);
+                k = k + 1;
+            }
+            this.entries #= es;
+            this.entryCap = newCap;
+        }
+        OriginEntry e = OriginEntry.of(key, this.maxPerOrigin);
+        this.entries[this.entryCount] = #e;
+        this.entryCount = this.entryCount + 1;
+        return this.entries[this.entryCount - 1];
+    }
+
+    /** The pool key for an origin: `host:port`. */
+    static #String keyOf(String host, int32 port) {
+        String k = host + ":" + port;
+        int32 n = k.byteLength();
+        int8[] b = k.toBytes();
+        String owned = heap String(#b, n);
+        return #owned;
+    }
+}

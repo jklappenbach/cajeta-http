@@ -15,6 +15,8 @@ import dev.cajeta.http.h1.HttpParser;
 import dev.cajeta.http.h1.HttpSerializer;
 import dev.cajeta.http.h1.BodyReader;
 import dev.cajeta.http.h1.BodyFraming;
+import dev.cajeta.http.h1.KeepAlive;
+import cajeta.io.net.Headers;
 
 /**
  * The **HTTP/1.1 client** — plan item **NET-8.1**. It drives one
@@ -65,6 +67,8 @@ import dev.cajeta.http.h1.BodyFraming;
  * response body in memory.
  */
 public class HttpClient {
+    /** The keep-alive connection pool (`http:1.4a`); plaintext origins. */
+    ConnectionPool pool;
     /** Explicit trust-anchor PEM bytes, or `null` to use the OS trust store. */
     int8[] trustPem;
     /** Length of [`trustPem`](#trustPem) (meaningful when `hasTrustAnchor`). */
@@ -85,10 +89,27 @@ public class HttpClient {
      * @EntryPoint
      */
     public HttpClient() {
+        ConnectionPool cp = ConnectionPool.of();
+        this.pool = #cp;
         int8[] e = heap int8[0];
         this.trustPem = #e;
         this.trustLen = 0;
         this.hasTrustAnchor = false;
+    }
+
+    /**
+     * Replace the pool with one at explicit limits (`http:1.4a`):
+     * `maxPerOrigin` caps concurrent connections per origin (an over-cap
+     * `send` parks its fiber until a lease frees); `idleMaxMs` bounds how
+     * long an idle connection may wait before the next acquire discards
+     * it. Returns `this`. Call before the first `send` — swapping pools
+     * mid-flight closes the old pool's idle sockets but cannot recall
+     * leased ones.
+     */
+    public HttpClient poolLimits(int32 maxPerOrigin, int32 idleMaxMs) {
+        ConnectionPool cp = ConnectionPool.withLimits(maxPerOrigin, idleMaxMs);
+        this.pool #= cp;
+        return this;
     }
 
     /**
@@ -128,11 +149,13 @@ public class HttpClient {
             port = https ? 443 : 80;
         }
         HttpClient.ensureHost(req, uri);
-        req.setHeader("Connection", "close");
-
-        TcpStream sock = HttpClient.connectAny(host, port);
 
         if (https) {
+            // TLS stays dial-per-exchange (the pool's revive probe needs
+            // the raw socket; see ConnectionPool's scope note) — so keep
+            // advertising close, which is honest about what happens.
+            req.setHeader("Connection", "close");
+            TcpStream sock = HttpClient.connectAny(host, port);
             int8[] hostBytes = host.toBytes();
             int32 hostLen = host.byteLength();
             TlsStream tls = HttpClient.wrapTls(#sock, hostBytes, hostLen,
@@ -146,9 +169,63 @@ public class HttpClient {
             return #rtls;
         }
 
-        HttpResponse rplain = HttpClient.exchange(sock, req);
-        sock.close();
+        // Plaintext rides the pool (1.4a): lease (parks at the origin
+        // cap), revive-or-dial, exchange, then park the connection idle
+        // when both sides' headers and the response framing permit reuse.
+        // No `Connection: close` stamp — pooling supersedes it; HTTP/1.1
+        // defaults to keep-alive.
+        PooledConnection pc = HttpClient.leaseFor(this.pool, host, port);
+        HttpResponse rplain = HttpClient.exchange(pc.stream, req);
+        boolean reuse = HttpClient.exchangeAllowsReuse(req, rplain);
+        this.pool.release(#pc, reuse);
         return #rplain;
+    }
+
+    /**
+     * A leased connection for `host:port`: a pool-revived idle one when
+     * available, else a fresh dial under the same lease. (A dial that
+     * RAISES leaks the lease permit — structured cleanup across a parking
+     * call is 1.4c's territory, noted in the plan.)
+     */
+    static #PooledConnection leaseFor(ConnectionPool pool, String host, int32 port) {
+        PooledConnection idle = pool.acquire(host, port);
+        if (idle != null) {
+            return #idle;
+        }
+        TcpStream sock = HttpClient.connectAny(host, port);
+        return pool.adopt(#sock, host, port);
+    }
+
+    /**
+     * May the connection that carried this exchange be pooled? Both
+     * sides' headers must permit it (`KeepAlive.canReuse`) AND the
+     * response framing must self-terminate — a close-delimited body
+     * (no `Content-Length`, no `Transfer-Encoding`) ends only with the
+     * connection, so there is nothing left to reuse.
+     */
+    static boolean exchangeAllowsReuse(HttpRequest req, HttpResponse resp) {
+        boolean headersOk = KeepAlive.canReuse(
+            req.getVersion(), req.getHeaders(),
+            resp.getVersion(), resp.getHeaders());
+        if (!headersOk) {
+            return false;
+        }
+        return HttpClient.framingSelfTerminates(resp);
+    }
+
+    /** True iff the response body's framing ends without a close. */
+    static boolean framingSelfTerminates(HttpResponse resp) {
+        int32 st = resp.statusCode();
+        if ((st >= 100 && st < 200) || st == 204 || st == 304) {
+            return true;                        // definitionally bodyless
+        }
+        Headers h = resp.getHeaders();
+        String te = h.get("transfer-encoding");
+        if (te != null) {
+            return true;                        // chunked self-terminates
+        }
+        String cl = h.get("content-length");
+        return cl != null;
     }
 
     /**

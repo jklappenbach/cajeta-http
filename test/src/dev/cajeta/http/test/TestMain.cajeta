@@ -18,6 +18,7 @@ public final class TestMain {
         StreamTests.run(c);
         MultipartTests.run(c);
         MessageBodyTests.run(c);
+        ClientPoolTests.run(c);
         CodecTests.run(c);
         ServerTests.run(c);
         ClientTests.run(c);

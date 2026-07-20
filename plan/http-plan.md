@@ -449,7 +449,7 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
   (`JsonValue` via the stdlib `cajeta.codec.json`) — typed `getJson<T>`
   auto-serde is primavera's layer per the spec boundary. 1.4e is gated
   on 1.6.
-  - [ ] **1.4a Connection pool + keep-alive.** `ConnectionPool` keyed
+  - [x] **1.4a Connection pool + keep-alive.** `ConnectionPool` keyed
     `(scheme, host, port)`; reuse honors `KeepAlive` decisions;
     `maxConnectionsPerOrigin` with waiting fibers; idle reaping on the
     timer wheel; drop `HttpClient.send`'s unconditional
@@ -460,6 +460,37 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
       until a lease frees; idle reap closes after the window; a
       server-closed pooled connection is detected and replaced, not
       surfaced to the caller.
+    - **Shipped:** `client/ConnectionPool` + `OriginEntry` +
+      `PooledConnection`. Key is `host:port` (scheme implicit — see the
+      TLS note). Per-origin `Semaphore` whose permits ARE the connection
+      budget (over-cap fibers park in `acquire`); LIFO idle stack
+      threaded through the connections; a `Lock` guards table+stacks
+      with every fiber-park kept outside it. Reaping is **lazy** at
+      acquire (no timer-wheel fiber — nothing to reap when nobody
+      calls; a background reaper can ride later without surface
+      change). Revive probe: non-blocking raw `read` — 0 = FIN, >0 =
+      protocol garbage, both evict; would-block revives. `HttpClient`
+      leases around each plaintext exchange and pools when
+      `KeepAlive.canReuse` AND the response framing self-terminates;
+      `poolLimits(maxPerOrigin, idleMaxMs)` configures. **TLS stays
+      dial-per-exchange** (probing a TLS stream would consume record
+      bytes; needs a stdlib consume-free readiness probe) and keeps its
+      honest `Connection: close`. Known gap for 1.4c: a dial that
+      RAISES leaks the lease permit (structured cleanup across a
+      parking call). Tests +12 checks (suite 299 → **311**), 240
+      consecutive clean runs, tour 15/15.
+    - **Land-mine (stdlib, by design): `Server.dispatch` JOINS the
+      connection fiber** — its discarded `spawn` Task is awaited at
+      scope exit (structured concurrency), so dispatch returns only
+      when the connection ends. Every loopback test passed by luck
+      (fibers end fast); a handler that PARKS mid-request deadlocks the
+      dispatching thread. The cap test drives dispatch from a helper
+      fiber and scopes the client so its pool-drop closes the socket
+      before the helper is awaited. Cost a full core-dump debug
+      session; wrote the fiber-registry gdb walk into the playbook.
+    - **cajeta wrinkle found:** `#=` move from a **null** owned field
+      throws (uncaught `0x3`) — null-guard before moving out of
+      nullable owned fields (pool list ops do).
   - [ ] **1.4b Redirects.** 301/302/303/307/308 with a hop cap; 303 →
     GET and drop the body, 307/308 preserve method + body; relative
     `Location` resolved via the stdlib `Uri`; `Authorization` stripped
