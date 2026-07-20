@@ -136,11 +136,38 @@ public class Body {                              // base class: `abstract` isn't
 }                                                //   borrow; no stdlib InputStream exists)
 public final class BytesBody extends Body { ... }   // shipped (1.3a) — adopts its buffer
 public final class StringBody extends Body { ... }  // shipped (1.3a) — copies the String
-public final class StreamBody extends Body { ... }   // upload/download, no materialize
-public final class FormBody extends Body { ... }     // x-www-form-urlencoded
-public final class MultipartBody extends Body { ... }
-public final class MultipartParser { public Iterator<MultipartPart> parts(); }
+public final class StreamBody extends Body { ... }   // shipped (1.3c) — no materialize
+public final class FormBody extends Body { ... }     // shipped (1.3b) — x-www-form-urlencoded
+public final class MultipartBody extends Body { ... }   // shipped (1.3d)
+public final class MultipartPart { ... }                // headers + name/filename + body
+public final class MultipartParser {                    // incremental; index the parts
+    public boolean feed(int8[] data, int32 length);     //   true at the closing delimiter
+    public void endInput();                             //   truncated -> UnexpectedEof
+    public int32 partCount();
+    public MultipartPart part(int32 i);
+    public static #String boundaryOf(MediaType type);
+}
+public final class MultipartScan { ... }                // pure buffer/param scanning
 ```
+
+> **Decided (1.3d):** `MultipartParser` exposes **indexed parts**, not the
+> `Iterator<MultipartPart>` this spec first sketched. It is fed chunks like
+> `HttpParser`/`BodyReader` — one vocabulary for every incremental codec in the
+> library — and a part is complete (and dropped from the buffer) the moment its
+> delimiter arrives, so peak memory is one part rather than the whole payload.
+> An iterator would have implied a pull source the parser does not own. A
+> consume-in-order streaming surface, where a part body reads straight off the
+> socket without buffering, stays open as a refinement.
+
+**The message model carries a body (1.3e).** `HttpRequest`/`HttpResponse` take
+a `body(#Body)` beside the raw `body(int8[], int32)` path, expose it via
+`getBody()`, and offer `asBody()` — a `BytesBody` view over a *received*
+message, so a parsed request and a constructed one read alike. Attaching a body
+sets `Content-Type` **including parameters** (via `MediaType.format()`) unless
+the caller set one; without the parameters a multipart boundary would never
+reach the wire. Known-length bodies drain into the raw byte path at attach time
+(wire compatibility, small-body fast path); unknown-length bodies are carried
+for the chunked writer, never drained.
 
 Large uploads pull from `body.reader()` without materializing; small bodies use
 `bytes`/`asString()`. Bodies stream through `cajeta.io.net`'s bounded
