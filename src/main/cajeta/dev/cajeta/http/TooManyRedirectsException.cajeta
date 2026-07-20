@@ -1,0 +1,35 @@
+package dev.cajeta.http;
+
+import cajeta.lang.String;
+
+/**
+ * Raised by [`HttpClient.sendFollowing`](client/HttpClient.cajeta)
+ * (http:1.4b) when a redirect chain exceeds
+ * [`HttpClient.MAX_REDIRECTS`](client/HttpClient.cajeta#MAX_REDIRECTS)
+ * hops — the bounded answer to a redirect **loop** (`A → B → A → …`),
+ * which is indistinguishable on the wire from a merely-too-long chain,
+ * so both surface as this one typed error rather than an endless
+ * exchange train.
+ *
+ * ## Hierarchy
+ *
+ * A client-side protocol fault under the intermediate
+ * [`HttpException`](HttpException.cajeta) root (→
+ * `cajeta.io.net.NetException`), so a request-boundary
+ * `catch (HttpException e)` nets it along with every parse fault. Like
+ * every leaf in the family it sets the inherited fields directly (no
+ * `super(...)` chaining — see `HttpException`'s construction note) and
+ * classifies to `NetException.KIND_INVALID` (12): the *peer's* redirect
+ * behavior, not a local socket error, is what went wrong.
+ */
+public class TooManyRedirectsException extends HttpException {
+    /** Redirect hops followed before giving up (the cap that tripped). */
+    public int32 hops;
+
+    public TooManyRedirectsException(String message, int32 hops) {
+        this.message = message;
+        this.cause = 0;
+        this.kind = 12;   // NetException.KIND_INVALID (via HttpException)
+        this.hops = hops;
+    }
+}

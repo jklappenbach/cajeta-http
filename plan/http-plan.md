@@ -506,12 +506,41 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
     - **cajeta wrinkle found:** `#=` move from a **null** owned field
       throws (uncaught `0x3`) — null-guard before moving out of
       nullable owned fields (pool list ops do).
-  - [ ] **1.4b Redirects.** 301/302/303/307/308 with a hop cap; 303 →
+  - [x] **1.4b Redirects.** 301/302/303/307/308 with a hop cap; 303 →
     GET and drop the body, 307/308 preserve method + body; relative
     `Location` resolved via the stdlib `Uri`; `Authorization` stripped
     on cross-origin hops; loop → error.
     - TDD: loopback chains per code (method/body rewrite table), hop-cap
       trip, cross-origin auth strip, relative-Location resolution.
+    - **Shipped:** `HttpClient.sendFollowing(uri, req)` — `send` stays
+      the single-exchange primitive; `get()` now rides `sendFollowing`.
+      Table as the de-facto consensus (Go/curl/browsers): 303 → `GET`
+      for everything but `HEAD`; 301/302 → `GET` for `POST`/**`PUT`**;
+      307/308 never rewrite; the body is forwarded **only** on 307/308
+      (`Content-Type` goes with it when dropped). Each hop rebuilds from
+      the ORIGINAL request: target + `Host` via `HttpRequest.fromUri`,
+      original headers re-applied minus `host`/`content-length` (both
+      re-derived) and `authorization` unless the hop targets the **same
+      origin the caller addressed** (scheme + host + effective port —
+      so a chain that returns to the origin regains auth). `Location`
+      resolves through the stdlib RFC 3986 `Uri.resolve` (merge-path +
+      dot-segments; the old origin-rebase `resolveRedirect` is deleted).
+      Past `MAX_REDIRECTS` (10) — which is how a loop surfaces — it
+      raises the new `TooManyRedirectsException extends HttpException`
+      (carries `hops`); `get()`'s old return-the-last-3xx-at-cap
+      behavior is gone with it. An unfollowable 3xx (no `Location`)
+      still returns as-is. Tests: `/final` echoes
+      `method|authorization|body` so one string pins each row of the
+      table; chains ride ONE pooled connection (accept accounting), and
+      the redirect responses carry small bodies so their framing
+      self-terminates — a handler answering a bodyless 301 without
+      `content-length` is close-delimited on the wire (server-side
+      ergonomics for 1.5 to consider). Suite 311 → **338**, 120/120
+      loop, tour 15/15, on cajeta 0.9.4 (`1b9987d4`).
+    - **cajeta wrinkle found:** `spawn` rejects a class-qualified static
+      call (`spawn Other.f(x)` → `CAJETA_ERROR_ASYNC_R3A` "doesn't
+      support instance-method calls") — only bare same-class invocations
+      spawn; RedirectTests carries its own `acceptAndDispatch` copy.
   - [ ] **1.4c Timeouts, cancellation, retry.** Per-exchange budget over
     `cajeta.concurrent.Tasks.withTimeout` (no HTTP-specific timeout
     vocabulary) plus a connect timeout; auto-retry policy — idempotent

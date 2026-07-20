@@ -11,6 +11,7 @@ import cajeta.io.net.tls.TlsStream;
 import cajeta.io.net.uri.Uri;
 import dev.cajeta.http.HttpRequest;
 import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.TooManyRedirectsException;
 import dev.cajeta.http.h1.HttpParser;
 import dev.cajeta.http.h1.HttpSerializer;
 import dev.cajeta.http.h1.BodyReader;
@@ -77,9 +78,11 @@ public class HttpClient {
     boolean hasTrustAnchor;
 
     /**
-     * Maximum number of 3xx redirects [`get`](#get) follows before giving up
-     * and returning the last redirect response to the caller. Bounds redirect
-     * loops (`A → B → A …`).
+     * Maximum number of 3xx redirects [`sendFollowing`](#sendFollowing)
+     * takes before raising
+     * [`TooManyRedirectsException`](../TooManyRedirectsException.cajeta).
+     * Bounds redirect loops (`A → B → A …`), which look exactly like a
+     * long chain from the client's side.
      */
     public static final int32 MAX_REDIRECTS = 10;
 
@@ -230,65 +233,210 @@ public class HttpClient {
 
     /**
      * `GET url` — parse `url` to a [`Uri`](../uri/Uri.cajeta), build the
-     * origin-form request (with `Host`), and [`send`](#send) it, **following
-     * up to [`MAX_REDIRECTS`](#MAX_REDIRECTS) 3xx redirects** (NET-8.3). Each
-     * redirect's `Location` (absolute, or origin-relative `"/path"`) becomes
-     * the next GET target. This is required for real-world download URLs —
-     * e.g. GitHub `releases/.../download/...` 302s to a signed CDN URL. If the
-     * redirect limit is hit, or a 3xx arrives with no `Location`, the last
-     * response is returned as-is (the caller sees the 3xx status).
+     * origin-form request (with `Host`), and follow redirects via
+     * [`sendFollowing`](#sendFollowing) (NET-8.3 → http:1.4b). This is
+     * required for real-world download URLs — e.g. GitHub
+     * `releases/.../download/...` 302s to a signed CDN URL.
      *
      * @EntryPoint
      */
     public #HttpResponse get(String url) {
-        String current = url.substring(0, url.byteLength());
+        Uri uri = Uri.parse(url);
+        HttpRequest req = HttpRequest.fromUri("GET", uri);
+        HttpResponse resp = this.sendFollowing(uri, req);
+        return #resp;
+    }
+
+    // ----- redirect following (http:1.4b) ----------------------------------
+
+    /**
+     * [`send`](#send) `req` to `uri`, then **follow 3xx redirects** up to
+     * [`MAX_REDIRECTS`](#MAX_REDIRECTS) hops — past the cap (which is how a
+     * redirect loop surfaces) it raises
+     * [`TooManyRedirectsException`](../TooManyRedirectsException.cajeta). A
+     * 3xx without a `Location` header is unfollowable and is returned as-is.
+     *
+     * Per hop:
+     *
+     *   - **`Location` resolution** — relative references resolve against
+     *     the redirecting URL via the stdlib RFC 3986
+     *     [`Uri.resolve`](../uri/Uri.cajeta#resolve) (merge-path + dot
+     *     segments), not just origin rebasing.
+     *   - **Method rewrite** — `303` turns everything but `HEAD` into `GET`;
+     *     `301`/`302` turn `POST`/`PUT` into `GET` (the de-facto table every
+     *     mainstream client ships); `307`/`308` never rewrite.
+     *   - **Body** — forwarded only on `307`/`308` (`303` drops it by
+     *     definition; on `301`/`302` mainstream clients drop it too). When
+     *     dropped, `Content-Type` goes with it.
+     *   - **Headers** — the *original* request's headers are re-applied to
+     *     every hop, except `Host` (regenerated from the hop's target),
+     *     `Content-Length` (re-derived from the forwarded body), and
+     *     `Authorization`, which is only forwarded when the hop's target is
+     *     the **same origin** (scheme + host + effective port) the caller
+     *     addressed — a cross-origin hop must not leak credentials.
+     *
+     * @EntryPoint
+     */
+    public #HttpResponse sendFollowing(Uri uri, HttpRequest req) {
+        HttpResponse first = this.send(uri, req);
+        String loc = HttpClient.locationOf(first);
+        if (loc == null) {
+            return #first;
+        }
+
+        // The origin the caller addressed — the Authorization anchor.
+        boolean origHttps = HttpClient.isHttps(uri.getScheme());
+        String origHost = uri.getHost();
+        int32 origPort = uri.getPort();
+        if (origPort < 0) {
+            origPort = origHttps ? 443 : 80;
+        }
+
+        // Loop state is owned (or scalar) so reassignment is a plain move.
+        String m0 = req.getMethod();
+        String method = m0.substring(0, m0.byteLength());
+        boolean keepBody = req.hasBody;
+        String baseUrl = uri.toString();
+        int32 lastStatus = first.statusCode();
         int32 hops = 0;
         while (true) {
-            Uri uri = Uri.parse(current);
-            HttpRequest req = HttpRequest.fromUri("GET", uri);
-            HttpResponse resp = this.send(uri, req);
-            // Follow a 3xx with a Location while under the hop cap; otherwise
-            // hand the response (2xx, 4xx, or an unfollowable 3xx) back. All
-            // reads of `resp` happen here, before the single `return #resp`.
-            if (HttpClient.isRedirect(resp.status) && hops < HttpClient.MAX_REDIRECTS) {
-                String loc = resp.headers.get("Location");
-                if (loc != null) {
-                    String next = HttpClient.resolveRedirect(current, loc);
-                    current = #next;
-                    hops = hops + 1;
-                    continue;
-                }
+            if (hops >= HttpClient.MAX_REDIRECTS) {
+                throw heap TooManyRedirectsException("too many redirects", hops);
             }
-            return #resp;
+            String m2 = HttpClient.redirectMethod(lastStatus, method);
+            method = #m2;
+            keepBody = keepBody && HttpClient.redirectKeepsBody(lastStatus);
+
+            Uri base = Uri.parse(baseUrl);
+            Uri next = Uri.resolve(base, loc);
+            boolean sameOrig = HttpClient.originMatches(next, origHttps,
+                                                        origHost, origPort);
+            HttpRequest hopReq = HttpClient.redirectedRequest(
+                req, method, keepBody, next, sameOrig);
+            HttpResponse resp = this.send(next, hopReq);
+            hops = hops + 1;
+
+            String loc2 = HttpClient.locationOf(resp);
+            if (loc2 == null) {
+                return #resp;
+            }
+            loc = #loc2;
+            lastStatus = resp.statusCode();
+            String nb = next.toString();
+            baseUrl = #nb;
         }
     }
 
-    /** True for the redirect status codes [`get`](#get) follows. */
+    /** True for the redirect status codes [`sendFollowing`](#sendFollowing) follows. */
     static boolean isRedirect(int32 status) {
         return status == 301 || status == 302 || status == 303
             || status == 307 || status == 308;
     }
 
     /**
-     * Resolve a redirect `Location` against the URL it came from. An absolute
-     * `http(s)://…` target is taken verbatim; an origin-relative `"/path"` is
-     * rebased onto `base`'s scheme + authority. Other relative forms (rare in
-     * practice) are rebased onto the origin as well.
+     * `resp`'s `Location` when it is a followable redirect, else null —
+     * one owned pass-through so callers never assign a header borrow
+     * inside a branch.
      */
-    static #String resolveRedirect(String base, String loc) {
-        if (loc.startsWith("https://") || loc.startsWith("http://")) {
-            return loc.substring(0, loc.byteLength());
+    static #String locationOf(HttpResponse resp) {
+        if (!HttpClient.isRedirect(resp.statusCode())) {
+            return null;
         }
-        Uri b = Uri.parse(base);
-        String origin = b.getScheme() + "://" + b.getHost();
-        int32 port = b.getPort();
-        if (port >= 0) {
-            origin = origin + ":" + port;
+        return resp.getHeaders().get("Location");
+    }
+
+    /**
+     * The method a `status` hop forwards `m` as (owned copy): `303` →
+     * `GET` for everything but `HEAD`; `301`/`302` → `GET` for
+     * `POST`/`PUT`; `307`/`308` (and anything else) keep `m`.
+     */
+    static #String redirectMethod(int32 status, String m) {
+        boolean toGet = false;
+        if (status == 303) {
+            toGet = !m.equals("HEAD");
         }
-        if (loc.startsWith("/")) {
-            return #(origin + loc);
+        if (status == 301 || status == 302) {
+            toGet = m.equals("POST") || m.equals("PUT");
         }
-        return #(origin + "/" + loc);
+        if (toGet) {
+            String g = "GET";
+            return g.substring(0, g.byteLength());
+        }
+        return m.substring(0, m.byteLength());
+    }
+
+    /** Does a `status` hop forward the request body? Only 307/308 do. */
+    static boolean redirectKeepsBody(int32 status) {
+        return status == 307 || status == 308;
+    }
+
+    /**
+     * Is `next` on the origin `(https, host, port)` the caller addressed?
+     * Effective ports compare (an absent port takes the scheme default),
+     * so `http://h/` and `http://h:80/` are one origin.
+     */
+    static boolean originMatches(Uri next, boolean https, String host, int32 port) {
+        boolean nHttps = HttpClient.isHttps(next.getScheme());
+        if (nHttps != https) {
+            return false;
+        }
+        if (!next.getHost().equals(host)) {
+            return false;
+        }
+        int32 np = next.getPort();
+        if (np < 0) {
+            np = nHttps ? 443 : 80;
+        }
+        return np == port;
+    }
+
+    /**
+     * Build hop N's request from the **original**: `method` verbatim (the
+     * caller already applied the rewrite table), target + `Host` from
+     * `target` via [`HttpRequest.fromUri`](../HttpRequest.cajeta#fromUri),
+     * then the original headers minus the per-hop set (see
+     * [`dropOnRedirect`](#dropOnRedirect)), and the original body iff
+     * `keepBody`.
+     */
+    static #HttpRequest redirectedRequest(HttpRequest original, String method,
+                                          boolean keepBody, Uri target,
+                                          boolean sameOrigin) {
+        HttpRequest r = HttpRequest.fromUri(method, target);
+        Headers src = original.getHeaders();
+        Headers dst = r.getHeaders();
+        int32 n = src.count();
+        int32 i = 0;
+        while (i < n) {
+            String name = src.nameAt(i);
+            if (!HttpClient.dropOnRedirect(name, keepBody, sameOrigin)) {
+                dst.add(name, src.valueAt(i));
+            }
+            i = i + 1;
+        }
+        if (keepBody && original.hasBody) {
+            r.body(original.body, original.bodyLength());
+        }
+        return #r;
+    }
+
+    /**
+     * Headers a redirect hop does NOT copy from the original request.
+     * Stored names are lowercased by [`Headers`](../../Headers.cajeta).
+     */
+    static boolean dropOnRedirect(String name, boolean keepBody, boolean sameOrigin) {
+        if (name.equals("host")) {
+            return true;                    // regenerated from the hop target
+        }
+        if (name.equals("content-length")) {
+            return true;                    // re-derived from the forwarded body
+        }
+        if (!keepBody && name.equals("content-type")) {
+            return true;                    // no body, no body type
+        }
+        if (!sameOrigin && name.equals("authorization")) {
+            return true;                    // never leak credentials cross-origin
+        }
+        return false;
     }
 
     // ----- transport wiring (static; no captured `this`) -------------------
