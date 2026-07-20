@@ -1,7 +1,10 @@
 package dev.cajeta.http;
 
 import cajeta.lang.String;
+import cajeta.io.net.AsyncReader;
 import cajeta.io.net.Headers;
+import dev.cajeta.http.body.Body;
+import dev.cajeta.http.body.BytesBody;
 import dev.cajeta.http.Status;
 import dev.cajeta.http.Version;
 import dev.cajeta.http.MediaType;
@@ -78,6 +81,9 @@ public class HttpResponse {
     /** True iff this response carries a message body. */
     public boolean hasBody;
 
+    /** The typed body model (http:1.3e), or null. */
+    public Body bodyModel;
+
     /**
      * Field-pinning constructor. Defaults to a `200`/`OK`/`HTTP/1.1`
      * response with an empty header map and no body, so a
@@ -104,6 +110,7 @@ public class HttpResponse {
         int8[] e = heap int8[0];
         this.body = #e;
         this.hasBody = false;
+        this.bodyModel = null;
     }
 
     // -- factories ----------------------------------------------------------
@@ -275,5 +282,83 @@ public class HttpResponse {
     /** 5xx — server error. */
     public boolean isServerError() {
         return this.status >= 500 && this.status < 600;
+    }
+
+    // -- Body model (http:1.3e) --------------------------------------------
+
+    /**
+     * Attach a [`Body`](body/Body.cajeta) and return `this` — the
+     * response twin of
+     * [`HttpRequest.body`](HttpRequest.cajeta#body). The body's media
+     * type becomes `Content-Type` (parameters included) unless one is
+     * already set; a known-length body is drained into the raw byte path
+     * so existing serializer paths work unchanged, while an
+     * unknown-length body is carried for the chunked writer.
+     */
+    public HttpResponse body(#Body b) {
+        MediaType t = b.contentType();
+        if (t != null && !this.headers.contains("content-type")) {
+            String tv = t.format();
+            this.headers.set("Content-Type", tv);
+        }
+        int64 n = b.contentLength();
+        if (n >= (int64) 0) {
+            int8[] drained = HttpResponse.drainBody(b, (int32) n);
+            this.body = #drained;
+            this.hasBody = true;
+        }
+        this.bodyModel = #b;
+        return this;
+    }
+
+    /** The attached [`Body`](body/Body.cajeta), or null (borrow). */
+    public Body getBody() {
+        return this.bodyModel;
+    }
+
+    /**
+     * This message's body as a [`Body`](body/Body.cajeta) — a fresh
+     * [`BytesBody`](body/BytesBody.cajeta) over the received bytes, so a
+     * client can read a parsed response through the same uniform
+     * surface. Null when the response carries no body, or when a body
+     * model is already attached (reach it via [`getBody`](#getBody)).
+     */
+    public #Body asBody() {
+        if (this.bodyModel != null) {
+            return null;
+        }
+        if (!this.hasBody) {
+            return null;
+        }
+        int32 n = this.bodyLength();
+        int8[] copy = heap int8[n];
+        int32 i = 0;
+        while (i < n) {
+            copy[i] = this.body[i];
+            i = i + 1;
+        }
+        MediaType t = this.contentType();
+        BytesBody bb = BytesBody.of(#copy, n, #t);
+        Body out = #bb;
+        return #out;
+    }
+
+    /** Drain a known-length `Body` into a fresh exactly-sized buffer. */
+    static #int8[] drainBody(Body b, int32 len) {
+        int8[] out = heap int8[len];
+        if (len == 0) {
+            return #out;
+        }
+        AsyncReader r = b.reader();
+        int32 o = 0;
+        while (o < len) {
+            int32 got = r.read(out, o, len - o);
+            if (got <= 0) {
+                o = len;
+            } else {
+                o = o + got;
+            }
+        }
+        return #out;
     }
 }

@@ -1,0 +1,227 @@
+package dev.cajeta.http.test;
+
+import cajeta.io.net.AsyncReader;
+import cajeta.io.net.Server;
+import cajeta.io.net.TcpStream;
+import cajeta.io.net.uri.Uri;
+import cajeta.time.Duration;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.MediaType;
+import dev.cajeta.http.body.Body;
+import dev.cajeta.http.body.BytesBody;
+import dev.cajeta.http.body.FormBody;
+import dev.cajeta.http.body.MultipartBody;
+import dev.cajeta.http.body.MultipartParser;
+import dev.cajeta.http.body.MultipartPart;
+import dev.cajeta.http.body.StringBody;
+import dev.cajeta.http.client.HttpClient;
+import dev.cajeta.http.server.HttpServer;
+import dev.cajeta.http.server.HttpServerBuilder;
+
+/**
+ * http:1.3e — the message model carries a Body. Attaching any Body kind
+ * to a request/response sets Content-Type (parameters included) and
+ * frames the payload; a received message reads back through the same
+ * uniform Body surface. Includes a live loopback POST of each body kind.
+ */
+public final class MessageBodyTests {
+
+    public static void run(Check c) {
+        System.stdout.println("-- message body: attach --");
+        attachStringBody(c);
+        attachFormBody(c);
+        attachMultipartCarriesBoundary(c);
+        attachDoesNotOverrideExplicitType(c);
+        System.stdout.println("-- message body: read back --");
+        asBodyRoundTrip(c);
+        System.stdout.println("-- message body: loopback --");
+        loopbackBodies(c);
+    }
+
+    /** Read a whole Body into a String. */
+    static #String textOf(Body b) {
+        int32 n = (int32) b.contentLength();
+        int8[] buf = heap int8[n + 1];
+        AsyncReader r = b.reader();
+        int32 got = r.read(buf, 0, n + 1);
+        int8[] exact = heap int8[got];
+        int32 i = 0;
+        while (i < got) { exact[i] = buf[i]; i = i + 1; }
+        String s = heap String(#exact, got);
+        return #s;
+    }
+
+    /** The request's raw body bytes as a String. */
+    static #String rawOf(HttpRequest r) {
+        int32 n = r.bodyLength();
+        int8[] exact = heap int8[n];
+        int32 i = 0;
+        while (i < n) { exact[i] = r.body[i]; i = i + 1; }
+        String s = heap String(#exact, n);
+        return #s;
+    }
+
+    static void attachStringBody(Check c) {
+        HttpRequest req = HttpRequest.post("/x");
+        StringBody sb = StringBody.of("hello body");
+        Body b = #sb;
+        req.body(#b);
+        c.eqInt((int64) req.bodyLength(), (int64) 10, "StringBody framed by length");
+        c.eqStr(MessageBodyTests.rawOf(req), "hello body", "StringBody bytes on the wire path");
+        c.eqStr(req.getHeaders().get("content-type"), "text/plain; charset=utf-8",
+            "Content-Type comes from the body, with parameters");
+        c.that(req.getBody() != null, "the body model is carried");
+    }
+
+    static void attachFormBody(Check c) {
+        HttpRequest req = HttpRequest.post("/x");
+        FormBody f = FormBody.of();
+        f.add("a", "1");
+        f.add("b", "two words");
+        Body b = #f;
+        req.body(#b);
+        c.eqStr(MessageBodyTests.rawOf(req), "a=1&b=two+words", "FormBody encodes onto the wire");
+        c.eqStr(req.getHeaders().get("content-type"),
+            "application/x-www-form-urlencoded", "form Content-Type");
+    }
+
+    static void attachMultipartCarriesBoundary(Check c) {
+        HttpRequest req = HttpRequest.post("/upload");
+        MultipartBody mb = MultipartBody.withBoundary("BeeF");
+        mb.addField("k", "v");
+        Body b = #mb;
+        req.body(#b);
+        c.eqStr(req.getHeaders().get("content-type"),
+            "multipart/form-data; boundary=BeeF",
+            "multipart Content-Type carries the boundary parameter");
+        c.that(req.bodyLength() > 20, "multipart body framed onto the wire");
+    }
+
+    static void attachDoesNotOverrideExplicitType(Check c) {
+        HttpRequest req = HttpRequest.post("/x");
+        req.setHeader("Content-Type", "application/vnd.custom+json");
+        StringBody sb = StringBody.of("{}");
+        Body b = #sb;
+        req.body(#b);
+        c.eqStr(req.getHeaders().get("content-type"), "application/vnd.custom+json",
+            "an explicit Content-Type wins over the body's");
+    }
+
+    static void asBodyRoundTrip(Check c) {
+        // A parsed message (raw bytes, no model) reads back as a Body.
+        HttpRequest req = HttpRequest.post("/x");
+        String payload = "raw payload";
+        req.body(payload.toBytes(), payload.byteLength());
+        req.setHeader("Content-Type", "text/plain");
+        Body seen = req.asBody();
+        c.that(seen != null, "asBody() views a raw-byte message");
+        c.eqInt(seen.contentLength(), (int64) 11, "asBody length");
+        c.eqStr(MessageBodyTests.textOf(seen), "raw payload", "asBody streams the bytes");
+        c.eqStr(seen.contentType().essence(), "text/plain", "asBody carries the media type");
+    }
+
+    // ---- loopback --------------------------------------------------------
+
+    /** Echo handler: reply with the request's body and its content type. */
+    public static #HttpResponse echoHandle(HttpRequest req) {
+        HttpResponse resp = HttpResponse.ok();
+        String ct = req.getHeaders().get("content-type");
+        if (ct != null) {
+            resp.setHeader("X-Echo-Type", ct);
+        }
+        // `body()` returns a BORROW of `this`, so returning it directly
+        // from a `#`-returning function hands back a local that drops at
+        // exit (SIGSEGV in the server's decideReuse). Mutate, then move.
+        resp.body(req.body, req.bodyLength());
+        return #resp;
+    }
+
+    /** POST a StringBody and check the server saw it verbatim. */
+    public static async int32 postString(int32 port) {
+        HttpClient client = heap HttpClient();
+        Uri uri = Uri.builder()
+            .scheme("http").host("127.0.0.1").port(port).path("/echo")
+            .build();
+        HttpRequest req = HttpRequest.fromUri("POST", uri);
+        StringBody sb = StringBody.of("streamed hello");
+        Body b = #sb;
+        req.body(#b);
+        HttpResponse resp = client.send(uri, req);
+        if (resp.statusCode() != 200) { return -1; }
+        if (resp.bodyLength() != 14) { return -2; }
+        return 1;
+    }
+
+    /** POST a FormBody; the echo must round-trip the urlencoded bytes. */
+    public static async int32 postForm(int32 port) {
+        HttpClient client = heap HttpClient();
+        Uri uri = Uri.builder()
+            .scheme("http").host("127.0.0.1").port(port).path("/echo")
+            .build();
+        HttpRequest req = HttpRequest.fromUri("POST", uri);
+        FormBody f = FormBody.of();
+        f.add("q", "a b");
+        Body b = #f;
+        req.body(#b);
+        HttpResponse resp = client.send(uri, req);
+        if (resp.statusCode() != 200) { return -1; }
+        if (resp.bodyLength() != 5) { return -2; }      // "q=a+b"
+        return 2;
+    }
+
+    /** POST a MultipartBody and re-parse the echoed payload server-side. */
+    public static async int32 postMultipart(int32 port) {
+        HttpClient client = heap HttpClient();
+        Uri uri = Uri.builder()
+            .scheme("http").host("127.0.0.1").port(port).path("/echo")
+            .build();
+        HttpRequest req = HttpRequest.fromUri("POST", uri);
+        MultipartBody mb = MultipartBody.withBoundary("Zed");
+        mb.addField("name", "ada");
+        Body b = #mb;
+        req.body(#b);
+        HttpResponse resp = client.send(uri, req);
+        if (resp.statusCode() != 200) { return -1; }
+        // Re-parse the echoed body through the parser.
+        MultipartParser p = MultipartParser.forBoundary("Zed");
+        p.feed(resp.body, resp.bodyLength());
+        if (!p.isComplete()) { return -2; }
+        if (p.partCount() != 1) { return -3; }
+        MultipartPart part = p.part(0);
+        if (!part.name().equals("name")) { return -4; }
+        return 3;
+    }
+
+    static void loopbackBodies(Check c) {
+        scope {
+            HttpServerBuilder bld = HttpServer.builder();
+            bld.bind("127.0.0.1:0");
+            (HttpRequest) -> #HttpResponse h =
+                (req) -> MessageBodyTests.echoHandle(req);
+            bld.handler(h);
+            HttpServer srv = bld.build();
+            Server core = srv.server;
+            int32 port = core.listener.boundPort();
+
+            Task<int32> t1 = spawn postString(port);
+            TcpStream c1 #= core.acceptNext();
+            core.dispatch(#c1);
+            c.eqInt((int64) await t1, (int64) 1, "loopback POST StringBody");
+
+            Task<int32> t2 = spawn postForm(port);
+            TcpStream c2 #= core.acceptNext();
+            core.dispatch(#c2);
+            c.eqInt((int64) await t2, (int64) 2, "loopback POST FormBody");
+
+            Task<int32> t3 = spawn postMultipart(port);
+            TcpStream c3 #= core.acceptNext();
+            core.dispatch(#c3);
+            c.eqInt((int64) await t3, (int64) 3, "loopback POST MultipartBody re-parses");
+
+            boolean drained = core.drainInflight(Duration.ofSeconds(5));
+            c.that(drained, "body-model connections drained");
+            core.listener.close();
+        }
+    }
+}

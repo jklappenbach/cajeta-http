@@ -398,7 +398,8 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
       field arguments, `throw` in void, same-arity method counts, long
       doc comments — all compile), so the reproducer is this file. Cost
       a long bisect; re-check on a future toolchain before reordering.
-  - [ ] **1.3e Message-model adoption.** `HttpRequest`/`HttpResponse`
+  - [~] **1.3e Message-model adoption.** *(core landed; the streaming
+    server/client legs stay open — see below.)* `HttpRequest`/`HttpResponse`
     carry an optional `Body`; `Exchange`/`RequestBodyStream` expose the
     request body as a `Body`; `ResponseBodyWriter` accepts one; client
     `send` takes a `Body` overload; raw byte-array paths stay (wire
@@ -410,7 +411,38 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
       handler runs; drained-connection reuse after a handler ignores its
       body.
     - Acceptance: full suite + tour green (loop ≥100 runs — 0.11 is
-      still live at ~1.6%, so judge by signature, not by a single red).
+      **fixed** as of cajeta v0.9.3, so a red is now a real red).
+    - **Landed:** `HttpRequest`/`HttpResponse` each carry an optional
+      `Body` (`bodyModel`) with a `body(#Body)` overload beside the raw
+      `body(int8[], int32)` path, plus `getBody()` and `asBody()` (a
+      `BytesBody` view over a *received* message so handlers and clients
+      read parsed bodies through the same `contentLength`/`contentType`/
+      `reader` surface). Attaching a body sets `Content-Type` **with
+      parameters** unless one is already set — which needed
+      `MediaType.format()` (+ `parameterNameAt`/`parameterValueAt`), new
+      here: without it a `multipart/form-data` boundary never reaches the
+      wire and the receiver cannot frame the body at all. Known-length
+      bodies drain into the raw byte path at attach time so every
+      existing serializer path keeps working; unknown-length bodies are
+      carried, not drained. Tests: attach-and-frame for String/Form/
+      Multipart, explicit-Content-Type precedence, `asBody()` round-trip,
+      and a **live loopback POST of each body kind** client→server with
+      the multipart payload re-parsed off the echo. Suite 282 → **299**,
+      100/100 stable, tour 15/15.
+    - **Still open in this unit** (deliberately deferred, each wants its
+      own TDD pass): the streamed *response* leg through
+      `ResponseBodyWriter` (unknown-length `Body` → chunked on the wire —
+      pairs with 1.4d), `Exchange`/`RequestBodyStream` exposing the
+      request body as a `Body` before it is buffered, per-route 413
+      thresholds (the global `ServerLimits.maxBodyBytes` cap already
+      rejects pre-handler, extracted in 0.3), and implicit drain-on-return
+      with the ownership opt-out.
+    - **Trap re-learned:** `body()` returns a **borrow** of `this`, so
+      `return resp.body(...)` from a `#HttpResponse` function hands back a
+      local that drops at exit — the server then dereferences freed memory
+      in `decideReuse` (SIGSEGV). Mutate, then `return #resp`. The
+      chained `return HttpResponse.ok().body(...)` form is fine and is
+      what the older handlers use.
 - [ ] **1.4** Client completeness. Broken to TDD granularity 2026-07-19.
   Decision encoded from the spec's lean: **cookie jar off by default**,
   explicit `CookieJar` opt-in (1.4g). `getJson` ships **untyped**

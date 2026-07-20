@@ -1,7 +1,10 @@
 package dev.cajeta.http;
 
 import cajeta.lang.String;
+import cajeta.io.net.AsyncReader;
 import cajeta.io.net.Headers;
+import dev.cajeta.http.body.Body;
+import dev.cajeta.http.body.BytesBody;
 import cajeta.io.net.uri.Uri;
 import dev.cajeta.http.PathParams;
 import dev.cajeta.http.Method;
@@ -100,6 +103,9 @@ public class HttpRequest {
      * [`pathParam`](#pathParam) accessor null-checks before reading. The
      * router calls [`bindPathParams`](#bindPathParams) to install the map.
      */
+    /** The typed body model (http:1.3e), or null. */
+    public Body bodyModel;
+
     public PathParams pathParams;
 
     /**
@@ -132,6 +138,7 @@ public class HttpRequest {
         int8[] e = heap int8[0];
         this.body = #e;
         this.hasBody = false;
+        this.bodyModel = null;
         this.pathParams = null;
     }
 
@@ -430,5 +437,93 @@ public class HttpRequest {
             return null;
         }
         return this.pathParams.get(name);
+    }
+
+    // -- Body model (http:1.3e) --------------------------------------------
+
+    /**
+     * Attach a [`Body`](body/Body.cajeta) — the typed body model — and
+     * return `this`. The body's media type becomes `Content-Type`
+     * (parameters included, so a `multipart/form-data` boundary reaches
+     * the wire) unless the caller already set one.
+     *
+     * A **known-length** body is drained into the raw byte path
+     * immediately, so every existing serializer/wire path keeps working
+     * unchanged and small bodies stay a single buffer. An
+     * **unknown-length** body (a [`StreamBody`](body/StreamBody.cajeta)
+     * over a pipe) is *not* drained — that is the whole point of it —
+     * and is carried for the chunked writer to stream; the raw path
+     * stays empty.
+     */
+    public HttpRequest body(#Body b) {
+        MediaType t = b.contentType();
+        if (t != null && !this.headers.contains("content-type")) {
+            String tv = t.format();
+            this.headers.set("Content-Type", tv);
+        }
+        int64 n = b.contentLength();
+        if (n >= (int64) 0) {
+            int8[] drained = HttpRequest.drainBody(b, (int32) n);
+            this.body = #drained;
+            this.hasBody = true;
+        }
+        this.bodyModel = #b;
+        return this;
+    }
+
+    /** The attached [`Body`](body/Body.cajeta), or null (borrow). */
+    public Body getBody() {
+        return this.bodyModel;
+    }
+
+    /**
+     * This message's body as a [`Body`](body/Body.cajeta): the attached
+     * model when there is one, else a fresh
+     * [`BytesBody`](body/BytesBody.cajeta) over the received bytes so a
+     * handler can read a parsed request through the same uniform surface
+     * (`contentLength`/`contentType`/`reader`). Returns null when the
+     * message carries no body at all.
+     */
+    public #Body asBody() {
+        if (this.bodyModel != null) {
+            return null;            // already yours via getBody(); no copy
+        }
+        if (!this.hasBody) {
+            return null;
+        }
+        int32 n = this.bodyLength();
+        int8[] copy = heap int8[n];
+        int32 i = 0;
+        while (i < n) {
+            copy[i] = this.body[i];
+            i = i + 1;
+        }
+        MediaType t = this.contentType();
+        BytesBody bb = BytesBody.of(#copy, n, #t);
+        Body out = #bb;
+        return #out;
+    }
+
+    /**
+     * Drain `b` into a fresh exactly-sized buffer. Known-length bodies
+     * only — the caller checks. Reads through the body's own reader, so
+     * every `Body` kind (bytes, string, form, multipart) works the same.
+     */
+    static #int8[] drainBody(Body b, int32 len) {
+        int8[] out = heap int8[len];
+        if (len == 0) {
+            return #out;
+        }
+        AsyncReader r = b.reader();
+        int32 o = 0;
+        while (o < len) {
+            int32 got = r.read(out, o, len - o);
+            if (got <= 0) {
+                o = len;
+            } else {
+                o = o + got;
+            }
+        }
+        return #out;
     }
 }
