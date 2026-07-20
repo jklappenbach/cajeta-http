@@ -208,7 +208,45 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
     fixes — don't "upgrade" to it. A proper upstream release remains the
     durable fix.
 
-- [ ] **0.11 Residual ~2.5% heap-corruption crash in the client loopback.**
+- [x] **0.11 Residual ~2.5% heap-corruption crash in the client loopback.**
+  **ROOT-CAUSED AND FIXED 2026-07-19 (cajeta-repo side): the frame bump
+  arena was per-carrier-THREAD, but fibers interleave on carriers.** The
+  gdb backtrace out of a crashing run landed in `HttpParser.feed`
+  indexing `data` — the client's 8 KiB `scratch` — whose array-header
+  length qword read 0 while its *contents* were the correctly-received
+  response bytes: the buffer's memory had been reclaimed out from under
+  the parked fiber. `heap int8[8192]` in `readResponse` is arena-
+  allocated (`__cajeta_new_array_header_arena`); the arena's O(1)
+  mark/reset assumes LIFO scope nesting per *logical stack*, and a fiber
+  that **parks** mid-frame (`readAsync` → `Reactor.awaitReadable`)
+  leaves live allocations above marks that co-hosted fibers reset right
+  through — the server connection fiber's scope exit rolled the shared
+  bump pointer back over the client fiber's live buffers. Explains the
+  ~4ms crash timing (first parked read), the layout sensitivity
+  (25% ↔ 0% ↔ 7.5% by allocation interleaving), and retro-explains the
+  0.9-era "fiber park duplicates active drop entries" double-close
+  (object memory reuse across fibers) and likely the long-open
+  lambda-capture double-free. A deterministic split-sweep (every 2-way
+  split of the response wire + bytewise, 100 rounds) was green —
+  exonerating the parser and pinning the runtime.
+  **Fix:** per-FIBER arenas (`cajeta_arena` in `struct cajeta_fiber`,
+  selected by `__cajeta_arena_ptr()` — the same accessor pattern as
+  `drop_top`/`exc_top`/`scope_top`), lazily mapped, recycled through a
+  process-wide mapping pool at fiber teardown; non-fiber threads keep
+  the `__thread` arena. Landed as cajeta **`84ebcec4`** on main, with a
+  deterministic C-level regression test
+  (`test/runtime/FiberArenaIsolationTests.cpp`: two fibers pinned to
+  one carrier replay the mark-park/alloc-park/reset interleave —
+  8192/8192 bytes corrupted pre-fix, clean post-fix). Verified: suite
+  **300/300 + 100/100**, tour 60/60 (was ~4.6%/run at this layout);
+  full cajeta ctest — no regressions (residual failures reproduce
+  pre-change: Xpu textures, MCP cache race, two near-timeout tests).
+  NOT cured (separate bugs, now cleanly disambiguated): the cajeta
+  repo's own tour SIGSEGV (WildcardsDemo region) and the cajeta-unit
+  reflective-runner abort blocking codec v0.5.0. The 0.9-era
+  double-close probe now shows exactly one close per fd. The installed
+  deb still carries the bug until a 0.9.3 release lands — local dev
+  should use the release-worktree compiler on PATH.
   Surfaced 2026-07-19 while pre-flighting the `13fef7a4` compiler deb:
   2 failures in 65 runs, both `SIGABRT: array index 0 out of bounds for
   dimension size 0` in `ClientTests` (crash in ~4ms — NOT the fixed
