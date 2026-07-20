@@ -1,0 +1,364 @@
+package dev.cajeta.http.body;
+
+import cajeta.io.net.AsyncReader;
+import cajeta.io.net.Headers;
+import cajeta.time.Clock;
+import cajeta.time.Instant;
+import dev.cajeta.http.MediaType;
+
+/**
+ * A `multipart/form-data` [`Body`](Body.cajeta) (`http:1.3d`) — the
+ * upload shape: an ordered list of [`MultipartPart`](MultipartPart.cajeta)s
+ * framed by a boundary delimiter per RFC 2046 §5.1 / RFC 7578.
+ *
+ * ```cajeta
+ * MultipartBody b = MultipartBody.of();          // boundary generated
+ * b.addField("title", "vacation");
+ * b.addFile("photo", "beach.jpg", #jpeg, #bytes, len);
+ * request.body(b);                               // Content-Type carries the boundary
+ * ```
+ *
+ * The wire is built **lazily and cached** — `add*` is O(1) and
+ * invalidates; the next `contentLength()`/`reader()`/[`wire`](#wire)
+ * rebuilds. [`contentType`](#contentType) is
+ * `multipart/form-data; boundary=<b>`, so a caller never has to
+ * hand-thread the boundary into a header.
+ *
+ * ## Boundary
+ *
+ * [`of`](#of) generates one from the wall clock plus a per-process
+ * counter (`----cajeta-<hex>`) — long enough that a collision with
+ * payload bytes is not a practical concern, which is exactly what RFC
+ * 2046 asks of a generator. [`withBoundary`](#withBoundary) takes an
+ * explicit one (deterministic tests, or a caller reproducing a fixed
+ * vector); it is the caller's job then to pick one absent from the
+ * payload.
+ *
+ * ## v1 scope
+ *
+ * Composition **materializes** the wire (parts are read into one buffer
+ * on the first length/read). A streaming multipart writer — framing each
+ * part straight from a [`StreamBody`](StreamBody.cajeta) with no full
+ * buffer — is future work; parsing is already incremental (see
+ * [`MultipartParser`](MultipartParser.cajeta)).
+ */
+public final class MultipartBody extends Body {
+
+    /** Per-process counter so two bodies built in the same millisecond differ. */
+    static int64 boundarySeq = (int64) 0;
+
+    MultipartPart[] parts;
+    int32 partCount;
+    int32 cap;
+    String bound;
+
+    int8[] data;          // lazily built wire (null = stale)
+    int32 len;
+    MediaType type;
+    BytesChannel channel;
+    AsyncReader rdr;
+
+    MultipartBody() {
+        this.parts = null;
+        this.partCount = 0;
+        this.cap = 0;
+        this.bound = null;
+        this.data = null;
+        this.len = 0;
+        this.type = null;
+        this.channel = null;
+        this.rdr = null;
+    }
+
+    /** An empty body with a generated boundary. */
+    public static #MultipartBody of() {
+        String b = MultipartBody.generateBoundary();
+        return MultipartBody.withBoundary(b);
+    }
+
+    /** An empty body with the caller's boundary (must not occur in the payload). */
+    public static #MultipartBody withBoundary(String boundary) {
+        MultipartBody m = heap MultipartBody();
+        m.cap = 8;
+        MultipartPart[] ps = heap MultipartPart[8];
+        m.parts = #ps;
+        String b = MultipartPart.copyOf(boundary);
+        m.bound = #b;
+        MediaType t = MultipartBody.typeFor(boundary);
+        m.type = #t;
+        return #m;
+    }
+
+    /** `multipart/form-data; boundary=<boundary>`. */
+    static #MediaType typeFor(String boundary) {
+        String v = "multipart/form-data; boundary=\"" + boundary + "\"";
+        return MediaType.parse(v);
+    }
+
+    /**
+     * A fresh boundary: `----cajeta-<hex epoch millis><hex counter>`. Long
+     * enough (and unique enough) that it cannot plausibly collide with
+     * payload bytes — RFC 2046's actual requirement of a generator.
+     */
+    static #String generateBoundary() {
+        Instant now = Clock.now();
+        int64 ms = now.toEpochMilli();
+        MultipartBody.boundarySeq = MultipartBody.boundarySeq + (int64) 1;
+        String s = "----cajeta-" + MultipartBody.hex(ms)
+                 + MultipartBody.hex(MultipartBody.boundarySeq);
+        String owned = MultipartPart.copyOf(s);
+        return #owned;
+    }
+
+    /** Lowercase hex of a non-negative int64 (at least one digit). */
+    static #String hex(int64 v) {
+        int8[] tmp = heap int8[16];
+        int32 nd = 0;
+        int64 x = v;
+        if (x < (int64) 0) {
+            x = (int64) 0 - x;
+        }
+        while (x > (int64) 0 && nd < 16) {
+            int32 d = (int32) (x % (int64) 16);
+            int8 ch = (int8) (48 + d);
+            if (d >= 10) {
+                ch = (int8) (97 + (d - 10));
+            }
+            tmp[nd] = ch;
+            x = x / (int64) 16;
+            nd = nd + 1;
+        }
+        if (nd == 0) {
+            tmp[0] = (int8) 48;
+            nd = 1;
+        }
+        int8[] out = heap int8[nd];
+        int32 i = 0;
+        while (i < nd) {
+            out[i] = tmp[nd - 1 - i];       // emit high-to-low
+            i = i + 1;
+        }
+        String s = heap String(#out, nd);
+        return #s;
+    }
+
+    /** Append a part; adopts it. */
+    public MultipartBody addPart(#MultipartPart part) {
+        if (this.partCount == this.cap) {
+            int32 newCap = this.cap * 2;
+            MultipartPart[] ps = heap MultipartPart[newCap];
+            int32 i = 0;
+            while (i < this.partCount) {
+                ps[i] = #(this.parts[i]);
+                i = i + 1;
+            }
+            this.parts #= ps;
+            this.cap = newCap;
+        }
+        this.parts[this.partCount] = #part;
+        this.partCount = this.partCount + 1;
+        this.data = null;       // wire is stale
+        return this;
+    }
+
+    /** Append a simple `name=value` form field. */
+    public MultipartBody addField(String name, String value) {
+        MultipartPart p = MultipartPart.field(name, value);
+        return this.addPart(#p);
+    }
+
+    /** Append a file part over the adopted `data[0..len)`. */
+    public MultipartBody addFile(String name, String filename,
+                                 #MediaType type, #int8[] data, int32 len) {
+        MultipartPart p = MultipartPart.file(name, filename, #type, #data, len);
+        return this.addPart(#p);
+    }
+
+    /** Number of parts. */
+    public int32 count() {
+        return this.partCount;
+    }
+
+    /** Part `i` (borrow). */
+    public MultipartPart part(int32 i) {
+        return this.parts[i];
+    }
+
+    /** The boundary delimiter (borrow). */
+    public String boundary() {
+        return this.bound;
+    }
+
+    // ---- wire ------------------------------------------------------------
+
+    /** Bytes of `s` appended to `out` at `at`; returns the new offset. */
+    static int32 putString(String s, int8[] out, int32 at) {
+        int32 n = s.byteLength();
+        int32 o = at;
+        int32 i = 0;
+        while (i < n) {
+            out[o] = s.byteAt(i);
+            o = o + 1;
+            i = i + 1;
+        }
+        return o;
+    }
+
+    /**
+     * Emit a header name in canonical `Title-Case` form.
+     * [`Headers`](Headers.cajeta) lowercases on the way in (HTTP field
+     * names are case-insensitive), but a multipart part's headers are
+     * read by every language's form parser and conventionally appear as
+     * `Content-Disposition` / `Content-Type` — so restore the casing on
+     * the wire: uppercase the first byte of each `-`-separated token.
+     * Byte count is unchanged, so sizing is unaffected.
+     */
+    static int32 putHeaderName(String s, int8[] out, int32 at) {
+        int32 n = s.byteLength();
+        int32 o = at;
+        boolean atTokenStart = true;
+        int32 i = 0;
+        while (i < n) {
+            int32 b = ((int32) s.byteAt(i)) & 0xFF;
+            if (atTokenStart && b >= 97 && b <= 122) {
+                b = b - 32;
+            }
+            out[o] = (int8) b;
+            atTokenStart = (b == 45);           // '-'
+            o = o + 1;
+            i = i + 1;
+        }
+        return o;
+    }
+
+    static int32 putCrlf(int8[] out, int32 at) {
+        out[at] = (int8) 13;
+        out[at + 1] = (int8) 10;
+        return at + 2;
+    }
+
+    /** Serialized size of one part, including its delimiter line. */
+    int32 sizeOfPart(MultipartPart p) {
+        int32 total = 2 + this.bound.byteLength() + 2;      // "--" boundary CRLF
+        Headers h = p.headers();
+        int32 hc = h.count();
+        int32 i = 0;
+        while (i < hc) {
+            total = total + h.nameAt(i).byteLength() + 2    // name ": "
+                          + h.valueAt(i).byteLength() + 2;  // value CRLF
+            i = i + 1;
+        }
+        total = total + 2;                                  // blank line
+        total = total + (int32) p.body().contentLength();   // content
+        total = total + 2;                                  // trailing CRLF
+        return total;
+    }
+
+    /** (Re)build the cached wire + channel + reader. */
+    void ensureEncoded() {
+        if (this.data != null) {
+            return;
+        }
+        int32 total = 0;
+        int32 i = 0;
+        while (i < this.partCount) {
+            total = total + this.sizeOfPart(this.parts[i]);
+            i = i + 1;
+        }
+        total = total + 2 + this.bound.byteLength() + 2 + 2;  // "--" b "--" CRLF
+        int8[] out = heap int8[total + 1];
+        int32 o = 0;
+        i = 0;
+        while (i < this.partCount) {
+            MultipartPart p = this.parts[i];
+            out[o] = (int8) 45;                 // '-'
+            out[o + 1] = (int8) 45;             // '-'
+            o = o + 2;
+            o = MultipartBody.putString(this.bound, out, o);
+            o = MultipartBody.putCrlf(out, o);
+            Headers h = p.headers();
+            int32 hc = h.count();
+            int32 k = 0;
+            while (k < hc) {
+                o = MultipartBody.putHeaderName(h.nameAt(k), out, o);
+                out[o] = (int8) 58;             // ':'
+                out[o + 1] = (int8) 32;         // ' '
+                o = o + 2;
+                o = MultipartBody.putString(h.valueAt(k), out, o);
+                o = MultipartBody.putCrlf(out, o);
+                k = k + 1;
+            }
+            o = MultipartBody.putCrlf(out, o);  // end of the part's head
+            o = MultipartBody.copyBody(p.body(), out, o);
+            o = MultipartBody.putCrlf(out, o);  // the delimiter's leading CRLF
+            i = i + 1;
+        }
+        out[o] = (int8) 45;
+        out[o + 1] = (int8) 45;
+        o = o + 2;
+        o = MultipartBody.putString(this.bound, out, o);
+        out[o] = (int8) 45;
+        out[o + 1] = (int8) 45;
+        o = o + 2;
+        o = MultipartBody.putCrlf(out, o);
+
+        this.data = #out;
+        this.len = o;
+        BytesChannel ch = heap BytesChannel(this.data, (int64) this.len);
+        this.channel = #ch;
+        AsyncReader r = heap AsyncReader(this.channel);
+        this.rdr = #r;
+    }
+
+    /** Drain `body` into `out` at `at`; returns the new offset. */
+    static int32 copyBody(Body body, int8[] out, int32 at) {
+        int32 n = (int32) body.contentLength();
+        if (n <= 0) {
+            return at;
+        }
+        AsyncReader r = body.reader();
+        if (r == null) {
+            return at;
+        }
+        int32 o = at;
+        int32 remaining = n;
+        while (remaining > 0) {
+            int32 got = r.read(out, o, remaining);
+            if (got <= 0) {
+                remaining = 0;
+            } else {
+                o = o + got;
+                remaining = remaining - got;
+            }
+        }
+        return o;
+    }
+
+    /** The full serialized body (a fresh owned copy). */
+    public #int8[] wire() {
+        this.ensureEncoded();
+        int8[] copy = heap int8[this.len];
+        int32 i = 0;
+        while (i < this.len) {
+            copy[i] = this.data[i];
+            i = i + 1;
+        }
+        return #copy;
+    }
+
+    // ---- Body ------------------------------------------------------------
+
+    public int64 contentLength() {
+        this.ensureEncoded();
+        return (int64) this.len;
+    }
+
+    public MediaType contentType() {
+        return this.type;
+    }
+
+    public AsyncReader reader() {
+        this.ensureEncoded();
+        return this.rdr;
+    }
+}

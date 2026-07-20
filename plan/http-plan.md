@@ -356,7 +356,7 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
       `BodyReader.forChunked`. Suite 214 → **235** checks. (The
       socket-loopback streaming pass rides 1.3e/1.4d where the
       serializer/client actually drive a Body.)
-  - [ ] **1.3d Multipart** — `MultipartBody` (part composition + boundary
+  - [x] **1.3d Multipart** — `MultipartBody` (part composition + boundary
     generation), `MultipartPart` (headers, name/filename, body),
     `MultipartParser` (boundary scan over a streaming source, per-part
     headers, part bodies as readers; max-part / max-parts limits).
@@ -364,6 +364,40 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
       edges, quoted boundary), compose→parse round-trip, malformed
       rejects (missing terminal boundary, oversize part → early 413-class
       error), binary part payloads.
+    - **Shipped:** four types in `dev.cajeta.http.body` —
+      `MultipartPart` (quoted-string `Content-Disposition` with `\`/`"`
+      escaping; `field()`/`file()` factories), `MultipartBody` (ordered
+      parts, lazily built + cached wire, generated
+      `----cajeta-<hex>` boundary from the clock + a per-process
+      counter, canonical `Title-Case` header names on the wire since
+      `Headers` lowercases on the way in), `MultipartParser` (the
+      incremental state machine), and `MultipartScan` (pure buffer
+      scanning + `Content-Disposition` parameter extraction, split out
+      because it touches no parser state). Suite 235 → **282** checks
+      (+47), 100/100 stable.
+    - **Design — the `DELIM` state.** The machine is
+      `PREAMBLE → DELIM → HEADERS → CONTENT → DELIM → … → DONE`. Emitting
+      a part and resolving the delimiter that follows it are *separate*
+      steps because both must be re-entrant at every byte: TDD's
+      byte-at-a-time feed caught the parser re-emitting a part when the
+      delimiter needed more bytes (content had been scanned but not yet
+      consumed), and caught `openPart` misreading the closing `--` as the
+      start of a new part when only the first `-` had arrived. A lone `-`
+      is genuinely undecidable, so `openPart` now returns false without
+      changing state until its successor lands. Peak memory is one part:
+      content is dropped from the buffer the moment it is emitted.
+    - **Compiler-order landmine (cajeta 0.9.3 `080171da`).** With the
+      `forBoundaryWithLimits` / `boundaryOf` statics declared *before*
+      `MultipartParser`'s instance methods, `feed` (and other later
+      methods) vanish from the compiler's method index — every call site
+      reports `CAJETA_ERROR_MEMBER_NOT_FOUND` for a method that is
+      plainly declared, with no diagnostic on the library build. Moving
+      the two statics below the instance methods is the entire fix and is
+      commented in the source. It did not reduce to a small standalone
+      case (isolated repros of the obvious suspects — `&&` operands,
+      field arguments, `throw` in void, same-arity method counts, long
+      doc comments — all compile), so the reproducer is this file. Cost
+      a long bisect; re-check on a future toolchain before reordering.
   - [ ] **1.3e Message-model adoption.** `HttpRequest`/`HttpResponse`
     carry an optional `Body`; `Exchange`/`RequestBodyStream` expose the
     request body as a `Body`; `ResponseBodyWriter` accepts one; client

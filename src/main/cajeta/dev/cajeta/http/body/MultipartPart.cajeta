@@ -1,0 +1,150 @@
+package dev.cajeta.http.body;
+
+import cajeta.io.net.Headers;
+import dev.cajeta.http.MediaType;
+
+/**
+ * One entry of a `multipart/form-data` body (`http:1.3d`) — the RFC 2046
+ * *body-part*: a header block plus content.
+ *
+ * Both directions use this type. Composed parts come from
+ * [`field`](#field) / [`file`](#file) (which synthesize the
+ * `Content-Disposition` header RFC 7578 requires); parsed parts come out
+ * of [`MultipartParser`](MultipartParser.cajeta) with whatever headers
+ * were on the wire and a [`BytesBody`](BytesBody.cajeta) over the
+ * decoded content.
+ *
+ * [`name`](#name) and [`filename`](#filename) are the
+ * `Content-Disposition` parameters, lifted out because every consumer
+ * wants them; `filename` is null for a plain field. The
+ * [`headers`](#headers) map stays authoritative — a part may carry
+ * `Content-Type`, `Content-Transfer-Encoding`, or anything else.
+ */
+public final class MultipartPart {
+
+    Headers hdrs;
+    String partName;
+    String partFilename;    // null for a non-file part
+    Body content;
+
+    MultipartPart() {
+        this.hdrs = null;
+        this.partName = null;
+        this.partFilename = null;
+        this.content = null;
+    }
+
+    /** A part with explicit headers + body; adopts all three. */
+    public static #MultipartPart of(#Headers headers, #String name,
+                                    #String filename, #Body body) {
+        MultipartPart p = heap MultipartPart();
+        p.hdrs = #headers;
+        p.partName = #name;
+        p.partFilename = #filename;
+        p.content = #body;
+        return #p;
+    }
+
+    /**
+     * A simple form field: `Content-Disposition: form-data; name="..."`
+     * with the value as a UTF-8 [`StringBody`](StringBody.cajeta).
+     */
+    public static #MultipartPart field(String name, String value) {
+        Headers h = heap Headers();
+        String disp = MultipartPart.disposition(name, null);
+        h.add("Content-Disposition", disp);
+        StringBody sb = StringBody.of(value);
+        Body b = #sb;
+        String n2 = MultipartPart.copyOf(name);
+        return MultipartPart.of(#h, #n2, null, #b);
+    }
+
+    /**
+     * A file part: `Content-Disposition` with `filename`, plus a
+     * `Content-Type` header, over the adopted `data[0..len)`.
+     */
+    public static #MultipartPart file(String name, String filename,
+                                      #MediaType type, #int8[] data, int32 len) {
+        Headers h = heap Headers();
+        String disp = MultipartPart.disposition(name, filename);
+        h.add("Content-Disposition", disp);
+        String tv = type.essence();
+        h.add("Content-Type", tv);
+        BytesBody bb = BytesBody.of(#data, len, #type);
+        Body b = #bb;
+        String n2 = MultipartPart.copyOf(name);
+        String f2 = MultipartPart.copyOf(filename);
+        return MultipartPart.of(#h, #n2, #f2, #b);
+    }
+
+    /** Copy `s` into a fresh owned String. */
+    static #String copyOf(String s) {
+        int32 n = s.byteLength();
+        int8[] b = s.toBytes();
+        String out = heap String(#b, n);
+        return #out;
+    }
+
+    /**
+     * Build a `Content-Disposition` value. Names are emitted
+     * **quoted-string** (RFC 7578 §4.2), with `\` and `"` backslash-
+     * escaped so a quote in a field name can't break out of the header.
+     */
+    static #String disposition(String name, String filename) {
+        String out = "form-data; name=\"";
+        out = out + MultipartPart.escapeQuoted(name) + "\"";
+        if (filename != null) {
+            out = out + "; filename=\"" + MultipartPart.escapeQuoted(filename) + "\"";
+        }
+        String owned = MultipartPart.copyOf(out);
+        return #owned;
+    }
+
+    /** Backslash-escape `\` and `"` for a quoted-string parameter. */
+    static #String escapeQuoted(String s) {
+        int32 n = s.byteLength();
+        int8[] out = heap int8[n * 2];
+        int32 o = 0;
+        int32 i = 0;
+        while (i < n) {
+            int32 b = ((int32) s.byteAt(i)) & 0xFF;
+            if (b == 92 || b == 34) {           // '\' or '"'
+                out[o] = (int8) 92;
+                o = o + 1;
+            }
+            out[o] = (int8) b;
+            o = o + 1;
+            i = i + 1;
+        }
+        int8[] exact = heap int8[o];
+        int32 k = 0;
+        while (k < o) { exact[k] = out[k]; k = k + 1; }
+        String s2 = heap String(#exact, o);
+        return #s2;
+    }
+
+    /** The part's headers (borrow). */
+    public Headers headers() {
+        return this.hdrs;
+    }
+
+    /** The `Content-Disposition` `name` parameter (borrow), or null. */
+    public String name() {
+        return this.partName;
+    }
+
+    /** The `Content-Disposition` `filename` parameter, or null for a field. */
+    public String filename() {
+        return this.partFilename;
+    }
+
+    /** The part's content as a [`Body`](Body.cajeta) (borrow). */
+    public Body body() {
+        return this.content;
+    }
+
+    /** The part's declared media type, or null when it declared none. */
+    public MediaType contentType() {
+        return this.content.contentType();
+    }
+}

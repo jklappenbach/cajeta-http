@@ -1,0 +1,158 @@
+package dev.cajeta.http.body;
+
+/**
+ * Pure byte- and text-scanning helpers for the multipart codec
+ * (`http:1.3d`) — delimiter/blank-line search over a raw buffer, and
+ * `Content-Disposition` parameter extraction.
+ *
+ * They live apart from [`MultipartParser`](MultipartParser.cajeta)
+ * because they are genuinely pure — the buffer and its length come in as
+ * arguments, no parser state is touched — which keeps them trivially
+ * testable and lets the parser file stay about its state machine.
+ */
+public final class MultipartScan {
+
+    /** True iff `buf[at .. at+2)` is CRLF. */
+    static boolean isCrlfAt(int8[] buf, int32 len, int32 at) {
+        if (at + 1 >= len) {
+            return false;
+        }
+        return ((int32) buf[at] & 0xFF) == 13
+            && ((int32) buf[at + 1] & 0xFF) == 10;
+    }
+
+    /** True iff `buf[at ..]` starts with `--<boundary>`. */
+    static boolean isDashBoundaryAt(int8[] buf, int32 len, String bound, int32 at) {
+        int32 bl = bound.byteLength();
+        if (at + 2 + bl > len) {
+            return false;
+        }
+        if (((int32) buf[at] & 0xFF) != 45
+                || ((int32) buf[at + 1] & 0xFF) != 45) {
+            return false;
+        }
+        int32 i = 0;
+        while (i < bl) {
+            if (((int32) buf[at + 2 + i] & 0xFF)
+                    != (((int32) bound.byteAt(i)) & 0xFF)) {
+                return false;
+            }
+            i = i + 1;
+        }
+        return true;
+    }
+
+    /** Index of the next CRLF-preceded `--boundary` at/after `from`, or -1. */
+    static int32 findDelimiter(int8[] buf, int32 len, String bound, int32 from) {
+        int32 bl = bound.byteLength();
+        int32 i = from;
+        while (i + 4 + bl <= len) {
+            if (MultipartScan.isCrlfAt(buf, len, i)
+                    && MultipartScan.isDashBoundaryAt(buf, len, bound, i + 2)) {
+                return i;
+            }
+            i = i + 1;
+        }
+        return -1;
+    }
+
+    /** Index of CRLFCRLF at/after `from`, or -1. */
+    static int32 findBlankLine(int8[] buf, int32 len, int32 from) {
+        int32 i = from;
+        while (i + 4 <= len) {
+            if (MultipartScan.isCrlfAt(buf, len, i)
+                    && MultipartScan.isCrlfAt(buf, len, i + 2)) {
+                return i;
+            }
+            i = i + 1;
+        }
+        return -1;
+    }
+
+    /**
+     * The value of a `Content-Disposition` parameter (`name`,
+     * `filename`), unquoting a quoted-string and unescaping `\`. Returns
+     * null when the header or the parameter is absent.
+     */
+    static #String dispositionParam(String disp, String want) {
+        if (disp == null) {
+            return null;
+        }
+        int32 n = disp.byteLength();
+        int32 wlen = want.byteLength();
+        int32 i = 0;
+        while (i < n) {
+            // Advance to the start of a parameter (past a ';' + OWS).
+            if ((((int32) disp.byteAt(i)) & 0xFF) == 59) {          // ';'
+                int32 s = i + 1;
+                while (s < n && ((((int32) disp.byteAt(s)) & 0xFF) == 32
+                                 || (((int32) disp.byteAt(s)) & 0xFF) == 9)) {
+                    s = s + 1;                                      // OWS
+                }
+                if (s + wlen < n && MultipartScan.matchesIgnoreCase(disp, s, want)
+                        && (((int32) disp.byteAt(s + wlen)) & 0xFF) == 61) {   // '='
+                    return MultipartScan.readParamValue(disp, s + wlen + 1);
+                }
+            }
+            i = i + 1;
+        }
+        return null;
+    }
+
+    static boolean matchesIgnoreCase(String s, int32 at, String token) {
+        int32 t = token.byteLength();
+        int32 j = 0;
+        while (j < t) {
+            int32 a = ((int32) s.byteAt(at + j)) & 0xFF;
+            int32 b = ((int32) token.byteAt(j)) & 0xFF;
+            if (a >= 65 && a <= 90) { a = a + 32; }
+            if (b >= 65 && b <= 90) { b = b + 32; }
+            if (a != b) {
+                return false;
+            }
+            j = j + 1;
+        }
+        return true;
+    }
+
+    /** Read a parameter value at `at`: quoted-string or bare token. */
+    static #String readParamValue(String s, int32 at) {
+        int32 n = s.byteLength();
+        int8[] out = heap int8[n];
+        int32 o = 0;
+        int32 i = at;
+        if (i < n && (((int32) s.byteAt(i)) & 0xFF) == 34) {        // '"'
+            i = i + 1;
+            while (i < n) {
+                int32 c = ((int32) s.byteAt(i)) & 0xFF;
+                if (c == 92 && i + 1 < n) {                         // '\' escape
+                    out[o] = s.byteAt(i + 1);
+                    o = o + 1;
+                    i = i + 2;
+                } else if (c == 34) {
+                    i = n;
+                } else {
+                    out[o] = (int8) c;
+                    o = o + 1;
+                    i = i + 1;
+                }
+            }
+        } else {
+            while (i < n) {
+                int32 c = ((int32) s.byteAt(i)) & 0xFF;
+                if (c == 59 || c == 32 || c == 9) {
+                    i = n;
+                } else {
+                    out[o] = (int8) c;
+                    o = o + 1;
+                    i = i + 1;
+                }
+            }
+        }
+        int8[] exact = heap int8[o];
+        int32 k = 0;
+        while (k < o) { exact[k] = out[k]; k = k + 1; }
+        String v = heap String(#exact, o);
+        return #v;
+    }
+}
