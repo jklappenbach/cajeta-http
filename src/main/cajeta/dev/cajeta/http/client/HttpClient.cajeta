@@ -14,7 +14,15 @@ import cajeta.io.net.TimedOutException;
 import cajeta.concurrent.Tasks;
 import cajeta.time.Clock;
 import cajeta.time.Instant;
+import cajeta.hash.Sha256;
+import cajeta.io.file.File;
+import cajeta.io.file.FileWriter;
+import cajeta.io.file.OpenMode;
+import cajeta.io.net.AsyncReader;
+import dev.cajeta.http.HttpException;
 import dev.cajeta.http.Method;
+import dev.cajeta.http.body.Body;
+import dev.cajeta.http.h1.ChunkedEncoder;
 import dev.cajeta.http.HttpRequest;
 import dev.cajeta.http.HttpResponse;
 import dev.cajeta.http.TooManyRedirectsException;
@@ -555,6 +563,234 @@ public class HttpClient {
         return false;
     }
 
+    // ----- download (http:1.4d) --------------------------------------------
+
+    /**
+     * `GET url` and **stream** the response body to `destPath`
+     * (`cajeta.io.file`, create-or-truncate), following redirects with
+     * [`sendFollowing`](#sendFollowing)'s exact table, and return the
+     * **running [`Sha256`](../../../../cajeta/hash/Sha256.cajeta)** fed
+     * with every stored byte (`.hex()` / `.digest()` read it out). The
+     * body never materializes: one 8 KiB scratch and one drained
+     * [`BodyReader`](../h1/BodyReader.cajeta) piece are the whole
+     * in-flight footprint, so a multi-GiB artifact downloads flat.
+     *
+     * Only the FINAL response streams to the file — redirect (and any
+     * other non-2xx) bodies are drained in memory as usual, so a 302's
+     * HTML never pollutes the artifact. A non-2xx final answer raises
+     * [`HttpException`](../HttpException.cajeta) (`"downloadTo: HTTP
+     * <status>"`) after the (empty) file is closed. The per-exchange
+     * budget ([`exchangeTimeout`](#exchangeTimeout)) applies per hop;
+     * downloads do NOT auto-retry (a mid-stream retry would corrupt the
+     * file — resume support is a later increment).
+     *
+     * @EntryPoint
+     */
+    public #Sha256 downloadTo(String url, String destPath) {
+        Uri uri = Uri.parse(url);
+        HttpRequest req = HttpRequest.fromUri("GET", uri);
+        FileWriter out = File.openWrite(destPath, OpenMode.WRITE);
+        Sha256 hasher = heap Sha256();
+
+        HttpResponse first = this.sendDownload(uri, req, out, hasher);
+        String loc = HttpClient.locationOf(first);
+        if (loc == null) {
+            out.flush();
+            out.close();
+            HttpClient.requireSuccess(first);
+            return #hasher;
+        }
+
+        boolean origHttps = HttpClient.isHttps(uri.getScheme());
+        String origHost = uri.getHost();
+        int32 origPort = uri.getPort();
+        if (origPort < 0) {
+            origPort = origHttps ? 443 : 80;
+        }
+        String baseUrl = uri.toString();
+        int32 hops = 0;
+        while (true) {
+            if (hops >= HttpClient.MAX_REDIRECTS) {
+                out.close();
+                throw heap TooManyRedirectsException("too many redirects", hops);
+            }
+            Uri base = Uri.parse(baseUrl);
+            Uri next = Uri.resolve(base, loc);
+            boolean sameOrig = HttpClient.originMatches(next, origHttps,
+                                                        origHost, origPort);
+            // A download is always a bodyless GET, so the rewrite table
+            // degenerates: method GET, no body forwarded.
+            HttpRequest hopReq = HttpClient.redirectedRequest(
+                req, "GET", false, next, sameOrig);
+            HttpResponse resp = this.sendDownload(next, hopReq, out, hasher);
+            hops = hops + 1;
+
+            String loc2 = HttpClient.locationOf(resp);
+            if (loc2 == null) {
+                out.flush();
+                out.close();
+                HttpClient.requireSuccess(resp);
+                return #hasher;
+            }
+            loc = #loc2;
+            String nb = next.toString();
+            baseUrl = #nb;
+        }
+    }
+
+    /** Raise `HttpException` for a non-2xx final download answer. */
+    static void requireSuccess(HttpResponse resp) {
+        if (resp.isSuccess()) {
+            return;
+        }
+        throw heap HttpException("downloadTo: HTTP " + resp.statusCode());
+    }
+
+    /**
+     * One download hop — [`sendOnce`](#sendOnce)'s transport dance with
+     * [`downloadExchange`](#downloadExchange) as the exchange: 2xx
+     * bodies stream to `out`/`hasher`, everything else buffers normally
+     * (so `Location` handling upstairs is unchanged). Same raise-path
+     * lease cleanup as `sendOnce`; TLS stays dial-per-exchange and
+     * unbudgeted (no `TlsStream.readWithin` — the 1.4c note).
+     */
+    #HttpResponse sendDownload(Uri uri, HttpRequest req,
+                               FileWriter out, Sha256 hasher) {
+        int64 deadline = 0;
+        if (this.exchangeTimeoutMs > 0) {
+            Instant t0 = Clock.now();
+            deadline = t0.toEpochMilli() + (int64) this.exchangeTimeoutMs;
+        }
+        boolean https = HttpClient.isHttps(uri.getScheme());
+        String host = uri.getHost();
+        int32 port = uri.getPort();
+        if (port < 0) {
+            port = https ? 443 : 80;
+        }
+        HttpClient.ensureHost(req, uri);
+
+        if (https) {
+            req.setHeader("Connection", "close");
+            TcpStream sock = HttpClient.connectAny(host, port);
+            int8[] hostBytes = host.toBytes();
+            int32 hostLen = host.byteLength();
+            TlsStream tls = HttpClient.wrapTls(#sock, hostBytes, hostLen,
+                                               this.trustPem, this.trustLen,
+                                               this.hasTrustAnchor);
+            int8[] alpn = HttpClient.alpnHttp11();
+            tls.offerAlpn(alpn, 9);
+            tls.handshake();
+            HttpResponse rtls = HttpClient.downloadExchange(
+                tls, null, req, (int64) 0, out, hasher);
+            tls.close();
+            return #rtls;
+        }
+
+        PooledConnection pc = this.leaseFor(host, port);
+        try {
+            HttpResponse rplain = HttpClient.downloadExchange(
+                pc.stream, pc.stream, req, deadline, out, hasher);
+            boolean reuse = HttpClient.exchangeAllowsReuse(req, rplain);
+            this.pool.release(#pc, reuse);
+            return #rplain;
+        } catch (NetException e) {
+            this.pool.release(#pc, false);
+            throw e;
+        }
+    }
+
+    /**
+     * The streaming exchange: write the request, parse the head, then —
+     * for a 2xx — pump decoded body pieces straight to `out` + `hasher`
+     * as they drain from the incremental [`BodyReader`](../h1/BodyReader.cajeta)
+     * (never accumulating); for anything else, buffer the body onto the
+     * response exactly like [`readResponseTimed`](#readResponseTimed).
+     * `timed` is the deadline-capable view of `ch` (the same TcpStream,
+     * or null on the TLS path where reads stay unbounded).
+     */
+    static #HttpResponse downloadExchange(ByteChannel ch, TcpStream timed,
+                                          HttpRequest req, int64 deadline,
+                                          FileWriter out, Sha256 hasher) {
+        HttpClient.writeRequest(ch, req);
+
+        HttpParser parser = HttpParser.forResponse();
+        int8[] scratch = heap int8[8192];
+        while (!parser.isComplete()) {
+            int64 n = HttpClient.readMaybeBudgeted(ch, timed, scratch, deadline);
+            int32 got = (int32) n;
+            if (got <= 0) {
+                parser.endInput();
+                break;
+            }
+            parser.feed(scratch, got);
+        }
+
+        HttpResponse response = parser.takeResponse();
+        BodyFraming framing = parser.getFraming();
+        BodyReader body = BodyReader.forFraming(framing);
+        int8[] leftover = parser.leftover();
+        int32 leftoverLen = parser.leftoverLength();
+        if (leftoverLen > 0) {
+            body.feed(leftover, leftoverLen);
+        }
+
+        if (response.isSuccess()) {
+            // Stream: sink whatever the leftover already decoded, then
+            // feed-and-drain until the framing completes. endInput on a
+            // premature close either completes a close-delimited body or
+            // raises UnexpectedEof — which propagates to the lease
+            // cleanup in sendDownload.
+            int8[] first = body.drain();
+            int32 fl = (int32) first.count();
+            if (fl > 0) {
+                out.write(first, fl);
+                hasher.update(first, (int64) fl);
+            }
+            while (!body.isComplete()) {
+                int64 n = HttpClient.readMaybeBudgeted(ch, timed, scratch, deadline);
+                int32 got = (int32) n;
+                if (got <= 0) {
+                    body.endInput();
+                } else {
+                    body.feed(scratch, got);
+                }
+                int8[] piece = body.drain();
+                int32 pl = (int32) piece.count();
+                if (pl > 0) {
+                    out.write(piece, pl);
+                    hasher.update(piece, (int64) pl);
+                }
+            }
+            return #response;
+        }
+
+        // Non-2xx (redirects, errors): small, buffered as usual.
+        while (!body.isComplete()) {
+            int64 n = HttpClient.readMaybeBudgeted(ch, timed, scratch, deadline);
+            int32 got = (int32) n;
+            if (got <= 0) {
+                body.endInput();
+                break;
+            }
+            body.feed(scratch, got);
+        }
+        int8[] decoded = body.drain();
+        int32 decodedLen = decoded.count();
+        if (decodedLen > 0) {
+            response.body(decoded, decodedLen);
+        }
+        return #response;
+    }
+
+    /** Budgeted read via `timed` when present, plain readAsync otherwise. */
+    static int64 readMaybeBudgeted(ByteChannel ch, TcpStream timed,
+                                   int8[] scratch, int64 deadline) {
+        if (timed != null) {
+            return HttpClient.readBudgeted(timed, scratch, deadline);
+        }
+        return ch.readAsync(scratch, (int64) 0, (int64) 8192);
+    }
+
     // ----- transport wiring (static; no captured `this`) -------------------
 
     /**
@@ -586,10 +822,49 @@ public class HttpClient {
      * stateless interface calls.
      */
     static #HttpResponse exchange(ByteChannel ch, HttpRequest req) {
+        HttpClient.writeRequest(ch, req);
+        return HttpClient.readResponse(ch);
+    }
+
+    /**
+     * Write `req` to `ch` (http:1.4d streamed-upload seam). A request
+     * carrying an **unknown-length** [`Body`](../body/Body.cajeta)
+     * (`bodyModel` set, raw path empty — 1.3e drains known-length bodies
+     * at attach time, so this combination IS the streaming case) goes
+     * out as: chunked head
+     * ([`HttpSerializer.requestChunkedHead`](../h1/HttpSerializer.cajeta#requestChunkedHead)),
+     * then the body's reader pumped through the incremental
+     * [`ChunkedEncoder`](../h1/ChunkedEncoder.cajeta) one 8 KiB piece at
+     * a time — nothing materializes — and the `0 CRLF CRLF` terminator.
+     * Everything else takes the existing one-buffer serializer path.
+     */
+    static void writeRequest(ByteChannel ch, HttpRequest req) {
+        Body b = req.getBody();
+        if (b != null && !req.hasBody) {
+            int8[] head = HttpSerializer.requestChunkedHead(req);
+            int32 headLen = (int32) head.count();
+            ch.writeAllAsync(head, (int64) 0, (int64) headLen);
+            AsyncReader r = b.reader();
+            int8[] scratch = heap int8[8192];
+            boolean going = true;
+            while (going) {
+                int32 got = r.read(scratch, 0, 8192);
+                if (got <= 0) {
+                    going = false;
+                } else {
+                    int8[] wire = ChunkedEncoder.encodeChunk(scratch, got);
+                    int32 wlen = (int32) wire.count();
+                    ch.writeAllAsync(wire, (int64) 0, (int64) wlen);
+                }
+            }
+            int8[] last = ChunkedEncoder.encodeLast();
+            int32 llen = (int32) last.count();
+            ch.writeAllAsync(last, (int64) 0, (int64) llen);
+            return;
+        }
         int8[] reqBytes = HttpSerializer.request(req);
         int32 reqLen = reqBytes.count();
         ch.writeAllAsync(reqBytes, (int64) 0, (int64) reqLen);
-        return HttpClient.readResponse(ch);
     }
 
     /**
@@ -604,9 +879,7 @@ public class HttpClient {
      * unbudgeted (no `writeWithin` in the stdlib yet — plan note).
      */
     static #HttpResponse exchangeTimed(TcpStream s, HttpRequest req, int64 deadline) {
-        int8[] reqBytes = HttpSerializer.request(req);
-        int32 reqLen = reqBytes.count();
-        s.writeAllAsync(reqBytes, (int64) 0, (int64) reqLen);
+        HttpClient.writeRequest(s, req);
         return HttpClient.readResponseTimed(s, deadline);
     }
 

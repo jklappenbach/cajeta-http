@@ -621,11 +621,53 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
       (TLS exchanges unbudgeted — the plan's TLS-reuse note grows a
       twin), `Semaphore` has no timed acquire (an origin-cap park is
       outside the budget).
-  - [ ] **1.4d Streaming + download.** Request/response `Body` streaming
+  - [x] **1.4d Streaming + download.** Request/response `Body` streaming
     through the client (rides 1.3c/1.3e); `downloadTo(path)` over
     `cajeta.io.file` returning a running `cajeta.hash.Sha256` digest.
     - TDD: large download lands byte-identical, digest matches, memory
       stays bounded; streamed upload arrives intact server-side.
+    - **Shipped — upload:** `HttpClient.writeRequest` is the streaming
+      seam: a request whose `bodyModel` is unknown-length (raw path
+      empty — 1.3e drains known-length at attach, so that combination
+      IS the streaming case) goes out as
+      `HttpSerializer.requestChunkedHead` (new; request twin of
+      `responseChunkedHead`) + the body's reader pumped through
+      `ChunkedEncoder` 8 KiB at a time + `encodeLast`; nothing
+      materializes. Both exchange paths (pooled/timed and TLS) ride it.
+    - **Shipped — download:** `downloadTo(url, destPath) → #Sha256` —
+      follows redirects with 1.4b's exact table (bodyless GET, so the
+      rewrite degenerates), streams ONLY the final 2xx body to the file
+      via `downloadExchange`: head parse, then `BodyReader` fed 8 KiB
+      reads and `drain()`ed incrementally into `FileWriter` + a running
+      `Sha256` — one scratch + one drained piece is the whole in-flight
+      footprint (bounded-memory is a construction property; tests prove
+      byte-identity by re-hashing the file). Non-2xx bodies buffer as
+      usual (Location handling unchanged); a non-2xx final raises
+      `HttpException("downloadTo: HTTP <status>")`; hop cap raises
+      `TooManyRedirectsException`. Budget (`exchangeTimeout`) applies
+      per hop on the pooled path; downloads do NOT auto-retry (a
+      mid-stream retry would corrupt the file — resume is a later
+      increment). Same raise-path lease cleanup as `sendOnce`.
+    - **The 1.4b caveat, now FIXED at the serializer:** a pooled GET to
+      a bodyless `HttpResponse.notFound()` stalled 30 s — no
+      `content-length`, so the response was close-delimited while the
+      keep-alive server held the socket; the client (correctly) read
+      until the server's head-read deadline killed it.
+      `HttpSerializer.writeResponse` now stamps `content-length: 0` on
+      bodyless responses (EXCEPT 1xx/204/304 where CL is forbidden);
+      requests deliberately don't get the stamp. Killed the stall and
+      shaved the whole suite (~4.5 s → ~1.2 s/run — other bodyless
+      responses had been quietly close-delimited too).
+    - Tests (DownloadTests, +14; suite 352 → **366**, 150/150 loop,
+      tour 15/15): 4 MiB known-length download (digest + re-hashed file
+      match, one accepted connection), download through a 302, CHUNKED
+      4 MiB wire response via a raw one-shot server (decode through the
+      same pump), 404 → `HttpException`, and a 1 MiB unknown-length
+      `StreamBody` POST whose server-side echo pins the received
+      sha256 AND the observed `transfer-encoding: chunked` framing.
+    - Still open from 1.3e (server-side legs, unchanged): streamed
+      *response* through `ResponseBodyWriter`, request body as a `Body`
+      pre-buffering, per-route 413, implicit drain-on-return.
   - [ ] **1.4e `getJson()` + transparent decompression** *(gated on
     1.6)*. `getJson()` → `JsonValue`; the client advertises
     `Accept-Encoding: gzip, deflate` and inflates transparently,

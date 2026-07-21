@@ -154,6 +154,22 @@ public final class HttpSerializer {
         return s.toBytes();
     }
 
+    /**
+     * Request twin of [`responseChunkedHead`](#responseChunkedHead)
+     * (http:1.4d): **only** the request-line + header block (adding
+     * `Transfer-Encoding: chunked` when absent) + the head-terminating
+     * CRLF — no body, no chunk terminator. The head the client's
+     * streamed-upload path writes once before pumping an unknown-length
+     * [`Body`](../body/Body.cajeta) through the incremental
+     * [`ChunkedEncoder`](ChunkedEncoder.cajeta). Owned wire bytes.
+     */
+    public static #int8[] requestChunkedHead(HttpRequest req) {
+        HttpSerializer s = heap HttpSerializer();
+        s.writeRequestLine(req);
+        s.writeChunkedHead(req.getHeaders());
+        return s.toBytes();
+    }
+
     // -- request --------------------------------------------------------------
 
     /**
@@ -170,7 +186,9 @@ public final class HttpSerializer {
      */
     public HttpSerializer writeRequest(HttpRequest req) {
         this.writeRequestLine(req);
-        this.writeLengthHead(req.getHeaders(), req.hasBody, req.bodyLength());
+        // Requests never get the empty-body stamp: a bodyless GET/HEAD
+        // conventionally carries no Content-Length at all.
+        this.writeLengthHead(req.getHeaders(), req.hasBody, req.bodyLength(), false);
         this.writeBody(req.body, req.hasBody, req.bodyLength(), false);
         return this;
     }
@@ -213,7 +231,18 @@ public final class HttpSerializer {
      */
     public HttpSerializer writeResponse(HttpResponse resp) {
         this.writeStatusLine(resp);
-        this.writeLengthHead(resp.getHeaders(), resp.hasBody, resp.bodyLength());
+        // A bodyless response (except the definitionally-bodyless 1xx /
+        // 204 / 304, where Content-Length is forbidden) gets an explicit
+        // `content-length: 0` — without it the response is CLOSE-DELIMITED
+        // on the wire, and a keep-alive server that doesn't then close
+        // leaves the peer reading until a deadline kills the connection
+        // (http:1.4d found a pooled client's bodyless 404 stalling 30 s
+        // against the server's head-read budget).
+        int32 st = resp.statusCode();
+        boolean noLengthAllowed =
+            (st >= 100 && st < 200) || st == 204 || st == 304;
+        this.writeLengthHead(resp.getHeaders(), resp.hasBody,
+                             resp.bodyLength(), !noLengthAllowed);
         this.writeBody(resp.body, resp.hasBody, resp.bodyLength(), false);
         return this;
     }
@@ -247,13 +276,17 @@ public final class HttpSerializer {
      * Emit the header block for the `Content-Length` framing, supplying
      * a `Content-Length` default when a body is present and the head
      * carries no length/encoding header, then the head-terminating
-     * CRLF.
+     * CRLF. `stampEmpty` additionally emits `content-length: 0` for a
+     * BODYLESS message with no framing header of its own — responses
+     * need it so their framing self-terminates on a keep-alive
+     * connection (see `writeResponse`); requests pass false.
      */
-    void writeLengthHead(Headers headers, boolean hasBody, int32 bodyLen) {
+    void writeLengthHead(Headers headers, boolean hasBody, int32 bodyLen,
+                         boolean stampEmpty) {
         this.writeHeaderLines(headers);
+        boolean hasLen = headers.contains("Content-Length");
+        boolean hasTe = headers.contains("Transfer-Encoding");
         if (hasBody) {
-            boolean hasLen = headers.contains("Content-Length");
-            boolean hasTe = headers.contains("Transfer-Encoding");
             if (!hasLen && !hasTe) {
                 String lenValue = HttpSerializer.decimalString(bodyLen);
                 // The Headers map lowercases stored names, and the golden
@@ -261,6 +294,11 @@ public final class HttpSerializer {
                 // framing header lowercased to match (field names are
                 // case-insensitive — RFC 7230 §3.2).
                 this.writeHeaderLine("content-length", lenValue);
+            }
+        } else {
+            if (stampEmpty && !hasLen && !hasTe) {
+                String zero = HttpSerializer.decimalString(0);
+                this.writeHeaderLine("content-length", zero);
             }
         }
         this.appendCrlf();                      // blank line ends the head

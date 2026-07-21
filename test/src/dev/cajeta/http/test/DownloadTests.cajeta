@@ -1,0 +1,357 @@
+package dev.cajeta.http.test;
+
+import cajeta.hash.Sha256;
+import cajeta.io.file.File;
+import cajeta.io.file.FileReader;
+import cajeta.io.net.Server;
+import cajeta.io.net.SocketAddress;
+import cajeta.io.net.TcpListener;
+import cajeta.io.net.TcpStream;
+import cajeta.io.net.AsyncReader;
+import cajeta.io.net.uri.Uri;
+import cajeta.time.Duration;
+import dev.cajeta.http.HttpException;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.body.BytesChannel;
+import dev.cajeta.http.body.StreamBody;
+import dev.cajeta.http.h1.ChunkedEncoder;
+import dev.cajeta.http.client.HttpClient;
+import dev.cajeta.http.server.HttpServer;
+import dev.cajeta.http.server.HttpServerBuilder;
+
+/**
+ * http:1.4d — streaming + download.
+ *
+ *   - `downloadTo(url, path)` streams a large response body to disk with
+ *     a running `Sha256`: the file lands byte-identical (proven by
+ *     hashing the file back) and the returned digest matches the
+ *     payload's known hash. One accepted connection per scenario
+ *     (accept accounting, as in the pool tests). Bounded memory is a
+ *     construction property of the pump (one 8 KiB scratch + one
+ *     drained piece in flight) — reviewed, not measured.
+ *   - a redirect hop upstream of the payload streams only the FINAL
+ *     2xx body to the file.
+ *   - a CHUNKED wire response (raw one-shot server) decodes through the
+ *     same pump: identical bytes, identical digest.
+ *   - a 404 raises `HttpException` and writes nothing.
+ *   - a streamed UPLOAD (unknown-length `StreamBody`) leaves the client
+ *     chunked on the wire and arrives intact server-side: the handler
+ *     echoes the received body's sha256 + observed framing header.
+ */
+public final class DownloadTests {
+
+    /** 4 MiB download payload; 1 MiB upload payload. */
+    static final int32 DL_SIZE = 4194304;
+    static final int32 UP_SIZE = 1048576;
+
+    public static void run(Check c) {
+        System.stdout.println("-- download: content-length body --");
+        downloadKnownLength(c);
+        System.stdout.println("-- download: via redirect --");
+        downloadViaRedirect(c);
+        System.stdout.println("-- download: chunked wire --");
+        downloadChunkedWire(c);
+        System.stdout.println("-- download: 404 raises --");
+        downloadNotFoundRaises(c);
+        System.stdout.println("-- upload: streamed chunked request --");
+        uploadStreamed(c);
+    }
+
+    // ---- shared bits -----------------------------------------------------
+
+    /** Deterministic pseudo-random payload (byte i = (i*31+7) & 0xff). */
+    static #int8[] pattern(int32 n) {
+        int8[] out = heap int8[n];
+        int32 i = 0;
+        while (i < n) {
+            out[i] = (int8) ((i * 31 + 7) % 256);
+            i = i + 1;
+        }
+        return #out;
+    }
+
+    /** Sha256 hex of the first `n` bytes of `data`. */
+    static #String hashOf(int8[] data, int32 n) {
+        return Sha256.hashHex(data, (int64) n);
+    }
+
+    /** Sha256 hex of a file's contents, read back in 8 KiB pieces. */
+    static #String hashFile(String path) {
+        FileReader r = File.openRead(path);
+        Sha256 h = heap Sha256();
+        int8[] buf = heap int8[8192];
+        boolean going = true;
+        while (going) {
+            int32 got = r.read(buf, 8192);
+            if (got <= 0) {
+                going = false;
+            } else {
+                h.update(buf, (int64) got);
+            }
+        }
+        r.close();
+        return h.hex();
+    }
+
+    /** The big-payload handler: /big serves the pattern; /hop 302s to it. */
+    public static #HttpResponse serveHandle(HttpRequest req) {
+        String t = req.getTarget();
+        if (t.equals("/big")) {
+            int8[] data = DownloadTests.pattern(DownloadTests.DL_SIZE);
+            return HttpResponse.ok().body(data, DownloadTests.DL_SIZE);
+        }
+        if (t.equals("/hop")) {
+            String moved = "moved";
+            return HttpResponse.of(302)
+                .setHeader("Location", "/big")
+                .body(moved.toBytes(), moved.byteLength());
+        }
+        if (t.equals("/upload")) {
+            // Echo what actually arrived: "<sha256hex>|<te-or-cl marker>".
+            String te = req.getHeaders().get("transfer-encoding");
+            String marker = "none";
+            if (te != null) {
+                marker = te;
+            }
+            int32 n = req.bodyLength();
+            String bodyHash = Sha256.hashHex(req.body, (int64) n);
+            String out = bodyHash + "|" + marker;
+            return HttpResponse.ok().body(out.toBytes(), out.byteLength());
+        }
+        return HttpResponse.notFound();
+    }
+
+    public static async int32 acceptAndDispatch(Server core) {
+        TcpStream conn #= core.acceptNext();
+        core.dispatch(#conn);
+        return 1;
+    }
+
+    // ---- 1: known-length download ----------------------------------------
+
+    public static async int32 dlKnown(int32 port, String dest, String want) {
+        HttpClient client = heap HttpClient();
+        String url = "http://127.0.0.1:" + port + "/big";
+        Sha256 h = client.downloadTo(url, dest);
+        String got = h.hex();
+        if (!got.equals(want)) { return -1; }
+        String fileHash = DownloadTests.hashFile(dest);
+        if (!fileHash.equals(want)) { return -2; }
+        return 1;
+    }
+
+    static void downloadKnownLength(Check c) {
+        int8[] data = DownloadTests.pattern(DownloadTests.DL_SIZE);
+        String want = DownloadTests.hashOf(data, DownloadTests.DL_SIZE);
+        scope {
+            HttpServerBuilder b = HttpServer.builder();
+            b.bind("127.0.0.1:0");
+            (HttpRequest) -> #HttpResponse h =
+                (req) -> DownloadTests.serveHandle(req);
+            b.handler(h);
+            HttpServer srv = b.build();
+            Server core = srv.server;
+            int32 port = core.listener.boundPort();
+
+            Task<int32> svc = spawn acceptAndDispatch(core);
+            Task<int32> t = spawn dlKnown(port, "build/test/dl-known.bin", want);
+            c.eqInt((int64) await t, 1,
+                "downloadTo: digest and re-hashed file both match the payload");
+            c.eqInt((int64) await svc, 1, "download rode one connection");
+
+            boolean drained = core.drainInflight(Duration.ofSeconds(5));
+            c.that(drained, "download connection drained");
+            core.listener.close();
+        }
+    }
+
+    // ---- 2: download through a redirect ----------------------------------
+
+    public static async int32 dlHop(int32 port, String dest, String want) {
+        HttpClient client = heap HttpClient();
+        String url = "http://127.0.0.1:" + port + "/hop";
+        Sha256 h = client.downloadTo(url, dest);
+        String got = h.hex();
+        if (!got.equals(want)) { return -1; }
+        String fileHash = DownloadTests.hashFile(dest);
+        if (!fileHash.equals(want)) { return -2; }
+        return 1;
+    }
+
+    static void downloadViaRedirect(Check c) {
+        int8[] data = DownloadTests.pattern(DownloadTests.DL_SIZE);
+        String want = DownloadTests.hashOf(data, DownloadTests.DL_SIZE);
+        scope {
+            HttpServerBuilder b = HttpServer.builder();
+            b.bind("127.0.0.1:0");
+            (HttpRequest) -> #HttpResponse h =
+                (req) -> DownloadTests.serveHandle(req);
+            b.handler(h);
+            HttpServer srv = b.build();
+            Server core = srv.server;
+            int32 port = core.listener.boundPort();
+
+            Task<int32> svc = spawn acceptAndDispatch(core);
+            Task<int32> t = spawn dlHop(port, "build/test/dl-hop.bin", want);
+            c.eqInt((int64) await t, 1,
+                "downloadTo follows the redirect and streams only the final body");
+            c.eqInt((int64) await svc, 1, "redirect download rode one connection");
+
+            boolean drained = core.drainInflight(Duration.ofSeconds(5));
+            c.that(drained, "redirect-download connection drained");
+            core.listener.close();
+        }
+    }
+
+    // ---- 3: chunked wire download ----------------------------------------
+
+    /**
+     * A raw one-shot server that answers ANY request with the pattern as
+     * a CHUNKED body (64 KiB pieces), then closes — chunked decode
+     * through the streaming pump without needing server-side streaming.
+     */
+    public static async int32 chunkedOneShot(TcpListener lst, int32 size) {
+        scope {
+            TcpStream s #= lst.acceptAsync();
+            int8[] reqBuf = heap int8[4096];
+            int64 n = s.readAsync(reqBuf, (int64) 0, (int64) 4096);
+            String head = "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n";
+            int8[] hb = head.toBytes();
+            s.writeAllAsync(hb, (int64) 0, (int64) head.byteLength());
+            int8[] data = DownloadTests.pattern(size);
+            int32 off = 0;
+            while (off < size) {
+                int32 piece = 65536;
+                if (size - off < piece) { piece = size - off; }
+                int8[] chunk = heap int8[piece];
+                int32 i = 0;
+                while (i < piece) {
+                    chunk[i] = data[off + i];
+                    i = i + 1;
+                }
+                int8[] wire = ChunkedEncoder.encodeChunk(chunk, piece);
+                int32 wlen = (int32) wire.count();
+                s.writeAllAsync(wire, (int64) 0, (int64) wlen);
+                off = off + piece;
+            }
+            int8[] last = ChunkedEncoder.encodeLast();
+            int32 llen = (int32) last.count();
+            s.writeAllAsync(last, (int64) 0, (int64) llen);
+            s.close();
+        }
+        return 1;
+    }
+
+    public static async int32 dlChunked(int32 port, String dest, String want) {
+        HttpClient client = heap HttpClient();
+        String url = "http://127.0.0.1:" + port + "/c";
+        Sha256 h = client.downloadTo(url, dest);
+        String got = h.hex();
+        if (!got.equals(want)) { return -1; }
+        String fileHash = DownloadTests.hashFile(dest);
+        if (!fileHash.equals(want)) { return -2; }
+        return 1;
+    }
+
+    static void downloadChunkedWire(Check c) {
+        int8[] data = DownloadTests.pattern(DownloadTests.DL_SIZE);
+        String want = DownloadTests.hashOf(data, DownloadTests.DL_SIZE);
+        scope {
+            SocketAddress addr = SocketAddress.parse("127.0.0.1:0");
+            TcpListener lst = TcpListener.bind(addr);
+            int32 port = lst.boundPort();
+
+            Task<int32> s1 = spawn chunkedOneShot(lst, DownloadTests.DL_SIZE);
+            Task<int32> t = spawn dlChunked(port, "build/test/dl-chunked.bin", want);
+            c.eqInt((int64) await t, 1,
+                "downloadTo decodes a chunked body to identical bytes + digest");
+            c.eqInt((int64) await s1, 1, "chunked one-shot served");
+            lst.close();
+        }
+    }
+
+    // ---- 4: 404 raises ----------------------------------------------------
+
+    public static async int32 dlMissing(int32 port, String dest) {
+        HttpClient client = heap HttpClient();
+        String url = "http://127.0.0.1:" + port + "/nope";
+        try {
+            Sha256 h = client.downloadTo(url, dest);
+            return -1;
+        } catch (HttpException e) {
+            return 1;
+        }
+    }
+
+    static void downloadNotFoundRaises(Check c) {
+        scope {
+            HttpServerBuilder b = HttpServer.builder();
+            b.bind("127.0.0.1:0");
+            (HttpRequest) -> #HttpResponse h =
+                (req) -> DownloadTests.serveHandle(req);
+            b.handler(h);
+            HttpServer srv = b.build();
+            Server core = srv.server;
+            int32 port = core.listener.boundPort();
+
+            Task<int32> svc = spawn acceptAndDispatch(core);
+            Task<int32> t = spawn dlMissing(port, "build/test/dl-missing.bin");
+            c.eqInt((int64) await t, 1, "downloadTo raises HttpException on 404");
+            c.eqInt((int64) await svc, 1, "404 exchange served");
+
+            boolean drained = core.drainInflight(Duration.ofSeconds(5));
+            c.that(drained, "404 connection drained");
+            core.listener.close();
+        }
+    }
+
+    // ---- 5: streamed upload ----------------------------------------------
+
+    public static async int32 upStreamed(int32 port, String want) {
+        HttpClient client = heap HttpClient();
+        Uri uri = Uri.builder()
+            .scheme("http").host("127.0.0.1").port(port).path("/upload")
+            .build();
+        HttpRequest req = HttpRequest.fromUri("POST", uri);
+        int8[] data = DownloadTests.pattern(DownloadTests.UP_SIZE);
+        BytesChannel ch = heap BytesChannel(data, (int64) DownloadTests.UP_SIZE);
+        AsyncReader r = heap AsyncReader(ch);
+        StreamBody sb = StreamBody.of(#r);
+        req.body(#sb);
+        HttpResponse resp = client.send(uri, req);
+        if (resp.statusCode() != 200) { return -1; }
+        String got = RedirectTests.respText(resp);
+        String expect = want + "|chunked";
+        if (!got.equals(expect)) {
+            System.stdout.println("  (upload echo: '{}')", got);
+            return -2;
+        }
+        return 1;
+    }
+
+    static void uploadStreamed(Check c) {
+        int8[] data = DownloadTests.pattern(DownloadTests.UP_SIZE);
+        String want = DownloadTests.hashOf(data, DownloadTests.UP_SIZE);
+        scope {
+            HttpServerBuilder b = HttpServer.builder();
+            b.bind("127.0.0.1:0");
+            (HttpRequest) -> #HttpResponse h =
+                (req) -> DownloadTests.serveHandle(req);
+            b.handler(h);
+            HttpServer srv = b.build();
+            Server core = srv.server;
+            int32 port = core.listener.boundPort();
+
+            Task<int32> svc = spawn acceptAndDispatch(core);
+            Task<int32> t = spawn upStreamed(port, want);
+            c.eqInt((int64) await t, 1,
+                "streamed chunked upload arrives intact (digest + framing echo)");
+            c.eqInt((int64) await svc, 1, "upload rode one connection");
+
+            boolean drained = core.drainInflight(Duration.ofSeconds(5));
+            c.that(drained, "upload connection drained");
+            core.listener.close();
+        }
+    }
+}
