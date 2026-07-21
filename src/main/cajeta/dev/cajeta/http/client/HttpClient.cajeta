@@ -9,6 +9,12 @@ import cajeta.io.net.dns.Dns;
 import cajeta.io.net.dns.ResolveFamily;
 import cajeta.io.net.tls.TlsStream;
 import cajeta.io.net.uri.Uri;
+import cajeta.io.net.NetException;
+import cajeta.io.net.TimedOutException;
+import cajeta.concurrent.Tasks;
+import cajeta.time.Clock;
+import cajeta.time.Instant;
+import dev.cajeta.http.Method;
 import dev.cajeta.http.HttpRequest;
 import dev.cajeta.http.HttpResponse;
 import dev.cajeta.http.TooManyRedirectsException;
@@ -76,6 +82,12 @@ public class HttpClient {
     int32 trustLen;
     /** True once [`trustAnchor`](#trustAnchor) pinned an explicit anchor. */
     boolean hasTrustAnchor;
+    /** Per-exchange budget, millis; `0` = unbounded (http:1.4c). */
+    int32 exchangeTimeoutMs;
+    /** Auto-retry cap — extra attempts after the first (http:1.4c). */
+    int32 maxRetries;
+    /** Millis slept between attempts. */
+    int32 retryBackoffMs;
 
     /**
      * Maximum number of 3xx redirects [`sendFollowing`](#sendFollowing)
@@ -98,6 +110,44 @@ public class HttpClient {
         this.trustPem = #e;
         this.trustLen = 0;
         this.hasTrustAnchor = false;
+        this.exchangeTimeoutMs = 0;
+        this.maxRetries = 1;
+        this.retryBackoffMs = 100;
+    }
+
+    /**
+     * Per-exchange budget in milliseconds (http:1.4c) — the whole
+     * plaintext exchange (every response-read park) must finish inside
+     * it or the send raises
+     * [`TimedOutException`](../../../../cajeta/io/net/TimedOutException.cajeta).
+     * The deadline is computed ONCE per `send` (monotonic — retries and
+     * multi-read bodies share it, nothing resets it). `0` (the default)
+     * = unbounded. Rides `TcpStream.readWithin`, so TLS exchanges are
+     * NOT yet budgeted (no `TlsStream.readWithin` in the stdlib — see
+     * the plan note), and neither are writes or the dial. Returns `this`.
+     */
+    public HttpClient exchangeTimeout(int32 ms) {
+        this.exchangeTimeoutMs = ms;
+        return this;
+    }
+
+    /**
+     * Auto-retry policy (http:1.4c): up to `maxRetries` extra attempts,
+     * sleeping `backoffMs` (fiber-parking `Tasks.sleepMillis`) between
+     * them. A retry happens only when ALL of these hold: the request
+     * method is **idempotent** ([`Method.isIdempotent`](../Method.cajeta)
+     * — a POST never auto-retries), the fault is a **transport** fault
+     * that precedes a usable response (connection refused / reset /
+     * aborted, host or network unreachable, broken pipe — see
+     * [`retryableKind`](#retryableKind); never a `TimedOutException`,
+     * whose budget is already spent, and never a parse fault), and the
+     * exchange budget (when set) has time left. Defaults: 1 retry,
+     * 100 ms backoff. `retryPolicy(0, 0)` disables. Returns `this`.
+     */
+    public HttpClient retryPolicy(int32 maxRetries, int32 backoffMs) {
+        this.maxRetries = maxRetries;
+        this.retryBackoffMs = backoffMs;
+        return this;
     }
 
     /**
@@ -145,6 +195,38 @@ public class HttpClient {
      * @EntryPoint
      */
     public #HttpResponse send(Uri uri, HttpRequest req) {
+        // The budget is computed ONCE — retries and every read of the
+        // winning attempt share the same absolute deadline (monotonic
+        // discipline, mirroring readWithin's own).
+        int64 deadline = 0;
+        if (this.exchangeTimeoutMs > 0) {
+            Instant t0 = Clock.now();
+            deadline = t0.toEpochMilli() + (int64) this.exchangeTimeoutMs;
+        }
+        boolean idem = req.methodType().isIdempotent();
+        int32 attempt = 0;
+        while (true) {
+            try {
+                HttpResponse r = this.sendOnce(uri, req, deadline);
+                return #r;
+            } catch (NetException e) {
+                boolean again = attempt < this.maxRetries
+                    && idem
+                    && HttpClient.retryableKind(e.kind)
+                    && HttpClient.budgetLeft(deadline);
+                if (!again) {
+                    throw e;
+                }
+            }
+            attempt = attempt + 1;
+            if (this.retryBackoffMs > 0) {
+                Tasks.sleepMillis((int64) this.retryBackoffMs);
+            }
+        }
+    }
+
+    /** One attempt: resolve, connect, exchange — no retry, no rewrite. */
+    #HttpResponse sendOnce(Uri uri, HttpRequest req, int64 deadline) {
         boolean https = HttpClient.isHttps(uri.getScheme());
         String host = uri.getHost();
         int32 port = uri.getPort();
@@ -156,7 +238,9 @@ public class HttpClient {
         if (https) {
             // TLS stays dial-per-exchange (the pool's revive probe needs
             // the raw socket; see ConnectionPool's scope note) — so keep
-            // advertising close, which is honest about what happens.
+            // advertising close, which is honest about what happens. The
+            // exchange budget does NOT bound this path yet: TlsStream has
+            // no readWithin (stdlib gap, noted in the plan).
             req.setHeader("Connection", "close");
             TcpStream sock = HttpClient.connectAny(host, port);
             int8[] hostBytes = host.toBytes();
@@ -176,27 +260,59 @@ public class HttpClient {
         // cap), revive-or-dial, exchange, then park the connection idle
         // when both sides' headers and the response framing permit reuse.
         // No `Connection: close` stamp — pooling supersedes it; HTTP/1.1
-        // defaults to keep-alive.
-        PooledConnection pc = HttpClient.leaseFor(this.pool, host, port);
-        HttpResponse rplain = HttpClient.exchange(pc.stream, req);
-        boolean reuse = HttpClient.exchangeAllowsReuse(req, rplain);
-        this.pool.release(#pc, reuse);
-        return #rplain;
+        // defaults to keep-alive. A raise mid-exchange evicts the
+        // connection AND frees the lease (1.4c structured cleanup) — the
+        // socket's state is unknowable, so it never re-enters the pool.
+        PooledConnection pc = this.leaseFor(host, port);
+        try {
+            HttpResponse rplain = HttpClient.exchangeTimed(pc.stream, req, deadline);
+            boolean reuse = HttpClient.exchangeAllowsReuse(req, rplain);
+            this.pool.release(#pc, reuse);
+            return #rplain;
+        } catch (NetException e) {
+            this.pool.release(#pc, false);
+            throw e;
+        }
     }
 
     /**
      * A leased connection for `host:port`: a pool-revived idle one when
-     * available, else a fresh dial under the same lease. (A dial that
-     * RAISES leaks the lease permit — structured cleanup across a parking
-     * call is 1.4c's territory, noted in the plan.)
+     * available, else a fresh dial under the same lease. A dial that
+     * RAISES frees the lease permit before propagating (the 1.4a gap,
+     * closed here) — without it the origin's budget leaks a slot per
+     * failed dial and eventually parks every caller forever.
      */
-    static #PooledConnection leaseFor(ConnectionPool pool, String host, int32 port) {
-        PooledConnection idle = pool.acquire(host, port);
+    #PooledConnection leaseFor(String host, int32 port) {
+        PooledConnection idle = this.pool.acquire(host, port);
         if (idle != null) {
             return #idle;
         }
-        TcpStream sock = HttpClient.connectAny(host, port);
-        return pool.adopt(#sock, host, port);
+        try {
+            TcpStream sock = HttpClient.connectAny(host, port);
+            return this.pool.adopt(#sock, host, port);
+        } catch (NetException e) {
+            this.pool.releaseFailed(host, port);
+            throw e;
+        }
+    }
+
+    /** Transport faults worth a second attempt (see [`retryPolicy`](#retryPolicy)). */
+    static boolean retryableKind(int32 kind) {
+        return kind == NetException.KIND_CONNECTION_REFUSED
+            || kind == NetException.KIND_CONNECTION_RESET
+            || kind == NetException.KIND_CONNECTION_ABORTED
+            || kind == NetException.KIND_HOST_UNREACHABLE
+            || kind == NetException.KIND_NETWORK_UNREACHABLE
+            || kind == NetException.KIND_BROKEN_PIPE;
+    }
+
+    /** True while the exchange budget (if any) has time left. */
+    static boolean budgetLeft(int64 deadline) {
+        if (deadline == (int64) 0) {
+            return true;
+        }
+        Instant now = Clock.now();
+        return now.toEpochMilli() < deadline;
     }
 
     /**
@@ -477,6 +593,24 @@ public class HttpClient {
     }
 
     /**
+     * The plaintext twin of [`exchange`](#exchange), deadline-aware
+     * (http:1.4c): every response read parks at most until `deadline`
+     * (absolute epoch millis; `0` = unbounded) via
+     * [`TcpStream.readWithin`](../../../../cajeta/io/net/TcpStream.cajeta#readWithin),
+     * raising `TimedOutException` when the budget runs dry. Takes the
+     * concrete `TcpStream` — `readWithin` is not on the `ByteChannel`
+     * seam (and `TlsStream` doesn't have it), which is why the TLS path
+     * still rides the untimed `exchange`. The request write stays
+     * unbudgeted (no `writeWithin` in the stdlib yet — plan note).
+     */
+    static #HttpResponse exchangeTimed(TcpStream s, HttpRequest req, int64 deadline) {
+        int8[] reqBytes = HttpSerializer.request(req);
+        int32 reqLen = reqBytes.count();
+        s.writeAllAsync(reqBytes, (int64) 0, (int64) reqLen);
+        return HttpClient.readResponseTimed(s, deadline);
+    }
+
+    /**
      * Read one HTTP/1.1 response off `ch`: pull chunks into a local scratch
      * buffer with [`ByteChannel.readAsync`](../ByteChannel.cajeta#readAsync),
      * feeding each to the incremental [`HttpParser`](HttpParser.cajeta) until
@@ -522,6 +656,70 @@ public class HttpClient {
             response.body(decoded, decodedLen);
         }
         return #response;
+    }
+
+    /**
+     * Deadline-aware twin of [`readResponse`](#readResponse) — the same
+     * head-then-body drive with every read going through
+     * [`readBudgeted`](#readBudgeted). Kept as a separate loop rather
+     * than a lambda-parameterized one: capturing lambdas still carry the
+     * open double-free wrinkle, and the duplication is two small loops.
+     */
+    static #HttpResponse readResponseTimed(TcpStream s, int64 deadline) {
+        HttpParser parser = HttpParser.forResponse();
+        int8[] scratch = heap int8[8192];
+        while (!parser.isComplete()) {
+            int64 n = HttpClient.readBudgeted(s, scratch, deadline);
+            int32 got = (int32) n;
+            if (got <= 0) {
+                parser.endInput();      // truncated head -> UnexpectedEof
+                break;
+            }
+            parser.feed(scratch, got);
+        }
+
+        HttpResponse response = parser.takeResponse();
+        BodyFraming framing = parser.getFraming();
+
+        BodyReader body = BodyReader.forFraming(framing);
+        int8[] leftover = parser.leftover();
+        int32 leftoverLen = parser.leftoverLength();
+        if (leftoverLen > 0) {
+            body.feed(leftover, leftoverLen);
+        }
+        while (!body.isComplete()) {
+            int64 n = HttpClient.readBudgeted(s, scratch, deadline);
+            int32 got = (int32) n;
+            if (got <= 0) {
+                body.endInput();        // KIND_CLOSE completes; others -> UnexpectedEof
+                break;
+            }
+            body.feed(scratch, got);
+        }
+        int8[] decoded = body.drain();
+        int32 decodedLen = decoded.count();
+        if (decodedLen > 0) {
+            response.body(decoded, decodedLen);
+        }
+        return #response;
+    }
+
+    /**
+     * One budgeted read: unbounded `readAsync` when `deadline` is `0`,
+     * else `readWithin` with the REMAINING budget (raising
+     * `TimedOutException` here when it is already spent, so a
+     * many-small-reads body cannot overshoot the deadline by one park).
+     */
+    static int64 readBudgeted(TcpStream s, int8[] scratch, int64 deadline) {
+        if (deadline == (int64) 0) {
+            return s.readAsync(scratch, (int64) 0, (int64) 8192);
+        }
+        Instant now = Clock.now();
+        int64 remaining = deadline - now.toEpochMilli();
+        if (remaining <= (int64) 0) {
+            throw heap TimedOutException("exchange budget exhausted");
+        }
+        return s.readWithin(scratch, (int64) 0, (int64) 8192, (int32) remaining);
     }
 
     // ----- resolution ------------------------------------------------------

@@ -23,6 +23,7 @@ public final class TestMain {
         ServerTests.run(c);
         ClientTests.run(c);
         RedirectTests.run(c);
+        ClientTimeoutTests.run(c);
         WsTests.run(c);
 
         System.stdout.println("");

@@ -541,7 +541,7 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
       call (`spawn Other.f(x)` → `CAJETA_ERROR_ASYNC_R3A` "doesn't
       support instance-method calls") — only bare same-class invocations
       spawn; RedirectTests carries its own `acceptAndDispatch` copy.
-  - [ ] **1.4c Timeouts, cancellation, retry.** Per-exchange budget over
+  - [x] **1.4c Timeouts, cancellation, retry.** Per-exchange budget over
     `cajeta.concurrent.Tasks.withTimeout` (no HTTP-specific timeout
     vocabulary) plus a connect timeout; auto-retry policy — idempotent
     methods only (`Method.isIdempotent`), connect-failure or
@@ -550,6 +550,77 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
       now that 0.9's fiber-parking wait landed); POST never
       auto-retries; GET retries once on refused-then-listening; a
       cancelled exchange releases its pooled connection.
+    - **Design deviation, forced by a verified substrate gap:**
+      `Tasks.withTimeout` CANNOT bound a stalled exchange — probed
+      standalone: `taskCancel` only sets the `cancel_with` marker, and
+      nothing ever UNPARKS a fiber parked in socket I/O or a channel
+      receive, so withTimeout's cancel-and-drain `await` hangs forever
+      (a yield-free CPU body times out fine; parked bodies never
+      observe the cancel). The budget therefore rides
+      **`TcpStream.readWithin`** (NET-3.4, fiber-parking timed wait)
+      inside the client instead — and since a budgeted exchange always
+      settles, `withTimeout` composes ON TOP for callers who want the
+      combinator. **Upstream follow-up wanted: cancel-unpark** —
+      `__cajeta_fiber_cancel` should wake the target out of whatever
+      park holds it (task_wait's resume path already checks the
+      marker; channel/reactor parks need the wake + check).
+    - **Shipped:** `HttpClient.exchangeTimeout(ms)` (0 = unbounded
+      default) — one absolute deadline computed per `send`, shared by
+      retries and every response read (`readBudgeted` passes the
+      REMAINING budget to each `readWithin`; over → `TimedOutException`,
+      the OS-level type, propagated as-is). `retryPolicy(maxRetries,
+      backoffMs)` (defaults 1, 100 ms; `retryPolicy(0, 0)` disables) —
+      `send` is now a retry loop over `sendOnce`: retry iff idempotent
+      (`Method.isIdempotent`) AND transport-fault kind (refused / reset
+      / aborted / host- or net-unreachable / broken-pipe — never
+      `TimedOutException`, never a parse fault) AND budget left;
+      backoff parks via `Tasks.sleepMillis` (new in 0.9.4). Phase is
+      approximated by KIND (a mid-body reset on an idempotent GET
+      re-fetches — idempotency is the true safety guard; a
+      pre-first-byte `UnexpectedEof(bytesBuffered==0)` is deliberately
+      NOT retried — conservative, the pool's revive probe already nets
+      pooled corpses). **Structured cleanup on the raise path** (the
+      1.4a gap, closed): a dial that raises frees its permit
+      (`pool.releaseFailed`) before propagating; a mid-exchange raise
+      evicts the connection AND frees the lease (`release(pc, false)`)
+      — pinned by the maxPerOrigin=1 tests (a leak parks the follow-up
+      exchange forever). Tests +14 (suite 338 → **352**), 120/120
+      loop, tour 15/15.
+    - **Land-mine, ROOT-CAUSED + FIXED upstream: `connectAsync` threw
+      legacy integer TAGS.** The intrinsic's failure paths did
+      `__cajeta_throw(IntToPtr(0x106/0x107))` — no exception object —
+      and the catch dispatch binds a legacy int throw to the FIRST
+      clause unconditionally, so `catch (NetException e)` bound
+      `e = 0x107`; the 1.4c retry policy was the first code to READ a
+      caught dial failure (`e.kind`) and SIGSEGV'd at 0x13f (= 0x107 +
+      kind's offset). Every prior catch "worked" only by never touching
+      `e` (same disease as 1.4a's recorded "`#=` from null throws
+      uncaught `0x3`"). **Fix (cajeta, this session):** the intrinsic
+      is renamed `connectAsyncNative` and now encodes the normalized
+      `cajeta_net_err` ordinal into the tag (`0x200 + err`; the
+      hard-fail path captures `last_error` BEFORE `close()` clobbers
+      errno), and the public `TcpStream.connectAsync` is a cajeta
+      wrapper catching the tag and materializing the typed exception
+      via `NetErrors.fromErrno` — a refused dial now surfaces as a
+      catchable `ConnectionRefusedException` with a readable `kind`.
+      **cajeta `8db619a2`**; regression
+      `test/parser/ConnectFailureTypedTests.cpp` (read the caught kind;
+      live-dial path untouched). The sync `connect` / `bind` /
+      socket-alloc tag throws (0x100–0x105) remain — same cleanup
+      wanted upstream when something reads them. NOTE: this unit's
+      tests REQUIRE a toolchain containing `8db619a2` (no released tag
+      carries it yet — v0.9.4 = `1b9987d4` predates it; bump the CI pin
+      when the next release ships). Also observed on cajeta main,
+      PRE-existing: `SpawnDropTests.bareSpawnStillDrops` fails on clean
+      `4e7d68ab` — it asserts the drop-at-spawn-site contract that
+      commit replaced with scope-owned registration; stale test or
+      instrumentation gap, needs its own look.
+    - **Substrate gaps noted for later:** no `writeWithin` (request
+      writes unbudgeted), no timed-connect primitive (a SYN-blackhole
+      dial is unboundable; refused fails fast), no `TlsStream.readWithin`
+      (TLS exchanges unbudgeted — the plan's TLS-reuse note grows a
+      twin), `Semaphore` has no timed acquire (an origin-cap park is
+      outside the budget).
   - [ ] **1.4d Streaming + download.** Request/response `Body` streaming
     through the client (rides 1.3c/1.3e); `downloadTo(path)` over
     `cajeta.io.file` returning a running `cajeta.hash.Sha256` digest.

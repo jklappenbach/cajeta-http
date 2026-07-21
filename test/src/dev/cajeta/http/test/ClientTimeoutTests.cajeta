@@ -1,0 +1,330 @@
+package dev.cajeta.http.test;
+
+import cajeta.concurrent.Channel;
+import cajeta.concurrent.Tasks;
+import cajeta.io.net.NetException;
+import cajeta.io.net.Server;
+import cajeta.io.net.SocketAddress;
+import cajeta.io.net.TcpListener;
+import cajeta.io.net.TcpStream;
+import cajeta.io.net.TimedOutException;
+import cajeta.io.net.uri.Uri;
+import cajeta.lang.Optional;
+import cajeta.time.Clock;
+import cajeta.time.Duration;
+import cajeta.time.Instant;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.client.HttpClient;
+import dev.cajeta.http.server.HttpServer;
+import dev.cajeta.http.server.HttpServerBuilder;
+
+/**
+ * http:1.4c — timeouts, cancellation-as-cleanup, retry.
+ *
+ *   - a stalled-server exchange raises `TimedOutException` at the
+ *     configured per-exchange budget (rides `TcpStream.readWithin`;
+ *     `Tasks.withTimeout` CANNOT break a parked read — taskCancel never
+ *     unparks, verified by probe, recorded in the plan);
+ *   - the timed-out exchange releases its lease and evicts the
+ *     connection: with `maxPerOrigin = 1` a follow-up exchange on the
+ *     same client succeeds over a FRESH dial (permit leak would park it
+ *     forever; a pooled corpse would poison it);
+ *   - POST never auto-retries (raise surfaces immediately, no backoff
+ *     sleep observed);
+ *   - GET retries once on refused-then-listening with backoff;
+ *   - a dial that raises frees its permit (the 1.4a known gap).
+ */
+public final class ClientTimeoutTests {
+
+    /** Gate for the stalled handler. */
+    static Channel<int32> gate = null;
+
+    public static void run(Check c) {
+        System.stdout.println("-- client timeouts: stalled exchange --");
+        stalledExchangeTimesOut(c);
+        System.stdout.println("-- client timeouts: lease released on timeout --");
+        timeoutReleasesLease(c);
+        System.stdout.println("-- client retry: POST never retries --");
+        postNeverRetries(c);
+        System.stdout.println("-- client retry: GET refused-then-listening --");
+        getRetriesRefused(c);
+        System.stdout.println("-- client retry: dial raise frees the permit --");
+        dialRaiseFreesPermit(c);
+    }
+
+    // ---- handlers --------------------------------------------------------
+
+    /** `/slow` parks on the gate; everything else answers fast. */
+    public static #HttpResponse gateHandle(HttpRequest req) {
+        if (req.getTarget().equals("/slow")) {
+            Optional<int32> go = ClientTimeoutTests.gate.receive();
+            String slow = "slow";
+            return HttpResponse.ok().body(slow.toBytes(), slow.byteLength());
+        }
+        String fast = "fast";
+        return HttpResponse.ok().body(fast.toBytes(), fast.byteLength());
+    }
+
+    /**
+     * Accept + dispatch, tolerating a raise: after a client-side timeout
+     * the socket is gone, so the parked handler's late response write
+     * fails in the connection fiber — expected here, not a test failure.
+     */
+    public static async int32 acceptAndDispatchLenient(Server core) {
+        try {
+            TcpStream conn #= core.acceptNext();
+            core.dispatch(#conn);
+            return 1;
+        } catch (Exception e) {
+            return 1;
+        }
+    }
+
+    public static async int32 acceptAndDispatch(Server core) {
+        TcpStream conn #= core.acceptNext();
+        core.dispatch(#conn);
+        return 1;
+    }
+
+    // ---- 1: the stalled exchange times out at the budget -----------------
+
+    public static async int32 slowTimesOut(int32 port) {
+        HttpClient client = heap HttpClient();
+        client.exchangeTimeout(150);
+        Uri uri = Uri.builder()
+            .scheme("http").host("127.0.0.1").port(port).path("/slow")
+            .build();
+        HttpRequest req = HttpRequest.fromUri("GET", uri);
+        Instant t0 = Clock.now();
+        try {
+            HttpResponse resp = client.send(uri, req);
+            return -1;                          // a response?! the gate is shut
+        } catch (TimedOutException e) {
+            Instant t1 = Clock.now();
+            int64 ms = t1.toEpochMilli() - t0.toEpochMilli();
+            if (ms < (int64) 140) { return -2; }    // fired early
+            if (ms > (int64) 1000) { return -3; }   // fired way late
+            return 1;
+        }
+    }
+
+    static void stalledExchangeTimesOut(Check c) {
+        Channel<int32> g = heap Channel<int32>(1);
+        ClientTimeoutTests.gate = #g;
+        scope {
+            HttpServerBuilder b = HttpServer.builder();
+            b.bind("127.0.0.1:0");
+            (HttpRequest) -> #HttpResponse h =
+                (req) -> ClientTimeoutTests.gateHandle(req);
+            b.handler(h);
+            HttpServer srv = b.build();
+            Server core = srv.server;
+            int32 port = core.listener.boundPort();
+
+            Task<int32> svc = spawn acceptAndDispatchLenient(core);
+            Task<int32> t = spawn slowTimesOut(port);
+            c.eqInt((int64) await t, 1,
+                "stalled exchange raises TimedOutException at the budget");
+
+            // Unblock the parked handler so its fiber can end (its write
+            // to the closed socket raises inside the lenient dispatcher).
+            ClientTimeoutTests.gate.send(1);
+            c.eqInt((int64) await svc, 1, "server side wound down");
+
+            boolean drained = core.drainInflight(Duration.ofSeconds(5));
+            c.that(drained, "stalled-exchange connection drained");
+            core.listener.close();
+        }
+    }
+
+    // ---- 2: the timed-out exchange releases lease + evicts ---------------
+
+    public static async int32 timeoutThenReuse(int32 port) {
+        HttpClient client = heap HttpClient();
+        client.poolLimits(1, 60000);
+        client.exchangeTimeout(150);
+        Uri slowUri = Uri.builder()
+            .scheme("http").host("127.0.0.1").port(port).path("/slow")
+            .build();
+        HttpRequest slowReq = HttpRequest.fromUri("GET", slowUri);
+        try {
+            HttpResponse r1 = client.send(slowUri, slowReq);
+            return -1;
+        } catch (TimedOutException e) {
+            // expected — now the only permit must be free again, and the
+            // dead connection evicted, or this second exchange wedges.
+        }
+        Uri fastUri = Uri.builder()
+            .scheme("http").host("127.0.0.1").port(port).path("/fast")
+            .build();
+        HttpRequest fastReq = HttpRequest.fromUri("GET", fastUri);
+        HttpResponse r2 = client.send(fastUri, fastReq);
+        if (r2.statusCode() != 200) { return -2; }
+        return 1;
+    }
+
+    static void timeoutReleasesLease(Check c) {
+        Channel<int32> g = heap Channel<int32>(1);
+        ClientTimeoutTests.gate = #g;
+        scope {
+            HttpServerBuilder b = HttpServer.builder();
+            b.bind("127.0.0.1:0");
+            (HttpRequest) -> #HttpResponse h =
+                (req) -> ClientTimeoutTests.gateHandle(req);
+            b.handler(h);
+            HttpServer srv = b.build();
+            Server core = srv.server;
+            int32 port = core.listener.boundPort();
+
+            // Two accepts: the timed-out socket, then the fresh dial.
+            Task<int32> s1 = spawn acceptAndDispatchLenient(core);
+            Task<int32> s2 = spawn acceptAndDispatchLenient(core);
+            Task<int32> t = spawn timeoutThenReuse(port);
+            c.eqInt((int64) await t, 1,
+                "timed-out exchange freed its lease and evicted the connection");
+
+            ClientTimeoutTests.gate.send(1);
+            c.eqInt((int64) await s1, 1, "first server fiber wound down");
+            c.eqInt((int64) await s2, 1, "second server fiber wound down");
+
+            boolean drained = core.drainInflight(Duration.ofSeconds(5));
+            c.that(drained, "timeout-release connections drained");
+            core.listener.close();
+        }
+    }
+
+    // ---- 3: POST never auto-retries --------------------------------------
+
+    public static async int32 postRefused(int32 port) {
+        HttpClient client = heap HttpClient();
+        client.retryPolicy(2, 400);            // a retry would cost >= 400ms
+        Uri uri = Uri.builder()
+            .scheme("http").host("127.0.0.1").port(port).path("/x")
+            .build();
+        HttpRequest req = HttpRequest.fromUri("POST", uri);
+        String data = "data";
+        req.body(data.toBytes(), data.byteLength());
+        Instant t0 = Clock.now();
+        try {
+            HttpResponse resp = client.send(uri, req);
+            return -1;                          // nothing listens there
+        } catch (NetException e) {
+            Instant t1 = Clock.now();
+            int64 ms = t1.toEpochMilli() - t0.toEpochMilli();
+            if (ms >= (int64) 350) { return -2; }   // it slept — it retried
+            return 1;
+        }
+    }
+
+    /** A loopback port with nothing listening (bind :0, note, close). */
+    static int32 deadPort() {
+        SocketAddress addr = SocketAddress.parse("127.0.0.1:0");
+        TcpListener lst = TcpListener.bind(addr);
+        int32 port = lst.boundPort();
+        lst.close();
+        return port;
+    }
+
+    static void postNeverRetries(Check c) {
+        int32 port = ClientTimeoutTests.deadPort();
+        scope {
+            Task<int32> t = spawn postRefused(port);
+            c.eqInt((int64) await t, 1,
+                "refused POST raises immediately — no auto-retry");
+        }
+    }
+
+    // ---- 4: GET retries once on refused-then-listening -------------------
+
+    public static async int32 getWithRetry(int32 port) {
+        HttpClient client = heap HttpClient();
+        client.retryPolicy(1, 250);
+        Uri uri = Uri.builder()
+            .scheme("http").host("127.0.0.1").port(port).path("/fast")
+            .build();
+        HttpRequest req = HttpRequest.fromUri("GET", uri);
+        HttpResponse resp = client.send(uri, req);
+        if (resp.statusCode() != 200) { return -1; }
+        return 1;
+    }
+
+    static void getRetriesRefused(Check c) {
+        int32 port = ClientTimeoutTests.deadPort();
+        scope {
+            // Attempt 1 fires into the dead port (refused) well before the
+            // 250ms backoff elapses; the server binds in that window and
+            // serves attempt 2.
+            Task<int32> t = spawn getWithRetry(port);
+            Tasks.sleepMillis((int64) 60);
+
+            HttpServerBuilder b = HttpServer.builder();
+            b.bind("127.0.0.1:" + port);
+            (HttpRequest) -> #HttpResponse h =
+                (req) -> ClientTimeoutTests.gateHandle(req);
+            b.handler(h);
+            HttpServer srv = b.build();
+            Server core = srv.server;
+
+            Task<int32> svc = spawn acceptAndDispatch(core);
+            c.eqInt((int64) await t, 1,
+                "GET retried after backoff and hit the now-listening server");
+            c.eqInt((int64) await svc, 1, "retry attempt was served");
+
+            boolean drained = core.drainInflight(Duration.ofSeconds(5));
+            c.that(drained, "retry connection drained");
+            core.listener.close();
+        }
+    }
+
+    // ---- 5: a dial that raises frees its permit (1.4a gap) ---------------
+
+    public static async int32 dialFailThenSucceed(int32 port,
+                                                  Channel<int32> bound) {
+        HttpClient client = heap HttpClient();
+        client.poolLimits(1, 60000);
+        client.retryPolicy(0, 0);              // no auto-retry — raw raise
+        Uri uri = Uri.builder()
+            .scheme("http").host("127.0.0.1").port(port).path("/fast")
+            .build();
+        HttpRequest r1 = HttpRequest.fromUri("GET", uri);
+        try {
+            HttpResponse a = client.send(uri, r1);
+            return -1;                          // nothing listens yet
+        } catch (NetException e) {
+            // expected: refused. The single permit must be free again.
+        }
+        Optional<int32> ok = bound.receive();   // wait for the server
+        HttpRequest r2 = HttpRequest.fromUri("GET", uri);
+        HttpResponse b = client.send(uri, r2);
+        if (b.statusCode() != 200) { return -2; }
+        return 1;
+    }
+
+    static void dialRaiseFreesPermit(Check c) {
+        int32 port = ClientTimeoutTests.deadPort();
+        Channel<int32> bound = heap Channel<int32>(1);
+        scope {
+            Task<int32> t = spawn dialFailThenSucceed(port, bound);
+            Tasks.sleepMillis((int64) 60);      // let the dead dial fail
+
+            HttpServerBuilder b = HttpServer.builder();
+            b.bind("127.0.0.1:" + port);
+            (HttpRequest) -> #HttpResponse h =
+                (req) -> ClientTimeoutTests.gateHandle(req);
+            b.handler(h);
+            HttpServer srv = b.build();
+            Server core = srv.server;
+            bound.send(1);
+
+            Task<int32> svc = spawn acceptAndDispatch(core);
+            c.eqInt((int64) await t, 1,
+                "a failed dial freed its permit; the next exchange got it");
+            c.eqInt((int64) await svc, 1, "post-failure exchange was served");
+
+            boolean drained = core.drainInflight(Duration.ofSeconds(5));
+            c.that(drained, "permit-test connection drained");
+            core.listener.close();
+        }
+    }
+}
