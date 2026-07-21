@@ -704,12 +704,37 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
       read-churn-read pattern); the @Native title-flag gap is recorded
       on cajeta's focus stack. **Suite now requires a compiler ≥
       `65588252`** — bump the CI pin alongside the 8db619a2 note.
-  - [ ] **1.4f Builder + proxy.** `HttpClient.builder()` — default
+  - [x] **1.4f Builder + proxy.** `HttpClient.builder()` — default
     headers, version pin, pool sizes, redirect/retry/timeout policy,
     TLS trust, HTTP proxy (absolute-form for `http`, CONNECT tunnel
     for `https`).
     - TDD: builder defaults observable on the wire; proxied loopback
       exchange through a minimal in-test proxy, both forms.
+    - **Shipped:** `HttpClientBuilder` (clone-at-build discipline;
+      unset knobs keep client defaults; drives the client's own
+      setters — `heap HttpClient()` + setters stays equivalent). New
+      client surface: `defaultHeader` (stamped only when the request
+      lacks the name — caller wins), `version` pin (stamped in `send`;
+      `null` default leaves requests alone), `redirectLimit`
+      (`redirectMax` field now backs `sendFollowing`/`downloadTo`;
+      `MAX_REDIRECTS` is the default), `proxy(host, port)`. Proxy
+      routing: plaintext dials AND pools on the proxy authority with
+      the target rewritten absolute-form (`ensureAbsoluteTarget`,
+      idempotent for retries/hops; `HttpRequest.target(t)` setter
+      added); `https` runs `connectTunnel` — `CONNECT host:port` via
+      `connectAny(proxy)`, head read to the blank line (4 KiB cap),
+      2xx required (`statusOfHead`), then the usual origin-host TLS
+      wrap rides the tunnel (proxy never sees plaintext); `downloadTo`
+      routes identically. ClientBuilderTests +13 checks (suite 398 →
+      **411**): default-header + override and version pin echoed off
+      the wire, redirectLimit(2) passes a 2-hop chain / (1) trips,
+      absolute-form proven by an HttpServer-as-proxy echoing the
+      target for a nonexistent origin, and the CONNECT leg runs a REAL
+      raw proxy (head validated, 200, bidirectional pump relay) into a
+      raw `TlsStream.server` origin — first in-repo TLS-server test;
+      self-signed P-256 cert (SAN IP:127.0.0.1, 2036 expiry) embedded
+      in the test, pinned via `trustAnchor`. 150-run loop clean, tour
+      15/15.
   - [ ] **1.4g `CookieJar`** (decision: **off by default**, explicit
     `.cookieJar(jar)` opt-in). RFC 6265 subset: `Set-Cookie` parse,
     domain/path matching, expiry/max-age, `Secure`/`HttpOnly` honored.

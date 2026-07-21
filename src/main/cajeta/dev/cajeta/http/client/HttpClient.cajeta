@@ -101,6 +101,17 @@ public class HttpClient {
     int32 retryBackoffMs;
     /** Cap on a DECODED response body, bytes (http:1.4e bomb guard). */
     int64 maxDecodedBytes;
+    /** Headers stamped on every request that lacks them (http:1.4f). */
+    Headers defaultHeaders;
+    /** Version stamped on every request, or `null` to leave requests alone. */
+    String versionPin;
+    /** Redirect-hop cap for `sendFollowing`/`downloadTo`. */
+    int32 redirectMax;
+    /** HTTP proxy authority, meaningful when [`hasProxy`](#hasProxy). */
+    String proxyHost;
+    int32 proxyPort;
+    /** True once [`proxy`](#proxy) routed this client through a proxy. */
+    boolean hasProxy;
 
     /**
      * Maximum number of 3xx redirects [`sendFollowing`](#sendFollowing)
@@ -127,6 +138,13 @@ public class HttpClient {
         this.maxRetries = 1;
         this.retryBackoffMs = 100;
         this.maxDecodedBytes = (int64) 67108864;    // 64 MiB
+        Headers dh = heap Headers();
+        this.defaultHeaders = #dh;
+        this.versionPin = null;
+        this.redirectMax = HttpClient.MAX_REDIRECTS;
+        this.proxyHost = null;
+        this.proxyPort = 0;
+        this.hasProxy = false;
     }
 
     /**
@@ -175,6 +193,66 @@ public class HttpClient {
      */
     public HttpClient decodeLimit(int64 maxBytes) {
         this.maxDecodedBytes = maxBytes;
+        return this;
+    }
+
+    /**
+     * A fresh [`HttpClientBuilder`](HttpClientBuilder.cajeta) —
+     * the fluent front door for 1.4f config (default headers, version
+     * pin, pool sizes, redirect/retry/timeout policy, TLS trust, HTTP
+     * proxy). `heap HttpClient()` + setters remains equivalent.
+     *
+     * @EntryPoint
+     */
+    public static #HttpClientBuilder builder() {
+        return heap HttpClientBuilder();
+    }
+
+    /**
+     * Stamp `name: value` on every request that does not already carry
+     * `name` — the caller's own header always wins. Returns `this`.
+     */
+    public HttpClient defaultHeader(String name, String value) {
+        this.defaultHeaders.set(name, value);
+        return this;
+    }
+
+    /**
+     * Pin the HTTP-version string every request goes out with
+     * (`"HTTP/1.0"` disables keep-alive by that version's own
+     * semantics). The default (`null`) leaves each request's version
+     * alone. Returns `this`.
+     */
+    public HttpClient version(String v) {
+        String vp = v.substring(0, v.byteLength());
+        this.versionPin = #vp;
+        return this;
+    }
+
+    /**
+     * Cap redirect hops for [`sendFollowing`](#sendFollowing) /
+     * [`downloadTo`](#downloadTo) (default
+     * [`MAX_REDIRECTS`](#MAX_REDIRECTS)). Returns `this`.
+     */
+    public HttpClient redirectLimit(int32 maxHops) {
+        this.redirectMax = maxHops;
+        return this;
+    }
+
+    /**
+     * Route every exchange through the HTTP proxy at `host:port`
+     * (http:1.4f): plaintext requests dial the proxy and send the
+     * **absolute-form** request-target (RFC 9112 §3.2.2); `https`
+     * exchanges open a **CONNECT tunnel** through it and run TLS
+     * end-to-end to the origin (the proxy never sees plaintext).
+     * Plaintext pooling keys on the proxy authority — every origin
+     * rides the same keep-alive proxy connections. Returns `this`.
+     */
+    public HttpClient proxy(String host, int32 port) {
+        String ph = host.substring(0, host.byteLength());
+        this.proxyHost = #ph;
+        this.proxyPort = port;
+        this.hasProxy = true;
         return this;
     }
 
@@ -232,6 +310,10 @@ public class HttpClient {
             deadline = t0.toEpochMilli() + (int64) this.exchangeTimeoutMs;
         }
         boolean idem = req.methodType().isIdempotent();
+        if (this.versionPin != null) {
+            req.version(this.versionPin);
+        }
+        this.applyDefaultHeaders(req);
         HttpClient.ensureAcceptEncoding(req);
         int32 attempt = 0;
         while (true) {
@@ -272,7 +354,7 @@ public class HttpClient {
             // exchange budget does NOT bound this path yet: TlsStream has
             // no readWithin (stdlib gap, noted in the plan).
             req.setHeader("Connection", "close");
-            TcpStream sock = HttpClient.connectAny(host, port);
+            TcpStream sock = this.dialSecure(host, port);
             int8[] hostBytes = host.toBytes();
             int32 hostLen = host.byteLength();
             TlsStream tls = HttpClient.wrapTls(#sock, hostBytes, hostLen,
@@ -293,7 +375,16 @@ public class HttpClient {
         // defaults to keep-alive. A raise mid-exchange evicts the
         // connection AND frees the lease (1.4c structured cleanup) — the
         // socket's state is unknowable, so it never re-enters the pool.
-        PooledConnection pc = this.leaseFor(host, port);
+        // Behind a proxy (1.4f), the dial target AND the pool key are the
+        // proxy authority, and the request-target goes absolute-form.
+        String dialHost = host;
+        int32 dialPort = port;
+        if (this.hasProxy) {
+            HttpClient.ensureAbsoluteTarget(req, host, port);
+            dialHost = this.proxyHost;
+            dialPort = this.proxyPort;
+        }
+        PooledConnection pc = this.leaseFor(dialHost, dialPort);
         try {
             HttpResponse rplain = HttpClient.exchangeTimed(pc.stream, req, deadline);
             boolean reuse = HttpClient.exchangeAllowsReuse(req, rplain);
@@ -419,6 +510,118 @@ public class HttpClient {
 
     // ----- transparent content-coding (http:1.4e) --------------------------
 
+    // ----- proxy routing (http:1.4f) ---------------------------------------
+
+    /**
+     * The socket a TLS exchange wraps: a direct dial to the origin, or —
+     * behind a proxy — a [`connectTunnel`](#connectTunnel)ed one. Either
+     * way the TLS layer above sees the origin end-to-end (SNI + verify
+     * against the origin host, never the proxy).
+     */
+    #TcpStream dialSecure(String host, int32 port) {
+        if (this.hasProxy) {
+            return this.connectTunnel(host, port);
+        }
+        return HttpClient.connectAny(host, port);
+    }
+
+    /**
+     * Open a raw tunnel to `host:port` through the proxy (RFC 9110
+     * §9.3.6): dial the proxy, send `CONNECT host:port HTTP/1.1`, and
+     * require a 2xx before handing the socket back for the TLS
+     * handshake. A non-2xx (or a malformed/truncated proxy head) raises
+     * `HttpException`. Bytes a broken proxy might send past its head
+     * would be lost — no conformant proxy speaks before the client after
+     * a 200 (the next bytes on the wire are our ClientHello).
+     */
+    #TcpStream connectTunnel(String host, int32 port) {
+        TcpStream sock = HttpClient.connectAny(this.proxyHost, this.proxyPort);
+        String hp = host + ":" + port;
+        String head = "CONNECT " + hp + " HTTP/1.1\r\nhost: " + hp + "\r\n\r\n";
+        int8[] hb = head.toBytes();
+        sock.writeAllAsync(hb, (int64) 0, (int64) head.byteLength());
+        int32 status = HttpClient.readTunnelStatus(sock);
+        if (status < 200 || status >= 300) {
+            sock.close();
+            throw heap HttpException("proxy CONNECT: HTTP " + status);
+        }
+        return #sock;
+    }
+
+    /**
+     * Read the proxy's CONNECT response head (to the blank line, 4 KiB
+     * cap) and return its status code. The head is consumed and
+     * discarded — a 2xx CONNECT response carries no body by definition.
+     */
+    static int32 readTunnelStatus(TcpStream sock) {
+        int8[] buf = heap int8[4096];
+        int32 have = 0;
+        while (true) {
+            int64 n = sock.readAsync(buf, (int64) have, (int64) (4096 - have));
+            if (n <= (int64) 0) {
+                throw heap HttpException(
+                    "proxy CONNECT: stream ended before the response head");
+            }
+            have = have + (int32) n;
+            int32 i = 3;
+            while (i < have) {
+                if (buf[i - 3] == (int8) 13 && buf[i - 2] == (int8) 10
+                    && buf[i - 1] == (int8) 13 && buf[i] == (int8) 10) {
+                    return HttpClient.statusOfHead(buf, have);
+                }
+                i = i + 1;
+            }
+            if (have >= 4096) {
+                throw heap HttpException("proxy CONNECT: response head too large");
+            }
+        }
+    }
+
+    /** The 3-digit status after the first SP of a response head. */
+    static int32 statusOfHead(int8[] buf, int32 n) {
+        int32 i = 0;
+        while (i < n && buf[i] != (int8) 32) {
+            i = i + 1;
+        }
+        if (i + 3 >= n) {
+            return -1;
+        }
+        int32 d1 = ((int32) buf[i + 1]) - 48;
+        int32 d2 = ((int32) buf[i + 2]) - 48;
+        int32 d3 = ((int32) buf[i + 3]) - 48;
+        if (d1 < 0 || d1 > 9 || d2 < 0 || d2 > 9 || d3 < 0 || d3 > 9) {
+            return -1;
+        }
+        return d1 * 100 + d2 * 10 + d3;
+    }
+
+    /**
+     * Rewrite an origin-form target to the **absolute-form** a proxy
+     * requires (RFC 9112 §3.2.2). Idempotent — a target already carrying
+     * the scheme (a retry, a redirect re-send) is left alone.
+     */
+    static void ensureAbsoluteTarget(HttpRequest req, String host, int32 port) {
+        String t = req.getTarget();
+        if (t.startsWith("http://")) {
+            return;
+        }
+        String abs = "http://" + host + ":" + port + t;
+        req.target(abs);
+    }
+
+    /** Stamp every configured default header the request lacks (1.4f). */
+    void applyDefaultHeaders(HttpRequest req) {
+        int32 n = this.defaultHeaders.count();
+        int32 i = 0;
+        while (i < n) {
+            String name = this.defaultHeaders.nameAt(i);
+            if (!req.getHeaders().contains(name)) {
+                req.setHeader(name, this.defaultHeaders.valueAt(i));
+            }
+            i = i + 1;
+        }
+    }
+
     /**
      * Advertise `Accept-Encoding: gzip, deflate` unless the caller
      * already stated a preference — theirs wins, including an explicit
@@ -528,7 +731,7 @@ public class HttpClient {
         int32 lastStatus = first.statusCode();
         int32 hops = 0;
         while (true) {
-            if (hops >= HttpClient.MAX_REDIRECTS) {
+            if (hops >= this.redirectMax) {
                 throw heap TooManyRedirectsException("too many redirects", hops);
             }
             String m2 = HttpClient.redirectMethod(lastStatus, method);
@@ -714,7 +917,7 @@ public class HttpClient {
         String baseUrl = uri.toString();
         int32 hops = 0;
         while (true) {
-            if (hops >= HttpClient.MAX_REDIRECTS) {
+            if (hops >= this.redirectMax) {
                 out.close();
                 throw heap TooManyRedirectsException("too many redirects", hops);
             }
@@ -775,7 +978,7 @@ public class HttpClient {
 
         if (https) {
             req.setHeader("Connection", "close");
-            TcpStream sock = HttpClient.connectAny(host, port);
+            TcpStream sock = this.dialSecure(host, port);
             int8[] hostBytes = host.toBytes();
             int32 hostLen = host.byteLength();
             TlsStream tls = HttpClient.wrapTls(#sock, hostBytes, hostLen,
@@ -790,7 +993,16 @@ public class HttpClient {
             return #rtls;
         }
 
-        PooledConnection pc = this.leaseFor(host, port);
+        // Same proxy routing as sendOnce: dial + pool on the proxy,
+        // absolute-form target (1.4f).
+        String dialHost = host;
+        int32 dialPort = port;
+        if (this.hasProxy) {
+            HttpClient.ensureAbsoluteTarget(req, host, port);
+            dialHost = this.proxyHost;
+            dialPort = this.proxyPort;
+        }
+        PooledConnection pc = this.leaseFor(dialHost, dialPort);
         try {
             HttpResponse rplain = HttpClient.downloadExchange(
                 pc.stream, pc.stream, req, deadline, out, hasher);

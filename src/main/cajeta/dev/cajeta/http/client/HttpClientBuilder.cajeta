@@ -1,0 +1,188 @@
+package dev.cajeta.http.client;
+
+import cajeta.lang.String;
+import cajeta.io.net.Headers;
+
+/**
+ * Fluent configuration for [`HttpClient`](HttpClient.cajeta) —
+ * http:1.4f. Collects default headers, the version pin, pool sizes,
+ * redirect/retry/timeout policy, the decode cap, a TLS trust anchor,
+ * and an HTTP proxy, then [`build`](#build)s the client by driving the
+ * client's own setters (the builder adds surface, never semantics —
+ * `heap HttpClient()` + setters stays equivalent).
+ *
+ * ```cajeta
+ * HttpClient client = HttpClient.builder()
+ *     .defaultHeader("user-agent", "cajeta-http/0.1")
+ *     .exchangeTimeout(5000)
+ *     .retryPolicy(2, 100)
+ *     .proxy("proxy.corp.test", 3128)
+ *     .build();
+ * ```
+ *
+ * Unset knobs keep the client's own defaults. The builder owns copies
+ * of everything it collects (the [`UriBuilder`](../uri/Uri.cajeta)
+ * clone discipline), so it may outlive every argument it was fed.
+ */
+public class HttpClientBuilder {
+    /** Headers stamped on requests that lack them. */
+    Headers defaults;
+    /** Version pin, or `null` to leave requests alone. */
+    String pin;
+    /** Redirect-hop cap; `-1` = keep the client default. */
+    int32 redirects;
+    /** Exchange budget millis; `-1` = keep the client default. */
+    int32 timeoutMs;
+    /** Retry policy; applied only when `hasRetry`. */
+    boolean hasRetry;
+    int32 retries;
+    int32 backoffMs;
+    /** Pool limits; applied only when `hasPool`. */
+    boolean hasPool;
+    int32 perOrigin;
+    int32 idleMs;
+    /** Decoded-body cap; `-1` = keep the client default. */
+    int64 decodeCap;
+    /** Trust-anchor PEM copy; applied only when `hasTrust`. */
+    int8[] trustPem;
+    int32 trustLen;
+    boolean hasTrust;
+    /** Proxy authority; applied only when `hasProxy`. */
+    String proxyHost;
+    int32 proxyPort;
+    boolean hasProxy;
+
+    /** Every knob at "keep the client's default". */
+    public HttpClientBuilder() {
+        Headers d = heap Headers();
+        this.defaults = #d;
+        this.pin = null;
+        this.redirects = -1;
+        this.timeoutMs = -1;
+        this.hasRetry = false;
+        this.retries = 0;
+        this.backoffMs = 0;
+        this.hasPool = false;
+        this.perOrigin = 0;
+        this.idleMs = 0;
+        this.decodeCap = (int64) -1;
+        int8[] e = heap int8[0];
+        this.trustPem = #e;
+        this.trustLen = 0;
+        this.hasTrust = false;
+        this.proxyHost = null;
+        this.proxyPort = 0;
+        this.hasProxy = false;
+    }
+
+    /** Stamp `name: value` on every request that lacks `name`. */
+    public HttpClientBuilder defaultHeader(String name, String value) {
+        this.defaults.set(name, value);
+        return this;
+    }
+
+    /** Pin the HTTP-version string every request goes out with. */
+    public HttpClientBuilder version(String v) {
+        String p = v.substring(0, v.byteLength());
+        this.pin = #p;
+        return this;
+    }
+
+    /** Cap redirect hops (`sendFollowing`/`downloadTo`). */
+    public HttpClientBuilder redirectLimit(int32 maxHops) {
+        this.redirects = maxHops;
+        return this;
+    }
+
+    /** Per-exchange budget in milliseconds (`0` = unbounded). */
+    public HttpClientBuilder exchangeTimeout(int32 ms) {
+        this.timeoutMs = ms;
+        return this;
+    }
+
+    /** Auto-retry policy (see [`HttpClient.retryPolicy`](HttpClient.cajeta#retryPolicy)). */
+    public HttpClientBuilder retryPolicy(int32 maxRetries, int32 backoffMs) {
+        this.hasRetry = true;
+        this.retries = maxRetries;
+        this.backoffMs = backoffMs;
+        return this;
+    }
+
+    /** Connection-pool limits (see [`HttpClient.poolLimits`](HttpClient.cajeta#poolLimits)). */
+    public HttpClientBuilder poolLimits(int32 maxPerOrigin, int32 idleMaxMs) {
+        this.hasPool = true;
+        this.perOrigin = maxPerOrigin;
+        this.idleMs = idleMaxMs;
+        return this;
+    }
+
+    /** Cap the size a transparently decoded body may reach. */
+    public HttpClientBuilder decodeLimit(int64 maxBytes) {
+        this.decodeCap = maxBytes;
+        return this;
+    }
+
+    /** Pin an explicit trust anchor (PEM bytes) for `https` verification. */
+    public HttpClientBuilder trustAnchor(int8[] pem, int32 len) {
+        int8[] copy = heap int8[len];
+        int32 i = 0;
+        while (i < len) {
+            copy[i] = pem[i];
+            i = i + 1;
+        }
+        this.trustPem = #copy;
+        this.trustLen = len;
+        this.hasTrust = true;
+        return this;
+    }
+
+    /** Route every exchange through the HTTP proxy at `host:port`. */
+    public HttpClientBuilder proxy(String host, int32 port) {
+        String ph = host.substring(0, host.byteLength());
+        this.proxyHost = #ph;
+        this.proxyPort = port;
+        this.hasProxy = true;
+        return this;
+    }
+
+    /**
+     * Build the client: a fresh [`HttpClient`](HttpClient.cajeta) with
+     * every configured knob applied through its own setters.
+     *
+     * @EntryPoint
+     */
+    public #HttpClient build() {
+        HttpClient c = heap HttpClient();
+        int32 n = this.defaults.count();
+        int32 i = 0;
+        while (i < n) {
+            c.defaultHeader(this.defaults.nameAt(i), this.defaults.valueAt(i));
+            i = i + 1;
+        }
+        if (this.pin != null) {
+            c.version(this.pin);
+        }
+        if (this.redirects >= 0) {
+            c.redirectLimit(this.redirects);
+        }
+        if (this.timeoutMs >= 0) {
+            c.exchangeTimeout(this.timeoutMs);
+        }
+        if (this.hasRetry) {
+            c.retryPolicy(this.retries, this.backoffMs);
+        }
+        if (this.hasPool) {
+            c.poolLimits(this.perOrigin, this.idleMs);
+        }
+        if (this.decodeCap >= (int64) 0) {
+            c.decodeLimit(this.decodeCap);
+        }
+        if (this.hasTrust) {
+            c.trustAnchor(this.trustPem, this.trustLen);
+        }
+        if (this.hasProxy) {
+            c.proxy(this.proxyHost, this.proxyPort);
+        }
+        return #c;
+    }
+}

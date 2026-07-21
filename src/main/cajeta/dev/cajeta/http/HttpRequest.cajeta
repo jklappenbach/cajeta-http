@@ -343,6 +343,16 @@ public class HttpRequest {
         return this;
     }
 
+    /**
+     * Override the request-target and return `this` — how the client
+     * rewrites origin-form to absolute-form for a proxied exchange
+     * (http:1.4f).
+     */
+    public HttpRequest target(String t) {
+        this.target = t.substring(0, t.byteLength());
+        return this;
+    }
+
     // -- accessors ----------------------------------------------------------
 
     /** The method token (`"GET"`). */

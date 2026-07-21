@@ -27,6 +27,7 @@ public final class TestMain {
         DownloadTests.run(c);
         CodingTests.run(c);
         ClientCodingTests.run(c);
+        ClientBuilderTests.run(c);
         WsTests.run(c);
 
         System.stdout.println("");
