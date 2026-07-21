@@ -1,0 +1,298 @@
+package dev.cajeta.http.test;
+
+import cajeta.io.net.IpAddress;
+import cajeta.io.net.Server;
+import cajeta.io.net.SocketAddress;
+import cajeta.io.net.TcpStream;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.server.HttpServer;
+import dev.cajeta.http.server.HttpServerBuilder;
+import dev.cajeta.http.server.ServerLimits;
+
+/**
+ * http:1.5b — server size limits. The body cap and the head caps both
+ * reject BEFORE any handler runs; the handler here echoes a sentinel
+ * ("HANDLED"), so a rejection is proven not merely by the status but by
+ * the handler's body being ABSENT.
+ *
+ *   - **body, `Content-Length`**: a declared length over `maxBodyBytes`
+ *     is `413`'d up front — no body byte buffered, handler never runs;
+ *     a length exactly AT the cap passes.
+ *   - **body, `chunked`**: an unknown-length stream is cut with `413`
+ *     the moment the decoded total crosses the cap (mid-stream), not
+ *     after buffering it all.
+ *   - **head, count/line**: a request with more header fields than
+ *     `maxHeaderCount`, or a single header line over `maxLineBytes`, is
+ *     `431 Request Header Fields Too Large` — the head caps surfaced on
+ *     `ServerLimits` (1.5b) reaching the parser.
+ */
+public final class ServerSizeLimitTests {
+
+    public static void run(Check c) {
+        System.stdout.println("-- server size: content-length 413 --");
+        contentLengthCap(c);
+        System.stdout.println("-- server size: at-limit passes --");
+        atLimitPasses(c);
+        System.stdout.println("-- server size: chunked mid-stream 413 --");
+        chunkedCap(c);
+        System.stdout.println("-- server size: header caps 431 --");
+        headerCaps(c);
+    }
+
+    // ---- server -----------------------------------------------------------
+
+    public static #HttpResponse handle(HttpRequest req) {
+        String s = "HANDLED";
+        return HttpResponse.ok().body(s.toBytes(), s.byteLength());
+    }
+
+    static #HttpServer serverWith(#ServerLimits l) {
+        HttpServerBuilder b = HttpServer.builder();
+        b.bind("127.0.0.1:0");
+        (HttpRequest) -> #HttpResponse h =
+            (req) -> ServerSizeLimitTests.handle(req);
+        b.handler(h);
+        b.serverLimits(#l);
+        return b.build();
+    }
+
+    /** Accept one connection and dispatch it (local copy — bare-spawn rule). */
+    public static async int32 acceptAndDispatch(Server core) {
+        TcpStream conn #= core.acceptNext();
+        core.dispatch(#conn);
+        return 1;
+    }
+
+    // ---- raw socket ------------------------------------------------------
+
+    static #TcpStream rawConnect(int32 port) {
+        IpAddress ip = IpAddress.loopbackV4();
+        SocketAddress a = SocketAddress.of(#ip, port);
+        return TcpStream.connectAsync(#a);
+    }
+
+    static void writeStr(TcpStream s, String text) {
+        int8[] b = text.toBytes();
+        s.writeAllAsync(b, (int64) 0, (int64) text.byteLength());
+    }
+
+    static #String readAll(TcpStream s) {
+        int8[] buf = heap int8[8192];
+        int32 have = 0;
+        try {
+            while (have < 8192) {
+                int64 n = s.readAsync(buf, (int64) have, (int64) (8192 - have));
+                if (n <= (int64) 0) { break; }
+                have = have + (int32) n;
+            }
+        } catch (Exception e) {
+        }
+        int8[] copy = heap int8[have];
+        int32 i = 0;
+        while (i < have) {
+            copy[i] = buf[i];
+            i = i + 1;
+        }
+        return heap String(#copy, have);
+    }
+
+    /** `n` copies of `unit` concatenated. */
+    static #String repeat(String unit, int32 n) {
+        String out = "";
+        int32 i = 0;
+        while (i < n) {
+            String next = out + unit;
+            out = #next;
+            i = i + 1;
+        }
+        return #out;
+    }
+
+    // ---- client fibers ---------------------------------------------------
+
+    /**
+     * A `Content-Length` of 100 against a 32-byte cap: 413, and the
+     * handler's "HANDLED" body must be ABSENT (it never ran).
+     */
+    public static async int32 overContentLength(int32 port) {
+        TcpStream s = ServerSizeLimitTests.rawConnect(port);
+        String body = ServerSizeLimitTests.repeat("x", 100);
+        ServerSizeLimitTests.writeStr(s,
+            "POST / HTTP/1.1\r\nhost: t\r\nconnection: close\r\n"
+            + "content-length: 100\r\n\r\n" + body);
+        String got = ServerSizeLimitTests.readAll(s);
+        s.close();
+        if (!got.contains("413")) {
+            System.stdout.println("  (over-CL got: '{}')", got);
+            return -1;
+        }
+        if (got.contains("HANDLED")) {
+            return -2;                  // handler ran — cap failed
+        }
+        return 1;
+    }
+
+    /** A body exactly at the cap is served (200, handler ran). */
+    public static async int32 atCap(int32 port, int32 cap) {
+        TcpStream s = ServerSizeLimitTests.rawConnect(port);
+        String body = ServerSizeLimitTests.repeat("x", cap);
+        ServerSizeLimitTests.writeStr(s,
+            "POST / HTTP/1.1\r\nhost: t\r\nconnection: close\r\n"
+            + "content-length: " + cap + "\r\n\r\n" + body);
+        String got = ServerSizeLimitTests.readAll(s);
+        s.close();
+        if (!got.contains("200") || !got.contains("HANDLED")) {
+            System.stdout.println("  (at-cap got: '{}')", got);
+            return -1;
+        }
+        return 1;
+    }
+
+    /**
+     * A chunked stream whose decoded total (200 bytes over 4 chunks)
+     * crosses a 32-byte cap: 413, handler absent.
+     */
+    public static async int32 overChunked(int32 port) {
+        TcpStream s = ServerSizeLimitTests.rawConnect(port);
+        ServerSizeLimitTests.writeStr(s,
+            "POST / HTTP/1.1\r\nhost: t\r\nconnection: close\r\n"
+            + "transfer-encoding: chunked\r\n\r\n");
+        String chunk = ServerSizeLimitTests.repeat("y", 50);   // 0x32
+        int32 i = 0;
+        boolean peerGone = false;
+        while (i < 4 && !peerGone) {
+            try {
+                ServerSizeLimitTests.writeStr(s, "32\r\n" + chunk + "\r\n");
+            } catch (Exception e) {
+                peerGone = true;        // server cut us mid-stream — expected
+            }
+            i = i + 1;
+        }
+        try {
+            ServerSizeLimitTests.writeStr(s, "0\r\n\r\n");
+        } catch (Exception e) {
+        }
+        String got = ServerSizeLimitTests.readAll(s);
+        s.close();
+        if (!got.contains("413")) {
+            System.stdout.println("  (over-chunked got: '{}')", got);
+            return -1;
+        }
+        if (got.contains("HANDLED")) {
+            return -2;
+        }
+        return 1;
+    }
+
+    /** More header fields than the cap → 431, handler absent. */
+    public static async int32 tooManyHeaders(int32 port) {
+        TcpStream s = ServerSizeLimitTests.rawConnect(port);
+        String hdrs = "";
+        int32 i = 0;
+        while (i < 12) {
+            String line = "x-h" + i + ": v\r\n";
+            String next = hdrs + line;
+            hdrs = #next;
+            i = i + 1;
+        }
+        ServerSizeLimitTests.writeStr(s,
+            "GET / HTTP/1.1\r\nhost: t\r\nconnection: close\r\n"
+            + hdrs + "\r\n");
+        String got = ServerSizeLimitTests.readAll(s);
+        s.close();
+        if (!got.contains("431")) {
+            System.stdout.println("  (too-many-headers got: '{}')", got);
+            return -1;
+        }
+        if (got.contains("HANDLED")) {
+            return -2;
+        }
+        return 1;
+    }
+
+    /** A single header line over the line cap → 431. */
+    public static async int32 lineTooLong(int32 port) {
+        TcpStream s = ServerSizeLimitTests.rawConnect(port);
+        String big = ServerSizeLimitTests.repeat("a", 300);
+        ServerSizeLimitTests.writeStr(s,
+            "GET / HTTP/1.1\r\nhost: t\r\nx-big: " + big + "\r\n\r\n");
+        String got = ServerSizeLimitTests.readAll(s);
+        s.close();
+        if (!got.contains("431")) {
+            System.stdout.println("  (line-too-long got: '{}')", got);
+            return -1;
+        }
+        return 1;
+    }
+
+    // ---- scenarios -------------------------------------------------------
+
+    static #ServerLimits smallBodyCap() {
+        ServerLimits l = ServerLimits.of(5000, 5000, (int64) 32, true);
+        return #l;
+    }
+
+    static void contentLengthCap(Check c) {
+        scope {
+            HttpServer srv = ServerSizeLimitTests.serverWith(
+                ServerSizeLimitTests.smallBodyCap());
+            Server core = srv.server;
+            int32 port = core.listener.boundPort();
+            Task<int32> s1 = spawn acceptAndDispatch(core);
+            Task<int32> t1 = spawn overContentLength(port);
+            c.eqInt((int64) await t1, 1,
+                    "over-limit content-length 413s before the handler");
+            c.eqInt((int64) await s1, 1, "over-CL connection accepted once");
+        }
+    }
+
+    static void atLimitPasses(Check c) {
+        scope {
+            HttpServer srv = ServerSizeLimitTests.serverWith(
+                ServerSizeLimitTests.smallBodyCap());
+            Server core = srv.server;
+            int32 port = core.listener.boundPort();
+            Task<int32> s1 = spawn acceptAndDispatch(core);
+            Task<int32> t1 = spawn atCap(port, 32);
+            c.eqInt((int64) await t1, 1, "a body exactly at the cap is served");
+            c.eqInt((int64) await s1, 1, "at-cap connection accepted once");
+        }
+    }
+
+    static void chunkedCap(Check c) {
+        scope {
+            HttpServer srv = ServerSizeLimitTests.serverWith(
+                ServerSizeLimitTests.smallBodyCap());
+            Server core = srv.server;
+            int32 port = core.listener.boundPort();
+            Task<int32> s1 = spawn acceptAndDispatch(core);
+            Task<int32> t1 = spawn overChunked(port);
+            c.eqInt((int64) await t1, 1,
+                    "over-limit chunked cut mid-stream with 413");
+            c.eqInt((int64) await s1, 1, "chunked connection accepted once");
+        }
+    }
+
+    static void headerCaps(Check c) {
+        scope {
+            // Head caps: at most 5 header fields, 128-byte lines.
+            ServerLimits l = ServerLimits.of(5000, 5000, (int64) 0, true);
+            l.maxHeaderCount = 5;
+            l.maxLineBytes = 128;
+            HttpServer srv = ServerSizeLimitTests.serverWith(#l);
+            Server core = srv.server;
+            int32 port = core.listener.boundPort();
+
+            Task<int32> s1 = spawn acceptAndDispatch(core);
+            Task<int32> t1 = spawn tooManyHeaders(port);
+            c.eqInt((int64) await t1, 1, "too many header fields → 431");
+            c.eqInt((int64) await s1, 1, "header-count connection accepted once");
+
+            Task<int32> s2 = spawn acceptAndDispatch(core);
+            Task<int32> t2 = spawn lineTooLong(port);
+            c.eqInt((int64) await t2, 1, "over-long header line → 431");
+            c.eqInt((int64) await s2, 1, "line-length connection accepted once");
+        }
+    }
+}

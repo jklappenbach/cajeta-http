@@ -809,12 +809,30 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
       handler-overrun 503 before the handler's own 900 ms, budget-
       bounds-a-drip with no per-phase deadline. 150-run loop clean,
       tour 15/15.
-  - [ ] **1.5b Size limits.** Per-server max body size — early 413,
+  - [x] **1.5b Size limits.** Per-server max body size — early 413,
     sharing 1.3e's parse-time enforcement (global cap here; per-route
     came with 1.3e) — and `HttpParserLimits`' header caps surfaced on
     `ServerLimits`.
     - TDD: over-limit content-length 413s before the handler runs;
       over-limit chunked cut mid-stream; exactly-at-limit passes.
+    - **Shipped:** the body-cap enforcement already existed
+      (`maxBodyBytes` → 413 up front for a declared `Content-Length`,
+      mid-stream for chunked, `errorResponse` mapping
+      `PayloadTooLargeException.httpStatus()`); this unit adds the
+      **head caps surfaced on `ServerLimits`** — `maxHeadBytes` /
+      `maxLineBytes` / `maxHeaderCount` fields mirroring
+      `HttpParserLimits`, plus `ServerLimits.toParserLimits()`, and
+      `bindAddressWithModelAndLimits` installs them onto `srv.limits`
+      **before** the accept closure captures it by value (the same
+      capture-order discipline 1.5a needed). So a server's whole
+      hardening posture — deadlines, body cap, head caps — is now
+      configured in ONE place and reaches both the read loop and the
+      parser. ServerSizeLimitTests +10 checks (suite 432 → **442**):
+      every rejection proven not just by status but by the handler's
+      "HANDLED" sentinel being ABSENT — over-`Content-Length` 413
+      before the handler, at-cap body served, chunked cut mid-stream
+      with 413, too-many-header-fields 431, over-long header line 431.
+      150-run loop clean, tour 15/15.
   - [ ] **1.5c Accept control + graceful shutdown.** Configurable
     listener backlog; `ConnectionLimits` + shed policy wired through
     `HttpServer.builder()`; `shutdown(Duration)` proven — stop

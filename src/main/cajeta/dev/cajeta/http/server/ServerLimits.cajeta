@@ -1,5 +1,7 @@
 package dev.cajeta.http.server;
 
+import dev.cajeta.http.h1.HttpParserLimits;
+
 /**
  * **Server-side request limits + hardening knobs** — plan item
  * **NET-9.6**. Where [`HttpParserLimits`](HttpParserLimits.cajeta) (NET-7.3)
@@ -102,6 +104,23 @@ public class ServerLimits {
      * handler fiber afterward. `0` (the default) disables the budget.
      */
     public int32 requestBudgetMs;
+    /**
+     * Head-size ceilings **surfaced from
+     * [`HttpParserLimits`](../h1/HttpParserLimits.cajeta)** (http:1.5b) so
+     * a server's whole hardening posture is configured in ONE place: the
+     * total head byte cap, the per-line cap, and the header-field-count
+     * cap. The [`HttpServer`](HttpServer.cajeta) installs these onto the
+     * parser at bind time (via [`toParserLimits`](#toParserLimits)); the
+     * parser rejects an over-cap head with `431 Request Header Fields
+     * Too Large` before any handler runs. A non-positive value is
+     * normalized to the [`HttpParserLimits`](../h1/HttpParserLimits.cajeta)
+     * default (unlike the body/deadline ceilings, whose `0` means
+     * "disabled" — the head caps have no "unbounded" mode; the parser
+     * must always bound the head it buffers).
+     */
+    public int32 maxHeadBytes;
+    public int32 maxLineBytes;
+    public int32 maxHeaderCount;
 
     /**
      * Field-pinning constructor at the conservative public-server defaults:
@@ -114,6 +133,9 @@ public class ServerLimits {
         this.maxBodyBytes = ServerLimits.DEFAULT_MAX_BODY_BYTES;
         this.expectContinueEnabled = true;
         this.requestBudgetMs = 0;
+        this.maxHeadBytes = 65536;      // HttpParserLimits defaults
+        this.maxLineBytes = 8192;
+        this.maxHeaderCount = 100;
     }
 
     /**
@@ -140,6 +162,19 @@ public class ServerLimits {
     /** True iff a whole-request budget is in force (positive). */
     public boolean hasRequestBudget() {
         return this.requestBudgetMs > 0;
+    }
+
+    /**
+     * The [`HttpParserLimits`](../h1/HttpParserLimits.cajeta) carrying
+     * these head ceilings (http:1.5b) — the
+     * [`HttpServer`](HttpServer.cajeta) installs it on the parser at bind
+     * time so the surfaced caps actually bound the head.
+     * [`HttpParserLimits.of`](../h1/HttpParserLimits.cajeta#of)
+     * normalizes any non-positive field to its own default.
+     */
+    public #HttpParserLimits toParserLimits() {
+        return HttpParserLimits.of(this.maxHeadBytes, this.maxLineBytes,
+                                   this.maxHeaderCount);
     }
 
     /** True iff a head-read deadline is in force (positive budget). */

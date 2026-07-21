@@ -30,6 +30,7 @@ public final class TestMain {
         ClientBuilderTests.run(c);
         ClientCookieTests.run(c);
         ServerDeadlineTests.run(c);
+        ServerSizeLimitTests.run(c);
         WsTests.run(c);
 
         System.stdout.println("");

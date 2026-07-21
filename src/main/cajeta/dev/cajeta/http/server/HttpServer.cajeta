@@ -313,6 +313,11 @@ public class HttpServer {
         if (limits != null) {
             ServerLimits l #= limits;
             srv.serverLimits #= l;
+            // http:1.5b — the ServerLimits-surfaced head caps become the
+            // parser's ceilings, BEFORE the accept closure captures
+            // `srv.limits` by value below.
+            HttpParserLimits pl = srv.serverLimits.toParserLimits();
+            srv.limits #= pl;
         }
         (HttpRequest) -> #HttpResponse h = srv.handler;
         HttpParserLimits lim = srv.limits;
