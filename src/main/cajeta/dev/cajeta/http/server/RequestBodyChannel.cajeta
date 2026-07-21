@@ -1,0 +1,83 @@
+package dev.cajeta.http.server;
+
+import cajeta.io.net.ByteChannel;
+import dev.cajeta.http.HttpException;
+
+/**
+ * A read-only [`ByteChannel`](../../../../cajeta/io/net/ByteChannel.cajeta)
+ * over a [`RequestBodyStream`](RequestBodyStream.cajeta) (http:1.3e's
+ * streaming-request leg): the bridge that lets the DECODED request body
+ * ride the stdlib `AsyncReader` every [`Body.reader`](../body/Body.cajeta)
+ * consumer already speaks. `RequestBodyStream.read()` hands back
+ * owned decoded chunks of its own sizing; this channel stashes the
+ * current chunk and copies it out at the caller's pace. EOF (`0`) once
+ * the body is fully consumed.
+ *
+ * Read-only: the write side of the interface raises — nothing may
+ * write INTO a request body.
+ */
+public final class RequestBodyChannel implements ByteChannel {
+    /** The decoding stream. **Borrowed** — the serve loop owns it. */
+    RequestBodyStream stream;
+    /** The current decoded chunk being copied out. Owned. */
+    int8[] stash;
+    int32 stashLen;
+    int32 stashPos;
+    boolean eof;
+
+    public RequestBodyChannel(RequestBodyStream stream) {
+        this.stream = stream;
+        int8[] e = heap int8[0];
+        this.stash = #e;
+        this.stashLen = 0;
+        this.stashPos = 0;
+        this.eof = false;
+    }
+
+    public int64 readAsync(int8[] buf, int64 offset, int64 length) {
+        if (this.stashPos >= this.stashLen) {
+            if (this.eof) {
+                return (int64) 0;
+            }
+            int8[] next = this.stream.read();
+            int32 n = (int32) next.count();
+            if (n == 0) {
+                this.eof = true;
+                return (int64) 0;
+            }
+            this.stash #= next;
+            this.stashLen = n;
+            this.stashPos = 0;
+        }
+        int32 avail = this.stashLen - this.stashPos;
+        int32 want = (int32) length;
+        int32 take = avail;
+        if (want < take) {
+            take = want;
+        }
+        int32 i = 0;
+        while (i < take) {
+            int64 di = offset + (int64) i;
+            buf[di] = this.stash[this.stashPos];
+            this.stashPos = this.stashPos + 1;
+            i = i + 1;
+        }
+        return (int64) take;
+    }
+
+    public int64 readWithin(int8[] buf, int64 offset, int64 length,
+                            int32 timeoutMs) {
+        // The underlying pulls ride the connection's buffered reader;
+        // per-pull deadlines belong to the serve loop's read path. Plain
+        // read here.
+        return this.readAsync(buf, offset, length);
+    }
+
+    public void writeAllAsync(int8[] data, int64 offset, int64 length) {
+        throw heap HttpException("RequestBodyChannel is read-only");
+    }
+
+    public void close() {
+        this.eof = true;
+    }
+}

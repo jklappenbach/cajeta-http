@@ -89,12 +89,18 @@ public final class RequestBodyStream {
     /** True once the post-body leftover was pushed back to the reader. */
     boolean drained;
 
-    /** Private ctor; construct through [`forRequest`](#forRequest). */
-    RequestBodyStream(BodyReader body, AsyncReader reader) {
-        this.body = body;
+    /**
+     * Private ctor; construct through [`forRequest`](#forRequest).
+     * ADOPTS the decoder — the plain param this used to be silently
+     * dropped the caller's `#br` transfer on the floor: the BodyReader
+     * was freed at the factory's return and the first `read()` called
+     * through a dangling vtable (found wiring 1.3e's streaming leg).
+     */
+    RequestBodyStream(#BodyReader body, AsyncReader reader) {
+        this.body = #body;
         this.reader = reader;
         this.pull = heap int8[RequestBodyStream.PULL];
-        this.complete = body.isComplete();
+        this.complete = this.body.isComplete();
         this.drained = false;
     }
 
@@ -125,8 +131,8 @@ public final class RequestBodyStream {
      * level entry [`forRequest`](#forRequest) wraps; this one is the test
      * seam and the building block for a caller that drives framing itself.
      */
-    public static #RequestBodyStream over(BodyReader body, AsyncReader reader) {
-        RequestBodyStream s = heap RequestBodyStream(body, reader);
+    public static #RequestBodyStream over(#BodyReader body, AsyncReader reader) {
+        RequestBodyStream s = heap RequestBodyStream(#body, reader);
         return #s;
     }
 

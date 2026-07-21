@@ -398,8 +398,9 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
       field arguments, `throw` in void, same-arity method counts, long
       doc comments — all compile), so the reproducer is this file. Cost
       a long bisect; re-check on a future toolchain before reordering.
-  - [~] **1.3e Message-model adoption.** *(core landed; the streaming
-    server/client legs stay open — see below.)* `HttpRequest`/`HttpResponse`
+  - [x] **1.3e Message-model adoption.** *(core landed 2026-07-19; the
+    streaming legs landed 2026-07-22 — see the second Shipped block.
+    Per-route 413 moved to 1.7 where the route table lives.)* `HttpRequest`/`HttpResponse`
     carry an optional `Body`; `Exchange`/`RequestBodyStream` expose the
     request body as a `Body`; `ResponseBodyWriter` accepts one; client
     `send` takes a `Body` overload; raw byte-array paths stay (wire
@@ -429,14 +430,38 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
       and a **live loopback POST of each body kind** client→server with
       the multipart payload re-parsed off the echo. Suite 282 → **299**,
       100/100 stable, tour 15/15.
-    - **Still open in this unit** (deliberately deferred, each wants its
-      own TDD pass): the streamed *response* leg through
-      `ResponseBodyWriter` (unknown-length `Body` → chunked on the wire —
-      pairs with 1.4d), `Exchange`/`RequestBodyStream` exposing the
-      request body as a `Body` before it is buffered, per-route 413
-      thresholds (the global `ServerLimits.maxBodyBytes` cap already
-      rejects pre-handler, extracted in 0.3), and implicit drain-on-return
-      with the ownership opt-out.
+    - **Shipped (streaming legs, 2026-07-22):** `writeExchange` now
+      streams an unknown-length response `Body` (`bodyModel` set, raw
+      path empty) CHUNKED through the pre-existing
+      `ResponseBodyWriter` — the pump runs AFTER the handler returns,
+      so the Body's source must outlive the handler frame (the test
+      holds it in a static `Holder`). Streaming REQUESTS are opt-in
+      via `ServerLimits.streamRequestBody` (default false — every
+      buffered handler unchanged): the loop skips the pre-dispatch
+      body read and hands the handler `request.getBody()` — a
+      `StreamBody` over the new `RequestBodyChannel` (a read-only
+      `ByteChannel` bridging `RequestBodyStream`'s owned decoded
+      chunks to the stdlib `AsyncReader` pace) — then DRAINS whatever
+      the handler left on return (`drainRequestStream`), so keep-alive
+      framing survives an ignoring handler. Streaming dispatch runs
+      inline (the request-budget handler cut would race the handler's
+      socket reads — documented on the flag); the ownership opt-out is
+      moot for sync handlers and dropped. Per-route 413 → 1.7.
+      ServerStreamingTests +6 checks (suite 458 → **464**), each
+      scenario ONE accepted connection carrying two exchanges.
+      **Two finds:** (1) `RequestBodyStream`'s ctor took its
+      `BodyReader` as a PLAIN param while `forRequest` passed `#br` —
+      the transfer silently evaporated, the decoder freed at factory
+      return, and the first `read()` called through a dangling vtable
+      (SIGSEGV; latent since the 1.3e core landed — nothing consumed
+      the factory until now). Fixed by making ctor + `over` adopt.
+      (2) A server-package SUBCLASS of `body.Body`
+      (cross-package `extends`) sends the COMPILER into unbounded
+      recursion (stack-overflow SIGSEGV) on a clean build — dodged
+      via same-package `StreamBody` + the channel bridge; minimal
+      repro owed to the cajeta repo. Also: `= #local` into a
+      class-typed STATIC now trips use-after-move when another local
+      shares the name — rename, and prefer `#=`.
     - **Trap re-learned:** `body()` returns a **borrow** of `this`, so
       `return resp.body(...)` from a `#HttpResponse` function hands back a
       local that drops at exit — the server then dereferences freed memory
@@ -976,7 +1001,10 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
 - [ ] **1.7** Router completeness — found unplanned during the
   2026-07-19 sweep: the extracted Router matches only literal and
   `{name}` (string) segments, but the spec promises typed params,
-  wildcards, and nesting.
+  wildcards, and nesting. *(Also owns **per-route 413 thresholds**,
+  moved here from 1.3e 2026-07-22 — the route table is where a
+  per-route body cap attaches; the global `ServerLimits.maxBodyBytes`
+  already rejects pre-handler.)*
   - [ ] **1.7a Typed path params.** `{id:int64}` (and the other core
     scalar types): parse at match time; a type mismatch is a **404**,
     never reaches the handler; `PathParams` grows typed getters.

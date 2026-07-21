@@ -12,6 +12,8 @@ import cajeta.io.net.TimedOutException;
 import cajeta.error.Exception;
 import dev.cajeta.http.HttpRequest;
 import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.body.Body;
+import dev.cajeta.http.body.StreamBody;
 import dev.cajeta.http.h1.HttpParser;
 import dev.cajeta.http.h1.HttpParserLimits;
 import dev.cajeta.http.server.ServerLimits;
@@ -888,6 +890,36 @@ public class HttpServer {
             writer.flush();
         }
 
+        // --- STREAMING request leg (http:1.3e, opt-in): hand the body
+        // to the handler un-buffered, drain the remainder on return so
+        // the keep-alive framing survives. Inline dispatch only (see
+        // ServerLimits.streamRequestBody's doc for the budget note).
+        if (limits.streamRequestBody) {
+            RequestBodyStream rbs = RequestBodyStream.forRequest(parser, reader);
+            // The handler-facing Body: the stdlib AsyncReader over the
+            // RequestBodyChannel bridge, wrapped by the body package's
+            // own StreamBody (a server-package Body SUBCLASS sends the
+            // compiler into unbounded recursion on a clean build —
+            // cross-package subclassing wrinkle, noted in the plan).
+            // `chan` stays frame-local: `ar` borrows it and this frame
+            // outlives the inline dispatch below.
+            RequestBodyChannel chan = heap RequestBodyChannel(rbs);
+            AsyncReader ar = heap AsyncReader(chan);
+            StreamBody sb = StreamBody.of(#ar);
+            request.bodyModel #= sb;
+            HttpResponse response = HttpServer.dispatch(handler, request);
+            try {
+                HttpServer.drainRequestStream(rbs);
+            } catch (HttpException e) {
+                // A mid-body EOF/parse fault while draining: answer the
+                // handler's response but never reuse the connection.
+                boolean ka = false;
+                return heap Exchange(#response, ka);
+            }
+            boolean keepAlive = HttpServer.decideReuse(request, response);
+            return heap Exchange(#response, keepAlive);
+        }
+
         // --- read the body under the body deadline + size cap. ---
         try {
             HttpServer.readBodyWithLimits(request, parser, framing, limits,
@@ -903,6 +935,21 @@ public class HttpServer {
         HttpResponse response = HttpServer.dispatch(handler, request);
         boolean keepAlive = HttpServer.decideReuse(request, response);
         return heap Exchange(#response, keepAlive);
+    }
+
+    /**
+     * Consume whatever the handler left of a streamed request body
+     * (http:1.3e's implicit drain-on-return) and re-stage the pipelined
+     * tail — the connection's framing is settled when this returns.
+     */
+    static void drainRequestStream(RequestBodyStream rbs) {
+        while (!rbs.isComplete()) {
+            int8[] junk = rbs.read();
+            if (junk.count() == (int64) 0) {
+                return;
+            }
+        }
+        rbs.drainToReader();
     }
 
     /**
@@ -1080,6 +1127,29 @@ public class HttpServer {
      */
     static void writeExchange(AsyncWriter writer, HttpResponse response,
                               boolean keepAlive) {
+        // The STREAMED response leg (http:1.3e): an unknown-length Body
+        // (`bodyModel` set, raw path empty — known-length bodies drained
+        // into the raw path at attach) frames CHUNKED on the wire
+        // through ResponseBodyWriter. The Body's source must outlive the
+        // handler frame — this pump runs AFTER the handler returned.
+        Body b = response.bodyModel;
+        if (b != null && !response.hasBody) {
+            ResponseBodyWriter w = ResponseBodyWriter.begin(writer, response,
+                                                            keepAlive);
+            AsyncReader r = b.reader();
+            int8[] scratch = heap int8[8192];
+            boolean going = true;
+            while (going) {
+                int32 got = r.read(scratch, 0, 8192);
+                if (got <= 0) {
+                    going = false;
+                } else {
+                    w.write(scratch, got);
+                }
+            }
+            w.finish();
+            return;
+        }
         KeepAlive.applyConnectionHeader(response.getHeaders(),
                                         response.getVersion(), keepAlive);
         int8[] bytes = HttpSerializer.response(response);

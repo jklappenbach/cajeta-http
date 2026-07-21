@@ -121,6 +121,21 @@ public class ServerLimits {
     public int32 maxHeadBytes;
     public int32 maxLineBytes;
     public int32 maxHeaderCount;
+    /**
+     * **Stream request bodies to the handler** (http:1.3e's deferred
+     * leg, default `false` = the buffered behavior every existing
+     * handler sees). When `true`, the serve loop does NOT read the body
+     * before dispatch: the handler receives it as `request.getBody()`
+     * (a [`RequestStreamBody`](RequestStreamBody.cajeta) whose
+     * `reader()` decodes incrementally off the connection), and
+     * whatever the handler leaves unread is DRAINED on return so the
+     * keep-alive framing survives. Streaming dispatch runs inline —
+     * [`requestBudgetMs`](#requestBudgetMs)'s handler cut does not
+     * apply (the handler shares the connection's reader; cutting it
+     * mid-read would race the socket) — the per-read body deadline
+     * still bounds each pull.
+     */
+    public boolean streamRequestBody;
 
     /**
      * Field-pinning constructor at the conservative public-server defaults:
@@ -136,6 +151,7 @@ public class ServerLimits {
         this.maxHeadBytes = 65536;      // HttpParserLimits defaults
         this.maxLineBytes = 8192;
         this.maxHeaderCount = 100;
+        this.streamRequestBody = false;
     }
 
     /**
