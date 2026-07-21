@@ -32,6 +32,7 @@ public final class TestMain {
         ServerDeadlineTests.run(c);
         ServerSizeLimitTests.run(c);
         StreamingCodingTests.run(c);
+        ServerTlsTests.run(c);
         WsTests.run(c);
 
         System.stdout.println("");

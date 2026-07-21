@@ -992,7 +992,7 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
     across the merged tree.
     - TDD: nested dispatch with prefix params, mount-shadowing rules,
       405 aggregation across mounts.
-- [ ] **1.8** Server TLS termination — found unplanned during the
+- [x] **1.8** Server TLS termination — found unplanned during the
   2026-07-19 sweep: the client speaks `https` (shipped: `wrapTls` +
   ALPN offer + OS-trust verify) but `HttpServer` has **no TLS path**,
   despite the spec's `.tls(serverTls)` builder line. `HttpServer.builder()
@@ -1008,6 +1008,28 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
     TLS stream.
   - Acceptance: suite + tour green with an HTTPS variant of the
     loopback exchange in each.
+  - **Shipped:** `builder().tls(cert, certLen, key, keyLen)` (PEM
+    copies) → `bindTlsAddress`: a PLAIN `TcpListener` bind — NOT
+    `TlsListener`, whose accept fuses the handshake into the accept
+    path where one hostile peer would stall the acceptor. Each
+    accepted socket goes to its own `tlsWorker` fiber: `TlsStream
+    .server` wrap + `http/1.1` ALPN + handshake (failure closes THAT
+    connection, isolated), then the exact hardened h1 loop via the
+    pre-existing `serveTlsStream` — TLS is pure termination above the
+    ByteChannel seam, so deadlines/size caps/budgets all apply
+    unchanged. Accept surface mirrors the plaintext core
+    (`acceptTlsNext`/`dispatchTls` for accept-accounting tests;
+    `serve()` runs the loop via a one-accept-per-call helper — the
+    owned-local-across-backedge rule; `shutdown` closes the listener,
+    scope-join drains workers; plaintext-core-style drain accounting
+    noted as 1.5c-tier follow-up). ServerTlsTests +10 checks (suite
+    448 → **458**): HTTPS exchange with the SHIPPED client (1.4f cert
+    fixture pinned via `trustAnchor`), plaintext-to-TLS-port clean
+    failure THEN a served TLS peer, three garbage handshakes then a
+    clean exchange, WSS upgrade + echo over `TlsStream` end-to-end.
+    Tour gains the HTTPS leg (15 → **17** checks). 150-run loop
+    clean — under a concurrently running full compiler sweep, which
+    also exercises the deadline tests' timing margins.
 
 ## 2 — Middleware
 

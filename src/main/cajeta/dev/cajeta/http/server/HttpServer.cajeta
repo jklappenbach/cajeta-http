@@ -5,6 +5,7 @@ import cajeta.io.net.Server;
 import cajeta.io.net.ServerModel;
 import cajeta.io.net.SocketAddress;
 import cajeta.io.net.TcpStream;
+import cajeta.io.net.TcpListener;
 import cajeta.io.net.AsyncReader;
 import cajeta.io.net.AsyncWriter;
 import cajeta.io.net.TimedOutException;
@@ -210,12 +211,35 @@ public class HttpServer {
      * default (fiber-per-connection) model and a `null` server (the
      * pure-logic test path).
      */
+    /**
+     * TLS-termination state (http:1.8), meaningful when
+     * [`isTls`](#isTls): the PLAIN listener the TLS server accepts on
+     * (each accepted socket is handshaked in its own worker fiber —
+     * never on the accept path, where one hostile peer would stall the
+     * acceptor) plus the PEM material every worker presents.
+     */
+    public TcpListener tlsListener;
+    int8[] tlsCert;
+    int32 tlsCertLen;
+    int8[] tlsKey;
+    int32 tlsKeyLen;
+    /** True iff this server terminates TLS (built via `.tls(...)`). */
+    public boolean isTls;
+
     public HttpServer((HttpRequest) -> #HttpResponse handler) {
         this.handler = handler;
         this.server = null;
         this.limits = heap HttpParserLimits();
         this.serverLimits = heap ServerLimits();
         this.model = ServerModel.fiberPerConnection();
+        this.tlsListener = null;
+        int8[] e = heap int8[0];
+        this.tlsCert = #e;
+        this.tlsCertLen = 0;
+        int8[] e2 = heap int8[0];
+        this.tlsKey = #e2;
+        this.tlsKeyLen = 0;
+        this.isTls = false;
     }
 
     // ----- bind / lifecycle ------------------------------------------------
@@ -332,9 +356,143 @@ public class HttpServer {
         return #srv;
     }
 
-    /** Run the accept loop synchronously (delegates to the NET-4 core). */
+    /**
+     * Bind a **TLS-terminating** HTTP server (http:1.8): a plain
+     * [`TcpListener`](../TcpListener.cajeta) on `addr` (the TLS
+     * handshake runs per connection in [`tlsWorker`](#tlsWorker), never
+     * on the accept path), the PEM material copied for the workers, and
+     * the same limits install the plaintext bind performs. ALPN
+     * advertises `http/1.1` (3.4 adds `h2`).
+     */
+    public static #HttpServer bindTlsAddress(#SocketAddress addr,
+                                             (HttpRequest) -> #HttpResponse handler,
+                                             #ServerLimits limits,
+                                             int8[] cert, int32 certLen,
+                                             int8[] key, int32 keyLen) {
+        HttpServer srv = heap HttpServer(handler);
+        if (limits != null) {
+            ServerLimits l #= limits;
+            srv.serverLimits #= l;
+            HttpParserLimits pl = srv.serverLimits.toParserLimits();
+            srv.limits #= pl;
+        }
+        int8[] certCopy = heap int8[certLen];
+        int32 i = 0;
+        while (i < certLen) {
+            certCopy[i] = cert[i];
+            i = i + 1;
+        }
+        srv.tlsCert #= certCopy;
+        srv.tlsCertLen = certLen;
+        int8[] keyCopy = heap int8[keyLen];
+        i = 0;
+        while (i < keyLen) {
+            keyCopy[i] = key[i];
+            i = i + 1;
+        }
+        srv.tlsKey #= keyCopy;
+        srv.tlsKeyLen = keyLen;
+        srv.isTls = true;
+        TcpListener lst = TcpListener.bind(addr);
+        srv.tlsListener #= lst;
+        return #srv;
+    }
+
+    /**
+     * Accept the next connection on the TLS port — still a PLAIN
+     * [`TcpStream`](../TcpStream.cajeta); the handshake belongs to the
+     * worker [`dispatchTls`](#dispatchTls) spawns. `null` once the
+     * listener has been closed by shutdown.
+     */
+    public #TcpStream acceptTlsNext() {
+        try {
+            return this.tlsListener.acceptAsync();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * Spawn the TLS worker fiber for an accepted connection — handshake
+     * plus the hardened h1 loop, every failure isolated to the fiber.
+     * The discarded spawn is scope-owned (joined at the enclosing
+     * `scope` brace), the `Server.dispatch` convention.
+     */
+    public void dispatchTls(#TcpStream conn) {
+        spawn tlsWorker(this.handler, this.limits, this.serverLimits,
+                        this.tlsCert, this.tlsCertLen,
+                        this.tlsKey, this.tlsKeyLen, #conn);
+    }
+
+    /**
+     * One TLS connection end to end: wrap, advertise `http/1.1`,
+     * handshake — a failure (a plaintext speaker, garbage, a cipher
+     * mismatch) closes THIS connection and nothing else — then the
+     * exact hardened keep-alive loop the plaintext server runs, via
+     * [`serveTlsStream`](#serveTlsStream). Returns 0 on a failed
+     * handshake, 1 after a served connection.
+     */
+    static async int32 tlsWorker((HttpRequest) -> #HttpResponse handler,
+                                 HttpParserLimits parseLimits,
+                                 ServerLimits limits,
+                                 int8[] cert, int32 certLen,
+                                 int8[] key, int32 keyLen,
+                                 #TcpStream conn) {
+        TlsStream tls = TlsStream.server(#conn, cert, certLen, key, keyLen);
+        int8[] alpn = HttpServer.alpnHttp11();
+        tls.supportAlpn(alpn, 9);
+        try {
+            tls.handshake();
+        } catch (Exception e) {
+            tls.close();
+            return 0;
+        }
+        HttpServer.serveTlsStream(handler, parseLimits, limits, #tls);
+        return 1;
+    }
+
+    /** The length-prefixed `http/1.1` ALPN protocol list (9 bytes). */
+    static #int8[] alpnHttp11() {
+        int8[] a = heap int8[9];
+        a[0] = (int8) 8;
+        a[1] = (int8) 104;   // 'h'
+        a[2] = (int8) 116;   // 't'
+        a[3] = (int8) 116;   // 't'
+        a[4] = (int8) 112;   // 'p'
+        a[5] = (int8) 47;    // '/'
+        a[6] = (int8) 49;    // '1'
+        a[7] = (int8) 46;    // '.'
+        a[8] = (int8) 49;    // '1'
+        return #a;
+    }
+
+    /** Run the accept loop synchronously (TLS mode runs its own). */
     public void serve() {
+        if (this.isTls) {
+            scope {
+                boolean go = true;
+                while (go) {
+                    go = this.acceptOneTls();
+                }
+            }
+            return;
+        }
         this.server.serve();
+    }
+
+    /**
+     * One TLS-mode accept + dispatch; `false` once the listener closed.
+     * A helper so the owned accepted stream never lives across the
+     * accept loop's backedge (the use-after-move analysis rejects a
+     * moved-out `#=` local re-entered by a loop).
+     */
+    boolean acceptOneTls() {
+        TcpStream conn #= this.acceptTlsNext();
+        if (conn == null) {
+            return false;               // listener closed by shutdown
+        }
+        this.dispatchTls(#conn);
+        return true;
     }
 
     /**
@@ -353,6 +511,13 @@ public class HttpServer {
      * Returns `true` if every connection drained within the deadline.
      */
     public boolean shutdown(Duration deadline) {
+        if (this.isTls) {
+            // TLS mode: stop accepting; in-flight workers are
+            // scope-joined by serve()'s brace (drain accounting like
+            // the plaintext core's is a 1.5c-tier follow-up).
+            this.tlsListener.close();
+            return true;
+        }
         return this.server.shutdown(deadline);
     }
 
@@ -1252,6 +1417,13 @@ public class HttpServerBuilder {
      */
     private ServerLimits slim;
 
+    /** TLS PEM material (http:1.8); the server terminates TLS when set. */
+    private int8[] bCert;
+    private int32 bCertLen;
+    private int8[] bKey;
+    private int32 bKeyLen;
+    private boolean bTls;
+
     /**
      * Start with the default (fiber-per-connection) model and no address/handler.
      *
@@ -1262,6 +1434,13 @@ public class HttpServerBuilder {
         this.model = ServerModel.fiberPerConnection();
         this.handler = null;
         this.slim = null;
+        int8[] e = heap int8[0];
+        this.bCert = #e;
+        this.bCertLen = 0;
+        int8[] e2 = heap int8[0];
+        this.bKey = #e2;
+        this.bKeyLen = 0;
+        this.bTls = false;
     }
 
     /**
@@ -1326,6 +1505,34 @@ public class HttpServerBuilder {
     }
 
     /**
+     * Terminate TLS on the built server (http:1.8) with this
+     * certificate + private key (PEM bytes, copied). The accept path
+     * handshakes each connection in its own worker fiber and ALPN
+     * advertises `http/1.1`. Returns `this` to chain.
+     */
+    public HttpServerBuilder tls(int8[] cert, int32 certLen,
+                                 int8[] key, int32 keyLen) {
+        int8[] certCopy = heap int8[certLen];
+        int32 i = 0;
+        while (i < certLen) {
+            certCopy[i] = cert[i];
+            i = i + 1;
+        }
+        this.bCert = #certCopy;
+        this.bCertLen = certLen;
+        int8[] keyCopy = heap int8[keyLen];
+        i = 0;
+        while (i < keyLen) {
+            keyCopy[i] = key[i];
+            i = i + 1;
+        }
+        this.bKey = #keyCopy;
+        this.bKeyLen = keyLen;
+        this.bTls = true;
+        return this;
+    }
+
+    /**
      * The accept [`model`](../ServerModel.cajeta) this builder will
      * materialize on [`build`](#build) — the documented default (Model A —
      * fiber-per-connection) until [`model`](#model) / [`sharedPool`](#sharedPool)
@@ -1355,6 +1562,11 @@ public class HttpServerBuilder {
             ServerLimits moved #= this.slim;
             this.slim = null;
             l = #moved;
+        }
+        if (this.bTls) {
+            return HttpServer.bindTlsAddress(
+                SocketAddress.parse(this.addr), h, #l,
+                this.bCert, this.bCertLen, this.bKey, this.bKeyLen);
         }
         return HttpServer.bindAddressWithModelAndLimits(
             SocketAddress.parse(this.addr), this.model, h, #l);

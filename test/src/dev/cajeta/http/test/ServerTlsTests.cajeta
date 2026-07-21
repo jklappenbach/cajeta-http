@@ -1,0 +1,296 @@
+package dev.cajeta.http.test;
+
+import cajeta.io.net.AsyncReader;
+import cajeta.io.net.AsyncWriter;
+import cajeta.io.net.IpAddress;
+import cajeta.io.net.SocketAddress;
+import cajeta.io.net.TcpListener;
+import cajeta.io.net.TcpStream;
+import cajeta.io.net.tls.TlsStream;
+import cajeta.io.net.uri.Uri;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.client.HttpClient;
+import dev.cajeta.http.server.HttpServer;
+import dev.cajeta.http.server.HttpServerBuilder;
+import dev.cajeta.http.ws.WebSocket;
+import dev.cajeta.http.ws.WsMessage;
+import dev.cajeta.http.ws.WsUpgrade;
+
+/**
+ * http:1.8 — server TLS termination. `HttpServer.builder().tls(cert,
+ * key)` binds a TLS-terminating server: each accepted socket is
+ * handshaked IN ITS OWN WORKER FIBER (never on the accept path — one
+ * hostile peer must not stall the acceptor), then served by the exact
+ * hardened h1 loop the plaintext server runs.
+ *
+ *   - loopback HTTPS exchange against the SHIPPED client (its
+ *     `trustAnchor` pinning the test CA);
+ *   - a plaintext request to the TLS port fails cleanly — no hang, no
+ *     crash, and the server still serves the next TLS peer;
+ *   - garbage handshakes don't leak or wedge — three in a row, then a
+ *     clean exchange;
+ *   - WSS: the WebSocket upgrade + echo rides an upgraded TLS stream
+ *     end-to-end (the "falls out for free" claim, proven at the
+ *     stream seam).
+ *
+ * Cert: the 1.4f self-signed P-256 fixture (CN/SAN 127.0.0.1).
+ */
+public final class ServerTlsTests {
+
+    public static void run(Check c) {
+        System.stdout.println("-- server tls: https exchange --");
+        httpsExchange(c);
+        System.stdout.println("-- server tls: plaintext to tls port --");
+        plaintextFailsCleanly(c);
+        System.stdout.println("-- server tls: garbage handshakes don't wedge --");
+        garbageHandshakes(c);
+        System.stdout.println("-- server tls: wss echo --");
+        wssEcho(c);
+    }
+
+    // ---- fixtures (the 1.4f self-signed P-256 pair) ----------------------
+
+    static #String certPem() {
+        String s = "-----BEGIN CERTIFICATE-----\n"
+            + "MIIBjjCCATSgAwIBAgIUG3tfsEcGGASfxB4YMpdd0NHD0xwwCgYIKoZIzj0EAwIw\n"
+            + "FDESMBAGA1UEAwwJMTI3LjAuMC4xMB4XDTI2MDcyMTE0MjU1MFoXDTM2MDcxODE0\n"
+            + "MjU1MFowFDESMBAGA1UEAwwJMTI3LjAuMC4xMFkwEwYHKoZIzj0CAQYIKoZIzj0D\n"
+            + "AQcDQgAEZLO33nsUaLPOrTdA1Qsugw7hJSvkPyBXYRDXrCCVp+UMRAaMA3po2ylC\n"
+            + "cSbipB2XqJZkNPFKfSU/HMFY8WmnIaNkMGIwHQYDVR0OBBYEFKWc9dLR6ZtiyziA\n"
+            + "6wi/WAS/LynCMB8GA1UdIwQYMBaAFKWc9dLR6ZtiyziA6wi/WAS/LynCMA8GA1Ud\n"
+            + "EwEB/wQFMAMBAf8wDwYDVR0RBAgwBocEfwAAATAKBggqhkjOPQQDAgNIADBFAiEA\n"
+            + "j38aD2Gc+SW19AjGNd8dYx9xB1ayoM7Sft14+vtFlvQCIDcawNickiIPu8OvLe3S\n"
+            + "9C1P6pu4xxUcLaIfZUv6Tb7F\n"
+            + "-----END CERTIFICATE-----\n";
+        return s.substring(0, s.byteLength());
+    }
+
+    static #String keyPem() {
+        String s = "-----BEGIN PRIVATE KEY-----\n"
+            + "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgWi6Npf2wrpH2sHdS\n"
+            + "HFt2FAwbM7E7VJKm9a7HCFI/amqhRANCAARks7feexRos86tN0DVCy6DDuElK+Q/\n"
+            + "IFdhENesIJWn5QxEBowDemjbKUJxJuKkHZeolmQ08Up9JT8cwVjxaach\n"
+            + "-----END PRIVATE KEY-----\n";
+        return s.substring(0, s.byteLength());
+    }
+
+    // ---- server ----------------------------------------------------------
+
+    public static #HttpResponse handle(HttpRequest req) {
+        String s = "SECURE";
+        return HttpResponse.ok().body(s.toBytes(), s.byteLength());
+    }
+
+    static #HttpServer tlsServer() {
+        String cp = ServerTlsTests.certPem();
+        String kp = ServerTlsTests.keyPem();
+        int8[] cert = cp.toBytes();
+        int8[] key = kp.toBytes();
+        HttpServerBuilder b = HttpServer.builder();
+        b.bind("127.0.0.1:0");
+        (HttpRequest) -> #HttpResponse h =
+            (req) -> ServerTlsTests.handle(req);
+        b.handler(h);
+        b.tls(cert, cp.byteLength(), key, kp.byteLength());
+        return b.build();
+    }
+
+    /** Accept one TLS-port connection and dispatch its worker fiber. */
+    public static async int32 acceptTlsOnce(HttpServer srv) {
+        TcpStream conn #= srv.acceptTlsNext();
+        srv.dispatchTls(#conn);
+        return 1;
+    }
+
+    // ---- client fibers ---------------------------------------------------
+
+    /** One HTTPS exchange with the shipped client (trust pinned). */
+    public static async int32 httpsGet(int32 port) {
+        String cp = ServerTlsTests.certPem();
+        int8[] anchor = cp.toBytes();
+        HttpClient client = HttpClient.builder()
+            .trustAnchor(anchor, cp.byteLength())
+            .build();
+        String url = "https://127.0.0.1:" + port + "/x";
+        HttpResponse resp = client.get(url);
+        if (resp.statusCode() != 200) { return -1; }
+        int32 n = resp.bodyLength();
+        int8[] copy = heap int8[n];
+        int32 i = 0;
+        while (i < n) {
+            copy[i] = resp.body[i];
+            i = i + 1;
+        }
+        String got = heap String(#copy, n);
+        if (!got.equals("SECURE")) {
+            System.stdout.println("  (https body: '{}')", got);
+            return -2;
+        }
+        return 1;
+    }
+
+    /** Write plaintext HTTP at the TLS port; expect clean close, no hang. */
+    public static async int32 plaintextProbe(int32 port) {
+        IpAddress ip = IpAddress.loopbackV4();
+        SocketAddress a = SocketAddress.of(#ip, port);
+        TcpStream s = TcpStream.connectAsync(#a);
+        String req = "GET / HTTP/1.1\r\nhost: t\r\n\r\n";
+        int8[] rb = req.toBytes();
+        try {
+            s.writeAllAsync(rb, (int64) 0, (int64) req.byteLength());
+        } catch (Exception e) {
+        }
+        int8[] buf = heap int8[512];
+        int32 sawHttp = 0;
+        try {
+            while (true) {
+                int64 n = s.readAsync(buf, (int64) 0, (int64) 512);
+                if (n <= (int64) 0) { break; }
+                // Any bytes back would be a TLS alert, never HTTP.
+                if (buf[0] == (int8) 72) { sawHttp = 1; }   // 'H'
+            }
+        } catch (Exception e) {
+        }
+        s.close();
+        if (sawHttp == 1) { return -1; }
+        return 1;
+    }
+
+    /** Write garbage at the TLS port and close. */
+    public static async int32 garbageProbe(int32 port) {
+        IpAddress ip = IpAddress.loopbackV4();
+        SocketAddress a = SocketAddress.of(#ip, port);
+        TcpStream s = TcpStream.connectAsync(#a);
+        int8[] junk = heap int8[16];
+        int32 i = 0;
+        while (i < 16) {
+            junk[i] = (int8) (0xA5 & 0xFF);
+            i = i + 1;
+        }
+        try {
+            s.writeAllAsync(junk, (int64) 0, (int64) 16);
+        } catch (Exception e) {
+        }
+        s.close();
+        return 1;
+    }
+
+    // ---- WSS: manual TLS ws echo pair ------------------------------------
+
+    /** TLS server fiber: handshake, accept the ws upgrade, echo one text. */
+    public static async int32 wssServer(#TcpListener lst,
+                                        int8[] cert, int32 certLen,
+                                        int8[] key, int32 keyLen) {
+        TcpStream sock = lst.acceptAsync();
+        TlsStream tls = TlsStream.server(#sock, cert, certLen, key, keyLen);
+        tls.handshake();
+        AsyncReader reader = heap AsyncReader(tls);
+        AsyncWriter writer = heap AsyncWriter(tls);
+        WebSocket ws = WsUpgrade.acceptServer(reader, writer);
+        WsMessage m = ws.receive();
+        String text = m.text();
+        ws.send(text);
+        tls.close();
+        return m.length();
+    }
+
+    static void httpsExchange(Check c) {
+        scope {
+            HttpServer srv = ServerTlsTests.tlsServer();
+            int32 port = srv.tlsListener.boundPort();
+            Task<int32> s1 = spawn acceptTlsOnce(srv);
+            Task<int32> t1 = spawn httpsGet(port);
+            c.eqInt((int64) await t1, 1,
+                    "loopback HTTPS exchange with the shipped client");
+            c.eqInt((int64) await s1, 1, "https exchange accepted once");
+        }
+    }
+
+    static void plaintextFailsCleanly(Check c) {
+        scope {
+            HttpServer srv = ServerTlsTests.tlsServer();
+            int32 port = srv.tlsListener.boundPort();
+
+            Task<int32> s1 = spawn acceptTlsOnce(srv);
+            Task<int32> t1 = spawn plaintextProbe(port);
+            c.eqInt((int64) await t1, 1,
+                    "plaintext request to the TLS port fails cleanly");
+            c.eqInt((int64) await s1, 1, "plaintext probe was accepted once");
+
+            Task<int32> s2 = spawn acceptTlsOnce(srv);
+            Task<int32> t2 = spawn httpsGet(port);
+            c.eqInt((int64) await t2, 1,
+                    "server still serves TLS after the plaintext peer");
+            c.eqInt((int64) await s2, 1, "post-plaintext exchange accepted once");
+        }
+    }
+
+    static void garbageHandshakes(Check c) {
+        scope {
+            HttpServer srv = ServerTlsTests.tlsServer();
+            int32 port = srv.tlsListener.boundPort();
+
+            int32 g = 0;
+            while (g < 3) {
+                Task<int32> sg = spawn acceptTlsOnce(srv);
+                Task<int32> tg = spawn garbageProbe(port);
+                int32 tr = await tg;
+                int32 sr = await sg;
+                if (tr != 1 || sr != 1) {
+                    c.that(false, "garbage handshake round survived");
+                    return;
+                }
+                g = g + 1;
+            }
+            Task<int32> s1 = spawn acceptTlsOnce(srv);
+            Task<int32> t1 = spawn httpsGet(port);
+            c.eqInt((int64) await t1, 1,
+                    "clean exchange after three garbage handshakes");
+            c.eqInt((int64) await s1, 1, "post-garbage exchange accepted once");
+        }
+    }
+
+    static void wssEcho(Check c) {
+        scope {
+            String cp = ServerTlsTests.certPem();
+            String kp = ServerTlsTests.keyPem();
+            int8[] cert = cp.toBytes();
+            int8[] key = kp.toBytes();
+
+            IpAddress la = IpAddress.loopbackV4();
+            SocketAddress bindAddr = SocketAddress.of(#la, 0);
+            TcpListener listener = TcpListener.bind(bindAddr);
+            int32 port = listener.boundPort();
+            Task<int32> t = spawn wssServer(#listener, cert, cp.byteLength(),
+                                            key, kp.byteLength());
+
+            IpAddress ca = IpAddress.loopbackV4();
+            SocketAddress connAddr = SocketAddress.of(#ca, port);
+            TcpStream sock = TcpStream.connectAsync(#connAddr);
+            String host = "127.0.0.1";
+            int8[] hostBytes = host.toBytes();
+            int8[] anchor = cp.toBytes();
+            TlsStream tls = TlsStream.client(#sock, hostBytes,
+                                             host.byteLength(),
+                                             anchor, cp.byteLength());
+            tls.handshake();
+            AsyncReader reader = heap AsyncReader(tls);
+            AsyncWriter writer = heap AsyncWriter(tls);
+            Uri curi = Uri.builder()
+                .scheme("wss").host("127.0.0.1").port(port).path("/")
+                .build();
+            WebSocket ws = WsUpgrade.connectClient(reader, writer, curi, 424242);
+
+            ws.send("wss-ping");
+            WsMessage e1 = ws.receive();
+            String back = e1.text();
+            c.that(e1.isText() && back.equals("wss-ping"),
+                   "text echoed intact over the upgraded TLS stream");
+
+            int32 sret = await t;
+            tls.close();
+            c.eqInt((int64) sret, 8, "server saw the 8-byte wss message");
+        }
+    }
+}

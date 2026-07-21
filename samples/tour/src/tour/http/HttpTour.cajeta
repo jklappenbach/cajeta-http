@@ -186,6 +186,82 @@ public final class HttpTour {
         }
     }
 
+    // ── 3b. HTTPS: the same exchange, TLS-terminated (http:1.8) ─────
+
+    /** Self-signed P-256 test cert, CN/SAN 127.0.0.1 (the 1.4f fixture). */
+    static #String tourCertPem() {
+        String s = "-----BEGIN CERTIFICATE-----\n"
+            + "MIIBjjCCATSgAwIBAgIUG3tfsEcGGASfxB4YMpdd0NHD0xwwCgYIKoZIzj0EAwIw\n"
+            + "FDESMBAGA1UEAwwJMTI3LjAuMC4xMB4XDTI2MDcyMTE0MjU1MFoXDTM2MDcxODE0\n"
+            + "MjU1MFowFDESMBAGA1UEAwwJMTI3LjAuMC4xMFkwEwYHKoZIzj0CAQYIKoZIzj0D\n"
+            + "AQcDQgAEZLO33nsUaLPOrTdA1Qsugw7hJSvkPyBXYRDXrCCVp+UMRAaMA3po2ylC\n"
+            + "cSbipB2XqJZkNPFKfSU/HMFY8WmnIaNkMGIwHQYDVR0OBBYEFKWc9dLR6ZtiyziA\n"
+            + "6wi/WAS/LynCMB8GA1UdIwQYMBaAFKWc9dLR6ZtiyziA6wi/WAS/LynCMA8GA1Ud\n"
+            + "EwEB/wQFMAMBAf8wDwYDVR0RBAgwBocEfwAAATAKBggqhkjOPQQDAgNIADBFAiEA\n"
+            + "j38aD2Gc+SW19AjGNd8dYx9xB1ayoM7Sft14+vtFlvQCIDcawNickiIPu8OvLe3S\n"
+            + "9C1P6pu4xxUcLaIfZUv6Tb7F\n"
+            + "-----END CERTIFICATE-----\n";
+        return s.substring(0, s.byteLength());
+    }
+
+    static #String tourKeyPem() {
+        String s = "-----BEGIN PRIVATE KEY-----\n"
+            + "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgWi6Npf2wrpH2sHdS\n"
+            + "HFt2FAwbM7E7VJKm9a7HCFI/amqhRANCAARks7feexRos86tN0DVCy6DDuElK+Q/\n"
+            + "IFdhENesIJWn5QxEBowDemjbKUJxJuKkHZeolmQ08Up9JT8cwVjxaach\n"
+            + "-----END PRIVATE KEY-----\n";
+        return s.substring(0, s.byteLength());
+    }
+
+    public static async int32 acceptTlsOnce(HttpServer srv) {
+        TcpStream conn #= srv.acceptTlsNext();
+        srv.dispatchTls(#conn);
+        return 1;
+    }
+
+    public static async int32 clientGetTls(int32 port) {
+        String cp = HttpTour.tourCertPem();
+        int8[] anchor = cp.toBytes();
+        HttpClient client = HttpClient.builder()
+            .trustAnchor(anchor, cp.byteLength())
+            .build();
+        String url = "https://127.0.0.1:" + port + "/hello";
+        HttpResponse resp = client.get(url);
+        if (resp.statusCode() != 200) {
+            return -1;
+        }
+        return resp.bodyLength();
+    }
+
+    static void liveHttps() {
+        System.stdout.println("");
+        System.stdout.println("-- The same exchange over HTTPS (TLS termination) --");
+
+        scope {
+            String cp = HttpTour.tourCertPem();
+            String kp = HttpTour.tourKeyPem();
+            int8[] cert = cp.toBytes();
+            int8[] key = kp.toBytes();
+            HttpServerBuilder b = HttpServer.builder();
+            b.bind("127.0.0.1:0");
+            (HttpRequest) -> #HttpResponse h = (req) -> HttpTour.handle(req);
+            b.handler(h);
+            b.tls(cert, cp.byteLength(), key, kp.byteLength());
+            HttpServer srv = b.build();
+            int32 port = srv.tlsListener.boundPort();
+            System.stdout.println("  TLS bound 127.0.0.1:{} (ephemeral)", port);
+            check(srv.isTls && port > 0, "TLS server bound an ephemeral port");
+
+            Task<int32> s1 = spawn acceptTlsOnce(srv);
+            Task<int32> tg = spawn clientGetTls(port);
+            int32 got = await tg;
+            int32 acc = await s1;
+            check(got == 22 && acc == 1,
+                  "HTTPS GET /hello answered the same 22-byte greeting");
+            srv.tlsListener.close();
+        }
+    }
+
     // ── 4. WebSocket ─────────────────────────────────────────────────
 
     public static async int32 wsServer(#TcpListener listener) {
@@ -254,6 +330,7 @@ public final class HttpTour {
         wireCodec();
         router();
         liveHttp();
+        liveHttps();
         webSocket();
 
         System.stdout.println("");
