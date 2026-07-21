@@ -25,6 +25,7 @@ public final class TestMain {
         RedirectTests.run(c);
         ClientTimeoutTests.run(c);
         DownloadTests.run(c);
+        CodingTests.run(c);
         WsTests.run(c);
 
         System.stdout.println("");

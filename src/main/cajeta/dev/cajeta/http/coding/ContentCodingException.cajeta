@@ -1,0 +1,27 @@
+package dev.cajeta.http.coding;
+
+import cajeta.lang.String;
+import dev.cajeta.http.HttpException;
+
+/**
+ * Raised by [`ContentCoding`](ContentCoding.cajeta) (http:1.6a) when a
+ * content-coded body cannot be decoded — malformed/truncated/corrupted
+ * compressed data (the underlying
+ * `dev.cajeta.codec.compress.DeflateException`, translated), output
+ * exceeding the caller's `maxOut` bomb-guard cap, or an unsupported
+ * coding token.
+ *
+ * Lives under the [`HttpException`](../HttpException.cajeta) root like
+ * every HTTP-boundary fault, so a request-boundary
+ * `catch (HttpException e)` nets it; `kind` classifies to
+ * `NetException.KIND_INVALID` (the peer sent undecodable bytes). A
+ * server decoding a request body maps it to `400` via the inherited
+ * [`httpStatus`](../HttpException.cajeta#httpStatus) default.
+ */
+public class ContentCodingException extends HttpException {
+    public ContentCodingException(String message) {
+        this.message = message;
+        this.cause = 0;
+        this.kind = 12;   // NetException.KIND_INVALID (via HttpException)
+    }
+}

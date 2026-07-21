@@ -19,6 +19,9 @@ REPO_ROOT="$( cd -- "${SCRIPT_DIR}/../.." &> /dev/null && pwd )"
 
 CAJETA_BIN="${CAJETA_BIN:-cajeta}"
 LIB_CJA="${REPO_ROOT}/build/archive/dev.cajeta.http-0.1.1.cja"
+# dev.cajeta.codec (http:1.6a content-coding) — the library's olla
+# dependency, needed on every downstream classpath alongside the .cja.
+CODEC_CJA="${CODEC_CJA:-${HOME}/.olla/dev.cajeta.codec/0.5.1/dev.cajeta.codec-0.5.1.cja}"
 OUT="${SCRIPT_DIR}/build/http-tour"
 
 # 1. The library .cja — build it when missing or older than any source.
@@ -32,7 +35,7 @@ fi
 mkdir -p "${SCRIPT_DIR}/build"
 "${CAJETA_BIN}" "tour.http.HttpTour::main" \
     "${SCRIPT_DIR}/src" "${SCRIPT_DIR}/build" \
-    --emit=exe --classpath="${LIB_CJA}" -o "${OUT}"
+    --emit=exe --classpath="${LIB_CJA},${CODEC_CJA}" -o "${OUT}"
 
 # 3. Run it (RUN=0 skips).
 if [[ "${RUN:-1}" != "0" ]]; then

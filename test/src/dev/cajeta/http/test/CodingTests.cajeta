@@ -1,0 +1,208 @@
+package dev.cajeta.http.test;
+
+import cajeta.lang.String;
+import dev.cajeta.http.coding.ContentCoding;
+import dev.cajeta.http.coding.ContentCodingException;
+
+/**
+ * http:1.6a — HTTP content-coding over `dev.cajeta.codec` (0.5.1, the
+ * hardened-inflate build). The boundary is `ContentCoding`:
+ *
+ *   - `gzip` (+ the legacy `x-gzip` alias) and `deflate` (= the RFC 9110
+ *     zlib-wrapped form) encode/decode round-trip;
+ *   - system-zlib/gzip fixtures (python zlib, level 9 — dynamic Huffman
+ *     + LZ77 back-references, 360-byte output well past the inflate
+ *     growth threshold) decode byte-exactly: the interop pin the old
+ *     0.5.0 inflate failed;
+ *   - malformed input (truncation, corrupted checksum, garbage) raises
+ *     `ContentCodingException` — an `HttpException`, catchable at any
+ *     request boundary, never a trap;
+ *   - the `maxOut` cap rejects over-limit output (bomb guard, v1
+ *     post-hoc — the streaming surface in 1.6b makes it pre-hoc);
+ *   - `identity` passes through; unknown tokens are unsupported.
+ */
+public final class CodingTests {
+
+    /** The fixtures' plaintext: the 45-byte phrase repeated 8 times. */
+    static #String phrase() {
+        String one = "the quick brown fox jumps over the lazy dog. ";
+        String out = one + one + one + one + one + one + one + one;
+        return #out;
+    }
+
+    /** python zlib.compress(text, 9) — 57 bytes. */
+    static #int8[] zlibFixture() {
+        int8[] z = {
+            (int8) 0x78, (int8) 0xDA, (int8) 0x2B, (int8) 0xC9, (int8) 0x48,
+            (int8) 0x55, (int8) 0x28, (int8) 0x2C, (int8) 0xCD, (int8) 0x4C,
+            (int8) 0xCE, (int8) 0x56, (int8) 0x48, (int8) 0x2A, (int8) 0xCA,
+            (int8) 0x2F, (int8) 0xCF, (int8) 0x53, (int8) 0x48, (int8) 0xCB,
+            (int8) 0xAF, (int8) 0x50, (int8) 0xC8, (int8) 0x2A, (int8) 0xCD,
+            (int8) 0x2D, (int8) 0x28, (int8) 0x56, (int8) 0xC8, (int8) 0x2F,
+            (int8) 0x4B, (int8) 0x2D, (int8) 0x52, (int8) 0x28, (int8) 0x01,
+            (int8) 0x4A, (int8) 0xE7, (int8) 0x24, (int8) 0x56, (int8) 0x55,
+            (int8) 0x2A, (int8) 0xA4, (int8) 0xE4, (int8) 0xA7, (int8) 0xEB,
+            (int8) 0x81, (int8) 0x79, (int8) 0xA3, (int8) 0x8A, (int8) 0xC9,
+            (int8) 0x52, (int8) 0x0C, (int8) 0x00, (int8) 0x2F, (int8) 0xC0,
+            (int8) 0x82, (int8) 0x39
+        };
+        int8[] out = heap int8[57];
+        int32 i = 0;
+        while (i < 57) { out[i] = z[i]; i = i + 1; }
+        return #out;
+    }
+
+    /** python zlib (wbits=31, level 9) — a 69-byte gzip member. */
+    static #int8[] gzipFixture() {
+        int8[] g = {
+            (int8) 0x1F, (int8) 0x8B, (int8) 0x08, (int8) 0x00, (int8) 0x00,
+            (int8) 0x00, (int8) 0x00, (int8) 0x00, (int8) 0x02, (int8) 0x03,
+            (int8) 0x2B, (int8) 0xC9, (int8) 0x48, (int8) 0x55, (int8) 0x28,
+            (int8) 0x2C, (int8) 0xCD, (int8) 0x4C, (int8) 0xCE, (int8) 0x56,
+            (int8) 0x48, (int8) 0x2A, (int8) 0xCA, (int8) 0x2F, (int8) 0xCF,
+            (int8) 0x53, (int8) 0x48, (int8) 0xCB, (int8) 0xAF, (int8) 0x50,
+            (int8) 0xC8, (int8) 0x2A, (int8) 0xCD, (int8) 0x2D, (int8) 0x28,
+            (int8) 0x56, (int8) 0xC8, (int8) 0x2F, (int8) 0x4B, (int8) 0x2D,
+            (int8) 0x52, (int8) 0x28, (int8) 0x01, (int8) 0x4A, (int8) 0xE7,
+            (int8) 0x24, (int8) 0x56, (int8) 0x55, (int8) 0x2A, (int8) 0xA4,
+            (int8) 0xE4, (int8) 0xA7, (int8) 0xEB, (int8) 0x81, (int8) 0x79,
+            (int8) 0xA3, (int8) 0x8A, (int8) 0xC9, (int8) 0x52, (int8) 0x0C,
+            (int8) 0x00, (int8) 0x0F, (int8) 0x86, (int8) 0xD9, (int8) 0xB7,
+            (int8) 0x68, (int8) 0x01, (int8) 0x00, (int8) 0x00
+        };
+        int8[] out = heap int8[69];
+        int32 i = 0;
+        while (i < 69) { out[i] = g[i]; i = i + 1; }
+        return #out;
+    }
+
+    static boolean matchesPhrase(int8[] data, int32 n, String phrase) {
+        if (n != phrase.byteLength()) { return false; }
+        int32 i = 0;
+        while (i < n) {
+            if (data[i] != phrase.byteAt(i)) { return false; }
+            i = i + 1;
+        }
+        return true;
+    }
+
+    public static void run(Check c) {
+        System.stdout.println("-- coding: round-trips --");
+        roundTrips(c);
+        System.stdout.println("-- coding: system fixtures --");
+        systemFixtures(c);
+        System.stdout.println("-- coding: rejects --");
+        rejects(c);
+        System.stdout.println("-- coding: caps + tokens --");
+        capsAndTokens(c);
+    }
+
+    static void roundTrips(Check c) {
+        String text = CodingTests.phrase();
+        int8[] plain = text.toBytes();
+        int32 n = text.byteLength();
+
+        int8[] gz = ContentCoding.encode("gzip", plain, n);
+        int32 gzLen = (int32) gz.count();
+        c.that(gzLen < n, "gzip encoding shrinks the repetitive phrase");
+        int8[] back = ContentCoding.decode("gzip", gz, gzLen, (int64) 65536);
+        c.that(CodingTests.matchesPhrase(back, (int32) back.count(), text),
+            "gzip round-trips byte-exactly");
+
+        int8[] zl = ContentCoding.encode("deflate", plain, n);
+        int32 zlLen = (int32) zl.count();
+        c.that(zlLen < n, "deflate encoding shrinks the repetitive phrase");
+        int8[] back2 = ContentCoding.decode("deflate", zl, zlLen, (int64) 65536);
+        c.that(CodingTests.matchesPhrase(back2, (int32) back2.count(), text),
+            "deflate round-trips byte-exactly");
+
+        int8[] idt = ContentCoding.encode("identity", plain, n);
+        c.that(CodingTests.matchesPhrase(idt, (int32) idt.count(), text),
+            "identity encode is a pass-through copy");
+    }
+
+    static void systemFixtures(Check c) {
+        String text = CodingTests.phrase();
+
+        int8[] gz = CodingTests.gzipFixture();
+        int8[] out = ContentCoding.decode("gzip", gz, 69, (int64) 65536);
+        c.that(CodingTests.matchesPhrase(out, (int32) out.count(), text),
+            "system-gzip fixture (dynamic Huffman + back-refs) decodes exactly");
+
+        int8[] gz2 = CodingTests.gzipFixture();
+        int8[] out2 = ContentCoding.decode("x-gzip", gz2, 69, (int64) 65536);
+        c.that(CodingTests.matchesPhrase(out2, (int32) out2.count(), text),
+            "the x-gzip alias decodes the same member");
+
+        int8[] zl = CodingTests.zlibFixture();
+        int8[] out3 = ContentCoding.decode("deflate", zl, 57, (int64) 65536);
+        c.that(CodingTests.matchesPhrase(out3, (int32) out3.count(), text),
+            "system-zlib fixture decodes exactly");
+    }
+
+    static void rejects(Check c) {
+        // Truncated gzip member.
+        int8[] gz = CodingTests.gzipFixture();
+        boolean caught = false;
+        try {
+            int8[] out = ContentCoding.decode("gzip", gz, 30, (int64) 65536);
+        } catch (ContentCodingException e) {
+            caught = true;
+        }
+        c.that(caught, "truncated gzip raises ContentCodingException");
+
+        // Corrupted CRC byte.
+        int8[] gz2 = CodingTests.gzipFixture();
+        gz2[61] = (int8) 0x00;
+        boolean caught2 = false;
+        try {
+            int8[] out = ContentCoding.decode("gzip", gz2, 69, (int64) 65536);
+        } catch (ContentCodingException e) {
+            caught2 = true;
+        }
+        c.that(caught2, "corrupted gzip CRC raises ContentCodingException");
+
+        // Plain garbage as deflate.
+        int8[] junk = heap int8[16];
+        int32 i = 0;
+        while (i < 16) { junk[i] = (int8) (0x41 + i); i = i + 1; }
+        boolean caught3 = false;
+        try {
+            int8[] out = ContentCoding.decode("deflate", junk, 16, (int64) 65536);
+        } catch (ContentCodingException e) {
+            caught3 = true;
+        }
+        c.that(caught3, "garbage deflate raises ContentCodingException");
+    }
+
+    static void capsAndTokens(Check c) {
+        String text = CodingTests.phrase();
+        int8[] plain = text.toBytes();
+        int32 n = text.byteLength();
+        int8[] gz = ContentCoding.encode("gzip", plain, n);
+        int32 gzLen = (int32) gz.count();
+
+        // 360 bytes of output against a 100-byte cap.
+        boolean caught = false;
+        try {
+            int8[] out = ContentCoding.decode("gzip", gz, gzLen, (int64) 100);
+        } catch (ContentCodingException e) {
+            caught = true;
+        }
+        c.that(caught, "output over maxOut raises ContentCodingException");
+
+        c.that(ContentCoding.isSupported("gzip"), "gzip is supported");
+        c.that(ContentCoding.isSupported("x-gzip"), "x-gzip is supported");
+        c.that(ContentCoding.isSupported("deflate"), "deflate is supported");
+        c.that(ContentCoding.isSupported("identity"), "identity is supported");
+        c.that(!ContentCoding.isSupported("br"), "brotli is not (yet) supported");
+
+        boolean caught2 = false;
+        try {
+            int8[] out = ContentCoding.decode("br", gz, gzLen, (int64) 65536);
+        } catch (ContentCodingException e) {
+            caught2 = true;
+        }
+        c.that(caught2, "an unsupported token raises ContentCodingException");
+    }
+}

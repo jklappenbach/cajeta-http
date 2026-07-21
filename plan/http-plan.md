@@ -722,7 +722,7 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
   (+`adler32`) — pure cajeta, already consumed by cajeta's `tools/mcp`.
   The stdlib itself still has only the `cajeta.wire`
   Compressor/Decompressor interfaces.)* Brotli stays deferred.
-  - [ ] **1.6a Adopt `dev.cajeta.codec`.** Add the dependency (olla
+  - [x] **1.6a Adopt `dev.cajeta.codec`.** Add the dependency (olla
     store, like tools/mcp does), route HTTP content-coding through
     `Gzip`/`Zlib`/`Deflate`, and pin interop with golden vectors
     (fixtures produced by system zlib — test-only).
@@ -739,6 +739,52 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
       produced fixtures must inflate correctly** (the case above is
       vector #1); malformed/truncation/trailing-garbage rejects at the
       HTTP boundary; wrong-`destLen` handling for `Zlib.decompress`.
+    - **Codec-side (cajeta-codec `6dc4e43` + `48b3c7a`, published
+      `dev.cajeta.codec@0.5.1` to the local olla):** the 2026-07-19
+      inflate blocker was ALREADY cured by `017ded2`'s ownership sweep
+      (verified against the MCP vector) — the olla 0.5.0 artifact just
+      predated it. What 1.6a's hostile-input probes then found:
+      **malformed DEFLATE trapped the process** (truncation = uncatchable
+      OOB abort in the bit reader; reserved BTYPE spun; an invalid
+      Huffman code silently ended the block with partial output), and
+      neither envelope verified anything. Hardened: `DeflateException`
+      (new) raised on truncation / BTYPE 3 / invalid codes /
+      dist-past-output / stored NLEN mismatch / code-length overruns;
+      `Gzip.decompress` validates magic+CM+bounds, inflates via the
+      GROWING path (ISIZE is untrusted, not an allocation hint) and
+      verifies CRC-32 + ISIZE; `Zlib.decompress` validates CMF/FLG and
+      verifies Adler-32, `destLen` demoted to an initial-buffer hint.
+      Plus one more latent 0.9 ownership bug the new tests exposed:
+      `ensure()`'s grown buffer was PLAIN-assigned into the owned field
+      (`this.out = nb`) — use-after-free; the growth path had never
+      been exercised. Verified via a direct driver (11/11 ×5) because
+      **the cajeta-unit reflective runner still aborts after
+      AvroWriteTest under 0.9.4** (retested; NOT the arena bug — its
+      own open issue); the 20 pre-abort classes stay green.
+    - **http-side:** `dev.cajeta.http.coding.ContentCoding`
+      (`encode`/`decode(token, data, len, maxOut)`/`isSupported`) +
+      `ContentCodingException extends HttpException`. Tokens: `gzip` +
+      `x-gzip`, `deflate` (= STRICT zlib per RFC 9110 §8.4.1.2;
+      raw-deflate leniency deferred), `identity`. `maxOut` is the
+      decompression-bomb cap — v1 enforces it post-inflation (1.6b's
+      streaming surface makes it pre-allocation). Tests +18 (suite 366
+      → **384**, 150/150 loop, tour 15/15): round-trips, system
+      python-zlib/gzip fixtures (level 9, dynamic Huffman + back-refs,
+      360-byte output through the growth path), truncation/CRC/garbage
+      rejects, cap trip, token surface.
+    - **Wiring notes:** manifest gains
+      `"dev.cajeta.codec": "0.5.1"`; the raw-CLI test compile and the
+      tour's `run.sh` need the codec `.cja` appended to `--classpath`
+      (comma-separated) — archive sources re-compile downstream, so
+      every consumer classpath must carry the transitive dep. **Release
+      chain:** codec `v0.5.1` is only in the LOCAL olla — tag it so CI
+      (remote Olla) can resolve cajeta-http builds.
+    - **cajeta wrinkle found:** a cross-archive class in CATCH POSITION
+      resolves to `int64` (the catch var binds as the legacy int-catch;
+      `e.getMessage()` → "no member on int64") — the scoped-resolution
+      bug class, catch-clause tier. Dodge: catch the stdlib
+      `RecoverableException` root instead; upstream fix wanted in
+      `Statement.cpp`'s catch-type lookup.
   - [ ] **1.6b Streaming surface.** The gap the dependency does not
     cover: incremental inflate/deflate with the dictionary/window
     preserved across calls plus flush modes — what 4.1's context

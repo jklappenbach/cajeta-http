@@ -1,0 +1,145 @@
+package dev.cajeta.http.coding;
+
+import cajeta.lang.String;
+import cajeta.error.RecoverableException;
+import dev.cajeta.codec.compress.Gzip;
+import dev.cajeta.codec.compress.Zlib;
+
+/**
+ * HTTP **content-coding** (http:1.6a) — the boundary between HTTP's
+ * `Content-Encoding`/`Accept-Encoding` tokens and the block codecs in
+ * `dev.cajeta.codec.compress` (0.5.1, the hardened-inflate build):
+ *
+ *   - **`gzip`** (and the RFC 9110 §18.9 legacy alias **`x-gzip`**) —
+ *     the RFC 1952 member, CRC-32 + ISIZE verified by the codec;
+ *   - **`deflate`** — per RFC 9110 §8.4.1.2 this is the **zlib**
+ *     (RFC 1950) container, Adler-32 verified. (Some ancient senders
+ *     ship raw DEFLATE under this token; leniency is a later increment
+ *     — strict zlib is the spec reading.)
+ *   - **`identity`** — a pass-through copy.
+ *
+ * `decode` enforces `maxOut` — compressed bodies are attacker-friendly
+ * amplifiers, so every call site states how much decoded output it is
+ * prepared to hold. v1 checks the cap **after** block inflation (the
+ * codec's growth path has already allocated); the 1.6b streaming
+ * surface moves that guard ahead of allocation. Every failure —
+ * malformed bytes (the codec's `DeflateException`, translated),
+ * over-cap output, unknown token — raises
+ * [`ContentCodingException`](ContentCodingException.cajeta), an
+ * `HttpException` a request boundary already catches.
+ *
+ * Consumers: 1.4e's transparent client decompression, 2.2c's
+ * Compression/Decompression middleware, 4.1's permessage-deflate (via
+ * 1.6b).
+ */
+public final class ContentCoding {
+
+    /** Is `token` a coding this boundary can encode/decode? */
+    public static boolean isSupported(String token) {
+        if (token.equals("gzip")) { return true; }
+        if (token.equals("x-gzip")) { return true; }
+        if (token.equals("deflate")) { return true; }
+        if (token.equals("identity")) { return true; }
+        return false;
+    }
+
+    /**
+     * Encode `data[0..len)` under `token`. `identity` returns an owned
+     * copy; unknown tokens raise. Callers pick the token from the
+     * peer's `Accept-Encoding` — this is mechanism, not negotiation.
+     */
+    public static #int8[] encode(String token, int8[] data, int32 len) {
+        if (token.equals("gzip") || token.equals("x-gzip")) {
+            return Gzip.compress(data, (int64) len);
+        }
+        if (token.equals("deflate")) {
+            return Zlib.compress(data, (int64) len);
+        }
+        if (token.equals("identity")) {
+            return ContentCoding.copy(data, len);
+        }
+        throw heap ContentCodingException(
+            "unsupported content-coding: " + token);
+    }
+
+    /**
+     * Decode `data[0..len)` under `token`, rejecting decoded output
+     * larger than `maxOut` bytes. Malformed input raises
+     * `ContentCodingException` (never a trap — the codec's hardened
+     * inflate guarantees it).
+     */
+    public static #int8[] decode(String token, int8[] data, int32 len,
+                                 int64 maxOut) {
+        if (token.equals("gzip") || token.equals("x-gzip")) {
+            int8[] out = ContentCoding.decodeGzip(data, len);
+            ContentCoding.enforceCap(out, maxOut);
+            return #out;
+        }
+        if (token.equals("deflate")) {
+            int8[] out = ContentCoding.decodeZlib(data, len);
+            ContentCoding.enforceCap(out, maxOut);
+            return #out;
+        }
+        if (token.equals("identity")) {
+            if ((int64) len > maxOut) {
+                throw heap ContentCodingException(
+                    "identity body exceeds the decode cap");
+            }
+            return ContentCoding.copy(data, len);
+        }
+        throw heap ContentCodingException(
+            "unsupported content-coding: " + token);
+    }
+
+    /** Gzip decode with the codec fault translated to the HTTP family. */
+    static #int8[] decodeGzip(int8[] data, int32 len) {
+        try {
+            return Gzip.decompress(data, (int64) len);
+        } catch (RecoverableException e) {
+            // Catching the stdlib root, not the codec's DeflateException:
+            // a cross-archive class in CATCH POSITION resolves to int64
+            // (the scoped-resolution bug class, catch-clause tier —
+            // upstream wrinkle). Only the codec raises inside this try.
+            throw heap ContentCodingException(
+                "gzip decode failed: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Zlib decode (the `deflate` token) with the fault translated. The
+     * destLen hint seeds the inflate buffer; the codec grows past a
+     * short hint, so 4x the compressed size is just a sane start.
+     */
+    static #int8[] decodeZlib(int8[] data, int32 len) {
+        int64 hint = ((int64) len) * (int64) 4;
+        if (hint < (int64) 64) {
+            hint = (int64) 64;
+        }
+        try {
+            return Zlib.decompress(data, (int64) len, hint);
+        } catch (RecoverableException e) {
+            throw heap ContentCodingException(
+                "deflate decode failed: " + e.getMessage());
+        }
+    }
+
+    /** Raise when decoded output exceeds the caller's cap. */
+    static void enforceCap(int8[] out, int64 maxOut) {
+        int64 n = (int64) out.count();
+        if (n > maxOut) {
+            throw heap ContentCodingException(
+                "decoded body exceeds the decode cap");
+        }
+    }
+
+    /** Owned copy of `data[0..len)`. */
+    static #int8[] copy(int8[] data, int32 len) {
+        int8[] out = heap int8[len];
+        int32 i = 0;
+        while (i < len) {
+            out[i] = data[i];
+            i = i + 1;
+        }
+        return #out;
+    }
+}

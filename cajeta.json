@@ -41,7 +41,11 @@
         // The core stdlib (cajeta.lang, cajeta.io, cajeta.io.net, cajeta.codec,
         // cajeta.hash, …) is built into the toolchain — not declared, not
         // fetched — and only the parts used are linked (dead-code elimination).
-        "dependencies": {},
+        // dev.cajeta.codec (olla store) supplies DEFLATE/gzip/zlib for HTTP
+        // content-coding (http:1.6a); 0.5.1 is the hardened-inflate build.
+        "dependencies": {
+            "dev.cajeta.codec": "0.5.1"
+        },
 
         "dev-dependencies": {
             "cajeta.testkit": "1.0.*"
@@ -79,7 +83,8 @@
                 { "action": "exec", "command": "cajeta",
                   "args": [ "dev.cajeta.http.test.TestMain::main",
                             "test/src", "build/test",
-                            "--emit=exe", "--classpath=${art.path}",
+                            "--emit=exe",
+                            "--classpath=${art.path},/home/julian/.olla/dev.cajeta.codec/0.5.1/dev.cajeta.codec-0.5.1.cja",
                             "-o", "build/test/http-tests" ] },
                 { "action": "test", "input": "build/test/http-tests" }
             ]
