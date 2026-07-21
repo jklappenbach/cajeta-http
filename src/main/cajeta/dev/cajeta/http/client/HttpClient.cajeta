@@ -31,6 +31,9 @@ import dev.cajeta.http.h1.HttpSerializer;
 import dev.cajeta.http.h1.BodyReader;
 import dev.cajeta.http.h1.BodyFraming;
 import dev.cajeta.http.h1.KeepAlive;
+import dev.cajeta.http.coding.ContentCoding;
+import cajeta.codec.json.Json;
+import cajeta.codec.json.JsonValue;
 import cajeta.io.net.Headers;
 
 /**
@@ -96,6 +99,8 @@ public class HttpClient {
     int32 maxRetries;
     /** Millis slept between attempts. */
     int32 retryBackoffMs;
+    /** Cap on a DECODED response body, bytes (http:1.4e bomb guard). */
+    int64 maxDecodedBytes;
 
     /**
      * Maximum number of 3xx redirects [`sendFollowing`](#sendFollowing)
@@ -121,6 +126,7 @@ public class HttpClient {
         this.exchangeTimeoutMs = 0;
         this.maxRetries = 1;
         this.retryBackoffMs = 100;
+        this.maxDecodedBytes = (int64) 67108864;    // 64 MiB
     }
 
     /**
@@ -155,6 +161,20 @@ public class HttpClient {
     public HttpClient retryPolicy(int32 maxRetries, int32 backoffMs) {
         this.maxRetries = maxRetries;
         this.retryBackoffMs = backoffMs;
+        return this;
+    }
+
+    /**
+     * Cap the size a transparently DECODED response body may reach
+     * (http:1.4e) — compressed bodies are amplifiers, and this is the
+     * "how much am I prepared to hold" answer
+     * [`ContentCoding.decode`](../coding/ContentCoding.cajeta) demands.
+     * Past it the send raises
+     * [`ContentCodingException`](../coding/ContentCodingException.cajeta).
+     * Default 64 MiB. Returns `this`.
+     */
+    public HttpClient decodeLimit(int64 maxBytes) {
+        this.maxDecodedBytes = maxBytes;
         return this;
     }
 
@@ -212,10 +232,12 @@ public class HttpClient {
             deadline = t0.toEpochMilli() + (int64) this.exchangeTimeoutMs;
         }
         boolean idem = req.methodType().isIdempotent();
+        HttpClient.ensureAcceptEncoding(req);
         int32 attempt = 0;
         while (true) {
             try {
                 HttpResponse r = this.sendOnce(uri, req, deadline);
+                this.decodeResponse(r);
                 return #r;
             } catch (NetException e) {
                 boolean again = attempt < this.maxRetries
@@ -369,6 +391,88 @@ public class HttpClient {
         HttpRequest req = HttpRequest.fromUri("GET", uri);
         HttpResponse resp = this.sendFollowing(uri, req);
         return #resp;
+    }
+
+    /**
+     * `GET url`, require a 2xx, and parse the (transparently decoded)
+     * body as JSON — the http:1.4e convenience (NET-8.6). Returns the
+     * stdlib Tier-3 [`JsonValue`](../../../../cajeta/codec/json/JsonValue.cajeta)
+     * DOM, which owns its strings (the parse copies every string/key out
+     * of the body buffer), so it outlives the response. A non-2xx raises
+     * [`HttpException`](../HttpException.cajeta) — the status is in the
+     * message; callers wanting the error body use [`get`](#get).
+     * Malformed JSON propagates the stdlib `JsonParseException`.
+     *
+     * @EntryPoint
+     */
+    public #JsonValue getJson(String url) {
+        HttpResponse resp = this.get(url);
+        if (!resp.isSuccess()) {
+            throw heap HttpException("getJson: HTTP " + resp.statusCode());
+        }
+        if (!resp.hasBody) {
+            throw heap HttpException("getJson: bodyless response");
+        }
+        JsonValue v = Json.parse(resp.body, (int64) resp.bodyLength());
+        return #v;
+    }
+
+    // ----- transparent content-coding (http:1.4e) --------------------------
+
+    /**
+     * Advertise `Accept-Encoding: gzip, deflate` unless the caller
+     * already stated a preference — theirs wins, including an explicit
+     * `identity` opt-out.
+     */
+    static void ensureAcceptEncoding(HttpRequest req) {
+        if (req.getHeaders().contains("Accept-Encoding")) {
+            return;
+        }
+        req.setHeader("Accept-Encoding", "gzip, deflate");
+    }
+
+    /**
+     * Transparently decode a compressed response body in place: on a
+     * supported single `Content-Encoding` token (`gzip`/`x-gzip`/
+     * `deflate`), inflate under [`decodeLimit`](#decodeLimit), clear
+     * `Content-Encoding`, and re-stamp `content-length` with the decoded
+     * size — the caller sees the entity as if it were never compressed.
+     * `identity` just clears the header. Anything this client did not
+     * ask for — an unknown token (`br`), a multi-coding chain — passes
+     * through UNTOUCHED, body and header both, which is honest: raw
+     * bytes still labeled with their coding. Malformed compressed data
+     * raises [`ContentCodingException`](../coding/ContentCodingException.cajeta)
+     * (never garbage bytes); the connection itself was already released
+     * reusable — the wire framing was fine, only the entity was rotten.
+     */
+    void decodeResponse(HttpResponse resp) {
+        if (!resp.hasBody) {
+            return;
+        }
+        Headers h = resp.getHeaders();
+        String ce = h.get("content-encoding");
+        if (ce == null) {
+            return;
+        }
+        String trimmed = ce.trim();
+        String token = trimmed.toLowerCase();
+        if (token.contains(",")) {
+            return;                     // multi-coding chain: v1 passes through
+        }
+        if (!ContentCoding.isSupported(token)) {
+            return;
+        }
+        if (token.equals("identity")) {
+            h.remove("content-encoding");
+            return;
+        }
+        int8[] decoded = ContentCoding.decode(token, resp.body,
+                                              resp.bodyLength(),
+                                              this.maxDecodedBytes);
+        int32 n = (int32) decoded.count();
+        resp.body #= decoded;
+        h.remove("content-encoding");
+        h.set("content-length", "" + n);
     }
 
     // ----- redirect following (http:1.4b) ----------------------------------

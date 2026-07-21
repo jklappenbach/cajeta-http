@@ -668,13 +668,42 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
     - Still open from 1.3e (server-side legs, unchanged): streamed
       *response* through `ResponseBodyWriter`, request body as a `Body`
       pre-buffering, per-route 413, implicit drain-on-return.
-  - [ ] **1.4e `getJson()` + transparent decompression** *(gated on
+  - [x] **1.4e `getJson()` + transparent decompression** *(gated on
     1.6)*. `getJson()` → `JsonValue`; the client advertises
     `Accept-Encoding: gzip, deflate` and inflates transparently,
     clearing `Content-Encoding` and fixing lengths up.
     - TDD: gzip/deflate/identity responses yield identical bodies;
       corrupt compressed stream → clean error, not garbage; JSON
       round-trip against the stdlib codec.
+    - **Shipped:** `send` stamps `Accept-Encoding: gzip, deflate` only
+      when the caller set none (an explicit `identity` opt-out rides
+      through); `decodeResponse` runs after every `sendOnce` — a
+      supported single `Content-Encoding` token (`gzip`/`x-gzip`/
+      `deflate`) is inflated via `ContentCoding.decode` under a new
+      `decodeLimit(maxBytes)` cap (default 64 MiB), `Content-Encoding`
+      cleared, `content-length` re-stamped (`resp.body #= decoded` —
+      owned-field reassign); `identity` just clears the header; unknown
+      tokens (`br`) and multi-coding chains pass through UNTOUCHED,
+      body + header both. `getJson(url)` = `get` → require 2xx (else
+      `HttpException`) → Tier-3 `Json.parse` → owned `JsonValue` DOM.
+      ClientCodingTests: +14 checks (suite 384 → **398**) — three
+      codings byte-identical over ONE pooled connection, advertise +
+      caller-override echoed off the wire, corrupt gzip →
+      `ContentCodingException`, cap trip, unknown-coding passthrough,
+      getJson field asserts + `Json.toBytes` byte round-trip + 404
+      raise. 150-run loop clean, tour 15/15.
+    - **Upstream find (the round-trip test caught it): READS corrupted
+      the stdlib JSON DOM.** The `(#int8[], int32)` String ctor's
+      @Native core consumes its buffer unconditionally (inline-copy +
+      FREE ≤ cap, adopt above it) because @Native bodies never see the
+      runtime title flag — and `JsonValue.asString()` /
+      `JsonObject.keys()` fed it the DOM's own buffers. First read
+      freed/aliased the tree; the next allocation recycled it; stale
+      single reads masked it (every earlier consumer read once). Fixed
+      in cajeta `65588252` (+ `JsonStringOwnershipTests`, 4 red→green,
+      read-churn-read pattern); the @Native title-flag gap is recorded
+      on cajeta's focus stack. **Suite now requires a compiler ≥
+      `65588252`** — bump the CI pin alongside the 8db619a2 note.
   - [ ] **1.4f Builder + proxy.** `HttpClient.builder()` — default
     headers, version pin, pool sizes, redirect/retry/timeout policy,
     TLS trust, HTTP proxy (absolute-form for `http`, CONNECT tunnel

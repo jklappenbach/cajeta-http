@@ -1,0 +1,375 @@
+package dev.cajeta.http.test;
+
+import cajeta.codec.json.Json;
+import cajeta.codec.json.JsonArray;
+import cajeta.codec.json.JsonObject;
+import cajeta.codec.json.JsonValue;
+import cajeta.io.net.Server;
+import cajeta.io.net.TcpStream;
+import cajeta.io.net.uri.Uri;
+import dev.cajeta.http.HttpException;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.client.HttpClient;
+import dev.cajeta.http.coding.ContentCoding;
+import dev.cajeta.http.coding.ContentCodingException;
+import dev.cajeta.http.server.HttpServer;
+import dev.cajeta.http.server.HttpServerBuilder;
+
+/**
+ * http:1.4e — transparent client decompression + `getJson()`. A loopback
+ * server serves the SAME phrase under `gzip`, `deflate`, and `identity`
+ * content-codings (compressed via the library's own `ContentCoding.encode`
+ * — interop against system zlib is pinned separately by CodingTests'
+ * golden vectors); the client must yield identical bodies with
+ * `Content-Encoding` cleared and `content-length` re-stamped to the
+ * decoded size. Also pinned here:
+ *
+ *   - the client advertises `Accept-Encoding: gzip, deflate` by default,
+ *     and a caller-set `Accept-Encoding` wins (echoed by the server);
+ *   - an unknown coding (`br`) is left UNTOUCHED — raw body, header
+ *     intact — never silently mangled;
+ *   - a corrupt compressed stream raises `ContentCodingException`, not
+ *     garbage bytes;
+ *   - the decode cap (`decodeLimit`) rejects an over-cap decoded body;
+ *   - `getJson()` inflates + parses to a `JsonValue` DOM that survives
+ *     the response's drop (the stdlib DOM owns its strings), round-trips
+ *     through `Json.toBytes`, and raises `HttpException` on a non-2xx.
+ */
+public final class ClientCodingTests {
+
+    /** The body every coding route serves (repetitive → compressible). */
+    static #String phrase() {
+        String one = "the quick brown fox jumps over the lazy dog. ";
+        String out = one + one + one + one + one + one + one + one;
+        return #out;
+    }
+
+    /** Compact JSON served by `/json` (gzip'd on the wire). */
+    static #String jsonText() {
+        String s = "{\"name\":\"cajeta\",\"n\":42,\"ok\":true,\"tags\":[\"a\",\"b\"]}";
+        return s.substring(0, s.byteLength());
+    }
+
+    public static void run(Check c) {
+        System.stdout.println("-- client coding: transparent bodies --");
+        transparentBodies(c);
+        System.stdout.println("-- client coding: accept-encoding --");
+        acceptEncoding(c);
+        System.stdout.println("-- client coding: edges --");
+        edges(c);
+        System.stdout.println("-- client coding: getJson --");
+        json(c);
+    }
+
+    // ---- the loopback coding server -------------------------------------
+
+    /** Body compressed under `token`, honestly labeled. */
+    static #HttpResponse coded(String token, String text) {
+        int8[] raw = text.toBytes();
+        int8[] enc = ContentCoding.encode(token, raw, text.byteLength());
+        return HttpResponse.ok()
+            .setHeader("Content-Encoding", token)
+            .body(enc, (int32) enc.count());
+    }
+
+    public static #HttpResponse handle(HttpRequest req) {
+        String t = req.getTarget();
+        if (t.equals("/gz")) {
+            String p = ClientCodingTests.phrase();
+            return ClientCodingTests.coded("gzip", p);
+        }
+        if (t.equals("/df")) {
+            String p = ClientCodingTests.phrase();
+            return ClientCodingTests.coded("deflate", p);
+        }
+        if (t.equals("/id")) {
+            String p = ClientCodingTests.phrase();
+            return HttpResponse.ok()
+                .setHeader("Content-Encoding", "identity")
+                .body(p.toBytes(), p.byteLength());
+        }
+        if (t.equals("/echo-ae")) {
+            String ae = req.getHeaders().get("accept-encoding");
+            String out = "-";
+            if (ae != null) {
+                out = ae;
+            }
+            return HttpResponse.ok().body(out.toBytes(), out.byteLength());
+        }
+        if (t.equals("/br")) {
+            // A coding this client does not speak — must pass through raw.
+            String fake = "brotli-ish";
+            return HttpResponse.ok()
+                .setHeader("Content-Encoding", "br")
+                .body(fake.toBytes(), fake.byteLength());
+        }
+        if (t.equals("/badgz")) {
+            int8[] junk = heap int8[8];
+            int32 i = 0;
+            while (i < 8) {
+                junk[i] = (int8) (0x41 + i);
+                i = i + 1;
+            }
+            return HttpResponse.ok()
+                .setHeader("Content-Encoding", "gzip")
+                .body(junk, 8);
+        }
+        if (t.equals("/json")) {
+            String j = ClientCodingTests.jsonText();
+            return ClientCodingTests.coded("gzip", j);
+        }
+        return HttpResponse.notFound();
+    }
+
+    /** Accept one connection and dispatch it (local copy — bare-spawn rule). */
+    public static async int32 acceptAndDispatch(Server core) {
+        TcpStream conn #= core.acceptNext();
+        core.dispatch(#conn);
+        return 1;
+    }
+
+    static #String respText(HttpResponse resp) {
+        int32 n = resp.bodyLength();
+        int8[] copy = heap int8[n];
+        int32 i = 0;
+        while (i < n) {
+            copy[i] = resp.body[i];
+            i = i + 1;
+        }
+        return heap String(#copy, n);
+    }
+
+    // ---- client fibers ---------------------------------------------------
+
+    /**
+     * GET `path`; the decoded body must equal the phrase, with
+     * `Content-Encoding` cleared and `content-length` restamped to the
+     * decoded size. Return a distinct negative per failed leg.
+     */
+    public static async int32 getDecoded(HttpClient client, int32 port,
+                                         String path) {
+        String url = "http://127.0.0.1:" + port + path;
+        HttpResponse resp = client.get(url);
+        if (resp.statusCode() != 200) { return -1; }
+        String want = ClientCodingTests.phrase();
+        String got = ClientCodingTests.respText(resp);
+        if (!got.equals(want)) { return -2; }
+        if (resp.getHeaders().get("content-encoding") != null) { return -3; }
+        String cl = resp.getHeaders().get("content-length");
+        if (cl == null) { return -4; }
+        String wantLen = "" + want.byteLength();
+        if (!cl.equals(wantLen)) { return -5; }
+        return 1;
+    }
+
+    /** All three codings over ONE pooled connection. */
+    public static async int32 threeCodings(int32 port) {
+        HttpClient client = heap HttpClient();
+        int32 gz = await spawn getDecoded(client, port, "/gz");
+        if (gz != 1) { return gz - 10; }
+        int32 df = await spawn getDecoded(client, port, "/df");
+        if (df != 1) { return df - 20; }
+        int32 id = await spawn getDecoded(client, port, "/id");
+        if (id != 1) { return id - 30; }
+        return 1;
+    }
+
+    /** Default advertise, then a caller override, one connection. */
+    public static async int32 advertise(int32 port) {
+        HttpClient client = heap HttpClient();
+        String url = "http://127.0.0.1:" + port + "/echo-ae";
+        HttpResponse d = client.get(url);
+        String def = ClientCodingTests.respText(d);
+        if (!def.equals("gzip, deflate")) {
+            System.stdout.println("  (default advertise: '{}')", def);
+            return -1;
+        }
+        Uri uri = Uri.builder()
+            .scheme("http").host("127.0.0.1").port(port).path("/echo-ae")
+            .build();
+        HttpRequest req = HttpRequest.fromUri("GET", uri);
+        req.setHeader("Accept-Encoding", "identity");
+        HttpResponse o = client.send(uri, req);
+        String ovr = ClientCodingTests.respText(o);
+        if (!ovr.equals("identity")) {
+            System.stdout.println("  (override advertise: '{}')", ovr);
+            return -2;
+        }
+        return 1;
+    }
+
+    /** Unknown coding: raw body and the header both untouched. */
+    public static async int32 unknownIntact(int32 port) {
+        HttpClient client = heap HttpClient();
+        String url = "http://127.0.0.1:" + port + "/br";
+        HttpResponse resp = client.get(url);
+        if (resp.statusCode() != 200) { return -1; }
+        String ce = resp.getHeaders().get("content-encoding");
+        if (ce == null) { return -2; }
+        if (!ce.equals("br")) { return -3; }
+        String got = ClientCodingTests.respText(resp);
+        if (!got.equals("brotli-ish")) { return -4; }
+        return 1;
+    }
+
+    /** Corrupt gzip must raise the typed coding fault, not return junk. */
+    public static async int32 corruptRaises(int32 port) {
+        HttpClient client = heap HttpClient();
+        String url = "http://127.0.0.1:" + port + "/badgz";
+        try {
+            HttpResponse resp = client.get(url);
+            return -1;
+        } catch (ContentCodingException e) {
+            return 1;
+        }
+    }
+
+    /** An over-cap decoded body must trip `decodeLimit`. */
+    public static async int32 capTrips(int32 port) {
+        HttpClient client = heap HttpClient();
+        client.decodeLimit((int64) 16);
+        String url = "http://127.0.0.1:" + port + "/gz";
+        try {
+            HttpResponse resp = client.get(url);
+            return -1;
+        } catch (ContentCodingException e) {
+            return 1;
+        }
+    }
+
+    /**
+     * `getJson` over a gzip'd wire body: field-level asserts on the DOM
+     * (checked AFTER the response object is long dropped — the DOM must
+     * own its strings), then a byte round-trip through `Json.toBytes`.
+     */
+    public static async int32 getJsonParses(int32 port) {
+        HttpClient client = heap HttpClient();
+        String url = "http://127.0.0.1:" + port + "/json";
+        JsonValue v = client.getJson(url);
+        JsonObject o = v.asObject();
+        String name = o.get("name").asString();
+        if (!name.equals("cajeta")) { return -1; }
+        if (o.get("n").asInt64() != (int64) 42) { return -2; }
+        if (!o.get("ok").asBoolean()) { return -3; }
+        JsonArray tags = o.get("tags").asArray();
+        if (tags.count() != 2) { return -4; }
+        String t0 = tags.get(0).asString();
+        if (!t0.equals("a")) { return -5; }
+        String t1 = tags.get(1).asString();
+        if (!t1.equals("b")) { return -6; }
+        int8[] rt = Json.toBytes(v);
+        int32 rtLen = (int32) rt.count();
+        String back = heap String(#rt, rtLen);
+        String want = ClientCodingTests.jsonText();
+        if (!back.equals(want)) {
+            System.stdout.println("  (round-trip: '{}')", back);
+            return -7;
+        }
+        return 1;
+    }
+
+    /** A non-2xx is an `HttpException`, never a parse attempt. */
+    public static async int32 getJsonNon2xx(int32 port) {
+        HttpClient client = heap HttpClient();
+        String url = "http://127.0.0.1:" + port + "/missing";
+        try {
+            JsonValue v = client.getJson(url);
+            return -1;
+        } catch (HttpException e) {
+            return 1;
+        }
+    }
+
+    // ---- scenarios -------------------------------------------------------
+
+    static void transparentBodies(Check c) {
+        scope {
+            HttpServerBuilder b = HttpServer.builder();
+            b.bind("127.0.0.1:0");
+            (HttpRequest) -> #HttpResponse h =
+                (req) -> ClientCodingTests.handle(req);
+            b.handler(h);
+            HttpServer srv = b.build();
+            Server core = srv.server;
+            int32 port = core.listener.boundPort();
+
+            Task<int32> s1 = spawn acceptAndDispatch(core);
+            Task<int32> t1 = spawn threeCodings(port);
+            c.eqInt((int64) await t1, 1,
+                    "gzip/deflate/identity decode to the identical body");
+            c.eqInt((int64) await s1, 1, "three codings rode one connection");
+        }
+    }
+
+    static void acceptEncoding(Check c) {
+        scope {
+            HttpServerBuilder b = HttpServer.builder();
+            b.bind("127.0.0.1:0");
+            (HttpRequest) -> #HttpResponse h =
+                (req) -> ClientCodingTests.handle(req);
+            b.handler(h);
+            HttpServer srv = b.build();
+            Server core = srv.server;
+            int32 port = core.listener.boundPort();
+
+            Task<int32> s1 = spawn acceptAndDispatch(core);
+            Task<int32> t1 = spawn advertise(port);
+            c.eqInt((int64) await t1, 1,
+                    "client advertises gzip, deflate; caller override wins");
+            c.eqInt((int64) await s1, 1, "advertise pair rode one connection");
+        }
+    }
+
+    static void edges(Check c) {
+        scope {
+            HttpServerBuilder b = HttpServer.builder();
+            b.bind("127.0.0.1:0");
+            (HttpRequest) -> #HttpResponse h =
+                (req) -> ClientCodingTests.handle(req);
+            b.handler(h);
+            HttpServer srv = b.build();
+            Server core = srv.server;
+            int32 port = core.listener.boundPort();
+
+            Task<int32> s1 = spawn acceptAndDispatch(core);
+            Task<int32> t1 = spawn unknownIntact(port);
+            c.eqInt((int64) await t1, 1, "unknown coding passes through untouched");
+            c.eqInt((int64) await s1, 1, "unknown-coding exchange accepted once");
+
+            Task<int32> s2 = spawn acceptAndDispatch(core);
+            Task<int32> t2 = spawn corruptRaises(port);
+            c.eqInt((int64) await t2, 1, "corrupt gzip raises ContentCodingException");
+            c.eqInt((int64) await s2, 1, "corrupt exchange accepted once");
+
+            Task<int32> s3 = spawn acceptAndDispatch(core);
+            Task<int32> t3 = spawn capTrips(port);
+            c.eqInt((int64) await t3, 1, "decodeLimit rejects an over-cap body");
+            c.eqInt((int64) await s3, 1, "cap exchange accepted once");
+        }
+    }
+
+    static void json(Check c) {
+        scope {
+            HttpServerBuilder b = HttpServer.builder();
+            b.bind("127.0.0.1:0");
+            (HttpRequest) -> #HttpResponse h =
+                (req) -> ClientCodingTests.handle(req);
+            b.handler(h);
+            HttpServer srv = b.build();
+            Server core = srv.server;
+            int32 port = core.listener.boundPort();
+
+            Task<int32> s1 = spawn acceptAndDispatch(core);
+            Task<int32> t1 = spawn getJsonParses(port);
+            c.eqInt((int64) await t1, 1,
+                    "getJson inflates, parses, and round-trips the DOM");
+            c.eqInt((int64) await s1, 1, "getJson exchange accepted once");
+
+            Task<int32> s2 = spawn acceptAndDispatch(core);
+            Task<int32> t2 = spawn getJsonNon2xx(port);
+            c.eqInt((int64) await t2, 1, "getJson on a 404 raises HttpException");
+            c.eqInt((int64) await s2, 1, "404 exchange accepted once");
+        }
+    }
+}
