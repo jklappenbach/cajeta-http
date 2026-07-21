@@ -32,10 +32,19 @@ public class Exchange {
      */
     public boolean keepAlive;
 
+    /**
+     * `true` iff the response was ALREADY written by the producer — the
+     * http:1.5a budget cut flushes its `503` at the deadline (before
+     * draining the stray handler fiber), so the loop must not write it
+     * again. Always paired with `keepAlive == false`.
+     */
+    public boolean written;
+
     /** Pin the response (taking ownership) + the reuse decision. */
     public Exchange(#HttpResponse response, boolean keepAlive) {
         this.response = #response;
         this.keepAlive = keepAlive;
+        this.written = false;
     }
 
     /** The response to send. */

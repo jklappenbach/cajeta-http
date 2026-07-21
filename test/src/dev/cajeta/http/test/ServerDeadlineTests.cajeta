@@ -1,0 +1,361 @@
+package dev.cajeta.http.test;
+
+import cajeta.concurrent.Tasks;
+import cajeta.io.net.IpAddress;
+import cajeta.io.net.Server;
+import cajeta.io.net.SocketAddress;
+import cajeta.io.net.TcpStream;
+import cajeta.time.Clock;
+import cajeta.time.Instant;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.client.HttpClient;
+import dev.cajeta.http.server.HttpServer;
+import dev.cajeta.http.server.HttpServerBuilder;
+import dev.cajeta.http.server.ServerLimits;
+
+/**
+ * http:1.5a — server deadlines, timed against the CONFIGURED budgets
+ * (never wall-clock guesses): every cut must land at or after its
+ * configured value and well before the abuse would otherwise complete.
+ *
+ *   - **whole-head deadline** (the real slowloris guard): a client that
+ *     drips header bytes forever is cut ~`headReadTimeoutMs` after its
+ *     FIRST byte — per-byte reads each succeeding no longer save it —
+ *     and the cut is a `408` + close, not a silent drop. A head that
+ *     completes within the budget (in several spaced writes) is served.
+ *   - **body inter-read timeout**: a body stalled mid-delivery is cut
+ *     ~`bodyReadTimeoutMs` after the stall; spaced-but-under-budget
+ *     body writes complete fine (the inter-read clock resets).
+ *   - **whole-request budget**: a handler that overruns is cut AT the
+ *     budget — the client sees `503` + close while the handler is
+ *     still running (the stray fiber is drained after the write) — and
+ *     the budget also bounds the read phases when no per-phase
+ *     deadline is armed.
+ */
+public final class ServerDeadlineTests {
+
+    public static void run(Check c) {
+        System.stdout.println("-- server deadlines: drip-fed head cut --");
+        dripHeadCut(c);
+        System.stdout.println("-- server deadlines: slow-but-complete served --");
+        slowHeadServed(c);
+        System.stdout.println("-- server deadlines: stalled body cut --");
+        stalledBodyCut(c);
+        System.stdout.println("-- server deadlines: handler overrun cut --");
+        handlerOverrunCut(c);
+        System.stdout.println("-- server deadlines: budget bounds reads --");
+        budgetBoundsReads(c);
+    }
+
+    // ---- server -----------------------------------------------------------
+
+    public static #HttpResponse handle(HttpRequest req) {
+        String t = req.getTarget();
+        if (t.equals("/slow")) {
+            Tasks.sleepMillis((int64) 900);
+            String late = "late";
+            return HttpResponse.ok().body(late.toBytes(), late.byteLength());
+        }
+        String ok = "ok";
+        return HttpResponse.ok().body(ok.toBytes(), ok.byteLength());
+    }
+
+    /** A server whose `ServerLimits` are exactly `l`. */
+    static #HttpServer serverWith(#ServerLimits l) {
+        HttpServerBuilder b = HttpServer.builder();
+        b.bind("127.0.0.1:0");
+        (HttpRequest) -> #HttpResponse h =
+            (req) -> ServerDeadlineTests.handle(req);
+        b.handler(h);
+        b.serverLimits(#l);
+        return b.build();
+    }
+
+    /** Accept one connection and dispatch it (local copy — bare-spawn rule). */
+    public static async int32 acceptAndDispatch(Server core) {
+        TcpStream conn #= core.acceptNext();
+        core.dispatch(#conn);
+        return 1;
+    }
+
+    // ---- raw-socket helpers ----------------------------------------------
+
+    static #TcpStream rawConnect(int32 port) {
+        IpAddress ip = IpAddress.loopbackV4();
+        SocketAddress a = SocketAddress.of(#ip, port);
+        return TcpStream.connectAsync(#a);
+    }
+
+    static void writeStr(TcpStream s, String text) {
+        int8[] b = text.toBytes();
+        s.writeAllAsync(b, (int64) 0, (int64) text.byteLength());
+    }
+
+    /** Read to EOF (8 KiB cap) and return the bytes as text. */
+    static #String readAll(TcpStream s) {
+        int8[] buf = heap int8[8192];
+        int32 have = 0;
+        try {
+            while (have < 8192) {
+                int64 n = s.readAsync(buf, (int64) have, (int64) (8192 - have));
+                if (n <= (int64) 0) { break; }
+                have = have + (int32) n;
+            }
+        } catch (Exception e) {
+            // reset after the server's close still counts as connection end
+        }
+        int8[] copy = heap int8[have];
+        int32 i = 0;
+        while (i < have) {
+            copy[i] = buf[i];
+            i = i + 1;
+        }
+        return heap String(#copy, have);
+    }
+
+    static int64 nowMs() {
+        Instant t = Clock.now();
+        return t.toEpochMilli();
+    }
+
+    // ---- client fibers ---------------------------------------------------
+
+    /**
+     * Drip one header byte every 60 ms forever; the server (whole-head
+     * budget `headMs`) must answer 408 + close at `headMs`-or-later
+     * counted from the FIRST byte, and long before the drip would end.
+     */
+    public static async int32 dripHead(int32 port, int32 headMs) {
+        TcpStream s = ServerDeadlineTests.rawConnect(port);
+        int64 t0 = ServerDeadlineTests.nowMs();
+        ServerDeadlineTests.writeStr(s, "GET / HTTP/1.1\r\nx-a: ");
+        int32 i = 0;
+        boolean peerGone = false;
+        while (i < 40 && !peerGone) {
+            Tasks.sleepMillis((int64) 60);
+            try {
+                ServerDeadlineTests.writeStr(s, "y");
+            } catch (Exception e) {
+                peerGone = true;            // server already cut us — fine
+            }
+            i = i + 1;
+        }
+        String got = ServerDeadlineTests.readAll(s);
+        int64 elapsed = ServerDeadlineTests.nowMs() - t0;
+        s.close();
+        if (!got.contains("408")) {
+            System.stdout.println("  (drip-head got: '{}')", got);
+            return -1;
+        }
+        if (elapsed < (int64) headMs) {
+            System.stdout.println("  (drip-head cut EARLY: {} ms)", elapsed);
+            return -2;
+        }
+        if (elapsed >= (int64) (headMs * 4)) {
+            System.stdout.println("  (drip-head cut LATE: {} ms)", elapsed);
+            return -3;
+        }
+        return 1;
+    }
+
+    /** A head delivered in 3 spaced writes inside the budget is served. */
+    public static async int32 slowHead(int32 port) {
+        TcpStream s = ServerDeadlineTests.rawConnect(port);
+        ServerDeadlineTests.writeStr(s, "GET / HTTP/1.1\r\n");
+        Tasks.sleepMillis((int64) 80);
+        ServerDeadlineTests.writeStr(s, "host: t\r\nconnection: close\r\n");
+        Tasks.sleepMillis((int64) 80);
+        ServerDeadlineTests.writeStr(s, "\r\n");
+        String got = ServerDeadlineTests.readAll(s);
+        s.close();
+        if (!got.contains("200")) {
+            System.stdout.println("  (slow-head got: '{}')", got);
+            return -1;
+        }
+        return 1;
+    }
+
+    /**
+     * Deliver 3 of 10 declared body bytes, then stall: cut ~`bodyMs`
+     * after the stall with a 408. First prove the inter-read clock
+     * RESETS: a body in two spaced-under-budget writes completes.
+     */
+    public static async int32 stalledBody(int32 port, int32 bodyMs) {
+        // Leg 1: spaced-but-alive body completes.
+        TcpStream a = ServerDeadlineTests.rawConnect(port);
+        ServerDeadlineTests.writeStr(a,
+            "POST / HTTP/1.1\r\nhost: t\r\nconnection: close\r\n"
+            + "content-length: 10\r\n\r\n12345");
+        Tasks.sleepMillis((int64) 150);
+        ServerDeadlineTests.writeStr(a, "67890");
+        String ok = ServerDeadlineTests.readAll(a);
+        a.close();
+        if (!ok.contains("200")) {
+            System.stdout.println("  (spaced-body got: '{}')", ok);
+            return -1;
+        }
+
+        // Leg 2: stall mid-body; expect 408 at bodyMs-or-later.
+        TcpStream s = ServerDeadlineTests.rawConnect(port);
+        ServerDeadlineTests.writeStr(s,
+            "POST / HTTP/1.1\r\nhost: t\r\nconnection: close\r\n"
+            + "content-length: 10\r\n\r\nabc");
+        int64 t0 = ServerDeadlineTests.nowMs();
+        String got = ServerDeadlineTests.readAll(s);
+        int64 elapsed = ServerDeadlineTests.nowMs() - t0;
+        s.close();
+        if (!got.contains("408")) {
+            System.stdout.println("  (stalled-body got: '{}')", got);
+            return -2;
+        }
+        if (elapsed < (int64) bodyMs) {
+            System.stdout.println("  (stalled-body cut EARLY: {} ms)", elapsed);
+            return -3;
+        }
+        if (elapsed >= (int64) (bodyMs * 4)) {
+            System.stdout.println("  (stalled-body cut LATE: {} ms)", elapsed);
+            return -4;
+        }
+        return 1;
+    }
+
+    /**
+     * `/slow` sleeps 900 ms; the request budget is `budgetMs`. The 503
+     * must arrive at `budgetMs`-or-later but BEFORE the handler could
+     * have finished — the cut happened, not a slow 200.
+     */
+    public static async int32 overrun(int32 port, int32 budgetMs) {
+        HttpClient client = heap HttpClient();
+        String url = "http://127.0.0.1:" + port + "/slow";
+        int64 t0 = ServerDeadlineTests.nowMs();
+        HttpResponse resp = client.get(url);
+        int64 elapsed = ServerDeadlineTests.nowMs() - t0;
+        if (resp.statusCode() != 503) {
+            System.stdout.println("  (overrun status: {})", resp.statusCode());
+            return -1;
+        }
+        if (elapsed < (int64) budgetMs) {
+            System.stdout.println("  (overrun cut EARLY: {} ms)", elapsed);
+            return -2;
+        }
+        if (elapsed >= (int64) 900) {
+            System.stdout.println("  (overrun cut LATE: {} ms)", elapsed);
+            return -3;
+        }
+        return 1;
+    }
+
+    /**
+     * With NO per-phase deadline armed, the whole-request budget alone
+     * must still cut a dripping head.
+     */
+    public static async int32 dripUnderBudget(int32 port, int32 budgetMs) {
+        TcpStream s = ServerDeadlineTests.rawConnect(port);
+        int64 t0 = ServerDeadlineTests.nowMs();
+        ServerDeadlineTests.writeStr(s, "GET / HTTP/1.1\r\nx-a: ");
+        int32 i = 0;
+        boolean peerGone = false;
+        while (i < 40 && !peerGone) {
+            Tasks.sleepMillis((int64) 60);
+            try {
+                ServerDeadlineTests.writeStr(s, "y");
+            } catch (Exception e) {
+                peerGone = true;
+            }
+            i = i + 1;
+        }
+        String got = ServerDeadlineTests.readAll(s);
+        int64 elapsed = ServerDeadlineTests.nowMs() - t0;
+        s.close();
+        if (!got.contains("408")) {
+            System.stdout.println("  (budget-drip got: '{}')", got);
+            return -1;
+        }
+        if (elapsed < (int64) budgetMs) {
+            System.stdout.println("  (budget-drip cut EARLY: {} ms)", elapsed);
+            return -2;
+        }
+        if (elapsed >= (int64) (budgetMs * 4)) {
+            System.stdout.println("  (budget-drip cut LATE: {} ms)", elapsed);
+            return -3;
+        }
+        return 1;
+    }
+
+    // ---- scenarios -------------------------------------------------------
+
+    static void dripHeadCut(Check c) {
+        scope {
+            ServerLimits l = ServerLimits.of(300, 0, (int64) 0, true);
+            HttpServer srv = ServerDeadlineTests.serverWith(#l);
+            Server core = srv.server;
+            int32 port = core.listener.boundPort();
+            Task<int32> s1 = spawn acceptAndDispatch(core);
+            Task<int32> t1 = spawn dripHead(port, 300);
+            c.eqInt((int64) await t1, 1,
+                    "drip-fed head cut with 408 at the whole-head budget");
+            c.eqInt((int64) await s1, 1, "drip connection accepted once");
+        }
+    }
+
+    static void slowHeadServed(Check c) {
+        scope {
+            ServerLimits l = ServerLimits.of(300, 0, (int64) 0, true);
+            HttpServer srv = ServerDeadlineTests.serverWith(#l);
+            Server core = srv.server;
+            int32 port = core.listener.boundPort();
+            Task<int32> s1 = spawn acceptAndDispatch(core);
+            Task<int32> t1 = spawn slowHead(port);
+            c.eqInt((int64) await t1, 1,
+                    "spaced-but-in-budget head is served, not cut");
+            c.eqInt((int64) await s1, 1, "slow-head connection accepted once");
+        }
+    }
+
+    static void stalledBodyCut(Check c) {
+        scope {
+            ServerLimits l = ServerLimits.of(5000, 250, (int64) 0, true);
+            HttpServer srv = ServerDeadlineTests.serverWith(#l);
+            Server core = srv.server;
+            int32 port = core.listener.boundPort();
+            Task<int32> s1 = spawn acceptAndDispatch(core);
+            Task<int32> s2 = spawn acceptAndDispatch(core);
+            Task<int32> t1 = spawn stalledBody(port, 250);
+            c.eqInt((int64) await t1, 1,
+                    "stalled body cut with 408 at the inter-read budget");
+            c.eqInt((int64) await s1, 1, "body scenario first accept");
+            c.eqInt((int64) await s2, 1, "body scenario second accept");
+        }
+    }
+
+    static void handlerOverrunCut(Check c) {
+        scope {
+            ServerLimits l = ServerLimits.of(5000, 5000, (int64) 0, true);
+            l.requestBudgetMs = 400;
+            HttpServer srv = ServerDeadlineTests.serverWith(#l);
+            Server core = srv.server;
+            int32 port = core.listener.boundPort();
+            Task<int32> s1 = spawn acceptAndDispatch(core);
+            Task<int32> t1 = spawn overrun(port, 400);
+            c.eqInt((int64) await t1, 1,
+                    "overrunning handler cut with 503 at the request budget");
+            c.eqInt((int64) await s1, 1, "overrun connection accepted once");
+        }
+    }
+
+    static void budgetBoundsReads(Check c) {
+        scope {
+            ServerLimits l = ServerLimits.of(0, 0, (int64) 0, true);
+            l.requestBudgetMs = 300;
+            HttpServer srv = ServerDeadlineTests.serverWith(#l);
+            Server core = srv.server;
+            int32 port = core.listener.boundPort();
+            Task<int32> s1 = spawn acceptAndDispatch(core);
+            Task<int32> t1 = spawn dripUnderBudget(port, 300);
+            c.eqInt((int64) await t1, 1,
+                    "request budget alone bounds a dripping head");
+            c.eqInt((int64) await s1, 1, "budget-drip connection accepted once");
+        }
+    }
+}

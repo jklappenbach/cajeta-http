@@ -768,7 +768,7 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
   stdlib ships `ConnectionLimits`/`ConnectionLimiter`/`LoadShedPolicy`
   for accept control — this unit makes budgets configurable, adds the
   missing phases, and proves the existing pieces under test.
-  - [ ] **1.5a Deadlines.** Configurable per-phase budgets on
+  - [x] **1.5a Deadlines.** Configurable per-phase budgets on
     `ServerLimits`: header-read (slowloris) deadline, body inter-read
     timeout, whole-request budget; 408 where a response is still
     possible, close otherwise.
@@ -776,6 +776,39 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
       stalled body read cut; handler overrun cut at the request budget;
       timings asserted against configured values, not wall-clock
       guesses.
+    - **Shipped:** the pre-1.5a `headReadTimeoutMs` was a PER-READ
+      timeout — it bounded the idle wait for each byte, so a slowloris
+      dripping one byte per (sub-deadline) interval never tripped it.
+      Now it stays the idle/keep-alive wait for a request's FIRST byte,
+      but from that byte an **absolute whole-head deadline** caps the
+      complete head; a spent deadline degrades the next read to a 1 ms
+      grace whose `TimedOutException` is the cut (`remainingMs` /
+      `clampReadMs` helpers). `bodyReadTimeoutMs` stays the inter-read
+      body budget (each arriving piece resets it — a live trickle
+      survives, a stall is cut). New `ServerLimits.requestBudgetMs`
+      (`0` = off): an absolute whole-request deadline from the first
+      byte spanning head + body reads AND the handler — it caps every
+      read (so it bounds a drip even with no per-phase deadline armed)
+      and, via `dispatchBudgeted`, runs the handler on its own fiber
+      polled (5 ms) against the deadline; an overrun writes `503` +
+      `Connection: close` AT the deadline, then drains the stray
+      handler fiber (can't cancel — parked fibers never observe
+      `taskCancel`, and the abandoned Task's drop joins it anyway). A
+      `TimedOutException` from the head/body read path now answers
+      **408** (best-effort) before closing, instead of a silent drop.
+      New pieces: `HandlerRun` (atomic-flag handoff cell — a `Channel`
+      won't do, its v1 `send(T)` borrows and the handler's response
+      would dangle), `Exchange.written` (loop must not re-write the
+      already-flushed 503), builder `serverLimits(#l)` +
+      `bindAddressWithModelAndLimits` (limits installed BEFORE the
+      accept closure captures them by value — a post-bind swap never
+      reaches an accepted connection; this was a real hang in dev).
+      ServerDeadlineTests +11 checks (suite 421 → **432**), every cut
+      asserted `>= configured && < 4x`: drip-head 408, slow-but-
+      in-budget served, stalled-body 408 with the reset-clock control,
+      handler-overrun 503 before the handler's own 900 ms, budget-
+      bounds-a-drip with no per-phase deadline. 150-run loop clean,
+      tour 15/15.
   - [ ] **1.5b Size limits.** Per-server max body size — early 413,
     sharing 1.3e's parse-time enforcement (global cap here; per-route
     came with 1.3e) — and `HttpParserLimits`' header caps surfaced on

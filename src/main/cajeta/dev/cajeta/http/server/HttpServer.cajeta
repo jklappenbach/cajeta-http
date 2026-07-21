@@ -24,6 +24,9 @@ import dev.cajeta.http.HttpException;
 import dev.cajeta.http.server.Exchange;
 import cajeta.io.net.tls.TlsStream;
 import cajeta.time.Duration;
+import cajeta.time.Clock;
+import cajeta.time.Instant;
+import cajeta.concurrent.Tasks;
 
 /**
  * The **HTTP/1.1 server** — plan item **NET-9.1**. It layers a typed
@@ -291,8 +294,26 @@ public class HttpServer {
     public static #HttpServer bindAddressWithModel(#SocketAddress addr,
                                                    ServerModel model,
                                                    (HttpRequest) -> #HttpResponse handler) {
+        return HttpServer.bindAddressWithModelAndLimits(#addr, model, handler,
+                                                        null);
+    }
+
+    /**
+     * [`bindAddressWithModel`](#bindAddressWithModel) with an explicit
+     * [`ServerLimits`](ServerLimits.cajeta) installed BEFORE the accept
+     * closure captures it (http:1.5a) — the connection closure binds the
+     * server's `serverLimits` by value, so a post-bind swap would never
+     * reach an already-accepted connection. `null` keeps the defaults.
+     */
+    public static #HttpServer bindAddressWithModelAndLimits(
+            #SocketAddress addr, ServerModel model,
+            (HttpRequest) -> #HttpResponse handler, #ServerLimits limits) {
         HttpServer srv = heap HttpServer(handler);
         srv.model = model;
+        if (limits != null) {
+            ServerLimits l #= limits;
+            srv.serverLimits #= l;
+        }
         (HttpRequest) -> #HttpResponse h = srv.handler;
         HttpParserLimits lim = srv.limits;
         // NET-9.6: the per-connection seam runs the hardened loop, threading
@@ -592,10 +613,22 @@ public class HttpServer {
                 ex = HttpServer.readExchangeWithLimits(handler, parseLimits, limits,
                                                        reader, writer);
             } catch (TimedOutException t) {
-                return;                 // slowloris / stalled peer: drop the conn
+                // Slowloris / stalled peer: a response is still possible
+                // (nothing of ours is on the wire yet), so say WHY before
+                // closing — 408 Request Timeout, best-effort (the peer may
+                // already be gone; the close happens regardless).
+                try {
+                    HttpResponse rto = HttpServer.statusResponse(408);
+                    HttpServer.writeExchange(writer, rto, false);
+                } catch (Exception we) {
+                }
+                return;
             }
             if (ex == null) {
                 return;                 // clean EOF between requests
+            }
+            if (ex.written) {
+                return;                 // budget cut: 503 already flushed; close
             }
             HttpServer.writeExchange(writer, ex.response, ex.keepAlive);
             keepAlive = ex.keepAlive;
@@ -621,10 +654,26 @@ public class HttpServer {
         int8[] one = heap int8[1];
         int32 headMs = limits.headReadTimeoutMs;
 
-        // --- read the head, a byte at a time, under the head deadline. ---
+        // --- read the head under the WHOLE-HEAD deadline (http:1.5a). ---
+        // `headMs` bounds the idle wait for a request's FIRST byte (the
+        // pre-1.5a behavior, doubling as the keep-alive idle timeout);
+        // from that byte on, an ABSOLUTE deadline caps the whole head —
+        // per-byte reads each succeeding no longer saves a slowloris.
+        // The whole-request budget (when armed) starts on the same byte
+        // and also caps every read. A spent deadline degrades the next
+        // read to a 1 ms grace, whose TimedOutException is the cut.
+        int64 headDeadline = 0;
+        int64 reqDeadline = 0;
         try {
             while (!parser.isComplete()) {
-                int32 n = reader.readWithin(one, 0, 1, headMs);
+                int32 ms = headMs;
+                if (sawAnyByte) {
+                    int64 left = HttpServer.remainingMs(headDeadline, reqDeadline);
+                    if (left >= 0) {
+                        ms = HttpServer.clampReadMs(left);
+                    }
+                }
+                int32 n = reader.readWithin(one, 0, 1, ms);
                 if (n == 0) {
                     if (!sawAnyByte) {
                         return null;            // clean EOF between requests
@@ -632,7 +681,17 @@ public class HttpServer {
                     parser.endInput();          // mid-head EOF -> UnexpectedEof
                     break;
                 }
-                sawAnyByte = true;
+                if (!sawAnyByte) {
+                    sawAnyByte = true;
+                    Instant t0 = Clock.now();
+                    int64 now = t0.toEpochMilli();
+                    if (headMs > 0) {
+                        headDeadline = now + (int64) headMs;
+                    }
+                    if (limits.requestBudgetMs > 0) {
+                        reqDeadline = now + (int64) limits.requestBudgetMs;
+                    }
+                }
                 parser.feed(one, 1);
             }
         } catch (HttpException e) {
@@ -661,14 +720,54 @@ public class HttpServer {
 
         // --- read the body under the body deadline + size cap. ---
         try {
-            HttpServer.readBodyWithLimits(request, parser, framing, limits, reader);
+            HttpServer.readBodyWithLimits(request, parser, framing, limits,
+                                          reader, reqDeadline);
         } catch (HttpException e) {
             return HttpServer.rejectExchange(HttpServer.errorResponse(e));
         }
 
+        if (reqDeadline > (int64) 0) {
+            return HttpServer.dispatchBudgeted(handler, request, reqDeadline,
+                                               writer);
+        }
         HttpResponse response = HttpServer.dispatch(handler, request);
         boolean keepAlive = HttpServer.decideReuse(request, response);
         return heap Exchange(#response, keepAlive);
+    }
+
+    /**
+     * Milliseconds left until the nearest ACTIVE absolute deadline
+     * (`0` = inactive), floored at zero; `-1` when neither is armed.
+     */
+    static int64 remainingMs(int64 dlA, int64 dlB) {
+        if (dlA == (int64) 0 && dlB == (int64) 0) {
+            return (int64) -1;
+        }
+        int64 dl = dlA;
+        if (dl == (int64) 0 || (dlB != (int64) 0 && dlB < dl)) {
+            dl = dlB;
+        }
+        Instant t = Clock.now();
+        int64 left = dl - t.toEpochMilli();
+        if (left < (int64) 0) {
+            return (int64) 0;
+        }
+        return left;
+    }
+
+    /**
+     * A remaining budget as a `readWithin` timeout: at least 1 ms (a
+     * spent budget gets a 1 ms grace read whose `TimedOutException` IS
+     * the cut — `<= 0` would mean "unbounded"), capped to int32.
+     */
+    static int32 clampReadMs(int64 left) {
+        if (left < (int64) 1) {
+            return 1;
+        }
+        if (left > (int64) 2147483000) {
+            return 2147483000;
+        }
+        return (int32) left;
     }
 
     /**
@@ -683,7 +782,7 @@ public class HttpServer {
      */
     static void readBodyWithLimits(HttpRequest request, HttpParser parser,
                                    BodyFraming framing, ServerLimits limits,
-                                   AsyncReader reader) {
+                                   AsyncReader reader, int64 reqDeadline) {
         BodyReader body = BodyReader.forFraming(framing);
         int8[] leftover = parser.leftover();
         int32 leftoverLen = parser.leftoverLength();
@@ -701,7 +800,18 @@ public class HttpServer {
                 limits.maxBodyBytes, total);
         }
         while (!body.isComplete()) {
-            int32 n = reader.readWithin(chunk, 0, 2048, bodyMs);
+            // Per-read: the INTER-READ body budget (each arriving piece
+            // resets it — a live trickle survives, a stall is cut), also
+            // capped by what remains of the whole-request budget.
+            int32 ms = bodyMs;
+            int64 left = HttpServer.remainingMs((int64) 0, reqDeadline);
+            if (left >= (int64) 0) {
+                int32 cap = HttpServer.clampReadMs(left);
+                if (ms <= 0 || cap < ms) {
+                    ms = cap;
+                }
+            }
+            int32 n = reader.readWithin(chunk, 0, 2048, ms);
             if (n == 0) {
                 body.endInput();        // KIND_CLOSE completes; others -> UnexpectedEof
                 break;
@@ -743,6 +853,50 @@ public class HttpServer {
         } catch (Exception e) {
             return HttpServer.statusResponse(500);
         }
+    }
+
+    /** The handler fiber of a budgeted dispatch: run, deposit, done. */
+    static async int32 runHandler((HttpRequest) -> #HttpResponse handler,
+                                  HttpRequest request, HandlerRun run) {
+        HttpResponse r = HttpServer.dispatch(handler, request);
+        run.put(#r);
+        return 1;
+    }
+
+    /**
+     * [`dispatch`](#dispatch) under the whole-request budget (http:1.5a):
+     * the handler runs on its OWN fiber depositing into a
+     * [`HandlerRun`](HandlerRun.cajeta); this fiber polls (5 ms grain)
+     * against `reqDeadline`. In time → the normal exchange. Overrun →
+     * the cut is written HERE — `503` + `Connection: close`, flushed at
+     * the deadline so the client sees it on time — and only then is the
+     * stray handler fiber awaited (it cannot be cancelled: parked fibers
+     * never observe `taskCancel`, and an abandoned Task's drop would
+     * join it anyway). The connection closes after the drain; the
+     * returned Exchange carries `written = true` so the loop writes
+     * nothing further.
+     */
+    static #Exchange dispatchBudgeted((HttpRequest) -> #HttpResponse handler,
+                                      HttpRequest request, int64 reqDeadline,
+                                      AsyncWriter writer) {
+        HandlerRun run = heap HandlerRun();
+        Task<int32> t = spawn runHandler(handler, request, run);
+        while (run.pending()) {
+            int64 left = HttpServer.remainingMs((int64) 0, reqDeadline);
+            if (left == (int64) 0) {
+                HttpResponse cut = HttpServer.statusResponse(503);
+                HttpServer.writeExchange(writer, cut, false);
+                int32 drained = await t;
+                Exchange ex = heap Exchange(#cut, false);
+                ex.written = true;
+                return #ex;
+            }
+            Tasks.sleepMillis((int64) 5);
+        }
+        int32 done = await t;
+        HttpResponse response = run.take();
+        boolean keepAlive = HttpServer.decideReuse(request, response);
+        return heap Exchange(#response, keepAlive);
     }
 
     // ----- response writing ------------------------------------------------
@@ -1087,6 +1241,13 @@ public class HttpServerBuilder {
     private (HttpRequest) -> #HttpResponse handler;
 
     /**
+     * The [`ServerLimits`](ServerLimits.cajeta) to install at
+     * [`build`](#build), or `null` to keep the server's defaults
+     * (http:1.5a).
+     */
+    private ServerLimits slim;
+
+    /**
      * Start with the default (fiber-per-connection) model and no address/handler.
      *
      * @EntryPoint
@@ -1095,6 +1256,7 @@ public class HttpServerBuilder {
         this.addr = null;
         this.model = ServerModel.fiberPerConnection();
         this.handler = null;
+        this.slim = null;
     }
 
     /**
@@ -1148,6 +1310,17 @@ public class HttpServerBuilder {
     }
 
     /**
+     * Adopt the [`ServerLimits`](ServerLimits.cajeta) the built server
+     * enforces (http:1.5a — the fluent path to the deadline/size/budget
+     * knobs). Unset, the server keeps its conservative defaults.
+     * Returns `this` to chain.
+     */
+    public HttpServerBuilder serverLimits(#ServerLimits l) {
+        this.slim = #l;
+        return this;
+    }
+
+    /**
      * The accept [`model`](../ServerModel.cajeta) this builder will
      * materialize on [`build`](#build) — the documented default (Model A —
      * fiber-per-connection) until [`model`](#model) / [`sharedPool`](#sharedPool)
@@ -1172,8 +1345,14 @@ public class HttpServerBuilder {
         if (h == null) {
             h = (HttpRequest req) -> HttpResponse.of(500);
         }
-        return HttpServer.bindAddressWithModel(SocketAddress.parse(this.addr),
-                                               this.model, h);
+        ServerLimits l = null;
+        if (this.slim != null) {
+            ServerLimits moved #= this.slim;
+            this.slim = null;
+            l = #moved;
+        }
+        return HttpServer.bindAddressWithModelAndLimits(
+            SocketAddress.parse(this.addr), this.model, h, #l);
     }
 
     /**

@@ -93,6 +93,15 @@ public class ServerLimits {
      * [`ExpectContinue`](ExpectContinue.cajeta).
      */
     public boolean expectContinueEnabled;
+    /**
+     * The **whole-request budget** in milliseconds (http:1.5a): from the
+     * request's first byte to the response write, spanning head + body
+     * reads AND the handler. Reads are capped by the remaining budget;
+     * a handler still running when it expires is cut — the server
+     * answers `503` + close at the deadline and drains the stray
+     * handler fiber afterward. `0` (the default) disables the budget.
+     */
+    public int32 requestBudgetMs;
 
     /**
      * Field-pinning constructor at the conservative public-server defaults:
@@ -104,6 +113,7 @@ public class ServerLimits {
         this.bodyReadTimeoutMs = ServerLimits.DEFAULT_BODY_TIMEOUT_MS;
         this.maxBodyBytes = ServerLimits.DEFAULT_MAX_BODY_BYTES;
         this.expectContinueEnabled = true;
+        this.requestBudgetMs = 0;
     }
 
     /**
@@ -123,7 +133,13 @@ public class ServerLimits {
         l.bodyReadTimeoutMs = bodyReadTimeoutMs;
         l.maxBodyBytes = maxBodyBytes;
         l.expectContinueEnabled = expectContinueEnabled;
+        l.requestBudgetMs = 0;
         return #l;
+    }
+
+    /** True iff a whole-request budget is in force (positive). */
+    public boolean hasRequestBudget() {
+        return this.requestBudgetMs > 0;
     }
 
     /** True iff a head-read deadline is in force (positive budget). */

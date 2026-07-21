@@ -1,0 +1,46 @@
+package dev.cajeta.http.server;
+
+import cajeta.concurrent.AtomicInt32;
+import dev.cajeta.http.HttpResponse;
+
+/**
+ * The cross-fiber handoff cell for a **budgeted** handler dispatch
+ * (http:1.5a): the handler fiber [`put`](#put)s its owned response and
+ * flips the atomic flag; the connection fiber polls [`pending`](#pending)
+ * against the request deadline and either [`take`](#take)s the result
+ * or cuts the exchange. The atomic store/load orders the response write
+ * against the flag, so a `take` after `!pending()` always sees the
+ * response. (A `Channel` would be the natural carrier, but its v1
+ * `send(T)` BORROWS the payload — a handler fiber's response would
+ * dangle the moment its frame dropped.)
+ */
+public class HandlerRun {
+    /** The handler's response; meaningful once the flag is set. */
+    HttpResponse resp;
+    /** `0` = still running, `1` = response deposited. */
+    AtomicInt32 flag;
+
+    public HandlerRun() {
+        this.resp = null;
+        AtomicInt32 f = heap AtomicInt32(0);
+        this.flag = #f;
+    }
+
+    /** Deposit the handler's response (called once, by the handler fiber). */
+    public void put(#HttpResponse r) {
+        this.resp = #r;
+        this.flag.store(1);
+    }
+
+    /** True while the handler fiber has not deposited its response. */
+    public boolean pending() {
+        return this.flag.load() == 0;
+    }
+
+    /** Detach the deposited response (call only after `!pending()`). */
+    public #HttpResponse take() {
+        HttpResponse r #= this.resp;
+        this.resp = null;
+        return #r;
+    }
+}
