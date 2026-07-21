@@ -757,10 +757,25 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
       Plus one more latent 0.9 ownership bug the new tests exposed:
       `ensure()`'s grown buffer was PLAIN-assigned into the owned field
       (`this.out = nb`) — use-after-free; the growth path had never
-      been exercised. Verified via a direct driver (11/11 ×5) because
-      **the cajeta-unit reflective runner still aborts after
-      AvroWriteTest under 0.9.4** (retested; NOT the arena bug — its
-      own open issue); the 20 pre-abort classes stay green.
+      been exercised. Verified first via a direct driver (11/11 ×5), then — after the
+      abort was ROOT-CAUSED (see below) — under the runner itself.
+      **The "reflective-runner abort" was never a runner bug**: it
+      reproduced with direct calls, and was codec heap corruption from
+      a SECOND family of 0.9 ownership misses (cajeta-codec `d02175c`):
+      five growth writers plain-assigning their grown buffer into the
+      owned field (AvroWriter/ProtobufWriter/IonWriter/
+      ThriftCompactWriter/BitWriter — freed buffer, dangling field,
+      `malloc: corrupted top size` at the next allocation; the passing
+      tests simply never grew past 64 bytes), and IonCursor storing
+      `IonIndex.buildAt`'s owned return / stepIn's owned local straight
+      into `frames[]` slots (dropped at statement end; SIGSEGV in
+      `String.equals` once the heap got reused). Codec suite:
+      20-then-SIGABRT → **173/173, 0 failed** ×3 through the vindicated
+      runner. Release chain: codec `v0.5.1` tagged + pushed; CI pin
+      bumped v0.7.1 → v0.9.3, GPU-decode oracle non-blocking (XPU
+      surface is feature-branch-only); first tag run red on
+      cajeta-unit's UNPUSHED `#Invocation` migration fix (885a5bf on
+      `feature/0.9.0-migration` — needs a push to its main).
     - **http-side:** `dev.cajeta.http.coding.ContentCoding`
       (`encode`/`decode(token, data, len, maxOut)`/`isSupported`) +
       `ContentCodingException extends HttpException`. Tokens: `gzip` +
