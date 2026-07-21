@@ -1,0 +1,46 @@
+package dev.cajeta.http.client;
+
+import cajeta.lang.String;
+
+/**
+ * One stored cookie (http:1.4g) — a node in
+ * [`CookieJar`](CookieJar.cajeta)'s owned chain (the
+ * [`OriginEntry`](OriginEntry.cajeta) linked-stack idiom; no growable
+ * array to manage). All strings are owned copies made at store time.
+ *
+ * `expiresAtMs == 0` marks a **session cookie** (no `Expires`/`Max-Age`
+ * — lives for the jar's lifetime). `hostOnly` records whether the
+ * cookie came WITHOUT a `Domain` attribute (RFC 6265 §5.3 step 6):
+ * host-only cookies match the exact request host; domain cookies
+ * domain-match suffix-wise.
+ */
+public class Cookie {
+    public String name;
+    public String value;
+    /** The match domain (lowercase, no leading dot). */
+    public String domain;
+    /** The match path (always starts `/`). */
+    public String path;
+    /** Absolute expiry, epoch millis; `0` = session cookie. */
+    public int64 expiresAtMs;
+    /** Only sent over `https` when set. */
+    public boolean secure;
+    /** `HttpOnly` attribute (recorded; a client jar is an HTTP-only surface). */
+    public boolean httpOnly;
+    /** Set iff no `Domain` attribute — exact-host matching. */
+    public boolean hostOnly;
+    /** The jar's chain link. */
+    public Cookie next;
+
+    public Cookie() {
+        this.name = null;
+        this.value = null;
+        this.domain = null;
+        this.path = null;
+        this.expiresAtMs = 0;
+        this.secure = false;
+        this.httpOnly = false;
+        this.hostOnly = true;
+        this.next = null;
+    }
+}

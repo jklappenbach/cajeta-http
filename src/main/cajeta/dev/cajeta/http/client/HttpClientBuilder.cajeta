@@ -51,6 +51,8 @@ public class HttpClientBuilder {
     String proxyHost;
     int32 proxyPort;
     boolean hasProxy;
+    /** Attach a fresh cookie jar at build (cookies stay off otherwise). */
+    boolean hasJar;
 
     /** Every knob at "keep the client's default". */
     public HttpClientBuilder() {
@@ -73,6 +75,7 @@ public class HttpClientBuilder {
         this.proxyHost = null;
         this.proxyPort = 0;
         this.hasProxy = false;
+        this.hasJar = false;
     }
 
     /** Stamp `name: value` on every request that lacks `name`. */
@@ -136,6 +139,16 @@ public class HttpClientBuilder {
         return this;
     }
 
+    /**
+     * Attach a fresh [`CookieJar`](CookieJar.cajeta) at build — the
+     * explicit RFC 6265 opt-in (cookies are off by default). To inject
+     * a prepared jar, use `HttpClient.cookieJar(#jar)` after build.
+     */
+    public HttpClientBuilder cookieJar() {
+        this.hasJar = true;
+        return this;
+    }
+
     /** Route every exchange through the HTTP proxy at `host:port`. */
     public HttpClientBuilder proxy(String host, int32 port) {
         String ph = host.substring(0, host.byteLength());
@@ -182,6 +195,10 @@ public class HttpClientBuilder {
         }
         if (this.hasProxy) {
             c.proxy(this.proxyHost, this.proxyPort);
+        }
+        if (this.hasJar) {
+            CookieJar j = heap CookieJar();
+            c.cookieJar(#j);
         }
         return #c;
     }

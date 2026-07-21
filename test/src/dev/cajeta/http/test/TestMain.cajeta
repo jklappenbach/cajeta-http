@@ -28,6 +28,7 @@ public final class TestMain {
         CodingTests.run(c);
         ClientCodingTests.run(c);
         ClientBuilderTests.run(c);
+        ClientCookieTests.run(c);
         WsTests.run(c);
 
         System.stdout.println("");

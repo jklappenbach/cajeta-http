@@ -735,11 +735,33 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
       self-signed P-256 cert (SAN IP:127.0.0.1, 2036 expiry) embedded
       in the test, pinned via `trustAnchor`. 150-run loop clean, tour
       15/15.
-  - [ ] **1.4g `CookieJar`** (decision: **off by default**, explicit
+  - [x] **1.4g `CookieJar`** (decision: **off by default**, explicit
     `.cookieJar(jar)` opt-in). RFC 6265 subset: `Set-Cookie` parse,
     domain/path matching, expiry/max-age, `Secure`/`HttpOnly` honored.
     - TDD: no jar → nothing echoed back; with jar → set/return across
       exchanges, domain/path scoping, expiry drops the cookie.
+    - **Shipped:** `Cookie` (owned-chain node, pool linked-stack idiom
+      — no growable array) + `CookieJar`: §5.2 parse (`Domain`/`Path`/
+      `Max-Age`/`Expires`/`Secure`/`HttpOnly`, unknown attrs ignored),
+      §5.1.3 domain-match with store-time rejection of a non-matching
+      `Domain` (no public-suffix list in v1), §5.1.4 default-path +
+      path-match, `Max-Age` wins over `Expires` (`<= 0` deletes), a
+      strict RFC 1123 `Expires` parser (days-from-civil; unparseable →
+      session cookie), lazy expiry eviction at match time, same
+      `(name, domain, path)` replaces. Send order is creation order
+      (§5.4 longest-path-first sort deferred — noted in the class
+      doc). Client: `cookieJar(#jar)` adopts (`null` default = OFF —
+      nothing stored or sent); `send` stamps `Cookie` only when the
+      caller set none, and admits every response `Set-Cookie` via
+      `getAll`. Builder: `.cookieJar()` attaches a fresh jar at build.
+      ClientCookieTests +10 checks (suite 411 → **421**): default-off,
+      cross-exchange round-trip incl. two `Set-Cookie` in one
+      response, `/app` path scoping, `Max-Age=0` delete + future/past
+      `Expires` (both RFC 1123 arms), `Secure` withheld over http,
+      foreign `Domain` rejected. 150-run loop clean, tour 15/15.
+      Compiler wrinkle recorded: an owned-chain detach temp
+      (`X rest #= …`) must not live across a loop backedge —
+      use-after-move flags it; one-unlink-per-call helpers dodge it.
 - [ ] **1.5** Server hardening. Broken to TDD granularity 2026-07-19.
   Substrate check: the head-read deadline already exists (`readWithin`,
   30s default), `HttpServer.shutdown(Duration)` already drains, and the

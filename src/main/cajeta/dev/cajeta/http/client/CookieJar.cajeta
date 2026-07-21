@@ -1,0 +1,484 @@
+package dev.cajeta.http.client;
+
+import cajeta.lang.String;
+
+/**
+ * The client cookie store (http:1.4g) — the **RFC 6265 subset** the
+ * plan names, wired into [`HttpClient`](HttpClient.cajeta) only by the
+ * explicit `.cookieJar(...)` opt-in (cookies are OFF by default):
+ *
+ *   - **`Set-Cookie` parse** (§5.2): `name=value` + the `Domain`,
+ *     `Path`, `Max-Age`, `Expires`, `Secure`, `HttpOnly` attributes
+ *     (unknown attributes ignored, per spec).
+ *   - **Domain matching** (§5.1.3): no `Domain` attribute → host-only
+ *     (exact match); with one → suffix domain-match, and a cookie whose
+ *     `Domain` the request host does not match is rejected at store
+ *     time (no public-suffix list in v1 — private-network use).
+ *   - **Path matching** (§5.1.4): missing/malformed `Path` takes the
+ *     request's default path (up to the last `/`); path-match is
+ *     identical / prefix-at-a-`/` boundary.
+ *   - **Expiry**: `Max-Age` (seconds, wins over `Expires`; `<= 0`
+ *     deletes), `Expires` as a strict RFC 1123 date (`Wdy, DD Mon YYYY
+ *     HH:MM:SS GMT` — the format every server has emitted for
+ *     decades; unparseable dates degrade to a session cookie). Expired
+ *     entries are dropped lazily at match time.
+ *   - **`Secure`** cookies are only released to `https` requests;
+ *     `HttpOnly` is recorded (a client jar has no non-HTTP reader).
+ *
+ * Storage is an owned `Cookie` chain appended at the tail, so the
+ * `Cookie` header lists same-path cookies in creation order (the §5.4
+ * longest-path-first sort is not implemented in v1 — no consumer of
+ * this jar distinguishes it until a name repeats across paths).
+ * An incoming cookie replaces a stored one with the same
+ * `(name, domain, path)`.
+ */
+public class CookieJar {
+    /** Chain head; append happens at the tail. */
+    Cookie head;
+
+    /** An empty jar. @EntryPoint */
+    public CookieJar() {
+        this.head = null;
+    }
+
+    // ----- store (§5.2/§5.3) ----------------------------------------------
+
+    /**
+     * Admit one `Set-Cookie` header value observed on a response from
+     * `host` for `reqPath`. Malformed or rejected cookies are dropped
+     * silently (§5.3's "ignore the Set-Cookie header entirely" arms);
+     * an expired one deletes its stored twin.
+     */
+    public void store(String setCookie, String host, String reqPath,
+                      int64 nowMs) {
+        // First `;`-segment: name=value. No `=` or empty name → ignore.
+        String pair = CookieJar.segment(setCookie, 0);
+        int64 eq = pair.indexOf("=");
+        if (eq <= (int64) 0) {
+            return;
+        }
+        String rawName = pair.substring(0, (int32) eq);
+        String name = rawName.trim();
+        String rawVal = pair.substring((int32) eq + 1, pair.byteLength());
+        String value = rawVal.trim();
+        if (name.byteLength() == 0) {
+            return;
+        }
+
+        // Attribute walk.
+        String domain = null;
+        String path = null;
+        boolean secure = false;
+        boolean httpOnly = false;
+        int64 expiresAt = 0;
+        boolean hasMaxAge = false;
+        boolean deleteNow = false;
+        int32 seg = 1;
+        while (true) {
+            String s = CookieJar.segment(setCookie, seg);
+            if (s == null) {
+                break;
+            }
+            seg = seg + 1;
+            String a = s.trim();
+            if (a.byteLength() == 0) {
+                continue;
+            }
+            String key = a;
+            String val = null;
+            int64 aeq = a.indexOf("=");
+            if (aeq >= (int64) 0) {
+                String rk = a.substring(0, (int32) aeq);
+                key = rk.trim();
+                String rv = a.substring((int32) aeq + 1, a.byteLength());
+                val = rv.trim();
+            }
+            String lk = key.toLowerCase();
+            if (lk.equals("secure")) {
+                secure = true;
+            } else if (lk.equals("httponly")) {
+                httpOnly = true;
+            } else if (lk.equals("domain") && val != null) {
+                String d = CookieJar.canonicalDomain(val);
+                domain = #d;
+            } else if (lk.equals("path") && val != null) {
+                if (val.startsWith("/")) {
+                    String p = val.substring(0, val.byteLength());
+                    path = #p;
+                }
+            } else if (lk.equals("max-age") && val != null) {
+                int64 secs = CookieJar.parseInt(val);
+                hasMaxAge = true;
+                if (secs <= (int64) 0) {
+                    deleteNow = true;
+                } else {
+                    expiresAt = nowMs + secs * (int64) 1000;
+                }
+            } else if (lk.equals("expires") && val != null && !hasMaxAge) {
+                int64 at = CookieJar.parseRfc1123(val);
+                if (at > (int64) 0) {
+                    if (at <= nowMs) {
+                        deleteNow = true;
+                    } else {
+                        expiresAt = at;
+                    }
+                }
+            }
+        }
+
+        // Domain admission (§5.3 step 6): a Domain the request host
+        // does not domain-match rejects the whole cookie.
+        boolean hostOnly = true;
+        String lhost = host.toLowerCase();
+        String matchDomain = lhost.substring(0, lhost.byteLength());
+        if (domain != null) {
+            if (!CookieJar.domainMatch(lhost, domain)) {
+                return;
+            }
+            hostOnly = false;
+            matchDomain = #domain;
+        }
+        String matchPath = CookieJar.defaultPath(reqPath);
+        if (path != null) {
+            matchPath = #path;
+        }
+
+        this.removeSame(name, matchDomain, matchPath);
+        if (deleteNow) {
+            return;
+        }
+
+        Cookie ck = heap Cookie();
+        String n2 = name.substring(0, name.byteLength());
+        ck.name = #n2;
+        String v2 = value.substring(0, value.byteLength());
+        ck.value = #v2;
+        String d2 = matchDomain.substring(0, matchDomain.byteLength());
+        ck.domain = #d2;
+        String p2 = matchPath.substring(0, matchPath.byteLength());
+        ck.path = #p2;
+        ck.expiresAtMs = expiresAt;
+        ck.secure = secure;
+        ck.httpOnly = httpOnly;
+        ck.hostOnly = hostOnly;
+        this.append(#ck);
+    }
+
+    // ----- match (§5.4) ----------------------------------------------------
+
+    /**
+     * The `Cookie` header value for a request to `host` + `path` over
+     * (`https`?) — `name=value` pairs joined `; ` in creation order —
+     * or `null` when nothing matches. Expired entries encountered on
+     * the walk are dropped.
+     */
+    public #String cookieHeaderFor(String host, String path, boolean https,
+                                   int64 nowMs) {
+        this.evictExpired(nowMs);
+        String lhost = host.toLowerCase();
+        String out = null;
+        Cookie c = this.head;
+        while (c != null) {
+            boolean send = true;
+            if (c.secure && !https) {
+                send = false;
+            }
+            if (send && c.hostOnly && !lhost.equals(c.domain)) {
+                send = false;
+            }
+            if (send && !c.hostOnly && !CookieJar.domainMatch(lhost, c.domain)) {
+                send = false;
+            }
+            if (send && !CookieJar.pathMatch(path, c.path)) {
+                send = false;
+            }
+            if (send) {
+                if (out == null) {
+                    String first = c.name + "=" + c.value;
+                    out = #first;
+                } else {
+                    String more = out + "; " + c.name + "=" + c.value;
+                    out = #more;
+                }
+            }
+            c = c.next;
+        }
+        if (out == null) {
+            return null;
+        }
+        return #out;
+    }
+
+    // ----- chain maintenance -----------------------------------------------
+
+    /** Append at the tail (creation order is the send order). */
+    void append(#Cookie ck) {
+        if (this.head == null) {
+            this.head = #ck;
+            return;
+        }
+        Cookie c = this.head;
+        while (c.next != null) {
+            c = c.next;
+        }
+        c.next = #ck;
+    }
+
+    /**
+     * Unlink any stored cookie with the same `(name, domain, path)`.
+     * One unlink per helper call — the detach temps must not live
+     * across a loop backedge (use-after-move analysis).
+     */
+    void removeSame(String name, String domain, String path) {
+        while (this.unlinkFirst(name, domain, path, false, 0)) {
+        }
+    }
+
+    /** Drop every entry whose (nonzero) expiry has passed. */
+    void evictExpired(int64 nowMs) {
+        while (this.unlinkFirst(null, null, null, true, nowMs)) {
+        }
+    }
+
+    /**
+     * Unlink the FIRST chain entry matching either criterion — the
+     * `(name, domain, path)` triple, or (`byExpiry`) a passed expiry —
+     * returning whether one was removed. The removed node (and only
+     * it) drops here: its `next` is detached back into the chain first.
+     */
+    boolean unlinkFirst(String name, String domain, String path,
+                        boolean byExpiry, int64 nowMs) {
+        if (this.head == null) {
+            return false;
+        }
+        if (CookieJar.hits(this.head, name, domain, path, byExpiry, nowMs)) {
+            Cookie old #= this.head;
+            this.head = null;
+            if (old.next != null) {
+                Cookie rest #= old.next;
+                this.head = #rest;
+            }
+            return true;
+        }
+        Cookie c = this.head;
+        while (c.next != null) {
+            if (CookieJar.hits(c.next, name, domain, path, byExpiry, nowMs)) {
+                Cookie old #= c.next;
+                c.next = null;
+                if (old.next != null) {
+                    Cookie rest #= old.next;
+                    c.next = #rest;
+                }
+                return true;
+            }
+            c = c.next;
+        }
+        return false;
+    }
+
+    /** Does `ck` match the unlink criterion? */
+    static boolean hits(Cookie ck, String name, String domain, String path,
+                        boolean byExpiry, int64 nowMs) {
+        if (byExpiry) {
+            return ck.expiresAtMs > (int64) 0 && ck.expiresAtMs <= nowMs;
+        }
+        return ck.name.equals(name) && ck.domain.equals(domain)
+            && ck.path.equals(path);
+    }
+
+    // ----- small pure helpers ----------------------------------------------
+
+    /** The `i`th `;`-separated segment of `s`, or `null` past the end. */
+    static #String segment(String s, int32 i) {
+        int32 n = s.byteLength();
+        int32 start = 0;
+        int32 idx = 0;
+        int32 p = 0;
+        while (p <= n) {
+            if (p == n || s.byteAt(p) == (int8) 59) {      // ';'
+                if (idx == i) {
+                    return s.substring(start, p);
+                }
+                idx = idx + 1;
+                start = p + 1;
+            }
+            p = p + 1;
+        }
+        return null;
+    }
+
+    /** Lowercased `Domain` attribute with any leading `.` stripped. */
+    static #String canonicalDomain(String v) {
+        String low = v.toLowerCase();
+        if (low.startsWith(".")) {
+            return low.substring(1, low.byteLength());
+        }
+        return low.substring(0, low.byteLength());
+    }
+
+    /** §5.1.3 domain-match: identical, or a `.`-boundary suffix. */
+    static boolean domainMatch(String host, String domain) {
+        if (host.equals(domain)) {
+            return true;
+        }
+        int32 hn = host.byteLength();
+        int32 dn = domain.byteLength();
+        if (hn <= dn) {
+            return false;
+        }
+        if (host.byteAt(hn - dn - 1) != (int8) 46) {       // '.'
+            return false;
+        }
+        String tail = host.substring(hn - dn, hn);
+        return tail.equals(domain);
+    }
+
+    /** §5.1.4 default path: the request path up to the last `/`. */
+    static #String defaultPath(String reqPath) {
+        if (!reqPath.startsWith("/")) {
+            String root = "/";
+            return root.substring(0, 1);
+        }
+        int32 n = reqPath.byteLength();
+        int32 last = 0;
+        int32 i = 1;
+        while (i < n) {
+            if (reqPath.byteAt(i) == (int8) 47) {          // '/'
+                last = i;
+            }
+            i = i + 1;
+        }
+        if (last == 0) {
+            return reqPath.substring(0, 1);
+        }
+        return reqPath.substring(0, last);
+    }
+
+    /** §5.1.4 path-match: identical, or prefix at a `/` boundary. */
+    static boolean pathMatch(String reqPath, String cookiePath) {
+        if (reqPath.equals(cookiePath)) {
+            return true;
+        }
+        if (!reqPath.startsWith(cookiePath)) {
+            return false;
+        }
+        int32 cn = cookiePath.byteLength();
+        if (cookiePath.byteAt(cn - 1) == (int8) 47) {      // ends '/'
+            return true;
+        }
+        return reqPath.byteAt(cn) == (int8) 47;
+    }
+
+    /** Decimal parse (optional leading `-`); 0 on any malformed input. */
+    static int64 parseInt(String v) {
+        int32 n = v.byteLength();
+        if (n == 0) {
+            return 0;
+        }
+        boolean neg = v.byteAt(0) == (int8) 45;            // '-'
+        int32 i = neg ? 1 : 0;
+        int64 out = 0;
+        while (i < n) {
+            int32 d = ((int32) v.byteAt(i)) - 48;
+            if (d < 0 || d > 9) {
+                return 0;
+            }
+            out = out * (int64) 10 + (int64) d;
+            i = i + 1;
+        }
+        if (neg) {
+            return (int64) 0 - out;
+        }
+        return out;
+    }
+
+    /**
+     * Strict RFC 1123 date (`Wdy, DD Mon YYYY HH:MM:SS GMT`) → epoch
+     * millis, or `0` on any deviation. Uses the days-from-civil
+     * calendar identity (proleptic Gregorian).
+     */
+    static int64 parseRfc1123(String v) {
+        String s = v.trim();
+        int64 comma = s.indexOf(",");
+        if (comma != (int64) 3 || s.byteLength() != 29) {
+            return 0;
+        }
+        // "Wdy, DD Mon YYYY HH:MM:SS GMT"
+        //   0123456789012345678901234567 8
+        int64 day = CookieJar.digits2(s, 5);
+        int32 mon = CookieJar.monthOf(s.substring(8, 11));
+        int64 year = CookieJar.digits4(s, 12);
+        int64 hh = CookieJar.digits2(s, 17);
+        int64 mm = CookieJar.digits2(s, 20);
+        int64 ss = CookieJar.digits2(s, 23);
+        String tz = s.substring(26, 29);
+        if (day < 0 || mon < 0 || year < 0 || hh < 0 || mm < 0 || ss < 0) {
+            return 0;
+        }
+        if (!tz.equals("GMT")) {
+            return 0;
+        }
+        if (day < (int64) 1 || day > (int64) 31 || hh > (int64) 23
+            || mm > (int64) 59 || ss > (int64) 59) {
+            return 0;
+        }
+        int64 days = CookieJar.epochDays(year, (int64) mon, day);
+        int64 secs = days * (int64) 86400 + hh * (int64) 3600
+            + mm * (int64) 60 + ss;
+        return secs * (int64) 1000;
+    }
+
+    /** Two ASCII digits at `at`, or -1. */
+    static int64 digits2(String s, int32 at) {
+        int32 d1 = ((int32) s.byteAt(at)) - 48;
+        int32 d2 = ((int32) s.byteAt(at + 1)) - 48;
+        if (d1 < 0 || d1 > 9 || d2 < 0 || d2 > 9) {
+            return -1;
+        }
+        return (int64) (d1 * 10 + d2);
+    }
+
+    /** Four ASCII digits at `at`, or -1. */
+    static int64 digits4(String s, int32 at) {
+        int64 hi = CookieJar.digits2(s, at);
+        int64 lo = CookieJar.digits2(s, at + 2);
+        if (hi < 0 || lo < 0) {
+            return -1;
+        }
+        return hi * (int64) 100 + lo;
+    }
+
+    /** Month token → 1..12, or -1. */
+    static int32 monthOf(String m) {
+        if (m.equals("Jan")) { return 1; }
+        if (m.equals("Feb")) { return 2; }
+        if (m.equals("Mar")) { return 3; }
+        if (m.equals("Apr")) { return 4; }
+        if (m.equals("May")) { return 5; }
+        if (m.equals("Jun")) { return 6; }
+        if (m.equals("Jul")) { return 7; }
+        if (m.equals("Aug")) { return 8; }
+        if (m.equals("Sep")) { return 9; }
+        if (m.equals("Oct")) { return 10; }
+        if (m.equals("Nov")) { return 11; }
+        if (m.equals("Dec")) { return 12; }
+        return -1;
+    }
+
+    /** Proleptic-Gregorian civil date → days since 1970-01-01. */
+    static int64 epochDays(int64 y, int64 m, int64 d) {
+        int64 yy = y;
+        if (m <= (int64) 2) {
+            yy = yy - (int64) 1;
+        }
+        int64 era = yy / (int64) 400;
+        if (yy < (int64) 0) {
+            era = (yy - (int64) 399) / (int64) 400;
+        }
+        int64 yoe = yy - era * (int64) 400;
+        int64 mp = (m + (int64) 9) % (int64) 12;
+        int64 doy = ((int64) 153 * mp + (int64) 2) / (int64) 5 + d - (int64) 1;
+        int64 doe = yoe * (int64) 365 + yoe / (int64) 4 - yoe / (int64) 100 + doy;
+        return era * (int64) 146097 + doe - (int64) 719468;
+    }
+}

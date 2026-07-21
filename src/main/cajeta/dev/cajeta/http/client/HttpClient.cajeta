@@ -112,6 +112,8 @@ public class HttpClient {
     int32 proxyPort;
     /** True once [`proxy`](#proxy) routed this client through a proxy. */
     boolean hasProxy;
+    /** The cookie store, or `null` — cookies are OFF by default (1.4g). */
+    CookieJar jar;
 
     /**
      * Maximum number of 3xx redirects [`sendFollowing`](#sendFollowing)
@@ -145,6 +147,7 @@ public class HttpClient {
         this.proxyHost = null;
         this.proxyPort = 0;
         this.hasProxy = false;
+        this.jar = null;
     }
 
     /**
@@ -257,6 +260,19 @@ public class HttpClient {
     }
 
     /**
+     * Adopt `j` as this client's cookie store (http:1.4g) — the
+     * explicit opt-in; without it NO cookie is ever stored or sent.
+     * With a jar, every response's `Set-Cookie` headers are admitted
+     * per the [`CookieJar`](CookieJar.cajeta) RFC 6265 subset and every
+     * request without its own `Cookie` header gets the jar's matches
+     * (a caller-set `Cookie` always wins). Returns `this`.
+     */
+    public HttpClient cookieJar(#CookieJar j) {
+        this.jar = #j;
+        return this;
+    }
+
+    /**
      * Replace the pool with one at explicit limits (`http:1.4a`):
      * `maxPerOrigin` caps concurrent connections per origin (an over-cap
      * `send` parks its fiber until a lease frees); `idleMaxMs` bounds how
@@ -315,10 +331,22 @@ public class HttpClient {
         }
         this.applyDefaultHeaders(req);
         HttpClient.ensureAcceptEncoding(req);
+        if (this.jar != null && !req.getHeaders().contains("Cookie")) {
+            Instant tc = Clock.now();
+            String ck = this.jar.cookieHeaderFor(
+                uri.getHost(), uri.getPath(),
+                HttpClient.isHttps(uri.getScheme()), tc.toEpochMilli());
+            if (ck != null) {
+                req.setHeader("Cookie", ck);
+            }
+        }
         int32 attempt = 0;
         while (true) {
             try {
                 HttpResponse r = this.sendOnce(uri, req, deadline);
+                if (this.jar != null) {
+                    this.storeCookies(uri, r);
+                }
                 this.decodeResponse(r);
                 return #r;
             } catch (NetException e) {
@@ -607,6 +635,24 @@ public class HttpClient {
         }
         String abs = "http://" + host + ":" + port + t;
         req.target(abs);
+    }
+
+    /** Admit every `Set-Cookie` on `resp` into the jar (1.4g). */
+    void storeCookies(Uri uri, HttpResponse resp) {
+        String[] all = resp.getHeaders().getAll("set-cookie");
+        int32 n = (int32) all.count();
+        if (n == 0) {
+            return;
+        }
+        Instant t = Clock.now();
+        int64 nowMs = t.toEpochMilli();
+        String host = uri.getHost();
+        String path = uri.getPath();
+        int32 i = 0;
+        while (i < n) {
+            this.jar.store(all[i], host, path, nowMs);
+            i = i + 1;
+        }
     }
 
     /** Stamp every configured default header the request lacks (1.4f). */
