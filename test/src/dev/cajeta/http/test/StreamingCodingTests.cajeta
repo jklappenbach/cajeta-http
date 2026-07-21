@@ -1,0 +1,119 @@
+package dev.cajeta.http.test;
+
+import dev.cajeta.codec.compress.Deflate;
+import dev.cajeta.codec.compress.DeflateStream;
+import dev.cajeta.codec.compress.InflateStream;
+
+/**
+ * http:1.6b — the codec 0.6.0 **streaming surface consumed through
+ * this library's classpath** (the middleware/permessage-deflate seams
+ * of 2.2c and 4.1 will build on exactly these calls). Pure compute, no
+ * sockets:
+ *
+ *   - a DEFLATE stream fed 3 bytes at a time drains to the identical
+ *     plaintext the one-shot block core produces;
+ *   - a sync-flushed segment ends `00 00 FF FF` and decodes standalone
+ *     off an unfinished stream;
+ *   - the window carries across flush boundaries — the second identical
+ *     message compresses smaller and still decodes through the same
+ *     inflater.
+ */
+public final class StreamingCodingTests {
+
+    static #String phrase() {
+        String one = "the quick brown fox jumps over the lazy dog. ";
+        String out = one + one + one + one + one + one + one + one;
+        return #out;
+    }
+
+    static boolean matches(int8[] got, String want) {
+        int32 n = want.byteLength();
+        if ((int64) n != got.count()) { return false; }
+        int32 i = 0;
+        while (i < n) {
+            if (got[i] != want.byteAt(i)) { return false; }
+            i = i + 1;
+        }
+        return true;
+    }
+
+    public static void run(Check c) {
+        System.stdout.println("-- streaming coding: chunked inflate --");
+        chunked(c);
+        System.stdout.println("-- streaming coding: sync flush + context --");
+        syncAndContext(c);
+    }
+
+    static void chunked(Check c) {
+        String p = StreamingCodingTests.phrase();
+        int8[] plain = p.toBytes();
+        int8[] raw = Deflate.deflate(plain, (int64) p.byteLength());
+        int64 rn = (int64) raw.count();
+
+        InflateStream s = heap InflateStream();
+        int8[] piece = heap int8[3];
+        int8[] acc = heap int8[1024];
+        int32 accLen = 0;
+        int64 pos = (int64) 0;
+        while (pos < rn) {
+            int32 take = 3;
+            if (pos + (int64) take > rn) {
+                take = (int32) (rn - pos);
+            }
+            int32 k = 0;
+            while (k < take) {
+                int64 si = pos + (int64) k;
+                piece[k] = raw[si];
+                k = k + 1;
+            }
+            s.feed(piece, take);
+            int8[] got = s.drain();
+            int64 gn = got.count();
+            int64 j = (int64) 0;
+            while (j < gn) {
+                acc[accLen] = got[j];
+                accLen = accLen + 1;
+                j = j + 1;
+            }
+            pos = pos + (int64) take;
+        }
+        c.that(s.finished(), "3-byte-chunked stream reaches the final block");
+        int8[] all = heap int8[accLen];
+        int32 i = 0;
+        while (i < accLen) {
+            all[i] = acc[i];
+            i = i + 1;
+        }
+        c.that(StreamingCodingTests.matches(all, p),
+               "chunk-at-a-time inflate equals the one-shot plaintext");
+    }
+
+    static void syncAndContext(Check c) {
+        String m = "the quick brown fox jumps over the lazy dog. ";
+        int8[] mb = m.toBytes();
+
+        DeflateStream d = heap DeflateStream();
+        d.write(mb, m.byteLength());
+        int8[] w1 = d.syncFlush();
+        int32 w1n = (int32) w1.count();
+        boolean tail = w1n >= 4
+            && w1[w1n - 4] == (int8) 0x00 && w1[w1n - 3] == (int8) 0x00
+            && w1[w1n - 2] == (int8) 0xFF && w1[w1n - 1] == (int8) 0xFF;
+        c.that(tail, "sync-flushed segment ends 00 00 FF FF");
+
+        InflateStream s = heap InflateStream();
+        s.feed(w1, w1n);
+        int8[] g1 = s.drain();
+        c.that(!s.finished() && StreamingCodingTests.matches(g1, m),
+               "sync segment decodes standalone off the unfinished stream");
+
+        d.write(mb, m.byteLength());
+        int8[] w2 = d.syncFlush();
+        c.that(w2.count() < w1.count(),
+               "second identical message compresses smaller (window carry)");
+        s.feed(w2, (int32) w2.count());
+        int8[] g2 = s.drain();
+        c.that(StreamingCodingTests.matches(g2, m),
+               "carried context decodes the second message");
+    }
+}

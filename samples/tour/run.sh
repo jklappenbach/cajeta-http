@@ -21,7 +21,7 @@ CAJETA_BIN="${CAJETA_BIN:-cajeta}"
 LIB_CJA="${REPO_ROOT}/build/archive/dev.cajeta.http-0.1.1.cja"
 # dev.cajeta.codec (http:1.6a content-coding) — the library's olla
 # dependency, needed on every downstream classpath alongside the .cja.
-CODEC_CJA="${CODEC_CJA:-${HOME}/.olla/dev.cajeta.codec/0.5.1/dev.cajeta.codec-0.5.1.cja}"
+CODEC_CJA="${CODEC_CJA:-${HOME}/.olla/dev.cajeta.codec/0.6.0/dev.cajeta.codec-0.6.0.cja}"
 OUT="${SCRIPT_DIR}/build/http-tour"
 
 # 1. The library .cja — build it when missing or older than any source.

@@ -927,7 +927,7 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
       bug class, catch-clause tier. Dodge: catch the stdlib
       `RecoverableException` root instead; upstream fix wanted in
       `Statement.cpp`'s catch-type lookup.
-  - [ ] **1.6b Streaming surface.** The gap the dependency does not
+  - [x] **1.6b Streaming surface.** The gap the dependency does not
     cover: incremental inflate/deflate with the dictionary/window
     preserved across calls plus flush modes — what 4.1's context
     takeover and 2.2c's streamed bodies need. Build it **against
@@ -936,6 +936,43 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
     - TDD: chunk-at-a-time equals one-shot on the 1.6a vectors; sync
       flush boundaries decode standalone; context carries across
       messages.
+    - **Shipped (upstreamed — cajeta-codec `ae12c81`, 0.5.1 → 0.6.0):**
+      `InflateStream` — `feed()` arbitrary chunks (splits mid-symbol
+      fine) / `drain()` committed output / `finished()` / `endInput()`
+      (truncation raises there and only there). Resume discipline:
+      whole-block trial decode from the last committed BLOCK BOUNDARY;
+      input exhaustion mid-block throws the internal `InflateNeedMore`
+      subtype → trial rolled back → same block re-decodes next feed
+      (corruption still raises `DeflateException` to the caller). A
+      sync-flush boundary is an ordinary empty stored block, so it
+      commits and drains with no lookahead; output slides post-drain
+      (O(window + largest block)); the back-ref reach check is against
+      TOTAL output so carried context counts — and a context-dependent
+      segment fed to a FRESH stream rejects, proving the context real.
+      `DeflateStream` — `write()` + `syncFlush()` (non-final
+      fixed-Huffman block + the `00 00 FF FF` empty stored block,
+      byte-aligned) / `finish()` (BFINAL); window carries via
+      `Deflate.deflateFixedInto`, the encoder core range-parameterized
+      so retained history PRIMES the match finder without re-emission
+      (`deflateFixed` is now a thin wrapper). Concatenated segments
+      form one valid DEFLATE stream the block core inflates whole.
+      Codec suite 173 → **182** ×3 clean (`StreamingDeflateTest`, 9
+      tests incl. 1/3/7-byte feeds over huffman + stored, the
+      second-identical-message-compresses-smaller context proof, and
+      truncation-only-at-endInput). http side: dep + classpaths bumped
+      to 0.6.0, `StreamingCodingTests` consumes the surface through
+      the classpath (+6 checks, suite 442 → **448**), tour 15/15.
+      Loop: 300 runs total — ONE unexplained red (run 54 of the first
+      150; output discarded by the loop harness, signature lost), then
+      0/150 on an instrumented rerun. Watch for a repeat; the capture
+      loop (save failing run's stdout) is the tool. Also RE-LEARNED
+      twice in one session: a `cd` inside a BACKGROUND compound
+      command leaks into later background tasks — the test binary must
+      run from the repo root (downloadTo writes relative paths) via an
+      explicit `cd` in the same command string. **Release chain: codec
+      0.6.0 is local-olla only — tag v0.6.0 when ready so CI (remote
+      Olla) resolves it; the http CI pin note from 1.6a still
+      stands.**
 - [ ] **1.7** Router completeness — found unplanned during the
   2026-07-19 sweep: the extracted Router matches only literal and
   `{name}` (string) segments, but the spec promises typed params,
