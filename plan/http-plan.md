@@ -299,7 +299,7 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
   to `Status`'s consolidated RFC 9110 §15 registry (own 27-entry table
   deleted); `KeepAlive`'s version default rides
   `Version.supportsKeepAlive()`. 17 new checks; suite 165/165.
-- [ ] **1.3** `Body` abstraction: in-memory + streaming, form, multipart
+- [x] **1.3** `Body` abstraction: in-memory + streaming, form, multipart
   (+ `MultipartParser`). Broken to TDD granularity 2026-07-19; decisions
   encoded from the spec's leans: body-size limits reject **early** (413 at
   parse, global + per-route), and streaming bodies **drain implicitly** on
@@ -468,7 +468,7 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
       in `decideReuse` (SIGSEGV). Mutate, then `return #resp`. The
       chained `return HttpResponse.ok().body(...)` form is fine and is
       what the older handlers use.
-- [ ] **1.4** Client completeness. Broken to TDD granularity 2026-07-19.
+- [x] **1.4** Client completeness. Broken to TDD granularity 2026-07-19.
   Decision encoded from the spec's lean: **cookie jar off by default**,
   explicit `CookieJar` opt-in (1.4g). `getJson` ships **untyped**
   (`JsonValue` via the stdlib `cajeta.codec.json`) — typed `getJson<T>`
@@ -787,7 +787,7 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
       Compiler wrinkle recorded: an owned-chain detach temp
       (`X rest #= …`) must not live across a loop backedge —
       use-after-move flags it; one-unlink-per-call helpers dodge it.
-- [ ] **1.5** Server hardening. Broken to TDD granularity 2026-07-19.
+- [x] **1.5** Server hardening. Broken to TDD granularity 2026-07-19.
   Substrate check: the head-read deadline already exists (`readWithin`,
   30s default), `HttpServer.shutdown(Duration)` already drains, and the
   stdlib ships `ConnectionLimits`/`ConnectionLimiter`/`LoadShedPolicy`
@@ -885,7 +885,7 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
       `UnexpectedEof`.
     - Acceptance: full suite **482/482 across 12 consecutive loops**,
       including all four accept-control tests, on the fixed compiler.
-- [ ] **1.6** Compression — a **prerequisite for 1.4e, 2.2c, and 4.1**.
+- [x] **1.6** Compression — a **prerequisite for 1.4e, 2.2c, and 4.1**.
   *(Re-planned 2026-07-19: the original from-scratch DEFLATE plan is
   obsolete — the external **`dev.cajeta.codec`** library
   (`~/code/cpp/cajeta-codec`, published in `~/.olla` at 0.5.0) already
