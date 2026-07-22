@@ -1,9 +1,14 @@
 package dev.cajeta.http.test;
 
+import cajeta.concurrent.Tasks;
+import cajeta.time.Duration;
 import cajeta.lang.String;
 import dev.cajeta.http.HttpRequest;
 import dev.cajeta.http.HttpResponse;
 import dev.cajeta.http.HttpException;
+import dev.cajeta.http.client.HttpClient;
+import dev.cajeta.http.server.HttpServer;
+import dev.cajeta.http.server.HttpServerBuilder;
 import dev.cajeta.http.middleware.Middleware;
 import dev.cajeta.http.middleware.MiddlewareChain;
 import dev.cajeta.http.middleware.Recover;
@@ -15,24 +20,11 @@ import dev.cajeta.http.middleware.LogSink;
  * http:2.2a — the first bundled middleware group (`Recover`, `RequestId`,
  * `Logging`).
  *
- * These checks drive each middleware through a **composed
- * [`MiddlewareChain`](../../middleware/MiddlewareChain.cajeta)** — the exact
- * handler a server invokes per request — asserting the precise behavior
- * deterministically (throw→500, id propagation/generation, log-line shape).
- *
- * **Note on the live-server leg.** The plan asks each middleware to also be
- * golden-tested through a real loopback `HttpServer`. That is currently
- * **blocked by a runtime limitation**, not by the middleware: a composed
- * handler captures its middleware holder objects by reference, and invoking
- * such a capturing/escaping closure **from a `serve()` fiber** — whether
- * stored via `compose(...)`, reached through a captured-`Router`
- * (`(req) -> router.dispatch(req)`), or loaded from a static field — corrupts
- * the fiber drop chain (double-free / SIGSEGV). A **static forwarder**
- * (`(req) -> Static.handle(req)`, no capture) runs fine from the fiber, but
- * cannot carry middleware. This is the "escaping closure capturing a borrow"
- * runtime item the [`Router`](../../routing/Router.cajeta) doc already flags;
- * the live golden leg lands once that is fixed upstream. The composition
- * checks below exercise the identical code path a server would run.
+ * Composition checks pin the exact behavior deterministically (throw→500, id
+ * propagation/generation, log-line shape); [`liveServer`](#liveServer)
+ * golden-tests the group through a **real loopback `HttpServer` +
+ * `HttpClient`**, with the bundle composed around the whole app handler and
+ * bound to the server (the ergonomic global-middleware wiring).
  */
 public final class MiddlewareBundleTests {
 
@@ -43,6 +35,8 @@ public final class MiddlewareBundleTests {
         requestIdUnit(c);
         System.stdout.println("-- middleware bundle: Logging (2.2a) --");
         loggingUnit(c);
+        System.stdout.println("-- middleware bundle: live server (2.2a) --");
+        liveServer(c);
     }
 
     static void recoverUnit(Check c) {
@@ -107,5 +101,89 @@ public final class MiddlewareBundleTests {
         c.that(line.startsWith("GET /x 200 "),
                "logging: line carries method, path, status");
         c.that(line.endsWith("ms"), "logging: line carries a duration");
+    }
+
+    // ---- live loopback ---------------------------------------------------
+
+    /** /boom throws (Recover → 500); anything else is 200. */
+    public static #HttpResponse handle(HttpRequest req) {
+        String t = req.getTarget();
+        if (t.equals("/boom")) {
+            throw heap HttpException("boom");
+        }
+        return HttpResponse.of(200);
+    }
+
+    public static async int32 serveBundle(HttpServer srv) {
+        srv.serve();
+        return 1;
+    }
+
+    /** GET `path`; the status code, or -3 on a fail-fast timeout/fault. */
+    public static async int32 statusOf(int32 port, String path) {
+        HttpClient client = heap HttpClient();
+        client.exchangeTimeout(15000);
+        try {
+            HttpResponse resp = client.get("http://127.0.0.1:" + port + path);
+            return resp.statusCode();
+        } catch (Exception e) {
+            return -3;
+        }
+    }
+
+    /** 1 iff GET `path` came back with a generated `X-Request-Id` (`req-…`). */
+    public static async int32 hasGenId(int32 port, String path) {
+        HttpClient client = heap HttpClient();
+        client.exchangeTimeout(15000);
+        try {
+            HttpResponse resp = client.get("http://127.0.0.1:" + port + path);
+            String id = resp.getHeaders().get("X-Request-Id");
+            if (id != null && id.startsWith("req-")) {
+                return 1;
+            }
+            return 0;
+        } catch (Exception e) {
+            return -3;
+        }
+    }
+
+    static void liveServer(Check c) {
+        // The ergonomic global-middleware wiring: compose the bundle around
+        // the app handler and bind the composed handler to the server.
+        LogSink sink = LogSink.capturing();
+        Middleware rec = Recover.middleware();
+        Middleware rid = RequestId.middleware();
+        Middleware log = Logging.middleware(sink);
+        MiddlewareChain chain = heap MiddlewareChain();
+        chain.use(#rec).use(#rid).use(#log);
+        (HttpRequest) -> #HttpResponse termi =
+            (req) -> MiddlewareBundleTests.handle(req);
+        (HttpRequest) -> #HttpResponse app = chain.compose(termi);
+
+        scope {
+            HttpServerBuilder b = HttpServer.builder();
+            b.bind("127.0.0.1:0");
+            b.handler(app);
+            HttpServer srv = b.build();
+            int32 port = srv.server.listener.boundPort();
+            Task<int32> sv = spawn serveBundle(srv);
+
+            // A throwing handler is recovered to 500 over the wire...
+            Task<int32> t1 = spawn statusOf(port, "/boom");
+            c.eqInt((int64) await t1, 500, "live: throwing handler recovered to 500");
+            // ...and the server survives it (next request 200)...
+            Task<int32> t2 = spawn statusOf(port, "/ok");
+            c.eqInt((int64) await t2, 200, "live: server survives the 500, next 200");
+            // ...with a generated request id echoed on the wire.
+            Task<int32> t3 = spawn hasGenId(port, "/also");
+            c.eqInt((int64) await t3, 1, "live: response carries a generated X-Request-Id");
+
+            boolean drained = srv.shutdown(Duration.ofSeconds(2));
+            c.that(drained, "live: bundle server drained clean");
+            int32 s = await sv;
+            c.eqInt((int64) s, 1, "live: accept loop exited");
+
+            c.that(sink.count() >= 2, "live: Logging captured a line per served exchange");
+        }
     }
 }

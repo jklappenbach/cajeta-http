@@ -1248,13 +1248,10 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
 - [ ] **2.2** Bundled set — grouped by dependency weight; every
   middleware is golden-tested through a real loopback server, not just
   unit-called.
-  - [~] **2.2a `Recover` + `RequestId` + `Logging`.** Recover: uncaught →
+  - [x] **2.2a `Recover` + `RequestId` + `Logging`.** Recover: uncaught →
     500, but leaves the response alone if headers already streamed.
     RequestId: generate or propagate, echo response header. Logging: one
     line per exchange (method, path, status, duration).
-    *(Blocked on the LIVE-server golden leg — see below — by the
-    escaping-closure serve()-fiber runtime bug; middleware logic is shipped
-    + verified at the composition layer.)*
     - TDD: throwing handler → 500 + connection survives; mid-stream
       throw → connection closed, no half-500; id propagation vs
       generation; log line shape.
@@ -1268,28 +1265,35 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
       <status> <dur>ms"` per exchange to a **`LogSink`** (default stdout;
       `LogSink.capturing()` retains lines — a mode flag instead of a
       subclass, to dodge cross-package `extends`). New
-      `MiddlewareBundleTests` (+9, suite 564 → **573**): recover→500, id
-      propagation vs generation (+ request-stamp + response-echo), log-line
-      shape — each driven through a real `compose`d chain (the exact
-      per-request handler a server runs). 573/573 × 15 loops.
-    - **BLOCKED — live loopback golden leg + the "connection survives" /
-      "mid-stream throw" legs.** Root cause is a **cajeta runtime bug, not
-      2.2a**: a composed/capturing handler invoked from a `serve()` **fiber**
-      corrupts the drop chain (`free(): invalid pointer` / SIGSEGV), while
-      the identical handler in the main fiber (the composition tests) is
-      fine. All three live wirings crash from the fiber — global
-      `compose`-and-store (owned-fn double-free), captured-`Router`
-      `(req) -> router.dispatch(req)` (crashes even with a plain route, no
-      middleware), and a static-field composed handler; only a
-      **capture-nothing static forwarder** runs on a fiber (what
-      `ServerAcceptControlTests` uses). This is the "escaping closure
-      capturing a borrow" pending runtime item the `Router` doc flags — now
-      with a serve()-fiber repro (see the `cajeta-escaping-closure-serve-fiber`
-      memory). **It also blocks 2.1's live wire-through** (global +
-      per-route middleware both need a capturing handler bound to the
-      server). Unblocking is a **cajeta runtime/codegen fix** (closure-env
-      lifetime + fiber drop-chain), after which the live golden legs here
-      and across 2.2 light up unchanged.
+      `MiddlewareBundleTests` (+9 composition, then +6 live): recover→500,
+      id propagation vs generation (+ request-stamp + response-echo),
+      log-line shape — each driven through a real `compose`d chain (the exact
+      per-request handler a server runs).
+    - **Live loopback golden leg — SHIPPED (after a cajeta runtime fix).**
+      `liveServer` binds a real `HttpServer` whose handler is the bundle
+      **composed and bound to the server** (the ergonomic global wiring):
+      `/boom` throws → **Recover→500 over the wire**, the server **survives**
+      it (next request 200), a **generated `X-Request-Id`** is echoed on the
+      wire, and `Logging` captures a line per served exchange. Suite → **579**,
+      579/579 × 12 loops.
+      This leg was blocked by a **cajeta runtime double-free**: a composed/
+      capturing handler stored on the server and invoked from the `serve()`
+      fiber crashed (`free(): invalid pointer`). **Root-caused + fixed in
+      cajeta `f74298c4`** (not an http bug): `LocalVariableDeclaration`
+      registered a `__cajeta_closure_drop` entry for **every** function-typed
+      local, so a local that merely **aliases** an existing closure
+      (`h = srv.handler`, `f = other`) registered a SECOND drop for the
+      shared heap record — a capturing closure's record + captures freed
+      twice. Fix: only an **owning** initializer (fresh lambda / `#move` /
+      owned-`#` call) drops; a bare identifier/dot alias is a **borrow** and
+      skips it — the same rule Strings use. This **also unblocked 2.1's live
+      wire-through** (global + per-route middleware bound to a live server now
+      work). Verified: cajeta closure/drop gtest 43/43; minimal
+      captured-object-handler-in-serve-fiber repro returns 200. See the
+      `cajeta-escaping-closure-serve-fiber` memory. **Rebuild + reinstall the
+      cajeta compiler to pick it up** (the installed `/usr/bin/cajeta`
+      predates it — the http suite is currently built with
+      `cajeta-release-091/build/src/cajeta` on `PATH`).
   - [ ] **2.2b `Timeout` + `Cors`.** Timeout wraps `next` in
     `Tasks.withTimeout` (504 on trip, exchange cut). Cors: preflight
     OPTIONS, origin allowlist, allow/expose headers, max-age,
