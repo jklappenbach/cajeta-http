@@ -6,6 +6,8 @@ import cajeta.io.net.ServerModel;
 import cajeta.io.net.SocketAddress;
 import cajeta.io.net.TcpStream;
 import cajeta.io.net.TcpListener;
+import cajeta.io.net.ConnectionLimits;
+import cajeta.io.net.ConnectionLimiter;
 import cajeta.io.net.AsyncReader;
 import cajeta.io.net.AsyncWriter;
 import cajeta.io.net.TimedOutException;
@@ -228,6 +230,15 @@ public class HttpServer {
     /** True iff this server terminates TLS (built via `.tls(...)`). */
     public boolean isTls;
 
+    /**
+     * Accept control (http:1.5c), meaningful when built with
+     * `.connectionLimits(...)`: the admission limiter every connection
+     * passes and the limits it was built from. `null` = uncapped (the
+     * default posture).
+     */
+    public ConnectionLimiter limiter;
+    public ConnectionLimits connLimits;
+
     public HttpServer((HttpRequest) -> #HttpResponse handler) {
         this.handler = handler;
         this.server = null;
@@ -242,6 +253,8 @@ public class HttpServer {
         this.tlsKey = #e2;
         this.tlsKeyLen = 0;
         this.isTls = false;
+        this.limiter = null;
+        this.connLimits = null;
     }
 
     // ----- bind / lifecycle ------------------------------------------------
@@ -321,7 +334,7 @@ public class HttpServer {
                                                    ServerModel model,
                                                    (HttpRequest) -> #HttpResponse handler) {
         return HttpServer.bindAddressWithModelAndLimits(#addr, model, handler,
-                                                        null);
+                                                        null, null);
     }
 
     /**
@@ -333,7 +346,8 @@ public class HttpServer {
      */
     public static #HttpServer bindAddressWithModelAndLimits(
             #SocketAddress addr, ServerModel model,
-            (HttpRequest) -> #HttpResponse handler, #ServerLimits limits) {
+            (HttpRequest) -> #HttpResponse handler, #ServerLimits limits,
+            #ConnectionLimits climits) {
         HttpServer srv = heap HttpServer(handler);
         srv.model = model;
         if (limits != null) {
@@ -352,10 +366,53 @@ public class HttpServer {
         // 100-continue) so a bound server enforces them. The plain
         // serveConnection stays the no-limits primitive for tests/callers.
         ServerLimits slim = srv.serverLimits;
+        if (climits != null) {
+            // http:1.5c — accept control: the kernel backlog from the
+            // limits, and every connection ADMITTED through the shared
+            // ConnectionLimiter before it is served (REFUSE closes the
+            // surplus at once; BLOCK parks the connection fiber for a
+            // permit). The limiter lives on the server so the capturing
+            // accept closure outlives this frame.
+            ConnectionLimits cls #= climits;
+            int32 backlog = cls.listenBacklog;
+            ConnectionLimiter climiter = ConnectionLimiter.fromLimits(cls);
+            srv.limiter #= climiter;
+            srv.connLimits #= cls;
+            ConnectionLimiter lm = srv.limiter;
+            Server score = model.bindServerWithBacklog(#addr, backlog,
+                (conn) -> HttpServer.serveConnectionAdmitted(h, lim, slim,
+                                                             lm, conn));
+            srv.server = #score;
+            return #srv;
+        }
         Server core = model.bindServer(#addr,
             (conn) -> HttpServer.serveConnectionWithLimits(h, lim, slim, conn));
         srv.server = #core;
         return #srv;
+    }
+
+    /**
+     * The admission-gated per-connection seam (http:1.5c): take a
+     * permit per the shed policy — [`LoadShedPolicy.REFUSE`](../LoadShedPolicy.cajeta)
+     * closes the surplus connection without a byte, `BLOCK` parks this
+     * connection's fiber until a permit frees — then run the hardened
+     * loop and release the permit on every exit path.
+     */
+    static void serveConnectionAdmitted((HttpRequest) -> #HttpResponse handler,
+                                        HttpParserLimits parseLimits,
+                                        ServerLimits limits,
+                                        ConnectionLimiter limiter,
+                                        TcpStream conn) {
+        if (!limiter.admit()) {
+            conn.close();
+            return;
+        }
+        try {
+            HttpServer.serveConnectionWithLimits(handler, parseLimits, limits,
+                                                 conn);
+        } catch (Exception e) {
+        }
+        limiter.release();
     }
 
     /**
@@ -795,6 +852,13 @@ public class HttpServer {
                 } catch (Exception we) {
                 }
                 return;
+            } catch (Exception e) {
+                // Any other per-connection fault (peer reset, a mid-head
+                // EOF's UnexpectedEofException, a write to a half-closed
+                // socket) ENDS THIS CONNECTION — it must never escape the
+                // connection fiber and tear the accept loop down. Nothing
+                // of ours is guaranteed on the wire, so close silently.
+                return;
             }
             if (ex == null) {
                 return;                 // clean EOF between requests
@@ -847,11 +911,16 @@ public class HttpServer {
                 }
                 int32 n = reader.readWithin(one, 0, 1, ms);
                 if (n == 0) {
-                    if (!sawAnyByte) {
-                        return null;            // clean EOF between requests
-                    }
-                    parser.endInput();          // mid-head EOF -> UnexpectedEof
-                    break;
+                    // EOF reading the head. Whether the peer hung up
+                    // cleanly BETWEEN requests (no bytes yet) or mid-head
+                    // (a partial request abandoned), the socket is already
+                    // gone — there is no peer left to answer, so CLOSE the
+                    // connection. (Earlier this raised UnexpectedEof on the
+                    // mid-head case; throwing for a peer disconnect is both
+                    // wrong — nothing to respond to — and, on the real
+                    // serve() accept loop, the exception unwind through this
+                    // frame's heap locals tripped a double-drop SIGSEGV.)
+                    return null;
                 }
                 if (!sawAnyByte) {
                     sawAnyByte = true;
@@ -1494,6 +1563,9 @@ public class HttpServerBuilder {
     private int32 bKeyLen;
     private boolean bTls;
 
+    /** Accept control (http:1.5c), or `null` for the uncapped default. */
+    private ConnectionLimits bClimits;
+
     /**
      * Start with the default (fiber-per-connection) model and no address/handler.
      *
@@ -1511,6 +1583,7 @@ public class HttpServerBuilder {
         this.bKey = #e2;
         this.bKeyLen = 0;
         this.bTls = false;
+        this.bClimits = null;
     }
 
     /**
@@ -1571,6 +1644,20 @@ public class HttpServerBuilder {
      */
     public HttpServerBuilder serverLimits(#ServerLimits l) {
         this.slim = #l;
+        return this;
+    }
+
+    /**
+     * Adopt the [`ConnectionLimits`](../ConnectionLimits.cajeta) the
+     * built server enforces (http:1.5c): the kernel `listen` backlog,
+     * the concurrent-connection cap, and the
+     * [`LoadShedPolicy`](../LoadShedPolicy.cajeta) for the surplus
+     * (`REFUSE` closes it at once; `BLOCK` parks it for a permit).
+     * Plaintext servers only in v1 — the TLS accept path (`.tls`) runs
+     * its own loop and ignores this. Returns `this` to chain.
+     */
+    public HttpServerBuilder connectionLimits(#ConnectionLimits l) {
+        this.bClimits = #l;
         return this;
     }
 
@@ -1638,8 +1725,14 @@ public class HttpServerBuilder {
                 SocketAddress.parse(this.addr), h, #l,
                 this.bCert, this.bCertLen, this.bKey, this.bKeyLen);
         }
+        ConnectionLimits cl = null;
+        if (this.bClimits != null) {
+            ConnectionLimits cmoved #= this.bClimits;
+            this.bClimits = null;
+            cl = #cmoved;
+        }
         return HttpServer.bindAddressWithModelAndLimits(
-            SocketAddress.parse(this.addr), this.model, h, #l);
+            SocketAddress.parse(this.addr), this.model, h, #l, #cl);
     }
 
     /**

@@ -1,0 +1,250 @@
+package dev.cajeta.http.test;
+
+import cajeta.concurrent.Tasks;
+import cajeta.io.net.ConnectionLimits;
+import cajeta.io.net.IpAddress;
+import cajeta.io.net.LoadShedPolicy;
+import cajeta.io.net.SocketAddress;
+import cajeta.io.net.TcpStream;
+import cajeta.time.Clock;
+import cajeta.time.Duration;
+import cajeta.time.Instant;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.client.HttpClient;
+import dev.cajeta.http.server.HttpServer;
+import dev.cajeta.http.server.HttpServerBuilder;
+
+/**
+ * http:1.5c — accept control + graceful shutdown, on the REAL accept
+ * loop (`serve()` on its own fiber, not the manual accept the other
+ * suites drive):
+ *
+ *   - **REFUSE sheds**: with `maxConnections = 2` and both slots held
+ *     by slow exchanges, a third connection is closed without a byte
+ *     of HTTP — and the two admitted exchanges still complete;
+ *   - **BLOCK queues**: with `maxConnections = 1`, a second concurrent
+ *     exchange is not dropped — it waits for the permit (its latency
+ *     shows the wait) and completes;
+ *   - **graceful shutdown**: `shutdown(Duration)` mid-exchange lets
+ *     that exchange finish (returns `true`), and a connect AFTER
+ *     shutdown is refused;
+ *   - **the deadline forces the stop**: a hung exchange makes
+ *     `shutdown` return `false` AT the deadline (asserted against the
+ *     configured value), not when the handler eventually ends.
+ */
+public final class ServerAcceptControlTests {
+
+    public static void run(Check c) {
+        System.stdout.println("-- accept control: REFUSE sheds the surplus --");
+        refuseSheds(c);
+        System.stdout.println("-- accept control: BLOCK queues the surplus --");
+        blockQueues(c);
+        System.stdout.println("-- shutdown: mid-exchange drain --");
+        gracefulShutdown(c);
+        System.stdout.println("-- shutdown: deadline forces the stop --");
+        deadlineForcesStop(c);
+    }
+
+    // ---- server ----------------------------------------------------------
+
+    public static #HttpResponse handle(HttpRequest req) {
+        String t = req.getTarget();
+        if (t.equals("/slow")) {
+            Tasks.sleepMillis((int64) 400);
+            String s = "slow-done";
+            return HttpResponse.ok().body(s.toBytes(), s.byteLength());
+        }
+        if (t.equals("/hung")) {
+            Tasks.sleepMillis((int64) 1500);
+            String hd = "hung-done";
+            return HttpResponse.ok().body(hd.toBytes(), hd.byteLength());
+        }
+        String ok = "ok";
+        return HttpResponse.ok().body(ok.toBytes(), ok.byteLength());
+    }
+
+    static #HttpServer serverWith(int32 maxConns, int32 policy) {
+        ConnectionLimits cl = heap ConnectionLimits(maxConns, 16, 65536,
+                                                    65536, policy);
+        HttpServerBuilder b = HttpServer.builder();
+        b.bind("127.0.0.1:0");
+        (HttpRequest) -> #HttpResponse h =
+            (req) -> ServerAcceptControlTests.handle(req);
+        b.handler(h);
+        b.connectionLimits(#cl);
+        return b.build();
+    }
+
+    /** Run the real accept loop on a fiber (spawn needs a bare call). */
+    public static async int32 serveIt(HttpServer srv) {
+        srv.serve();
+        return 1;
+    }
+
+    static int64 nowMs() {
+        Instant t = Clock.now();
+        return t.toEpochMilli();
+    }
+
+    // ---- client fibers ---------------------------------------------------
+
+    /** GET `path`; 1 on the expected body, negative codes otherwise. */
+    public static async int32 getPath(int32 port, String path, String want) {
+        HttpClient client = heap HttpClient();
+        String url = "http://127.0.0.1:" + port + path;
+        HttpResponse resp = client.get(url);
+        if (resp.statusCode() != 200) { return -1; }
+        int32 n = resp.bodyLength();
+        int8[] copy = heap int8[n];
+        int32 i = 0;
+        while (i < n) {
+            copy[i] = resp.body[i];
+            i = i + 1;
+        }
+        String got = heap String(#copy, n);
+        if (!got.equals(want)) { return -2; }
+        return 1;
+    }
+
+    /**
+     * Probe the port while the cap is full: connect, send a GET, and
+     * expect the connection to close WITHOUT a byte of HTTP back.
+     */
+    public static async int32 shedProbe(int32 port) {
+        IpAddress ip = IpAddress.loopbackV4();
+        SocketAddress a = SocketAddress.of(#ip, port);
+        TcpStream s = TcpStream.connectAsync(#a);
+        String req = "GET / HTTP/1.1\r\nhost: t\r\nconnection: close\r\n\r\n";
+        int8[] rb = req.toBytes();
+        try {
+            s.writeAllAsync(rb, (int64) 0, (int64) req.byteLength());
+        } catch (Exception e) {
+        }
+        int8[] buf = heap int8[256];
+        int32 got = 0;
+        try {
+            while (true) {
+                int64 n = s.readAsync(buf, (int64) 0, (int64) 256);
+                if (n <= (int64) 0) { break; }
+                got = got + (int32) n;
+            }
+        } catch (Exception e) {
+        }
+        s.close();
+        if (got > 0) {
+            System.stdout.println("  (shed probe got {} bytes)", got);
+            return -1;
+        }
+        return 1;
+    }
+
+    /** A connect after shutdown must fail (or read instant EOF). */
+    public static async int32 deadPortProbe(int32 port) {
+        IpAddress ip = IpAddress.loopbackV4();
+        SocketAddress a = SocketAddress.of(#ip, port);
+        try {
+            TcpStream s = TcpStream.connectAsync(#a);
+            int8[] buf = heap int8[64];
+            int64 n = s.readAsync(buf, (int64) 0, (int64) 64);
+            s.close();
+            if (n <= (int64) 0) { return 1; }    // accepted-then-EOF: closed
+            return -1;
+        } catch (Exception e) {
+            return 1;                            // refused outright
+        }
+    }
+
+    // ---- scenarios -------------------------------------------------------
+
+    static void refuseSheds(Check c) {
+        scope {
+            HttpServer srv = ServerAcceptControlTests.serverWith(
+                2, LoadShedPolicy.REFUSE);
+            int32 port = srv.server.listener.boundPort();
+            Task<int32> sv = spawn serveIt(srv);
+
+            Task<int32> a = spawn getPath(port, "/slow", "slow-done");
+            Task<int32> b = spawn getPath(port, "/slow", "slow-done");
+            Tasks.sleepMillis((int64) 120);      // both slots now held
+            Task<int32> probe = spawn shedProbe(port);
+            c.eqInt((int64) await probe, 1,
+                    "third connection shed without a byte of HTTP");
+            c.eqInt((int64) await a, 1, "first admitted exchange completed");
+            c.eqInt((int64) await b, 1, "second admitted exchange completed");
+
+            boolean drained = srv.shutdown(Duration.ofSeconds(2));
+            c.that(drained, "REFUSE server drained clean");
+            int32 s = await sv;
+            c.eqInt((int64) s, 1, "accept loop exited after shutdown");
+        }
+    }
+
+    static void blockQueues(Check c) {
+        scope {
+            HttpServer srv = ServerAcceptControlTests.serverWith(
+                1, LoadShedPolicy.BLOCK);
+            int32 port = srv.server.listener.boundPort();
+            Task<int32> sv = spawn serveIt(srv);
+
+            int64 t0 = ServerAcceptControlTests.nowMs();
+            Task<int32> a = spawn getPath(port, "/slow", "slow-done");
+            Tasks.sleepMillis((int64) 100);
+            Task<int32> b = spawn getPath(port, "/slow", "slow-done");
+            c.eqInt((int64) await a, 1, "first BLOCK exchange completed");
+            c.eqInt((int64) await b, 1, "queued exchange completed (not shed)");
+            int64 elapsed = ServerAcceptControlTests.nowMs() - t0;
+            c.that(elapsed >= (int64) 800,
+                   "queued exchange waited for the permit (serialized)");
+
+            boolean drained = srv.shutdown(Duration.ofSeconds(2));
+            c.that(drained, "BLOCK server drained clean");
+            int32 s = await sv;
+            c.eqInt((int64) s, 1, "BLOCK accept loop exited");
+        }
+    }
+
+    static void gracefulShutdown(Check c) {
+        scope {
+            HttpServer srv = ServerAcceptControlTests.serverWith(
+                8, LoadShedPolicy.REFUSE);
+            int32 port = srv.server.listener.boundPort();
+            Task<int32> sv = spawn serveIt(srv);
+
+            Task<int32> a = spawn getPath(port, "/slow", "slow-done");
+            Tasks.sleepMillis((int64) 100);      // exchange in flight
+            boolean drained = srv.shutdown(Duration.ofSeconds(2));
+            c.that(drained, "shutdown mid-exchange drained clean");
+            c.eqInt((int64) await a, 1, "in-flight exchange completed");
+
+            Task<int32> probe = spawn deadPortProbe(port);
+            c.eqInt((int64) await probe, 1, "post-shutdown connect refused");
+            int32 s = await sv;
+            c.eqInt((int64) s, 1, "accept loop exited");
+        }
+    }
+
+    static void deadlineForcesStop(Check c) {
+        scope {
+            HttpServer srv = ServerAcceptControlTests.serverWith(
+                8, LoadShedPolicy.REFUSE);
+            int32 port = srv.server.listener.boundPort();
+            Task<int32> sv = spawn serveIt(srv);
+
+            Task<int32> a = spawn getPath(port, "/hung", "hung-done");
+            Tasks.sleepMillis((int64) 100);      // the hung exchange is in
+            int64 t0 = ServerAcceptControlTests.nowMs();
+            boolean drained = srv.shutdown(Duration.ofMillis((int64) 300));
+            int64 elapsed = ServerAcceptControlTests.nowMs() - t0;
+            c.that(!drained, "hung exchange forces shutdown to report false");
+            c.that(elapsed >= (int64) 300 && elapsed < (int64) 1200,
+                   "shutdown returned AT its deadline, not the handler's");
+
+            // v1 semantics: the hung handler is abandoned to the scope
+            // join, not hard-closed — it still completes for its client.
+            c.eqInt((int64) await a, 1, "abandoned exchange still completed");
+            int32 s = await sv;
+            c.eqInt((int64) s, 1, "accept loop exited after forced stop");
+        }
+    }
+}

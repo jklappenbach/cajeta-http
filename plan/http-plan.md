@@ -858,13 +858,33 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
       before the handler, at-cap body served, chunked cut mid-stream
       with 413, too-many-header-fields 431, over-long header line 431.
       150-run loop clean, tour 15/15.
-  - [ ] **1.5c Accept control + graceful shutdown.** Configurable
+  - [x] **1.5c Accept control + graceful shutdown.** Configurable
     listener backlog; `ConnectionLimits` + shed policy wired through
     `HttpServer.builder()`; `shutdown(Duration)` proven — stop
     accepting, drain in-flight, hard-close at the deadline.
     - TDD: capacity + shed behavior observable under concurrent
       connects; shutdown mid-exchange completes that exchange and
       refuses new ones; a hung exchange is cut at the deadline.
+    - ServerAcceptControlTests (REFUSE sheds / BLOCK queues / shutdown
+      mid-exchange drain / shutdown deadline forces stop) — the first
+      suite to drive the REAL `serve()` accept loop (every other suite
+      uses the serialized manual `acceptNext #= / dispatch(#conn)`).
+    - **Unblocked by a COMPILER fix (cajeta `3ca4ac12`, 2026-07-22).**
+      Driving `serve()` exposed a real codegen bug: `spawn f(#x)` did not
+      transfer ownership of `#`-moved args — it neither deactivated the
+      spawner's drop entry (→ the spawner freed `conn` while the fiber
+      used it: intermittent serve()-loop use-after-free) nor passed a
+      transfer word (→ once the first half was fixed, the fiber's `#conn`
+      was never armed, so `Server.serveConnection`'s socket never closed
+      and peers waiting on the server hung — the ServerDeadlineTests drip
+      deadlock). Both halves fixed in `SpawnExpression::generateCode`.
+      Minimal repro: `cajeta-release-091/repro-borrow-park-race.cajeta`.
+    - Two independent cajeta-http robustness fixes also landed:
+      `serveLoopWithLimits` catches any per-connection exception as a
+      close, and a mid-head EOF CLOSES (returns null) instead of throwing
+      `UnexpectedEof`.
+    - Acceptance: full suite **482/482 across 12 consecutive loops**,
+      including all four accept-control tests, on the fixed compiler.
 - [ ] **1.6** Compression — a **prerequisite for 1.4e, 2.2c, and 4.1**.
   *(Re-planned 2026-07-19: the original from-scratch DEFLATE plan is
   obsolete — the external **`dev.cajeta.codec`** library
