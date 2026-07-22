@@ -1,0 +1,72 @@
+package dev.cajeta.http.middleware;
+
+import cajeta.lang.String;
+
+/**
+ * The destination for [`Logging`](Logging.cajeta)'s per-exchange lines —
+ * plan item **2.2a**. The default sink writes each line to `stdout`; a
+ * [`capturing`](#capturing) sink instead **retains** the lines in memory for
+ * inspection (used by the tests, and handy for an in-process log buffer).
+ *
+ * A single class with a mode flag — rather than a `stdout` base plus a
+ * capturing subclass — deliberately avoids cross-package subclassing (an
+ * unstable path in cajeta today), while still letting [`Logging`](Logging.cajeta)
+ * dispatch to one [`line`](#line) surface.
+ */
+public class LogSink {
+    boolean capture;
+    String[] lines;
+    int32 lineCount;
+
+    /** A sink that prints each line to `stdout`. */
+    public LogSink() {
+        this.capture = false;
+        this.lines = heap String[0];
+        this.lineCount = 0;
+    }
+
+    /** A sink that **retains** lines in memory (read via [`count`](#count) /
+     * [`at`](#at)) instead of printing them. */
+    public static #LogSink capturing() {
+        LogSink s = heap LogSink();
+        s.capture = true;
+        s.lines = heap String[16];
+        return #s;
+    }
+
+    /**
+     * Emit one completed log `line` (ownership transfers in). A `stdout` sink
+     * prints it; a capturing sink stores it.
+     */
+    public void line(#String s) {
+        if (this.capture) {
+            if (this.lineCount >= this.lines.count()) {
+                int32 newCap = this.lines.count() * 2;
+                if (newCap < 16) {
+                    newCap = 16;
+                }
+                String[] grown = heap String[newCap];
+                int32 j = 0;
+                while (j < this.lineCount) {
+                    grown[j] = this.lines[j];
+                    j = j + 1;
+                }
+                this.lines = grown;
+            }
+            this.lines[this.lineCount] = #s;
+            this.lineCount = this.lineCount + 1;
+        } else {
+            System.stdout.println("{}", s);
+        }
+    }
+
+    /** The number of retained lines (capturing sink). */
+    public int32 count() {
+        return this.lineCount;
+    }
+
+    /** The retained line at index `i` (capturing sink). */
+    public String at(int32 i) {
+        return this.lines[i];
+    }
+}

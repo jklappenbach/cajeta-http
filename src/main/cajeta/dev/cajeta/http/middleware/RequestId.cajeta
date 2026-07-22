@@ -1,0 +1,58 @@
+package dev.cajeta.http.middleware;
+
+import cajeta.lang.String;
+import cajeta.concurrent.AtomicInt32;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.middleware.Middleware;
+
+/**
+ * **RequestId** middleware — plan item **2.2a**. Ensures every request
+ * carries a correlation id: it **propagates** an inbound `X-Request-Id` if
+ * the client sent one, otherwise **generates** a fresh id; the id is stamped
+ * back onto the request (so the handler and downstream middleware — e.g.
+ * [`Logging`](Logging.cajeta) — can read it) and echoed on the response's
+ * `X-Request-Id` header.
+ *
+ * ```
+ * chain.use(RequestId.middleware())
+ * ```
+ *
+ * Generated ids are `req-<n>` from a process-wide atomic counter — monotonic
+ * and cheap, enough to correlate a request across the log line and the
+ * response without pulling in a UUID dependency. (A client that wants
+ * globally-unique ids supplies its own `X-Request-Id`, which is propagated
+ * verbatim.)
+ */
+public class RequestId {
+    /** The propagated / echoed header name. */
+    public static final String HEADER = "X-Request-Id";
+
+    /** Process-wide id counter (lazily created). */
+    static AtomicInt32 counter;
+
+    /** Build the RequestId middleware. */
+    public static #Middleware middleware() {
+        (HttpRequest, (HttpRequest) -> #HttpResponse) -> #HttpResponse f =
+            (req, next) -> {
+                String id = req.getHeaders().get("X-Request-Id");
+                if (id == null) {
+                    id = RequestId.generate();
+                }
+                req.setHeader("X-Request-Id", id);
+                HttpResponse resp = next(req);
+                resp.setHeader("X-Request-Id", id);
+                return resp;
+            };
+        return Middleware.of(#f);
+    }
+
+    /** A fresh `req-<n>` id from the atomic counter. */
+    static #String generate() {
+        if (RequestId.counter == null) {
+            RequestId.counter = heap AtomicInt32(0);
+        }
+        int32 n = RequestId.counter.fetchAdd(1);
+        return "req-" + n;
+    }
+}

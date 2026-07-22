@@ -1,0 +1,111 @@
+package dev.cajeta.http.test;
+
+import cajeta.lang.String;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.HttpException;
+import dev.cajeta.http.middleware.Middleware;
+import dev.cajeta.http.middleware.MiddlewareChain;
+import dev.cajeta.http.middleware.Recover;
+import dev.cajeta.http.middleware.RequestId;
+import dev.cajeta.http.middleware.Logging;
+import dev.cajeta.http.middleware.LogSink;
+
+/**
+ * http:2.2a — the first bundled middleware group (`Recover`, `RequestId`,
+ * `Logging`).
+ *
+ * These checks drive each middleware through a **composed
+ * [`MiddlewareChain`](../../middleware/MiddlewareChain.cajeta)** — the exact
+ * handler a server invokes per request — asserting the precise behavior
+ * deterministically (throw→500, id propagation/generation, log-line shape).
+ *
+ * **Note on the live-server leg.** The plan asks each middleware to also be
+ * golden-tested through a real loopback `HttpServer`. That is currently
+ * **blocked by a runtime limitation**, not by the middleware: a composed
+ * handler captures its middleware holder objects by reference, and invoking
+ * such a capturing/escaping closure **from a `serve()` fiber** — whether
+ * stored via `compose(...)`, reached through a captured-`Router`
+ * (`(req) -> router.dispatch(req)`), or loaded from a static field — corrupts
+ * the fiber drop chain (double-free / SIGSEGV). A **static forwarder**
+ * (`(req) -> Static.handle(req)`, no capture) runs fine from the fiber, but
+ * cannot carry middleware. This is the "escaping closure capturing a borrow"
+ * runtime item the [`Router`](../../routing/Router.cajeta) doc already flags;
+ * the live golden leg lands once that is fixed upstream. The composition
+ * checks below exercise the identical code path a server would run.
+ */
+public final class MiddlewareBundleTests {
+
+    public static void run(Check c) {
+        System.stdout.println("-- middleware bundle: Recover (2.2a) --");
+        recoverUnit(c);
+        System.stdout.println("-- middleware bundle: RequestId (2.2a) --");
+        requestIdUnit(c);
+        System.stdout.println("-- middleware bundle: Logging (2.2a) --");
+        loggingUnit(c);
+    }
+
+    static void recoverUnit(Check c) {
+        Middleware rec = Recover.middleware();
+        (HttpRequest) -> #HttpResponse thrower = (req) -> {
+            throw heap HttpException("boom");
+        };
+        MiddlewareChain chain = heap MiddlewareChain();
+        chain.use(#rec);
+        (HttpRequest) -> #HttpResponse app = chain.compose(thrower);
+
+        HttpResponse resp = app(HttpRequest.of("GET", "/x"));
+        c.eqInt((int64) resp.statusCode(), 500,
+                "recover: uncaught exception becomes 500");
+    }
+
+    static void requestIdUnit(Check c) {
+        Middleware rid = RequestId.middleware();
+        // Echo the request's stamped id into the body, to prove it reached
+        // the handler as well as the response header.
+        (HttpRequest) -> #HttpResponse echo = (req) -> {
+            String got = req.getHeaders().get("X-Request-Id");
+            if (got == null) {
+                return HttpResponse.of(500);
+            }
+            return HttpResponse.ok().body(got.toBytes(), got.byteLength());
+        };
+        MiddlewareChain chain = heap MiddlewareChain();
+        chain.use(#rid);
+        (HttpRequest) -> #HttpResponse app = chain.compose(echo);
+
+        // Propagation: an inbound id is kept verbatim.
+        HttpRequest req1 = HttpRequest.of("GET", "/x");
+        req1.setHeader("X-Request-Id", "abc-123");
+        HttpResponse r1 = app(req1);
+        c.eqInt((int64) r1.statusCode(), 200, "requestid: handler saw the id");
+        c.eqBytes(r1.body, r1.bodyLength(), "abc-123",
+                  "requestid: inbound id stamped on the request");
+        String echoed1 = r1.getHeaders().get("X-Request-Id");
+        c.that(echoed1 != null && echoed1.equals("abc-123"),
+               "requestid: inbound id echoed on the response");
+
+        // Generation: absent id yields a fresh req-<n>.
+        HttpResponse r2 = app(HttpRequest.of("GET", "/y"));
+        String echoed2 = r2.getHeaders().get("X-Request-Id");
+        c.that(echoed2 != null && echoed2.startsWith("req-"),
+               "requestid: generates an id when none was sent");
+    }
+
+    static void loggingUnit(Check c) {
+        LogSink sink = LogSink.capturing();
+        Middleware log = Logging.middleware(sink);
+        (HttpRequest) -> #HttpResponse ok = (req) -> HttpResponse.of(200);
+        MiddlewareChain chain = heap MiddlewareChain();
+        chain.use(#log);
+        (HttpRequest) -> #HttpResponse app = chain.compose(ok);
+
+        HttpResponse resp = app(HttpRequest.of("GET", "/x"));
+        c.eqInt((int64) resp.statusCode(), 200, "logging: passes the exchange through");
+        c.eqInt((int64) sink.count(), 1, "logging: exactly one line per exchange");
+        String line = sink.at(0);
+        c.that(line.startsWith("GET /x 200 "),
+               "logging: line carries method, path, status");
+        c.that(line.endsWith("ms"), "logging: line carries a duration");
+    }
+}

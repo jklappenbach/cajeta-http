@@ -1,0 +1,50 @@
+package dev.cajeta.http.middleware;
+
+import cajeta.lang.String;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.middleware.Middleware;
+
+/**
+ * **Recover** middleware — plan item **2.2a**. Wraps the rest of the chain
+ * in a `try`, turning an **uncaught exception** from a downstream middleware
+ * or the handler into a clean `500 Internal Server Error` so one bad request
+ * never takes the connection (or the worker) down.
+ *
+ * ```
+ * chain.use(Recover.middleware())    // outermost, so it catches everything below
+ * ```
+ *
+ * ## Scope — before the response is produced
+ *
+ * Recover only governs the window **before** `next` returns a response: the
+ * handler threw instead of returning. Once a response exists (and for a
+ * **streamed** body, once its head has gone to the wire) there is nothing to
+ * recover to — a `500` cannot be prepended to bytes the client already has —
+ * so a throw *during* body serialization is the server's connection-close
+ * concern, not Recover's (the plan's "leaves the response alone if headers
+ * already streamed"). At the buffered middleware layer that Recover sits in,
+ * the observable contract is simply: **handler throws → 500, and the
+ * exception does not escape the middleware stack.**
+ *
+ * A fatal `UnrecoverableException` (a programmer-error panic) is *not* caught
+ * — it bypasses `catch` by design and aborts, which is the intended behavior
+ * for an invariant violation.
+ */
+public class Recover {
+    /**
+     * Build the Recover middleware. Register it **outermost**
+     * (first `use`) so it wraps every other middleware and the handler.
+     */
+    public static #Middleware middleware() {
+        (HttpRequest, (HttpRequest) -> #HttpResponse) -> #HttpResponse f =
+            (req, next) -> {
+                try {
+                    return next(req);
+                } catch (Exception e) {
+                    return HttpResponse.of(500);
+                }
+            };
+        return Middleware.of(#f);
+    }
+}

@@ -1,0 +1,49 @@
+package dev.cajeta.http.middleware;
+
+import cajeta.lang.String;
+import cajeta.time.Clock;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.middleware.Middleware;
+import dev.cajeta.http.middleware.LogSink;
+
+/**
+ * **Logging** middleware — plan item **2.2a**. Emits **one line per
+ * exchange** to a [`LogSink`](LogSink.cajeta): the request method, the
+ * request target, the response status, and the wall-clock duration, in the
+ * form
+ *
+ * ```
+ * GET /users/42 200 3ms
+ * ```
+ *
+ * ```
+ * chain.use(Logging.middleware(sink))
+ * ```
+ *
+ * The duration spans the wrapped `next` — every middleware and the handler
+ * **inside** this one — so registering `Logging` near the outside of the
+ * chain measures the whole exchange. The `sink` is captured by the composed
+ * handler, so it must outlive the server that runs the chain (a process-
+ * lifetime logger, or a test-scoped collector kept alive across the requests
+ * it observes).
+ */
+public class Logging {
+    /**
+     * Build the Logging middleware writing to `sink`. `sink` is borrowed and
+     * captured — keep it alive for as long as the middleware is in service.
+     */
+    public static #Middleware middleware(LogSink sink) {
+        (HttpRequest, (HttpRequest) -> #HttpResponse) -> #HttpResponse f =
+            (req, next) -> {
+                int64 start = Clock.now().toEpochMilli();
+                HttpResponse resp = next(req);
+                int64 dur = Clock.now().toEpochMilli() - start;
+                String line = req.getMethod() + " " + req.getTarget() + " "
+                            + resp.statusCode() + " " + dur + "ms";
+                sink.line(#line);
+                return resp;
+            };
+        return Middleware.of(#f);
+    }
+}
