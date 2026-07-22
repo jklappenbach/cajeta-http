@@ -1,0 +1,238 @@
+package dev.cajeta.http.middleware;
+
+import cajeta.lang.String;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.middleware.Middleware;
+
+/**
+ * **CORS** middleware — plan item **2.2b**. Both a **configuration** builder
+ * and the middleware factory: build a `Cors`, tune it fluently, then
+ * [`middleware`](#middleware) it into a chain.
+ *
+ * ```
+ * Cors cors = Cors.create()
+ *     .allowOrigin("https://app.example")
+ *     .allowMethods("GET, POST")
+ *     .allowHeaders("Content-Type, Authorization")
+ *     .maxAge(600)
+ *     .allowCredentials(true);
+ * chain.use(Cors.middleware(cors));
+ * ```
+ *
+ * The config object is **captured by the middleware** and must outlive it
+ * (hold it in a variable for the server's lifetime — the same rule the other
+ * config-carrying middlewares follow).
+ *
+ * ## Two request shapes
+ *
+ *   - **Preflight** — an `OPTIONS` carrying `Access-Control-Request-Method`.
+ *     Answered here (short-circuit, no `next`) with `204` and the
+ *     `Access-Control-Allow-*` matrix: allowed-origin, allowed-methods,
+ *     allowed-headers (configured, else the requested set echoed), max-age,
+ *     and — when enabled — credentials.
+ *   - **Actual request** — anything else. `next` runs, then the response is
+ *     stamped with `Access-Control-Allow-Origin` (+ credentials / expose /
+ *     `Vary` as configured).
+ *
+ * ## Credentialed wildcard, per spec
+ *
+ * `Access-Control-Allow-Origin: *` is **incompatible** with
+ * `Access-Control-Allow-Credentials: true` — a credentialed response must name
+ * a concrete origin. So [`allowAnyOrigin`](#allowAnyOrigin) emits `*` only when
+ * credentials are **off**; with credentials on it **reflects** the request's
+ * `Origin` (and sets `Vary: Origin`, since the header now varies per request).
+ *
+ * A disallowed `Origin` is answered **without** any `Access-Control-Allow-*`
+ * header — the request still runs (a server-to-server or same-origin caller
+ * is unaffected), but a browser enforcing CORS blocks the cross-origin read.
+ */
+public class Cors {
+    String[] origins;
+    int32 originCount;
+    boolean anyOrigin;
+    String methods;
+    String allowHeaders;
+    String exposeHeaders;
+    int64 maxAgeSecs;
+    boolean credentials;
+
+    public Cors() {
+        this.origins = heap String[4];
+        this.originCount = 0;
+        this.anyOrigin = false;
+        this.methods = "GET, HEAD, PUT, PATCH, POST, DELETE";
+        this.allowHeaders = null;
+        this.exposeHeaders = null;
+        this.maxAgeSecs = 0;
+        this.credentials = false;
+    }
+
+    /** A fresh config with permissive method defaults and no origins yet. */
+    public static #Cors create() {
+        return heap Cors();
+    }
+
+    /** Add one exact origin to the allowlist. */
+    public Cors allowOrigin(String o) {
+        if (this.originCount >= this.origins.count()) {
+            int32 newCap = this.origins.count() * 2;
+            String[] grown = heap String[newCap];
+            int32 j = 0;
+            while (j < this.originCount) {
+                grown[j] = this.origins[j];
+                j = j + 1;
+            }
+            this.origins = grown;
+        }
+        this.origins[this.originCount] = o.substring(0, o.byteLength());
+        this.originCount = this.originCount + 1;
+        return this;
+    }
+
+    /** Allow any origin (reflected when credentialed — see the class note). */
+    public Cors allowAnyOrigin() {
+        this.anyOrigin = true;
+        return this;
+    }
+
+    /** Set the `Access-Control-Allow-Methods` value. */
+    public Cors allowMethods(String m) {
+        this.methods = m.substring(0, m.byteLength());
+        return this;
+    }
+
+    /** Set an explicit `Access-Control-Allow-Headers` (else the request's set is echoed). */
+    public Cors allowHeaders(String h) {
+        this.allowHeaders = h.substring(0, h.byteLength());
+        return this;
+    }
+
+    /** Set `Access-Control-Expose-Headers` for actual responses. */
+    public Cors exposeHeaders(String h) {
+        this.exposeHeaders = h.substring(0, h.byteLength());
+        return this;
+    }
+
+    /** Set `Access-Control-Max-Age` (seconds); `0` omits it. */
+    public Cors maxAge(int64 s) {
+        this.maxAgeSecs = s;
+        return this;
+    }
+
+    /** Toggle `Access-Control-Allow-Credentials`. */
+    public Cors allowCredentials(boolean b) {
+        this.credentials = b;
+        return this;
+    }
+
+    /** True iff `origin` is permitted (wildcard or an exact allowlist hit). */
+    boolean isAllowed(String origin) {
+        if (this.anyOrigin) {
+            return true;
+        }
+        int32 i = 0;
+        while (i < this.originCount) {
+            if (this.origins[i].equals(origin)) {
+                return true;
+            }
+            i = i + 1;
+        }
+        return false;
+    }
+
+    /**
+     * The `Access-Control-Allow-Origin` value for `origin`, or `null` if it is
+     * not allowed. Wildcard emits `*` only when credentials are off; otherwise
+     * the concrete origin is reflected (spec: `*` can't be credentialed).
+     */
+    #String resolveOrigin(String origin) {
+        if (!this.isAllowed(origin)) {
+            return null;
+        }
+        if (this.anyOrigin && !this.credentials) {
+            return "*";
+        }
+        return origin.substring(0, origin.byteLength());
+    }
+
+    /** The `Access-Control-Allow-Headers` value: configured, else the echoed request set. */
+    #String allowHeadersFor(String requested) {
+        if (this.allowHeaders != null) {
+            return this.allowHeaders.substring(0, this.allowHeaders.byteLength());
+        }
+        if (requested != null) {
+            return requested.substring(0, requested.byteLength());
+        }
+        return null;
+    }
+
+    /** Whether `Access-Control-Allow-Origin` varies per request (needs `Vary: Origin`). */
+    boolean needsVary() {
+        return !this.anyOrigin || this.credentials;
+    }
+
+    /**
+     * Build the CORS middleware from config `cfg`. The middleware lambda
+     * captures `cfg` (an object — member calls resolve) and delegates to the
+     * static [`apply`](#apply), forwarding its own `req`/`next` parameters.
+     */
+    public static #Middleware middleware(Cors cfg) {
+        (HttpRequest, (HttpRequest) -> #HttpResponse) -> #HttpResponse f =
+            (req, next) -> Cors.apply(cfg, req, next);
+        return Middleware.of(#f);
+    }
+
+    /** The request/response logic — preflight short-circuit or actual-request stamping. */
+    static #HttpResponse apply(Cors cfg, HttpRequest req,
+                               (HttpRequest) -> #HttpResponse next) {
+        String origin = req.getHeaders().get("Origin");
+        String method = req.getMethod();
+        String acrm = req.getHeaders().get("Access-Control-Request-Method");
+        boolean preflight = method.equals("OPTIONS") && acrm != null;
+
+        if (preflight) {
+            HttpResponse resp = HttpResponse.of(204);
+            if (origin != null) {
+                String acao = cfg.resolveOrigin(origin);
+                if (acao != null) {
+                    resp.setHeader("Access-Control-Allow-Origin", acao);
+                    resp.setHeader("Access-Control-Allow-Methods", cfg.methods);
+                    String acrh = req.getHeaders().get("Access-Control-Request-Headers");
+                    String ah = cfg.allowHeadersFor(acrh);
+                    if (ah != null) {
+                        resp.setHeader("Access-Control-Allow-Headers", ah);
+                    }
+                    if (cfg.maxAgeSecs > 0) {
+                        resp.setHeader("Access-Control-Max-Age", "" + cfg.maxAgeSecs);
+                    }
+                    if (cfg.credentials) {
+                        resp.setHeader("Access-Control-Allow-Credentials", "true");
+                    }
+                    if (cfg.needsVary()) {
+                        resp.setHeader("Vary", "Origin");
+                    }
+                }
+            }
+            return #resp;
+        }
+
+        HttpResponse resp = next(req);
+        if (origin != null) {
+            String acao = cfg.resolveOrigin(origin);
+            if (acao != null) {
+                resp.setHeader("Access-Control-Allow-Origin", acao);
+                if (cfg.credentials) {
+                    resp.setHeader("Access-Control-Allow-Credentials", "true");
+                }
+                if (cfg.exposeHeaders != null) {
+                    resp.setHeader("Access-Control-Expose-Headers", cfg.exposeHeaders);
+                }
+                if (cfg.needsVary()) {
+                    resp.setHeader("Vary", "Origin");
+                }
+            }
+        }
+        return #resp;
+    }
+}

@@ -1294,13 +1294,40 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
       cajeta compiler to pick it up** (the installed `/usr/bin/cajeta`
       predates it — the http suite is currently built with
       `cajeta-release-091/build/src/cajeta` on `PATH`).
-  - [ ] **2.2b `Timeout` + `Cors`.** Timeout wraps `next` in
-    `Tasks.withTimeout` (504 on trip, exchange cut). Cors: preflight
-    OPTIONS, origin allowlist, allow/expose headers, max-age,
-    credentials flag.
-    - TDD: overrunning handler → 504 at the budget; preflight matrix
-      (allowed/denied origin, methods, headers), actual-request headers,
-      credentialed wildcards rejected per spec.
+  - [x] **2.2b `Timeout` + `Cors`.** Timeout bounds `next` to a
+    wall-clock budget (504 on overrun). Cors: preflight OPTIONS, origin
+    allowlist, allow/expose headers, max-age, credentials flag.
+    - TDD: overrunning handler → 504; in-budget passes; a handler *throw*
+      crosses Timeout to an outer Recover as 500 (not a 504); preflight
+      matrix (allowed/denied origin, methods, echoed request headers),
+      actual-request stamping, credentialed-wildcard reflection.
+    - **Shipped:** `Timeout.middleware(budgetMs)`, `Cors` (config builder +
+      `Cors.middleware(cfg)`), and the middleware-layer handoff cell
+      `TimeoutRun`. `MiddlewareTimeoutCorsTests` (18 assertions);
+      suite 597/597 × 8 loops.
+      - **Not `Tasks.withTimeout` after all.** Its `Optional<R>` hands the
+        value back through `get()`, which **borrows** — so an owned
+        `#HttpResponse` couldn't be extracted without the returned Optional's
+        drop freeing it (use-after-free). Timeout instead mirrors the
+        server's proven [`HttpServer.dispatchBudgeted`](../src/main/cajeta/dev/cajeta/http/server/HttpServer.cajeta):
+        run `next(req)` on its own fiber depositing into `TimeoutRun`
+        (whose `#take()` *moves* ownership out), poll (5 ms) against the
+        deadline. A `Channel` can't carry it either (v1 `send` borrows).
+      - **The overrunning fiber is still joined.** cajeta fibers park
+        uncancellably and an abandoned `Task`'s drop joins anyway, so after
+        deciding 504 the middleware still `await`s the stray fiber to drain
+        it — the *status* is the timeout's at the budget, but this frame
+        doesn't unblock until the runaway handler finally yields (same
+        limitation `dispatchBudgeted` documents). Its late response is
+        dropped with the `TimeoutRun`.
+      - Wrinkles: `spawn` requires a **bare** class-method target
+        (`spawn runNext(...)`, not `spawn Timeout.runNext(...)` — the dot
+        form is rejected as an "instance-method call"); the middleware
+        lambda **delegates** to a static `runBudgeted` (a lambda body can't
+        host `spawn`/`await`, and `next` must arrive as a parameter, not a
+        capture, to be invocable); each Cors test builds its chain **inline**
+        (the composed handler captures the middleware by reference, so a
+        factory returning the handler would dangle it).
   - [ ] **2.2c `Compression`/`Decompression`** *(gated on 1.6)*.
     Response side: `Accept-Encoding` negotiation with q-values, min-size
     and content-type gates, streaming compress of streamed bodies,

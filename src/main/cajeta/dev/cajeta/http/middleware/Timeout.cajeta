@@ -1,0 +1,102 @@
+package dev.cajeta.http.middleware;
+
+import cajeta.lang.String;
+import cajeta.time.Clock;
+import cajeta.time.Instant;
+import cajeta.concurrent.Tasks;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.HttpException;
+import dev.cajeta.http.middleware.Middleware;
+import dev.cajeta.http.middleware.TimeoutRun;
+
+/**
+ * **Timeout** middleware — plan item **2.2b**. Bounds the rest of the chain
+ * (downstream middleware + handler) to a wall-clock budget: if `next(req)`
+ * has not produced a response within `budgetMs`, the middleware returns
+ * `504 Gateway Timeout` instead of waiting on it.
+ *
+ * ```
+ * chain.use(Timeout.middleware(30000))    // 30 s per request
+ * ```
+ *
+ * ## How it bounds a synchronous handler
+ *
+ * A handler is a plain function call; a middleware can't interrupt one
+ * mid-frame. So — exactly as the server's own request budget does
+ * ([`HttpServer.dispatchBudgeted`](../server/HttpServer.cajeta)) — `next(req)`
+ * runs on its **own fiber** ([`runNext`](#runNext)) depositing into a
+ * [`TimeoutRun`](TimeoutRun.cajeta), while this fiber polls (5 ms grain)
+ * against the deadline. In time → the handler's response. Overrun → `504`.
+ *
+ * **The overrunning fiber is still joined.** cajeta fibers park
+ * uncancellably (a sleeping / blocked-on-I/O fiber never observes
+ * `taskCancel`), and an abandoned `Task`'s drop would join it anyway, so
+ * after deciding `504` this fiber still `await`s the stray one to drain it —
+ * the returned *status* is the timeout's the moment the budget trips, even
+ * though this frame doesn't unblock until the runaway handler finally yields.
+ * Its late response is discarded (dropped with the `TimeoutRun`).
+ *
+ * ## Throw vs. overrun
+ *
+ * A handler that **throws** is not a timeout: [`runNext`](#runNext) catches it
+ * and flips [`TimeoutRun.fail`](TimeoutRun.cajeta#fail), and this middleware
+ * **re-raises** so an outer [`Recover`](Recover.cajeta) maps it to `500`
+ * (registered outermost, Recover wraps Timeout). Only a genuine budget
+ * overrun becomes `504`.
+ */
+public class Timeout {
+    /**
+     * Build the Timeout middleware with a per-request budget of `budgetMs`
+     * milliseconds. A non-positive budget still trips on the first poll (an
+     * already-spent deadline), i.e. effectively "no time allowed".
+     */
+    public static #Middleware middleware(int64 budgetMs) {
+        (HttpRequest, (HttpRequest) -> #HttpResponse) -> #HttpResponse f =
+            (req, next) -> Timeout.runBudgeted(next, req, budgetMs);
+        return Middleware.of(#f);
+    }
+
+    /**
+     * Run `next(req)` on its own fiber under a `budgetMs` wall-clock budget.
+     * Kept a static so the middleware lambda merely delegates (a lambda body
+     * can't host the `spawn`/`await` this needs, and can't invoke a *captured*
+     * function value — but `next` arrives here as a plain parameter).
+     */
+    static #HttpResponse runBudgeted((HttpRequest) -> #HttpResponse next,
+                                     HttpRequest req, int64 budgetMs) {
+        TimeoutRun run = heap TimeoutRun();
+        Instant t0 = Clock.now();
+        int64 deadline = t0.toEpochMilli() + budgetMs;
+        Task<int32> t = spawn runNext(next, req, run);
+        boolean timedOut = false;
+        while (run.pending()) {
+            Instant tn = Clock.now();
+            if (tn.toEpochMilli() >= deadline) {
+                timedOut = true;
+                break;
+            }
+            Tasks.sleepMillis((int64) 5);
+        }
+        int32 done = await t;
+        if (timedOut) {
+            return HttpResponse.of(504);
+        }
+        if (run.threw()) {
+            throw heap HttpException("timeout: downstream handler failed");
+        }
+        return run.take();
+    }
+
+    /** The handler fiber: run `next(req)`, deposit the response or the throw. */
+    static async int32 runNext((HttpRequest) -> #HttpResponse next,
+                               HttpRequest req, TimeoutRun run) {
+        try {
+            HttpResponse r = next(req);
+            run.put(#r);
+        } catch (Exception e) {
+            run.fail();
+        }
+        return 1;
+    }
+}

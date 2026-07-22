@@ -24,6 +24,7 @@ public final class TestMain {
         RouterTests.run(c);
         MiddlewareTests.run(c);
         MiddlewareBundleTests.run(c);
+        MiddlewareTimeoutCorsTests.run(c);
         ClientTests.run(c);
         RedirectTests.run(c);
         ClientTimeoutTests.run(c);

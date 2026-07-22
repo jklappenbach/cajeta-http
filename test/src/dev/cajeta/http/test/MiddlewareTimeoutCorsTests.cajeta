@@ -1,0 +1,242 @@
+package dev.cajeta.http.test;
+
+import cajeta.lang.String;
+import cajeta.concurrent.Tasks;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.HttpException;
+import dev.cajeta.http.middleware.Middleware;
+import dev.cajeta.http.middleware.MiddlewareChain;
+import dev.cajeta.http.middleware.Recover;
+import dev.cajeta.http.middleware.Timeout;
+import dev.cajeta.http.middleware.Cors;
+
+/**
+ * http:2.2b — `Timeout` and `Cors` middleware.
+ *
+ * Timeout is exercised on real fibers (its budget runs `next` on its own
+ * fiber): an overrunning handler trips to `504`, a fast one passes, and a
+ * throw crosses to an outer `Recover` as `500` (not swallowed as a timeout).
+ * Cors is pure request/response logic — the preflight matrix, actual-request
+ * stamping, and the credentialed-wildcard reflection rule are pinned
+ * synchronously.
+ */
+public final class MiddlewareTimeoutCorsTests {
+
+    public static void run(Check c) {
+        System.stdout.println("-- middleware: Timeout (2.2b) --");
+        timeoutTrips(c);
+        timeoutPasses(c);
+        timeoutThrowBecomes500(c);
+        System.stdout.println("-- middleware: Cors (2.2b) --");
+        corsPreflightAllowed(c);
+        corsPreflightDenied(c);
+        corsPreflightEchoesHeaders(c);
+        corsActualAllowed(c);
+        corsActualNoOrigin(c);
+        corsWildcardNoCreds(c);
+        corsCredentialedWildcardReflects(c);
+    }
+
+    // ---- terminals -------------------------------------------------------
+
+    static #HttpResponse slow(HttpRequest req) {
+        Tasks.sleepMillis((int64) 300);
+        return HttpResponse.of(200);
+    }
+
+    static #HttpResponse fast(HttpRequest req) {
+        return HttpResponse.of(200);
+    }
+
+    static #HttpResponse boom(HttpRequest req) {
+        throw heap HttpException("boom");
+    }
+
+    /** Invoke a composed app on a fiber, reporting the status code. */
+    static async int32 runApp((HttpRequest) -> #HttpResponse app, HttpRequest req) {
+        HttpResponse resp = app(req);
+        return resp.statusCode();
+    }
+
+    // ---- Timeout ---------------------------------------------------------
+
+    static void timeoutTrips(Check c) {
+        Middleware tmo = Timeout.middleware((int64) 50);
+        MiddlewareChain chain = heap MiddlewareChain();
+        chain.use(#tmo);
+        (HttpRequest) -> #HttpResponse slowT =
+            (req) -> MiddlewareTimeoutCorsTests.slow(req);
+        (HttpRequest) -> #HttpResponse app = chain.compose(slowT);
+
+        Task<int32> t = spawn runApp(app, HttpRequest.of("GET", "/x"));
+        c.eqInt((int64) await t, 504, "timeout: overrunning handler becomes 504");
+    }
+
+    static void timeoutPasses(Check c) {
+        Middleware tmo = Timeout.middleware((int64) 1000);
+        MiddlewareChain chain = heap MiddlewareChain();
+        chain.use(#tmo);
+        (HttpRequest) -> #HttpResponse fastT =
+            (req) -> MiddlewareTimeoutCorsTests.fast(req);
+        (HttpRequest) -> #HttpResponse app = chain.compose(fastT);
+
+        Task<int32> t = spawn runApp(app, HttpRequest.of("GET", "/x"));
+        c.eqInt((int64) await t, 200, "timeout: in-budget handler passes through");
+    }
+
+    static void timeoutThrowBecomes500(Check c) {
+        // Recover outermost, Timeout inside: a handler throw must reach Recover
+        // as a 500 rather than being reported as a 504 overrun.
+        Middleware rec = Recover.middleware();
+        Middleware tmo = Timeout.middleware((int64) 1000);
+        MiddlewareChain chain = heap MiddlewareChain();
+        chain.use(#rec).use(#tmo);
+        (HttpRequest) -> #HttpResponse boomT =
+            (req) -> MiddlewareTimeoutCorsTests.boom(req);
+        (HttpRequest) -> #HttpResponse app = chain.compose(boomT);
+
+        Task<int32> t = spawn runApp(app, HttpRequest.of("GET", "/x"));
+        c.eqInt((int64) await t, 500, "timeout: handler throw crosses to Recover as 500");
+    }
+
+    // ---- Cors ------------------------------------------------------------
+    //
+    // Each test builds its own chain inline: the composed handler captures the
+    // Cors middleware (and terminal) by reference, so those must live in the
+    // same scope as the `app(...)` call — a factory returning the handler would
+    // dangle them.
+
+    static void corsPreflightAllowed(Check c) {
+        Cors cfg = Cors.create();
+        cfg.allowOrigin("https://good.example").allowMethods("GET, POST").maxAge((int64) 600);
+        Middleware cm = Cors.middleware(cfg);
+        MiddlewareChain chain = heap MiddlewareChain();
+        chain.use(#cm);
+        (HttpRequest) -> #HttpResponse okT = (req) -> MiddlewareTimeoutCorsTests.fast(req);
+        (HttpRequest) -> #HttpResponse app = chain.compose(okT);
+
+        HttpRequest req = HttpRequest.of("OPTIONS", "/x");
+        req.setHeader("Origin", "https://good.example");
+        req.setHeader("Access-Control-Request-Method", "POST");
+        HttpResponse resp = app(req);
+
+        c.eqInt((int64) resp.statusCode(), 204, "cors preflight: allowed origin → 204");
+        c.eqStr(resp.getHeaders().get("Access-Control-Allow-Origin"), "https://good.example",
+                "cors preflight: echoes allowed origin");
+        c.eqStr(resp.getHeaders().get("Access-Control-Allow-Methods"), "GET, POST",
+                "cors preflight: advertises allowed methods");
+        c.eqStr(resp.getHeaders().get("Access-Control-Max-Age"), "600",
+                "cors preflight: carries max-age");
+    }
+
+    static void corsPreflightDenied(Check c) {
+        Cors cfg = Cors.create();
+        cfg.allowOrigin("https://good.example");
+        Middleware cm = Cors.middleware(cfg);
+        MiddlewareChain chain = heap MiddlewareChain();
+        chain.use(#cm);
+        (HttpRequest) -> #HttpResponse okT = (req) -> MiddlewareTimeoutCorsTests.fast(req);
+        (HttpRequest) -> #HttpResponse app = chain.compose(okT);
+
+        HttpRequest req = HttpRequest.of("OPTIONS", "/x");
+        req.setHeader("Origin", "https://evil.example");
+        req.setHeader("Access-Control-Request-Method", "POST");
+        HttpResponse resp = app(req);
+
+        c.that(resp.getHeaders().get("Access-Control-Allow-Origin") == null,
+               "cors preflight: disallowed origin gets no Allow-Origin header");
+    }
+
+    static void corsPreflightEchoesHeaders(Check c) {
+        Cors cfg = Cors.create();
+        cfg.allowOrigin("https://good.example");
+        Middleware cm = Cors.middleware(cfg);
+        MiddlewareChain chain = heap MiddlewareChain();
+        chain.use(#cm);
+        (HttpRequest) -> #HttpResponse okT = (req) -> MiddlewareTimeoutCorsTests.fast(req);
+        (HttpRequest) -> #HttpResponse app = chain.compose(okT);
+
+        HttpRequest req = HttpRequest.of("OPTIONS", "/x");
+        req.setHeader("Origin", "https://good.example");
+        req.setHeader("Access-Control-Request-Method", "POST");
+        req.setHeader("Access-Control-Request-Headers", "X-Custom, Content-Type");
+        HttpResponse resp = app(req);
+
+        c.eqStr(resp.getHeaders().get("Access-Control-Allow-Headers"), "X-Custom, Content-Type",
+                "cors preflight: echoes requested headers when none configured");
+    }
+
+    static void corsActualAllowed(Check c) {
+        Cors cfg = Cors.create();
+        cfg.allowOrigin("https://good.example").exposeHeaders("X-Total-Count");
+        Middleware cm = Cors.middleware(cfg);
+        MiddlewareChain chain = heap MiddlewareChain();
+        chain.use(#cm);
+        (HttpRequest) -> #HttpResponse okT = (req) -> MiddlewareTimeoutCorsTests.fast(req);
+        (HttpRequest) -> #HttpResponse app = chain.compose(okT);
+
+        HttpRequest req = HttpRequest.of("GET", "/x");
+        req.setHeader("Origin", "https://good.example");
+        HttpResponse resp = app(req);
+
+        c.eqInt((int64) resp.statusCode(), 200, "cors actual: handler ran");
+        c.eqStr(resp.getHeaders().get("Access-Control-Allow-Origin"), "https://good.example",
+                "cors actual: stamps allowed origin");
+        c.eqStr(resp.getHeaders().get("Access-Control-Expose-Headers"), "X-Total-Count",
+                "cors actual: exposes configured headers");
+    }
+
+    static void corsActualNoOrigin(Check c) {
+        Cors cfg = Cors.create();
+        cfg.allowOrigin("https://good.example");
+        Middleware cm = Cors.middleware(cfg);
+        MiddlewareChain chain = heap MiddlewareChain();
+        chain.use(#cm);
+        (HttpRequest) -> #HttpResponse okT = (req) -> MiddlewareTimeoutCorsTests.fast(req);
+        (HttpRequest) -> #HttpResponse app = chain.compose(okT);
+
+        HttpResponse resp = app(HttpRequest.of("GET", "/x"));
+        c.eqInt((int64) resp.statusCode(), 200, "cors actual: same-origin request passes");
+        c.that(resp.getHeaders().get("Access-Control-Allow-Origin") == null,
+               "cors actual: no Origin → no CORS headers");
+    }
+
+    static void corsWildcardNoCreds(Check c) {
+        Cors cfg = Cors.create();
+        cfg.allowAnyOrigin();
+        Middleware cm = Cors.middleware(cfg);
+        MiddlewareChain chain = heap MiddlewareChain();
+        chain.use(#cm);
+        (HttpRequest) -> #HttpResponse okT = (req) -> MiddlewareTimeoutCorsTests.fast(req);
+        (HttpRequest) -> #HttpResponse app = chain.compose(okT);
+
+        HttpRequest req = HttpRequest.of("GET", "/x");
+        req.setHeader("Origin", "https://any.example");
+        HttpResponse resp = app(req);
+
+        c.eqStr(resp.getHeaders().get("Access-Control-Allow-Origin"), "*",
+                "cors wildcard: uncredentialed emits *");
+    }
+
+    static void corsCredentialedWildcardReflects(Check c) {
+        Cors cfg = Cors.create();
+        cfg.allowAnyOrigin().allowCredentials(true);
+        Middleware cm = Cors.middleware(cfg);
+        MiddlewareChain chain = heap MiddlewareChain();
+        chain.use(#cm);
+        (HttpRequest) -> #HttpResponse okT = (req) -> MiddlewareTimeoutCorsTests.fast(req);
+        (HttpRequest) -> #HttpResponse app = chain.compose(okT);
+
+        HttpRequest req = HttpRequest.of("GET", "/x");
+        req.setHeader("Origin", "https://app.example");
+        HttpResponse resp = app(req);
+
+        c.eqStr(resp.getHeaders().get("Access-Control-Allow-Origin"), "https://app.example",
+                "cors credentialed wildcard: reflects the origin, not *");
+        c.eqStr(resp.getHeaders().get("Access-Control-Allow-Credentials"), "true",
+                "cors credentialed wildcard: sets Allow-Credentials");
+        c.eqStr(resp.getHeaders().get("Vary"), "Origin",
+                "cors credentialed wildcard: adds Vary: Origin");
+    }
+}

@@ -1,0 +1,62 @@
+package dev.cajeta.http.middleware;
+
+import cajeta.concurrent.AtomicInt32;
+import dev.cajeta.http.HttpResponse;
+
+/**
+ * Cross-fiber handoff cell for the [`Timeout`](Timeout.cajeta) middleware
+ * (http:2.2b) — the middleware-layer twin of the server's
+ * [`HandlerRun`](../server/HandlerRun.cajeta), extended with a **threw**
+ * state so a downstream throw is distinguished from an overrun.
+ *
+ * The handler fiber runs `next(req)` and either [`put`](#put)s its owned
+ * response (state `1`) or, on an exception, flips [`fail`](#fail) (state `2`);
+ * the middleware fiber polls [`pending`](#pending) against the budget and then
+ * either [`take`](#take)s the response, re-raises (`threw()`), or returns a
+ * `504`. The `AtomicInt32` store/load orders the response write against the
+ * flag so a `take()` after `!pending()` always sees the deposited response.
+ *
+ * A plain `Channel` can't carry the response: its v1 `send(T)` **borrows** the
+ * payload, so the handler fiber's owned response would dangle the moment its
+ * frame dropped — the same reason `HandlerRun` exists.
+ */
+public class TimeoutRun {
+    /** The handler's response; meaningful once state is `1`. */
+    HttpResponse resp;
+    /** `0` = running, `1` = response deposited, `2` = handler threw. */
+    AtomicInt32 state;
+
+    public TimeoutRun() {
+        this.resp = null;
+        AtomicInt32 s = heap AtomicInt32(0);
+        this.state = #s;
+    }
+
+    /** Deposit the handler's response (state → `1`). */
+    public void put(#HttpResponse r) {
+        this.resp = #r;
+        this.state.store(1);
+    }
+
+    /** Mark that the handler threw (state → `2`). */
+    public void fail() {
+        this.state.store(2);
+    }
+
+    /** True while the handler fiber has neither deposited nor failed. */
+    public boolean pending() {
+        return this.state.load() == 0;
+    }
+
+    /** True iff the handler fiber ended by throwing. */
+    public boolean threw() {
+        return this.state.load() == 2;
+    }
+
+    /** Detach the deposited response (call only after `!pending() && !threw()`). */
+    public #HttpResponse take() {
+        HttpResponse r #= this.resp;
+        this.resp = null;
+        return #r;
+    }
+}
