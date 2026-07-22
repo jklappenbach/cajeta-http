@@ -1245,9 +1245,32 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
       `HttpClient.exchangeTimeout` + `catch` so a future starved run **fails
       fast** (`-3` → clean assertion) instead of a 120 s hang — a wall-clock
       deadline can only bound the hang, not make a starved exchange pass.
-- [ ] **2.2** Bundled set — grouped by dependency weight; every
+- [x] **2.2** Bundled set — grouped by dependency weight; every
   middleware is golden-tested through a real loopback server, not just
   unit-called.
+  - **Shipped:** `MiddlewareLoopbackTests` — four live `HttpServer`/
+    `HttpClient` scopes over an actual socket, covering all twelve 2.2
+    middlewares: **stack** (Recover 500, RequestId header, Compression
+    server-gzip→client-inflate round-trip + Vary, ETag conditional 304,
+    ProxyHeaders client-IP resolve, Cors preflight), **gated** (BearerAuth
+    401, RateLimit 429, Timeout 504 — Timeout's spawn/await running inside a
+    real connection fiber for the first time), **request-transform**
+    (BasicAuth 401 + Decompression of a real gzip POST body), **static**
+    (StaticFile serve + 404). Suite 701/701 × 4.
+  - **The loopback pass earned its keep — it caught two bugs unit tests
+    (all ≤2 middlewares, small bodies) never reached:**
+    - **Array-grow use-after-free.** `MiddlewareChain.use` (from 2.1),
+      `Cors.allowOrigin`, and `RateLimit.grow` grew their backing arrays with
+      `grown[j] = old[j]` — a **borrow**-copy — then `this.arr = grown`; the
+      old array's drop then freed the very elements `grown` still held. Latent
+      until a chain exceeded the **initial capacity 4** — the 6-middleware
+      stack was the first to trip it (SIGSEGV + a doubled drop-chain entry).
+      Fixed with the stdlib `ArrayList.grow` idiom: `grown[j] #= #old[j]`
+      (move each element out) and `this.arr #= grown` (move the array in).
+    - **`XXHash3.hash` traps on larger inputs.** ETag's `XXHash3` digest was
+      fine on the 15-byte unit body but **SIGILL**'d on the ~900-byte wire
+      body (a different XXHash3 code path). Swapped ETag to `Sha256.hashHex`.
+      Upstream stdlib issue — worth a repro to cajeta.
   - [x] **2.2a `Recover` + `RequestId` + `Logging`.** Recover: uncaught →
     500, but leaves the response alone if headers already streamed.
     RequestId: generate or propagate, echo response header. Logging: one
@@ -1442,11 +1465,11 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
         under `build/test` (index/nested/missing files + a symlink to a
         secret outside the root) — the canonical layer is exercised on an
         actual escaping symlink, not mocked.
-      - **ETag** hashes buffered bodies with `XXHash3` (a cache validator,
-        not a security token — non-crypto is correct) → strong quoted tag;
-        `If-None-Match` (tag or `*`) → a bare `304` carrying the tag.
-        Streamed bodies are left untagged (hashing them would buffer the very
-        payload streaming avoids).
+      - **ETag** hashes buffered bodies → strong quoted tag; `If-None-Match`
+        (tag or `*`) → a bare `304` carrying the tag. Streamed bodies are left
+        untagged (hashing them would buffer the very payload streaming avoids).
+        (Uses `Sha256.hashHex`; an initial `XXHash3` version **traps on larger
+        inputs** — see the 2.2 loopback note.)
       - **ProxyHeaders**: trusted → resolve `X-Forwarded-For`'s first hop
         onto `X-Real-IP`; untrusted → **strip** all `X-Forwarded-*` +
         `X-Real-IP` so a spoofing client can't forge them. **v1 caveat**

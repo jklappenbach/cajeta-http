@@ -80,10 +80,12 @@ public class Cors {
             String[] grown = heap String[newCap];
             int32 j = 0;
             while (j < this.originCount) {
-                grown[j] = this.origins[j];
+                // Move (not copy) — else the old array's drop frees strings the
+                // grown array still holds. Idiom: stdlib ArrayList.grow.
+                grown[j] #= #this.origins[j];
                 j = j + 1;
             }
-            this.origins = grown;
+            this.origins #= grown;
         }
         this.origins[this.originCount] = o.substring(0, o.byteLength());
         this.originCount = this.originCount + 1;

@@ -1,7 +1,7 @@
 package dev.cajeta.http.middleware;
 
 import cajeta.lang.String;
-import cajeta.hash.XXHash3;
+import cajeta.hash.Sha256;
 import dev.cajeta.http.HttpRequest;
 import dev.cajeta.http.HttpResponse;
 import dev.cajeta.http.middleware.Middleware;
@@ -21,11 +21,11 @@ import dev.cajeta.http.middleware.Middleware;
  * `*`), the body is dropped and a bare `304` (carrying the same `ETag`) is
  * returned — the client's cached copy is still current.
  *
- * The hash is [`XXHash3`](../../../hash/XXHash3.cajeta) — fast and
- * well-distributed; an ETag is a **cache validator**, not a security token, so
- * a non-cryptographic hash is the right tool. Streamed (unknown-length)
- * responses are left untagged: hashing them would mean buffering the very
- * payload streaming exists to avoid.
+ * The hash is [`Sha256`](../../../hash/Sha256.cajeta)'s one-shot hex digest —
+ * an ETag only needs to change when the bytes do, and a strong digest makes
+ * accidental collisions a non-issue. Streamed (unknown-length) responses are
+ * left untagged: hashing them would mean buffering the very payload streaming
+ * exists to avoid.
  */
 public class ETag {
 
@@ -45,8 +45,7 @@ public class ETag {
         if (resp.getHeaders().contains("etag")) {
             return #resp;
         }
-        int64 h = XXHash3.hash(resp.body, (int64) resp.bodyLength());
-        String tag = "\"" + ETag.toHex(h) + "\"";
+        String tag = "\"" + Sha256.hashHex(resp.body, (int64) resp.bodyLength()) + "\"";
         resp.setHeader("ETag", tag);
 
         String inm = req.getHeaders().get("If-None-Match");
@@ -65,22 +64,5 @@ public class ETag {
             return true;
         }
         return t.contains(tag);
-    }
-
-    /** Lower-case 16-digit hex of an int64 (leading zeros kept). */
-    static #String toHex(int64 v) {
-        int8[] out = heap int8[16];
-        int32 i = 0;
-        while (i < 16) {
-            int32 shift = (15 - i) * 4;
-            int32 nib = (int32) ((v >> (int64) shift) & (int64) 0xF);
-            if (nib < 10) {
-                out[i] = (int8) (48 + nib);
-            } else {
-                out[i] = (int8) (97 + nib - 10);
-            }
-            i = i + 1;
-        }
-        return heap String(#out, 16);
     }
 }
