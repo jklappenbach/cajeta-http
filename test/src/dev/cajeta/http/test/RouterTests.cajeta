@@ -12,18 +12,43 @@ import dev.cajeta.http.routing.Router;
  *
  *   - 1.7a typed path params (`{id:int64}`): match/404 matrix per type,
  *     typed getter round-trip, string params unchanged.
+ *   - 1.7b wildcards (`{p:*}` one segment, `{p:**}` rest of path):
+ *     precedence literal > param > `*` > `**`, `**` binding incl. empty
+ *     rest, and registration-time rejection of bad patterns.
  */
 public final class RouterTests {
 
     public static void run(Check c) {
         System.stdout.println("-- router: typed params (1.7a) --");
         typedParams(c);
+        System.stdout.println("-- router: wildcards (1.7b) --");
+        wildcards(c);
     }
 
     // Small helper: dispatch (method, target) and return the status code.
     static int32 status(Router r, String method, String target) {
         HttpResponse resp = r.dispatch(HttpRequest.of(method, target));
         return resp.statusCode();
+    }
+
+    // A 200 response whose body is `s` — a marker the tests read back to see
+    // which route won.
+    static #HttpResponse text(String s) {
+        return HttpResponse.ok().body(s.toBytes(), s.byteLength());
+    }
+
+    // Dispatch (method, target) and return the response body as a String.
+    static #String body(Router r, String method, String target) {
+        HttpResponse resp = r.dispatch(HttpRequest.of(method, target));
+        int32 len = resp.bodyLength();
+        int8[] b = resp.body;
+        int8[] copy = heap int8[len];
+        int32 i = 0;
+        while (i < len) {
+            copy[i] = b[i];
+            i = i + 1;
+        }
+        return heap String(#copy, len);
     }
 
     static void typedParams(Check c) {
@@ -162,5 +187,82 @@ public final class RouterTests {
         // POST /i64/abc : path does NOT match (type mismatch) -> 404, not 405.
         c.eqInt((int64) RouterTests.status(r, "POST", "/i64/abc"), 404,
                 "typed mismatch is 404 even for a registered path prefix");
+    }
+
+    static void wildcards(Check c) {
+        (HttpRequest) -> #HttpResponse lit = (req) -> RouterTests.text("LIT");
+        (HttpRequest) -> #HttpResponse par = (req) -> {
+            String v = req.pathParam("id");
+            return RouterTests.text("PARAM:" + v);
+        };
+        (HttpRequest) -> #HttpResponse star = (req) -> {
+            String v = req.pathParam("w");
+            return RouterTests.text("STAR:" + v);
+        };
+        (HttpRequest) -> #HttpResponse dstar = (req) -> {
+            String v = req.pathParam("rest");
+            return RouterTests.text("REST:" + v);
+        };
+
+        // -- precedence: literal > param (registration order is irrelevant) --
+        Router ra = heap Router();
+        ra.route("GET", "/a/{id}", par);        // registered FIRST
+        ra.route("GET", "/a/x", lit);           // more specific, registered LAST
+        c.eqStr(RouterTests.body(ra, "GET", "/a/x"), "LIT",
+                "literal beats param regardless of registration order");
+        c.eqStr(RouterTests.body(ra, "GET", "/a/y"), "PARAM:y",
+                "param matches a non-literal segment");
+
+        // -- precedence: param > single wildcard -----------------------------
+        Router rb = heap Router();
+        rb.route("GET", "/b/{w:*}", star);      // registered FIRST
+        rb.route("GET", "/b/{id}", par);
+        c.eqStr(RouterTests.body(rb, "GET", "/b/z"), "PARAM:z",
+                "param beats single wildcard");
+
+        // -- precedence: single wildcard > double wildcard; * is one segment -
+        Router rc = heap Router();
+        rc.route("GET", "/c/{rest:**}", dstar);
+        rc.route("GET", "/c/{w:*}", star);
+        c.eqStr(RouterTests.body(rc, "GET", "/c/z"), "STAR:z",
+                "single wildcard beats ** for one segment");
+        c.eqStr(RouterTests.body(rc, "GET", "/c/z/y"), "REST:z/y",
+                "** matches multiple segments where * cannot");
+
+        // -- literal beats **, and ** binds the rest with '/' preserved ------
+        Router rd = heap Router();
+        rd.route("GET", "/d/{rest:**}", dstar);
+        rd.route("GET", "/d/config", lit);
+        c.eqStr(RouterTests.body(rd, "GET", "/d/config"), "LIT",
+                "literal beats ** catch-all");
+        c.eqStr(RouterTests.body(rd, "GET", "/d/other"), "REST:other",
+                "** catches a single non-literal segment");
+        c.eqStr(RouterTests.body(rd, "GET", "/d/a/b/c"), "REST:a/b/c",
+                "** binds the rest with separators preserved");
+
+        // -- ** binds an EMPTY rest (matches the prefix itself) --------------
+        Router re = heap Router();
+        re.route("GET", "/e/{rest:**}", dstar);
+        c.eqStr(RouterTests.body(re, "GET", "/e"), "REST:",
+                "** binds empty rest at the prefix");
+        c.eqStr(RouterTests.body(re, "GET", "/e/a/b"), "REST:a/b",
+                "** binds the multi-segment rest");
+        // A prefix that does not match at all is still 404.
+        c.eqInt((int64) RouterTests.status(re, "GET", "/zzz"), 404,
+                "** router still 404s a non-matching prefix");
+
+        // -- registration-time validation (Router.patternError) --------------
+        c.that(Router.patternError("/a/x") == null,
+               "valid literal pattern accepted");
+        c.that(Router.patternError("/a/{id:int64}") == null,
+               "valid typed pattern accepted");
+        c.that(Router.patternError("/a/{w:*}") == null,
+               "single wildcard accepted");
+        c.that(Router.patternError("/a/{rest:**}") == null,
+               "trailing ** accepted");
+        c.that(Router.patternError("/a/{rest:**}/b") != null,
+               "non-terminal ** rejected at registration");
+        c.that(Router.patternError("/a/{x:bogus}") != null,
+               "unknown path-param type rejected at registration");
     }
 }

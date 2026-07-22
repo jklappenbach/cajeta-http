@@ -1,6 +1,7 @@
 package dev.cajeta.http.routing;
 
 import cajeta.lang.String;
+import cajeta.error.UnrecoverableException;
 import dev.cajeta.http.HttpRequest;
 import dev.cajeta.http.HttpResponse;
 import dev.cajeta.http.routing.Route;
@@ -111,9 +112,74 @@ public class Router {
      */
     public Router route(String method, String pattern,
                         (HttpRequest) -> #HttpResponse handler) {
+        String err = Router.patternError(pattern);
+        if (err != null) {
+            throw heap UnrecoverableException(#err);
+        }
         Route r = heap Route(method, pattern, handler);
         this.append(#r);
         return this;
+    }
+
+    /**
+     * Validate a route `pattern` at **registration time**, returning `null`
+     * when it is well-formed or a human-readable reason when it is not
+     * (http:1.7b). [`route`](#route) calls this and raises a fatal
+     * [`UnrecoverableException`](../../error/UnrecoverableException.cajeta)
+     * on a non-null result — a malformed pattern is a programmer error, not
+     * a recoverable condition. Exposed as a pure predicate so it is testable
+     * without tripping the fatal path.
+     *
+     * The rules: a `**` catch-all may appear **only as the final segment**
+     * (`/files/{p:**}` is valid; `/files/{p:**}/x` is not — nothing can
+     * follow the rest-of-path), and every `{name:type}` segment's type must
+     * be one the router understands — `*`, `**`, or a
+     * [`PathParams.isKnownType`](../PathParams.cajeta) scalar (`int64`,
+     * `bool`, …). An untyped `{name}` (implicitly `string`) is always valid.
+     */
+    public static #String patternError(String pattern) {
+        String[] segs = Router.splitPath(pattern);
+        int32 n = segs.count();
+        int32 i = 0;
+        while (i < n) {
+            String seg = segs[i];
+            int32 len = seg.byteLength();
+            boolean isParam = len >= 2
+                && ((((int32) seg.byteAt(0)) & 0xff) == 123)          // '{'
+                && ((((int32) seg.byteAt(len - 1)) & 0xff) == 125);   // '}'
+            if (isParam) {
+                String type = Router.paramTypeOf(seg);
+                if (type.equals("**")) {
+                    if (i != n - 1) {
+                        return "router: '**' catch-all must be the last "
+                             + "segment in pattern '" + pattern + "'";
+                    }
+                } else if (!type.equals("*") && !PathParams.isKnownType(type)) {
+                    return "router: unknown path-param type '" + type
+                         + "' in pattern '" + pattern + "'";
+                }
+            }
+            i = i + 1;
+        }
+        return null;
+    }
+
+    /**
+     * The declared type token of a `{name:type}` param segment — the text
+     * between `:` and `}`, or `"string"` for an untyped `{name}`. Operates
+     * on a raw segment string (the registration-time counterpart to
+     * [`Route.paramType`](Route.cajeta)).
+     */
+    static #String paramTypeOf(String seg) {
+        int32 len = seg.byteLength();
+        int32 k = 1;                                 // skip '{'
+        while (k < len - 1) {
+            if ((((int32) seg.byteAt(k)) & 0xff) == 58) {    // ':'
+                return seg.substring(k + 1, len - 1);
+            }
+            k = k + 1;
+        }
+        return "string".substring(0, 6);
     }
 
     /** Append a compiled route, growing the backing array on demand. */
@@ -151,19 +217,37 @@ public class Router {
         String[] segs = Router.splitPath(request.getTarget());
         int32 segCount = segs.count();
 
+        // Pass 1 — among routes whose path matches AND method matches, pick
+        // the highest-scoring (most specific) one; ties break by earliest
+        // registration. A throwaway PathParams absorbs each probe's captures
+        // (re-bound on the winner in pass 2), so ownership stays simple.
         boolean pathMatchedAny = false;
+        int32 bestIdx = -1;
+        int64 bestScore = (int64) -1;
         int32 i = 0;
         while (i < this.routeCount) {
             Route r = this.routes[i];
-            PathParams params = heap PathParams();
-            if (r.tryMatch(segs, segCount, params)) {
-                if (r.methodMatches(method)) {
-                    request.bindPathParams(#params);
-                    return r.handler(request);
-                }
+            PathParams probe = heap PathParams();
+            int64 sc = r.matchAndScore(segs, segCount, probe);
+            if (sc >= (int64) 0) {
                 pathMatchedAny = true;
+                if (r.methodMatches(method)) {
+                    if (bestIdx < 0 || sc > bestScore) {
+                        bestIdx = i;
+                        bestScore = sc;
+                    }
+                }
             }
             i = i + 1;
+        }
+
+        // Pass 2 — re-bind the winner's params onto the request and dispatch.
+        if (bestIdx >= 0) {
+            Route chosen = this.routes[bestIdx];
+            PathParams params = heap PathParams();
+            chosen.matchAndScore(segs, segCount, params);
+            request.bindPathParams(#params);
+            return chosen.handler(request);
         }
 
         if (pathMatchedAny) {

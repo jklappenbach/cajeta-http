@@ -1054,11 +1054,40 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
       registration rejection is 1.7b's job (it owns the machinery). New
       `test/.../RouterTests.cajeta` (+41 checks, suite 482 → **523**);
       full suite 523/523 × 15 loops incl. the serve()/deadline tests.
-  - [ ] **1.7b Wildcards.** `{p:*}` — one segment; `{p:**}` — rest of
+  - [x] **1.7b Wildcards.** `{p:*}` — one segment; `{p:**}` — rest of
     the path (bound with `/` separators preserved); precedence: literal
     > typed/string param > `*` > `**`.
     - TDD: precedence table proven, `**` binding incl. empty rest,
       wildcard + trailing-route conflicts rejected at registration.
+    - **Shipped:** `{p:*}` matches exactly one segment (binds the decoded
+      value); `{p:**}` is a terminal catch-all binding the **raw** rest of
+      the path joined by `/` (separators preserved; empty at the prefix, so
+      `/e/{p:**}` matches `/e` with `p=""`). Precedence is now **real**, not
+      registration-order: `Route.matchAndScore` returns a packed
+      **specificity score** (3 bits/segment, MSB-first — literal 5 > param
+      4 > `*` 3 > `**`-absorbed 1, terminal exact 6 vs `**` 0) and
+      `Router.dispatch` picks the highest-scoring route among those matching
+      path **and** method (ties → earliest registration), replacing the old
+      first-match walk. So a later-registered literal beats an
+      earlier-registered `{id}`; a `{id}` beats `{w:*}`; `{w:*}` beats
+      `{rest:**}` for one segment; and `**` wins only where nothing more
+      specific reaches. Score packs paths up to ~20 segments exactly, deeper
+      ties fall back to registration order (documented). Registration-time
+      validation: new **`Router.patternError(pattern)`** (pure predicate,
+      testable without the fatal path) → `route()` raises a fatal
+      `UnrecoverableException` when a `**` is not the final segment or a
+      `{name:type}` names a type that is not `*`/`**`/a known scalar — this
+      is where 1.7a's deferred unknown-type rejection landed. Chose
+      `UnrecoverableException` (panic-on-bad-registration, like Go routers)
+      so `route()` needs no `throws` clause / API churn. RouterTests +17
+      (suite 523 → **540**); 540/540 × 15 loops.
+    - **cajeta wrinkle found:** the codegen move-checker tracks owned locals
+      by **identifier name across the whole method body**, not per lexical
+      scope — reusing `String name`/`String decoded` in two sibling
+      `if`/`else` branches (each `#`-moved) was flagged
+      `CAJETA_ERROR_USE_AFTER_MOVE` on the second declaration. Dodge: give
+      each branch's owned local a **distinct** name (`wName`/`pName`/
+      `restName`). Error carries no file/line; bisect by `#ident` sites.
   - [ ] **1.7c `mount(prefix, sub)`.** Nest a sub-router under a
     prefix; path params allowed in the prefix; 405/Allow computed
     across the merged tree.
