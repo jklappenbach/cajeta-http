@@ -1,0 +1,58 @@
+package dev.cajeta.http.body;
+
+import cajeta.io.net.AsyncReader;
+import dev.cajeta.http.MediaType;
+import dev.cajeta.http.body.Body;
+import dev.cajeta.http.body.GzipCompressChannel;
+
+/**
+ * A streaming [`Body`](Body.cajeta) that **gzips another body incrementally**
+ * (http:2.2c). Wraps a source body and, through a
+ * [`GzipCompressChannel`](GzipCompressChannel.cajeta), serves the source's
+ * content as a gzip member — the payload never materializes, so an
+ * arbitrarily large streamed response compresses in constant memory as the
+ * chunked writer pulls it.
+ *
+ * Always **unknown-length** (`contentLength() == -1`): the compressed size
+ * isn't known until the stream ends, so the response frames chunked. The body
+ * **adopts** its source (`#Body`) and keeps it alive for as long as it lives,
+ * because the compress channel reads through the source's reader.
+ *
+ * The Compression middleware sets `Content-Encoding: gzip` when it installs
+ * this; the body itself declares no media type (the response's `Content-Type`
+ * was already stamped from the original body).
+ */
+public final class GzipCompressBody extends Body {
+    Body source;
+    GzipCompressChannel channel;
+    AsyncReader rdr;
+
+    GzipCompressBody() {
+        this.source = null;
+        this.channel = null;
+        this.rdr = null;
+    }
+
+    /** Wrap `source`, gzipping its content on read; adopts the source. */
+    public static #GzipCompressBody of(#Body source) {
+        GzipCompressBody b = heap GzipCompressBody();
+        b.source = #source;
+        GzipCompressChannel ch = heap GzipCompressChannel(b.source.reader());
+        b.channel = #ch;
+        AsyncReader r = heap AsyncReader(b.channel);
+        b.rdr = #r;
+        return #b;
+    }
+
+    public int64 contentLength() {
+        return (int64) 0 - (int64) 1;
+    }
+
+    public MediaType contentType() {
+        return null;
+    }
+
+    public AsyncReader reader() {
+        return this.rdr;
+    }
+}

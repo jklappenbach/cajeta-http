@@ -1328,7 +1328,7 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
         capture, to be invocable); each Cors test builds its chain **inline**
         (the composed handler captures the middleware by reference, so a
         factory returning the handler would dangle it).
-  - [ ] **2.2c `Compression`/`Decompression`** *(gated on 1.6)*.
+  - [x] **2.2c `Compression`/`Decompression`** *(gated on 1.6)*.
     Response side: `Accept-Encoding` negotiation with q-values, min-size
     and content-type gates, streaming compress of streamed bodies,
     `Vary: Accept-Encoding`. Request side: inflate
@@ -1337,6 +1337,39 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
     - TDD: negotiation matrix incl. `identity;q=0`; already-encoded and
       tiny bodies skipped; streamed body compresses incrementally;
       bomb-guard 413s.
+    - **Shipped:** `coding.AcceptEncoding` (q-value negotiation in
+      integer milli-units), `Compression`/`Decompression` middleware, and
+      `body.GzipCompressBody`/`GzipCompressChannel` + `coding.Crc32` for
+      the streaming path. `MiddlewareCompressionTests` (25 assertions);
+      suite 622/622 × 4.
+      - **Negotiation** ([`AcceptEncoding.best`](../src/main/cajeta/dev/cajeta/http/coding/AcceptEncoding.cajeta)):
+        parses each `token;q=…` to milli-units (no float in a header path),
+        honors `*`, gzip beats deflate on a tie, and never 406s — an
+        unacceptable set falls back to `identity` (uncompressed is always a
+        valid answer).
+      - **Compression** (response): skips already-`Content-Encoding`d,
+        `identity`-negotiated, non-text (`Content-Type` gate), and
+        sub-`minSize` (256 B) bodies; adds `Vary: Accept-Encoding` on every
+        pass-through; buffered bodies encode one-shot with `Content-Length`
+        restamped.
+      - **Streaming gzip.** The codec ships no streaming gzip *container*
+        (`Gzip.compress` is one-shot) and exposes **no CRC**, so
+        `GzipCompressChannel` frames it itself: 10-byte header, then per
+        source chunk `DeflateStream.write`+`syncFlush` (incremental blocks),
+        then `finish()` + an 8-byte trailer (local `Crc32` + ISIZE). A
+        streamed body negotiated to gzip is wrapped in `GzipCompressBody`
+        (unknown length → chunked); a streamed body negotiated to *deflate*
+        passes uncompressed rather than buffering an unbounded stream to fit
+        zlib's back-patched header. `Crc32` builds the `0xEDB88320` poly from
+        two positive halves to dodge a sign-extended 32-bit literal.
+      - **Decompression** (request): inflates a supported `Content-Encoding`
+        with the cap on **decoded** output — over-cap → **413** (the
+        zip-bomb guard), malformed → **400**, unknown token → **415**; then
+        strips `Content-Encoding` and restamps `Content-Length`.
+      - Streamed-incremental proof is the `GzipCompressBody`-over-`BytesBody`
+        round-trip drained in **7-byte reads** — self-owned backing sidesteps
+        `StreamBody`'s borrow-your-channel lifetime rule (a handler-local
+        channel would dangle once the handler returns).
   - [ ] **2.2d `RateLimit` + `BasicAuth`/`BearerAuth`.** RateLimit:
     token bucket keyed by remote address or a caller-supplied extractor,
     429 + `Retry-After`. Auth: constant-time comparison, 401 +

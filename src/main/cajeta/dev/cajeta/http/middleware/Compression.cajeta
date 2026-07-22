@@ -1,0 +1,169 @@
+package dev.cajeta.http.middleware;
+
+import cajeta.lang.String;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.body.Body;
+import dev.cajeta.http.body.GzipCompressBody;
+import dev.cajeta.http.coding.ContentCoding;
+import dev.cajeta.http.coding.AcceptEncoding;
+import dev.cajeta.http.middleware.Middleware;
+
+/**
+ * **Compression** middleware — plan item **2.2c**, the response side.
+ * Negotiates the client's `Accept-Encoding` and, when worthwhile, encodes the
+ * response body (`gzip`/`deflate`) and stamps `Content-Encoding` +
+ * `Vary: Accept-Encoding`.
+ *
+ * ```
+ * Compression comp = Compression.create().minSize(256);
+ * chain.use(Compression.middleware(comp));
+ * ```
+ *
+ * ## When it does *not* compress (each a deliberate skip)
+ *
+ *   - **Already encoded** — the response carries a `Content-Encoding`; the
+ *     handler chose it, so it is left alone.
+ *   - **Not acceptable** — `Accept-Encoding` negotiates to `identity`.
+ *   - **Wrong type** — the `Content-Type` is not in the compressible set
+ *     (text, JSON/XML/JS, SVG, CSV, wasm); images/video/archives are already
+ *     compressed, so re-compressing only burns CPU.
+ *   - **Too small** — a buffered body below [`minSize`](#minSize) (default
+ *     256 B); the gzip framing overhead can exceed the savings.
+ *
+ * `Vary: Accept-Encoding` is added on **every** response that passes through
+ * (even a skipped one), so a shared cache keys the entry on the negotiated
+ * coding and never serves a gzip body to a client that did not ask for it.
+ *
+ * ## Buffered vs. streamed
+ *
+ *   - **Buffered** (`hasBody`): the whole body is encoded in one shot via
+ *     [`ContentCoding.encode`](../coding/ContentCoding.cajeta) and the
+ *     `Content-Length` restamped.
+ *   - **Streamed** (`bodyModel`, unknown length): the body is wrapped in a
+ *     [`GzipCompressBody`](../body/GzipCompressBody.cajeta) that gzips
+ *     incrementally as the chunked writer pulls it — the payload never
+ *     materializes. Only `gzip` streams (its container needs no back-patched
+ *     length); a streamed body negotiated to `deflate` falls through
+ *     uncompressed rather than buffering an unbounded stream to fit zlib.
+ */
+public class Compression {
+    /** Buffered bodies strictly below this many bytes are left uncompressed. */
+    int32 minBytes;
+
+    public Compression() {
+        this.minBytes = 256;
+    }
+
+    /** A config with the default 256-byte minimum. */
+    public static #Compression create() {
+        return heap Compression();
+    }
+
+    /** Set the minimum buffered-body size (bytes) worth compressing. */
+    public Compression minSize(int32 n) {
+        this.minBytes = n;
+        return this;
+    }
+
+    /** Build the middleware from config `cfg` (captured by the lambda). */
+    public static #Middleware middleware(Compression cfg) {
+        (HttpRequest, (HttpRequest) -> #HttpResponse) -> #HttpResponse f =
+            (req, next) -> Compression.apply(cfg, req, next);
+        return Middleware.of(#f);
+    }
+
+    static #HttpResponse apply(Compression cfg, HttpRequest req,
+                               (HttpRequest) -> #HttpResponse next) {
+        HttpResponse resp = next(req);
+        Compression.addVary(resp);
+
+        if (resp.getHeaders().contains("content-encoding")) {
+            return #resp;
+        }
+        String coding = AcceptEncoding.best(req.getHeaders().get("Accept-Encoding"));
+        if (coding.equals("identity")) {
+            return #resp;
+        }
+        if (!Compression.isCompressible(resp.getHeaders().get("Content-Type"))) {
+            return #resp;
+        }
+
+        if (resp.hasBody) {
+            int32 blen = resp.bodyLength();
+            if (blen < cfg.minBytes) {
+                return #resp;
+            }
+            int8[] encoded = ContentCoding.encode(coding, resp.body, blen);
+            int32 en = encoded.count();
+            resp.body = #encoded;
+            resp.setHeader("Content-Encoding", coding);
+            resp.setHeader("Content-Length", "" + en);
+            return #resp;
+        }
+
+        if (resp.bodyModel != null && coding.equals("gzip")) {
+            return Compression.compressStreamed(resp);
+        }
+        return #resp;
+    }
+
+    /**
+     * Wrap a streamed response body in a [`GzipCompressBody`](../body/GzipCompressBody.cajeta)
+     * so it gzips incrementally as the chunked writer pulls it.
+     */
+    static #HttpResponse compressStreamed(HttpResponse resp) {
+        Body src #= resp.bodyModel;
+        resp.bodyModel = null;
+        GzipCompressBody cb = GzipCompressBody.of(#src);
+        resp.bodyModel = #cb;
+        resp.setHeader("Content-Encoding", "gzip");
+        return #resp;
+    }
+
+    /** Whether `ct` names a text-ish, worth-compressing media type. */
+    static boolean isCompressible(String ct) {
+        if (ct == null) {
+            return false;
+        }
+        String c = ct.toLowerCase();
+        if (c.startsWith("text/")) {
+            return true;
+        }
+        if (c.contains("json")) {
+            return true;
+        }
+        if (c.contains("javascript")) {
+            return true;
+        }
+        if (c.contains("xml")) {
+            return true;
+        }
+        if (c.contains("csv")) {
+            return true;
+        }
+        if (c.contains("svg")) {
+            return true;
+        }
+        if (c.contains("wasm")) {
+            return true;
+        }
+        return false;
+    }
+
+    /** Add `Accept-Encoding` to `Vary` (idempotent; `Vary: *` left as is). */
+    static void addVary(HttpResponse resp) {
+        String v = resp.getHeaders().get("Vary");
+        if (v == null) {
+            resp.setHeader("Vary", "Accept-Encoding");
+            return;
+        }
+        if (v.equals("*")) {
+            return;
+        }
+        if (v.toLowerCase().contains("accept-encoding")) {
+            return;
+        }
+        resp.setHeader("Vary", v + ", Accept-Encoding");
+    }
+}

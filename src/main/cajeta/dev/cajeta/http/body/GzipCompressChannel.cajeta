@@ -1,0 +1,174 @@
+package dev.cajeta.http.body;
+
+import cajeta.io.net.ByteChannel;
+import cajeta.io.net.AsyncReader;
+import dev.cajeta.codec.compress.DeflateStream;
+import dev.cajeta.http.coding.Crc32;
+import dev.cajeta.http.HttpException;
+
+/**
+ * A read-only `ByteChannel` that **gzips a source reader incrementally**
+ * (http:2.2c) — the streaming half of the Compression middleware. It frames a
+ * complete gzip member around raw DEFLATE without ever materializing the
+ * payload:
+ *
+ *   1. the 10-byte gzip **header** (emitted once, first read);
+ *   2. **DEFLATE** blocks — each source chunk is fed to a
+ *      [`DeflateStream`](DeflateStream) and `syncFlush`ed, so compressed
+ *      bytes come out as input flows (and the CRC-32 + uncompressed length
+ *      accumulate as they pass);
+ *   3. the final block ([`DeflateStream.finish`](DeflateStream)) plus the
+ *      8-byte **trailer** (CRC-32, then ISIZE, little-endian) at source EOF.
+ *
+ * The codec ships no streaming gzip *container* (its `Gzip.compress` is
+ * one-shot) and exposes no CRC, so both the framing and the checksum
+ * ([`Crc32`](../coding/Crc32.cajeta)) live here. Output is served from a
+ * `pending` buffer; each `readAsync` drains it and, when empty, produces the
+ * next stage — so a caller reading in small chunks still gets a valid,
+ * byte-for-byte gzip stream.
+ */
+public final class GzipCompressChannel implements ByteChannel {
+    AsyncReader src;
+    DeflateStream def;
+    Crc32 crc;
+    int64 isize;
+    int8[] inbuf;
+    int8[] pending;
+    int32 pendPos;
+    int32 pendLen;
+    int32 phase;
+    boolean closed;
+
+    public GzipCompressChannel(AsyncReader src) {
+        this.src = src;
+        this.def = heap DeflateStream();
+        this.crc = heap Crc32();
+        this.isize = (int64) 0;
+        this.inbuf = heap int8[8192];
+        this.pending = null;
+        this.pendPos = 0;
+        this.pendLen = 0;
+        this.phase = 0;
+        this.closed = false;
+    }
+
+    public int64 readAsync(int8[] buf, int64 offset, int64 length) {
+        if (this.closed) {
+            return (int64) 0;
+        }
+        while (this.pendPos >= this.pendLen) {
+            boolean more = this.produce();
+            if (!more) {
+                return (int64) 0;
+            }
+        }
+        int64 avail = (int64) (this.pendLen - this.pendPos);
+        int64 n = length;
+        if (n > avail) {
+            n = avail;
+        }
+        int64 i = (int64) 0;
+        while (i < n) {
+            buf[offset + i] = this.pending[this.pendPos + (int32) i];
+            i = i + (int64) 1;
+        }
+        this.pendPos = this.pendPos + (int32) n;
+        return n;
+    }
+
+    /** Refill `pending` with the next stage; false only when fully drained. */
+    boolean produce() {
+        if (this.phase == 0) {
+            int8[] h = GzipCompressChannel.header();
+            this.pendLen = h.count();
+            this.pending = #h;
+            this.pendPos = 0;
+            this.phase = 1;
+            return true;
+        }
+        if (this.phase == 1) {
+            int32 got = this.src.read(this.inbuf, 0, 8192);
+            if (got > 0) {
+                this.crc.update(this.inbuf, got);
+                this.isize = this.isize + (int64) got;
+                this.def.write(this.inbuf, got);
+                int8[] out = this.def.syncFlush();
+                this.pendLen = out.count();
+                this.pending = #out;
+                this.pendPos = 0;
+                return true;
+            }
+            int8[] tail = this.def.finish();
+            int8[] trailer = this.trailer();
+            int8[] merged = GzipCompressChannel.concat(tail, trailer);
+            this.pendLen = merged.count();
+            this.pending = #merged;
+            this.pendPos = 0;
+            this.phase = 2;
+            return true;
+        }
+        return false;
+    }
+
+    /** The fixed 10-byte gzip header (deflate method, no flags, OS unknown). */
+    static #int8[] header() {
+        int8[] h = heap int8[10];
+        h[0] = (int8) 0x1f;
+        h[1] = (int8) 0x8b;
+        h[2] = (int8) 0x08;
+        h[3] = (int8) 0x00;
+        h[4] = (int8) 0x00;
+        h[5] = (int8) 0x00;
+        h[6] = (int8) 0x00;
+        h[7] = (int8) 0x00;
+        h[8] = (int8) 0x00;
+        h[9] = (int8) 0xff;
+        return #h;
+    }
+
+    /** The 8-byte trailer: CRC-32 then ISIZE, little-endian. */
+    #int8[] trailer() {
+        int64 c = this.crc.value();
+        int64 sz = this.isize & (int64) 0xFFFFFFFF;
+        int8[] t = heap int8[8];
+        t[0] = (int8) (c & (int64) 0xFF);
+        t[1] = (int8) ((c >> (int64) 8) & (int64) 0xFF);
+        t[2] = (int8) ((c >> (int64) 16) & (int64) 0xFF);
+        t[3] = (int8) ((c >> (int64) 24) & (int64) 0xFF);
+        t[4] = (int8) (sz & (int64) 0xFF);
+        t[5] = (int8) ((sz >> (int64) 8) & (int64) 0xFF);
+        t[6] = (int8) ((sz >> (int64) 16) & (int64) 0xFF);
+        t[7] = (int8) ((sz >> (int64) 24) & (int64) 0xFF);
+        return #t;
+    }
+
+    /** Owned concatenation `a ++ b`. */
+    static #int8[] concat(int8[] a, int8[] b) {
+        int32 an = a.count();
+        int32 bn = b.count();
+        int8[] out = heap int8[an + bn];
+        int32 i = 0;
+        while (i < an) {
+            out[i] = a[i];
+            i = i + 1;
+        }
+        int32 j = 0;
+        while (j < bn) {
+            out[an + j] = b[j];
+            j = j + 1;
+        }
+        return #out;
+    }
+
+    public void writeAllAsync(int8[] data, int64 offset, int64 length) {
+        throw heap HttpException("GzipCompressChannel is read-only");
+    }
+
+    public int64 readWithin(int8[] buf, int64 offset, int64 length, int32 timeoutMs) {
+        return this.readAsync(buf, offset, length);
+    }
+
+    public void close() {
+        this.closed = true;
+    }
+}

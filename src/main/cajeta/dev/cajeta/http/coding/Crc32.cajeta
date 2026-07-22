@@ -1,0 +1,49 @@
+package dev.cajeta.http.coding;
+
+/**
+ * Incremental **CRC-32/ISO-HDLC** (the checksum a gzip trailer carries) —
+ * http:2.2c. The block codec computes its own CRC internally for one-shot
+ * `Gzip.compress`, but streaming gzip framing
+ * ([`GzipCompressBody`](../body/GzipCompressBody.cajeta)) computes the trailer
+ * itself as bytes flow, so it needs a standalone accumulator the codec does
+ * not expose.
+ *
+ * Reflected polynomial `0xEDB88320`, init/final XOR `0xFFFFFFFF`. The state is
+ * held in an `int64` masked to 32 bits so the right-shifts stay logical (no
+ * sign extension from a would-be-negative `int32`).
+ */
+public final class Crc32 {
+    int64 state;
+    int64 poly;
+
+    public Crc32() {
+        this.state = (int64) 0xFFFFFFFF;
+        // 0xEDB88320, built from two positive halves to dodge a 32-bit
+        // literal overflowing into a sign-extended int64.
+        this.poly = (((int64) 0xEDB8) << (int64) 16) | (int64) 0x8320;
+    }
+
+    /** Fold `data[0..len)` into the running checksum. */
+    public void update(int8[] data, int32 len) {
+        int32 i = 0;
+        while (i < len) {
+            int64 b = ((int64) data[i]) & (int64) 0xFF;
+            this.state = this.state ^ b;
+            int32 k = 0;
+            while (k < 8) {
+                if ((this.state & (int64) 1) != (int64) 0) {
+                    this.state = (this.state >> (int64) 1) ^ this.poly;
+                } else {
+                    this.state = this.state >> (int64) 1;
+                }
+                k = k + 1;
+            }
+            i = i + 1;
+        }
+    }
+
+    /** The finalized 32-bit checksum (`0..2^32-1`). */
+    public int64 value() {
+        return (this.state ^ (int64) 0xFFFFFFFF) & (int64) 0xFFFFFFFF;
+    }
+}

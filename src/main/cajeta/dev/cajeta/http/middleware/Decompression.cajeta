@@ -1,0 +1,94 @@
+package dev.cajeta.http.middleware;
+
+import cajeta.lang.String;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.coding.ContentCoding;
+import dev.cajeta.http.middleware.Middleware;
+
+/**
+ * **Decompression** middleware — plan item **2.2c**, the request side.
+ * Transparently inflates a `Content-Encoding`d request body before the
+ * handler sees it, so handlers read plain bytes and never touch a codec.
+ *
+ * ```
+ * Decompression dec = Decompression.create().maxSize(8 * 1024 * 1024);
+ * chain.use(Decompression.middleware(dec));
+ * ```
+ *
+ * ## The zip-bomb guard is the whole point
+ *
+ * A compressed request body is an **amplifier**: a few KB on the wire can
+ * inflate to gigabytes. So the decode enforces [`maxSize`](#maxSize) on the
+ * **decoded** output ([`ContentCoding.decode`](../coding/ContentCoding.cajeta)'s
+ * cap) — a body that would exceed it is rejected with **`413`** rather than
+ * inflated into memory. This is the request-side complement to the server's
+ * on-the-wire body cap (1.5b): that bounds bytes *received*, this bounds bytes
+ * *produced by inflation*. Malformed compressed input is a **`400`**; an
+ * unsupported coding token is a **`415`**.
+ *
+ * `identity` and absent `Content-Encoding` pass straight through. On success
+ * the body is replaced with the decoded bytes and `Content-Encoding` is
+ * dropped (with `Content-Length` restamped) so nothing downstream re-decodes.
+ */
+public class Decompression {
+    /** Reject when decoded output would exceed this many bytes (413). */
+    int64 maxBytes;
+
+    public Decompression() {
+        this.maxBytes = (int64) 10485760;
+    }
+
+    /** A config with the default 10 MiB post-inflate cap. */
+    public static #Decompression create() {
+        return heap Decompression();
+    }
+
+    /** Set the maximum decoded body size (bytes) before a 413. */
+    public Decompression maxSize(int64 n) {
+        this.maxBytes = n;
+        return this;
+    }
+
+    /** Build the middleware from config `cfg` (captured by the lambda). */
+    public static #Middleware middleware(Decompression cfg) {
+        (HttpRequest, (HttpRequest) -> #HttpResponse) -> #HttpResponse f =
+            (req, next) -> Decompression.apply(cfg, req, next);
+        return Middleware.of(#f);
+    }
+
+    static #HttpResponse apply(Decompression cfg, HttpRequest req,
+                               (HttpRequest) -> #HttpResponse next) {
+        String ce = req.getHeaders().get("Content-Encoding");
+        if (ce == null || !req.hasBody) {
+            return next(req);
+        }
+        String coding = ce.trim().toLowerCase();
+        if (coding.equals("identity")) {
+            return next(req);
+        }
+        if (!ContentCoding.isSupported(coding)) {
+            return HttpResponse.of(415);
+        }
+        try {
+            int8[] decoded = ContentCoding.decode(coding, req.body,
+                                                  req.bodyLength(), cfg.maxBytes);
+            int32 dn = decoded.count();
+            req.body = #decoded;
+            req.getHeaders().remove("Content-Encoding");
+            req.setHeader("Content-Length", "" + dn);
+        } catch (Exception e) {
+            return Decompression.faultResponse(e);
+        }
+        return next(req);
+    }
+
+    /** Over-cap → 413 (the bomb guard); malformed input → 400. */
+    static #HttpResponse faultResponse(Exception e) {
+        String m = e.getMessage();
+        if (m != null && m.contains("cap")) {
+            return HttpResponse.of(413);
+        }
+        return HttpResponse.of(400);
+    }
+}

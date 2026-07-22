@@ -1,0 +1,148 @@
+package dev.cajeta.http.coding;
+
+import cajeta.lang.String;
+
+/**
+ * `Accept-Encoding` negotiation (http:2.2c) — pick the content-coding a
+ * response should use, given the client's `Accept-Encoding` and the codings
+ * this boundary supports (`gzip`, `deflate`, `identity`; `x-gzip` as a gzip
+ * alias).
+ *
+ * ## The rules ([`best`](#best))
+ *
+ *   - Each listed coding carries an optional quality `;q=<0..1>` (default
+ *     `1`); `q=0` means **forbidden**. A `*` entry supplies the quality for
+ *     any coding **not** explicitly listed. A coding neither listed nor
+ *     covered by `*` is not acceptable.
+ *   - Among the compression codings acceptable at `q>0`, the highest quality
+ *     wins; **`gzip` beats `deflate`** on a tie (server preference — gzip's
+ *     framing is universally understood and its container is self-describing).
+ *   - No acceptable compression coding → `identity` (send uncompressed). This
+ *     boundary never 406s on encoding; an uncompressed body is always a valid
+ *     answer.
+ *
+ * Qualities are parsed to **milli-units** (`0..1000`) so the whole path is
+ * integer — no float in a header hot path, and `identity;q=0` vs `q=0.001`
+ * stay distinct.
+ */
+public final class AcceptEncoding {
+
+    /**
+     * The coding to encode a response with for this `Accept-Encoding` value:
+     * `"gzip"`, `"deflate"`, or `"identity"` (a borrowed literal). A null or
+     * empty header yields `identity`.
+     */
+    public static String best(String header) {
+        if (header == null) {
+            return "identity";
+        }
+        String h = header.toLowerCase();
+        int32 starQ = AcceptEncoding.milliQ(h, "*");
+
+        int32 gzipQ = AcceptEncoding.milliQ(h, "gzip");
+        int32 xgzipQ = AcceptEncoding.milliQ(h, "x-gzip");
+        if (xgzipQ > gzipQ) {
+            gzipQ = xgzipQ;
+        }
+        if (gzipQ < 0) {
+            gzipQ = starQ;
+        }
+
+        int32 deflateQ = AcceptEncoding.milliQ(h, "deflate");
+        if (deflateQ < 0) {
+            deflateQ = starQ;
+        }
+
+        if (gzipQ > 0 && gzipQ >= deflateQ) {
+            return "gzip";
+        }
+        if (deflateQ > 0) {
+            return "deflate";
+        }
+        return "identity";
+    }
+
+    /** Milli-quality (0..1000) for `token` in `h`, or `-1` if not listed. */
+    static int32 milliQ(String h, String token) {
+        int32 n = h.byteLength();
+        int32 start = 0;
+        while (start < n) {
+            int64 c = h.indexOfFrom(",", (int64) start);
+            int32 end = n;
+            if (c >= (int64) 0) {
+                end = (int32) c;
+            }
+            String seg = h.substring(start, end).trim();
+            int32 q = AcceptEncoding.segMatch(seg, token);
+            if (q >= 0) {
+                return q;
+            }
+            if (c < (int64) 0) {
+                start = n;
+            } else {
+                start = (int32) c + 1;
+            }
+        }
+        return -1;
+    }
+
+    /** If `seg` (`"gzip"` / `"gzip;q=0.5"`) names `token`, its milli-q; else -1. */
+    static int32 segMatch(String seg, String token) {
+        int64 sc = seg.indexOf(";");
+        String name = seg;
+        if (sc >= (int64) 0) {
+            name = seg.substring(0, (int32) sc).trim();
+        }
+        if (!name.equals(token)) {
+            return -1;
+        }
+        if (sc < (int64) 0) {
+            return 1000;
+        }
+        String params = seg.substring((int32) sc + 1, seg.byteLength());
+        int64 qi = params.indexOf("q=");
+        if (qi < (int64) 0) {
+            return 1000;
+        }
+        String qv = params.substring((int32) qi + 2, params.byteLength()).trim();
+        return AcceptEncoding.parseMilli(qv);
+    }
+
+    /** Parse `"0.5"` / `"1"` / `"0"` → milli-units (0..1000); lenient. */
+    static int32 parseMilli(String qv) {
+        int32 n = qv.byteLength();
+        if (n == 0) {
+            return 0;
+        }
+        int8[] b = qv.toBytes();
+        int32 intPart = 0;
+        int32 i = 0;
+        while (i < n && b[i] != (int8) 46) {
+            int32 d = ((int32) b[i]) - 48;
+            if (d < 0 || d > 9) {
+                return 0;
+            }
+            intPart = intPart * 10 + d;
+            i = i + 1;
+        }
+        int32 milli = intPart * 1000;
+        if (i < n && b[i] == (int8) 46) {
+            i = i + 1;
+            int32 scale = 100;
+            while (i < n && scale > 0) {
+                int32 d = ((int32) b[i]) - 48;
+                if (d < 0 || d > 9) {
+                    i = n;
+                } else {
+                    milli = milli + d * scale;
+                    scale = scale / 10;
+                    i = i + 1;
+                }
+            }
+        }
+        if (milli > 1000) {
+            milli = 1000;
+        }
+        return milli;
+    }
+}
