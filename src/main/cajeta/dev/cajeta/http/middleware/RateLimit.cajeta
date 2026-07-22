@@ -1,0 +1,134 @@
+package dev.cajeta.http.middleware;
+
+import cajeta.lang.String;
+import cajeta.time.Clock;
+import cajeta.time.Instant;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.middleware.Middleware;
+import dev.cajeta.http.middleware.TokenBucket;
+
+/**
+ * **RateLimit** middleware — plan item **2.2d**. A per-key
+ * [`TokenBucket`](TokenBucket.cajeta): each key gets its own burst budget of
+ * `capacity`, refilled at `refillPerSec`. A request that finds its bucket
+ * empty is rejected with **`429 Too Many Requests`** and a `Retry-After`
+ * (seconds until a token frees up).
+ *
+ * ```
+ * RateLimit rl = RateLimit.create(100, 10);   // burst 100, +10/s
+ * chain.use(RateLimit.middleware(rl));
+ * ```
+ *
+ * ## Keying
+ *
+ * The bucket key comes from a request header — [`keyByHeader`](#keyByHeader),
+ * default `X-Forwarded-For` (the client address a reverse proxy forwards;
+ * `HttpRequest` has no connection-level peer, so the address arrives as a
+ * header). A request missing that header shares a single `*` bucket. Two
+ * distinct keys are fully isolated — one client exhausting its budget never
+ * throttles another.
+ *
+ * ## Caveats (v1)
+ *
+ *   - **Not synchronized.** The bucket table and counters are plain state; a
+ *     multi-fiber server can race them. Precise concurrent limiting (atomic
+ *     buckets / sharded locks) is a later increment — v1 is best-effort and
+ *     correct single-threaded, which the tests exercise.
+ *   - **Unbounded key set.** Buckets are never evicted; a key-diverse
+ *     attacker grows the table. A future LRU/TTL sweep bounds it.
+ */
+public class RateLimit {
+    int64 capacity;
+    int64 refillPerSec;
+    String keyHeader;
+    String[] keys;
+    TokenBucket[] buckets;
+    int32 count;
+
+    public RateLimit(int64 capacity, int64 refillPerSec) {
+        this.capacity = capacity;
+        this.refillPerSec = refillPerSec;
+        this.keyHeader = "X-Forwarded-For";
+        this.keys = heap String[8];
+        this.buckets = heap TokenBucket[8];
+        this.count = 0;
+    }
+
+    /** A limiter with `capacity` burst and `refillPerSec` steady-state rate. */
+    public static #RateLimit create(int64 capacity, int64 refillPerSec) {
+        return heap RateLimit(capacity, refillPerSec);
+    }
+
+    /** Key buckets by request header `h` (default `X-Forwarded-For`). */
+    public RateLimit keyByHeader(String h) {
+        this.keyHeader = h.substring(0, h.byteLength());
+        return this;
+    }
+
+    /** Build the middleware from config `cfg` (captured by the lambda). */
+    public static #Middleware middleware(RateLimit cfg) {
+        (HttpRequest, (HttpRequest) -> #HttpResponse) -> #HttpResponse f =
+            (req, next) -> RateLimit.apply(cfg, req, next);
+        return Middleware.of(#f);
+    }
+
+    static #HttpResponse apply(RateLimit cfg, HttpRequest req,
+                               (HttpRequest) -> #HttpResponse next) {
+        String key = RateLimit.keyOf(req, cfg.keyHeader);
+        Instant t = Clock.now();
+        int64 now = t.toEpochMilli();
+        TokenBucket b = cfg.bucketFor(key, now);
+        if (b.tryAcquire(now)) {
+            return next(req);
+        }
+        int64 ra = b.retryAfterSecs(now);
+        HttpResponse resp = HttpResponse.of(429);
+        resp.setHeader("Retry-After", "" + ra);
+        return #resp;
+    }
+
+    /** The `keyHeader` value, or `*` when absent (owned). */
+    static #String keyOf(HttpRequest req, String header) {
+        String v = req.getHeaders().get(header);
+        if (v == null) {
+            String star = "*";
+            return star.substring(0, star.byteLength());
+        }
+        return #v;
+    }
+
+    /** The bucket for `key`, creating (and anchoring at `now`) on first sight. */
+    TokenBucket bucketFor(String key, int64 now) {
+        int32 i = 0;
+        while (i < this.count) {
+            if (this.keys[i].equals(key)) {
+                return this.buckets[i];
+            }
+            i = i + 1;
+        }
+        if (this.count >= this.keys.count()) {
+            this.grow();
+        }
+        this.keys[this.count] = key.substring(0, key.byteLength());
+        TokenBucket b = heap TokenBucket(this.capacity, this.refillPerSec, now);
+        this.buckets[this.count] = #b;
+        this.count = this.count + 1;
+        return this.buckets[this.count - 1];
+    }
+
+    /** Double both parallel arrays. */
+    void grow() {
+        int32 newCap = this.keys.count() * 2;
+        String[] gk = heap String[newCap];
+        TokenBucket[] gb = heap TokenBucket[newCap];
+        int32 j = 0;
+        while (j < this.count) {
+            gk[j] = this.keys[j];
+            gb[j] = this.buckets[j];
+            j = j + 1;
+        }
+        this.keys = gk;
+        this.buckets = gb;
+    }
+}

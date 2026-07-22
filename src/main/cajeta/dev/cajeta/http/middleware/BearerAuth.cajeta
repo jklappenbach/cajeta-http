@@ -1,0 +1,79 @@
+package dev.cajeta.http.middleware;
+
+import cajeta.lang.String;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.middleware.Middleware;
+
+/**
+ * **Bearer token** authentication middleware — plan item **2.2d**
+ * (RFC 6750). Pulls the token from `Authorization: Bearer <token>` and hands
+ * it to a **caller-supplied verifier** `(token) -> boolean` — the library
+ * validates no tokens itself (opaque, JWT, introspection: all the caller's
+ * choice). A `false` verdict, or any malformed / missing header, yields
+ * **`401`** with a `WWW-Authenticate: Bearer realm="…"` challenge.
+ *
+ * ```
+ * BearerAuth ba = BearerAuth.create("api");
+ * (String) -> boolean check = (token) -> mySessions.valid(token);
+ * ba.verifier(#check);
+ * chain.use(BearerAuth.middleware(ba));
+ * ```
+ *
+ * The config (with its verifier) is captured by the middleware and must
+ * outlive it. A verifier comparing the token to an expected secret should use
+ * [`Credentials.constantTimeEquals`](Credentials.cajeta) to avoid a timing
+ * side channel.
+ */
+public class BearerAuth {
+    String realm;
+    (String) -> boolean verify;
+
+    public BearerAuth(String realm) {
+        this.realm = realm.substring(0, realm.byteLength());
+        this.verify = null;
+    }
+
+    /** A config for `realm`; set a [`verifier`](#verifier) before use. */
+    public static #BearerAuth create(String realm) {
+        return heap BearerAuth(realm);
+    }
+
+    /** Install the token verifier `(token) -> boolean` (adopted). */
+    public BearerAuth verifier((String) -> boolean fn) {
+        this.verify = #fn;
+        return this;
+    }
+
+    /** Build the middleware from config `cfg` (captured by the lambda). */
+    public static #Middleware middleware(BearerAuth cfg) {
+        (HttpRequest, (HttpRequest) -> #HttpResponse) -> #HttpResponse f =
+            (req, next) -> BearerAuth.apply(cfg, req, next);
+        return Middleware.of(#f);
+    }
+
+    static #HttpResponse apply(BearerAuth cfg, HttpRequest req,
+                               (HttpRequest) -> #HttpResponse next) {
+        String h = req.getHeaders().get("Authorization");
+        if (h == null || !h.startsWith("Bearer ")) {
+            return BearerAuth.challenge(cfg);
+        }
+        String token = h.substring(7, h.byteLength()).trim();
+        if (token.byteLength() == 0) {
+            return BearerAuth.challenge(cfg);
+        }
+        (String) -> boolean vf = cfg.verify;
+        boolean ok = vf(token);
+        if (!ok) {
+            return BearerAuth.challenge(cfg);
+        }
+        return next(req);
+    }
+
+    /** `401` with the `Bearer` challenge for this realm. */
+    static #HttpResponse challenge(BearerAuth cfg) {
+        HttpResponse resp = HttpResponse.of(401);
+        resp.setHeader("WWW-Authenticate", "Bearer realm=\"" + cfg.realm + "\"");
+        return #resp;
+    }
+}

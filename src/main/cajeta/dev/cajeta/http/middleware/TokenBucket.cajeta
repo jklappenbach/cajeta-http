@@ -1,0 +1,73 @@
+package dev.cajeta.http.middleware;
+
+/**
+ * A **token bucket** rate limiter (http:2.2d) — the mechanism behind
+ * [`RateLimit`](RateLimit.cajeta). Holds up to `capacity` tokens (the burst),
+ * refilled at `refillPerSec` tokens/second; each admitted request spends one.
+ *
+ * ## Injected clock
+ *
+ * Time enters **only** as the `nowMillis` argument to [`tryAcquire`](#tryAcquire)
+ * / [`retryAfterSecs`](#retryAfterSecs) — the bucket never reads a clock
+ * itself. So a test drives refill deterministically by passing controlled
+ * timestamps, and the middleware passes `Clock.now().toEpochMilli()`.
+ *
+ * ## Integer-only
+ *
+ * Tokens are tracked in **milli-tokens** (tokens × 1000) so refill is exact
+ * integer arithmetic: in `elapsed` ms at `refillPerSec` tokens/s the bucket
+ * gains `refillPerSec × elapsed` milli-tokens (`refillPerSec/1000` tokens per
+ * ms, pre-multiplied). One request costs 1000 milli-tokens. No float on the
+ * request path.
+ */
+public final class TokenBucket {
+    int64 capacityMilli;
+    int64 refillPerSec;
+    int64 tokensMilli;
+    int64 lastMillis;
+
+    /** A bucket that starts **full**, its clock anchored at `nowMillis`. */
+    public TokenBucket(int64 capacity, int64 refillPerSec, int64 nowMillis) {
+        this.capacityMilli = capacity * (int64) 1000;
+        this.refillPerSec = refillPerSec;
+        this.tokensMilli = this.capacityMilli;
+        this.lastMillis = nowMillis;
+    }
+
+    /** Credit tokens for the time elapsed since the last touch, capped. */
+    void refill(int64 nowMillis) {
+        int64 elapsed = nowMillis - this.lastMillis;
+        if (elapsed > (int64) 0) {
+            this.tokensMilli = this.tokensMilli + elapsed * this.refillPerSec;
+            if (this.tokensMilli > this.capacityMilli) {
+                this.tokensMilli = this.capacityMilli;
+            }
+            this.lastMillis = nowMillis;
+        }
+    }
+
+    /** Refill to `nowMillis`, then spend one token if available. */
+    public boolean tryAcquire(int64 nowMillis) {
+        this.refill(nowMillis);
+        if (this.tokensMilli >= (int64) 1000) {
+            this.tokensMilli = this.tokensMilli - (int64) 1000;
+            return true;
+        }
+        return false;
+    }
+
+    /** Seconds until the next whole token is available (≥1 when empty; 0 if ready). */
+    public int64 retryAfterSecs(int64 nowMillis) {
+        this.refill(nowMillis);
+        if (this.tokensMilli >= (int64) 1000) {
+            return (int64) 0;
+        }
+        int64 need = (int64) 1000 - this.tokensMilli;
+        int64 ratePerSec = this.refillPerSec * (int64) 1000;
+        int64 secs = (need + ratePerSec - (int64) 1) / ratePerSec;
+        if (secs < (int64) 1) {
+            secs = (int64) 1;
+        }
+        return secs;
+    }
+}

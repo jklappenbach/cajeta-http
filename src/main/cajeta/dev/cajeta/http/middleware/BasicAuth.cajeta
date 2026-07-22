@@ -1,0 +1,107 @@
+package dev.cajeta.http.middleware;
+
+import cajeta.lang.String;
+import cajeta.codec.Base64;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.middleware.Middleware;
+
+/**
+ * **HTTP Basic** authentication middleware — plan item **2.2d**
+ * (RFC 7617). Parses `Authorization: Basic <base64(user:pass)>`, splits on the
+ * **first** colon (a password may itself contain colons), and hands the
+ * credentials to a **caller-supplied verifier** — this library stores no
+ * credentials and makes no policy. A verifier that returns `false` (or any
+ * malformed / missing header) yields **`401`** with a `WWW-Authenticate:
+ * Basic realm="…"` challenge.
+ *
+ * ```
+ * BasicAuth ba = BasicAuth.create("api");
+ * (String, String) -> boolean check = (user, pass) -> myStore.check(user, pass);
+ * ba.verifier(#check);
+ * chain.use(BasicAuth.middleware(ba));
+ * ```
+ *
+ * The config (with its verifier) is captured by the middleware and must
+ * outlive it — hold it for the server's lifetime, as the other config-carrying
+ * middlewares require.
+ *
+ * ## Malformed headers are 401, never 500
+ *
+ * Every parse failure — no header, a non-`Basic` scheme, base64 garbage (the
+ * decode's `Base64Exception` is caught), or a decoded value with no colon —
+ * routes to the same `401` challenge. A bad `Authorization` header is an
+ * authentication failure, not a server error.
+ */
+public class BasicAuth {
+    String realm;
+    (String, String) -> boolean verify;
+
+    public BasicAuth(String realm) {
+        this.realm = realm.substring(0, realm.byteLength());
+        this.verify = null;
+    }
+
+    /** A config for `realm`; set a [`verifier`](#verifier) before use. */
+    public static #BasicAuth create(String realm) {
+        return heap BasicAuth(realm);
+    }
+
+    /** Install the credential verifier `(user, pass) -> boolean` (adopted). */
+    public BasicAuth verifier((String, String) -> boolean fn) {
+        this.verify = #fn;
+        return this;
+    }
+
+    /** Build the middleware from config `cfg` (captured by the lambda). */
+    public static #Middleware middleware(BasicAuth cfg) {
+        (HttpRequest, (HttpRequest) -> #HttpResponse) -> #HttpResponse f =
+            (req, next) -> BasicAuth.apply(cfg, req, next);
+        return Middleware.of(#f);
+    }
+
+    static #HttpResponse apply(BasicAuth cfg, HttpRequest req,
+                               (HttpRequest) -> #HttpResponse next) {
+        String h = req.getHeaders().get("Authorization");
+        if (h == null || !h.startsWith("Basic ")) {
+            return BasicAuth.challenge(cfg);
+        }
+        String b64 = h.substring(6, h.byteLength()).trim();
+        String decoded = BasicAuth.decodeBasic(b64);
+        if (decoded == null) {
+            return BasicAuth.challenge(cfg);
+        }
+        int64 colon = decoded.indexOf(":");
+        if (colon < (int64) 0) {
+            return BasicAuth.challenge(cfg);
+        }
+        String user = decoded.substring(0, (int32) colon);
+        String pass = decoded.substring((int32) colon + 1, decoded.byteLength());
+
+        (String, String) -> boolean vf = cfg.verify;
+        boolean ok = vf(user, pass);
+        if (!ok) {
+            return BasicAuth.challenge(cfg);
+        }
+        return next(req);
+    }
+
+    /** Base64-decode to a UTF-8 string, or null on garbage (kept off the
+     *  `next` path so a decode fault can't masquerade as a handler error). */
+    static #String decodeBasic(String b64) {
+        try {
+            int8[] raw = Base64.decode(b64);
+            int32 rn = raw.count();
+            return heap String(#raw, rn);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** `401` with the `Basic` challenge for this realm. */
+    static #HttpResponse challenge(BasicAuth cfg) {
+        HttpResponse resp = HttpResponse.of(401);
+        resp.setHeader("WWW-Authenticate", "Basic realm=\"" + cfg.realm + "\"");
+        return #resp;
+    }
+}

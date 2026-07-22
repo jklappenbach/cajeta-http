@@ -1370,14 +1370,51 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
         round-trip drained in **7-byte reads** — self-owned backing sidesteps
         `StreamBody`'s borrow-your-channel lifetime rule (a handler-local
         channel would dangle once the handler returns).
-  - [ ] **2.2d `RateLimit` + `BasicAuth`/`BearerAuth`.** RateLimit:
-    token bucket keyed by remote address or a caller-supplied extractor,
-    429 + `Retry-After`. Auth: constant-time comparison, 401 +
-    `WWW-Authenticate`; the credential verifier is a caller-supplied
-    lambda — no credential storage in this library.
+  - [x] **2.2d `RateLimit` + `BasicAuth`/`BearerAuth`.** RateLimit:
+    token bucket keyed by request header, 429 + `Retry-After`. Auth:
+    constant-time comparison, 401 + `WWW-Authenticate`; the credential
+    verifier is a caller-supplied lambda — no credential storage in this
+    library.
     - TDD: bucket refill over an injected clock; per-key isolation;
       Basic round-trip via stdlib Base64 incl. colon-in-password;
       malformed auth headers → 401 not 500.
+    - **Shipped:** `middleware.TokenBucket` (pure), `RateLimit`,
+      `Credentials.constantTimeEquals`, `BasicAuth`, `BearerAuth`.
+      `MiddlewareAuthRateTests` (23 assertions); suite 645/645 × 4.
+      - **Injected clock, integer-only.** `TokenBucket` never reads a
+        clock — time enters only as the `nowMillis` arg to
+        `tryAcquire`/`retryAfterSecs`, so tests drive refill with literal
+        timestamps and the middleware passes `Clock.now().toEpochMilli()`.
+        Tokens are tracked in **milli-tokens** (× 1000) so refill
+        (`refillPerSec × elapsedMs`) is exact integer arithmetic — no float
+        on the request path.
+      - **Keying.** `HttpRequest` has no connection-level peer, so the
+        client address arrives as a header — `RateLimit` keys by
+        `keyByHeader` (default `X-Forwarded-For`), absent → a single `*`
+        bucket. Buckets live in a self-managed parallel-array store (exact
+        ownership, like `Cors.origins`) rather than `HashMap<String,…>`
+        whose `V get`/`put` ownership was fiddlier than a linear scan is
+        worth at this key count. **v1 caveats** (both in the source):
+        not synchronized (multi-fiber races) and no bucket eviction.
+      - **Caller-supplied verifier — the function-value config seam.**
+        `BasicAuth`/`BearerAuth` hold the verifier as an **adopted**
+        function-value field (`verifier(#fn)` moves it in, mirroring
+        `Middleware`'s owned `fn`); `apply` loads it into a local before
+        invoking (`(String,String)->boolean vf = cfg.verify; vf(u,p)`) — a
+        field-function-value call, the same shape `Middleware.wrapOne` uses.
+        The library stores **no** credentials; `constantTimeEquals` folds the
+        length difference in and never early-returns, so a verifier comparing
+        a secret leaks no timing.
+      - **Malformed → 401, never 500.** Basic isolates the Base64 decode in a
+        helper returning null on garbage (kept off the `next` path so a
+        decode fault can't masquerade as a handler error), splits on the
+        **first** colon (colon-in-password round-trips), and routes every
+        parse failure — missing header, wrong scheme, bad base64, no colon —
+        to the one `401 + WWW-Authenticate` challenge.
+      - Test wrinkle: `app(req).method()` (a method chained on a
+        function-value call result) fails to resolve — bind the response to a
+        local first, then call. (Both the closure-drop fix and the
+        static-`apply` delegation from 2.2b/2.2c carry this unit too.)
   - [ ] **2.2e `StaticFile` + `ETag` + `ProxyHeaders`.** StaticFile:
     root-jailed path resolution, MediaType from extension, index files,
     404/403 discipline. ETag: strong tag from content hash,

@@ -1,0 +1,169 @@
+package dev.cajeta.http.test;
+
+import cajeta.lang.String;
+import cajeta.codec.Base64;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.middleware.Middleware;
+import dev.cajeta.http.middleware.MiddlewareChain;
+import dev.cajeta.http.middleware.RateLimit;
+import dev.cajeta.http.middleware.TokenBucket;
+import dev.cajeta.http.middleware.BasicAuth;
+import dev.cajeta.http.middleware.BearerAuth;
+import dev.cajeta.http.middleware.Credentials;
+
+/**
+ * http:2.2d — `RateLimit` (token bucket) and `BasicAuth`/`BearerAuth`.
+ * The bucket is unit-tested against an **injected clock** (timestamps passed
+ * in); the middleware is exercised end-to-end (per-key isolation, 429 +
+ * Retry-After); auth covers the Basic round-trip (colon-in-password),
+ * constant-time compare, bearer tokens, and malformed headers → 401.
+ */
+public final class MiddlewareAuthRateTests {
+
+    public static void run(Check c) {
+        System.stdout.println("-- rate limit: token bucket (2.2d) --");
+        bucketRefill(c);
+        System.stdout.println("-- rate limit: middleware (2.2d) --");
+        rateLimitMiddleware(c);
+        System.stdout.println("-- auth: constant-time compare (2.2d) --");
+        constantTime(c);
+        System.stdout.println("-- auth: Basic (2.2d) --");
+        basicAuth(c);
+        System.stdout.println("-- auth: Bearer (2.2d) --");
+        bearerAuth(c);
+    }
+
+    static #HttpResponse ok(HttpRequest req) {
+        return HttpResponse.of(200);
+    }
+
+    // ---- token bucket (injected clock) -----------------------------------
+
+    static void bucketRefill(Check c) {
+        TokenBucket b = heap TokenBucket((int64) 2, (int64) 1, (int64) 0);
+        c.that(b.tryAcquire((int64) 0), "bucket: first token");
+        c.that(b.tryAcquire((int64) 0), "bucket: second token (burst)");
+        c.that(!b.tryAcquire((int64) 0), "bucket: empty after burst");
+        c.eqInt(b.retryAfterSecs((int64) 0), 1, "bucket: 1s until a token frees");
+        c.that(b.tryAcquire((int64) 1000), "bucket: one token refilled after 1s");
+        c.that(!b.tryAcquire((int64) 1000), "bucket: only one token refilled");
+        c.that(b.tryAcquire((int64) 3000), "bucket: refill accrues over elapsed time");
+    }
+
+    // ---- rate limit middleware -------------------------------------------
+
+    static void rateLimitMiddleware(Check c) {
+        RateLimit rl = RateLimit.create((int64) 1, (int64) 1);   // burst 1, +1/s
+        Middleware rm = RateLimit.middleware(rl);
+        MiddlewareChain chain = heap MiddlewareChain();
+        chain.use(#rm);
+        (HttpRequest) -> #HttpResponse term = (req) -> MiddlewareAuthRateTests.ok(req);
+        (HttpRequest) -> #HttpResponse app = chain.compose(term);
+
+        HttpRequest a1 = HttpRequest.of("GET", "/x");
+        a1.setHeader("X-Forwarded-For", "1.1.1.1");
+        HttpResponse ra1 = app(a1);
+        c.eqInt((int64) ra1.statusCode(), 200, "ratelimit: first request admitted");
+
+        HttpRequest a2 = HttpRequest.of("GET", "/x");
+        a2.setHeader("X-Forwarded-For", "1.1.1.1");
+        HttpResponse r2 = app(a2);
+        c.eqInt((int64) r2.statusCode(), 429, "ratelimit: burst exhausted → 429");
+        c.that(r2.getHeaders().get("Retry-After") != null,
+               "ratelimit: 429 carries Retry-After");
+
+        HttpRequest b1 = HttpRequest.of("GET", "/x");
+        b1.setHeader("X-Forwarded-For", "2.2.2.2");
+        HttpResponse rb1 = app(b1);
+        c.eqInt((int64) rb1.statusCode(), 200,
+                "ratelimit: a different key has its own bucket");
+    }
+
+    // ---- constant-time compare -------------------------------------------
+
+    static void constantTime(Check c) {
+        c.that(Credentials.constantTimeEquals("hunter2", "hunter2"),
+               "ct-equals: equal secrets match");
+        c.that(!Credentials.constantTimeEquals("hunter2", "hunter3"),
+               "ct-equals: single-byte difference rejected");
+        c.that(!Credentials.constantTimeEquals("hunter2", "hunter22"),
+               "ct-equals: length difference rejected");
+    }
+
+    // ---- Basic -----------------------------------------------------------
+
+    static void basicAuth(Check c) {
+        BasicAuth ba = BasicAuth.create("api");
+        (String, String) -> boolean verify =
+            (u, p) -> u.equals("alice")
+                      && Credentials.constantTimeEquals(p, "s3cr:et");
+        ba.verifier(#verify);
+        Middleware am = BasicAuth.middleware(ba);
+        MiddlewareChain chain = heap MiddlewareChain();
+        chain.use(#am);
+        (HttpRequest) -> #HttpResponse term = (req) -> MiddlewareAuthRateTests.ok(req);
+        (HttpRequest) -> #HttpResponse app = chain.compose(term);
+
+        // Colon-in-password round-trips (split on the FIRST colon only).
+        String creds = "alice:s3cr:et";
+        String good = Base64.encode(creds.toBytes(), (int64) creds.byteLength());
+        HttpRequest r1 = HttpRequest.of("GET", "/x");
+        r1.setHeader("Authorization", "Basic " + good);
+        HttpResponse br1 = app(r1);
+        c.eqInt((int64) br1.statusCode(), 200,
+                "basic: valid credentials (colon in password) admitted");
+
+        String bad = "alice:wrong";
+        String badB64 = Base64.encode(bad.toBytes(), (int64) bad.byteLength());
+        HttpRequest r2 = HttpRequest.of("GET", "/x");
+        r2.setHeader("Authorization", "Basic " + badB64);
+        HttpResponse br2 = app(r2);
+        c.eqInt((int64) br2.statusCode(), 401, "basic: wrong password → 401");
+
+        HttpResponse r3 = app(HttpRequest.of("GET", "/x"));
+        c.eqInt((int64) r3.statusCode(), 401, "basic: missing header → 401");
+        String chal = r3.getHeaders().get("WWW-Authenticate");
+        c.that(chal != null && chal.startsWith("Basic realm="),
+               "basic: challenge names the realm");
+
+        HttpRequest r4 = HttpRequest.of("GET", "/x");
+        r4.setHeader("Authorization", "Basic @@@not-base64@@@");
+        HttpResponse br4 = app(r4);
+        c.eqInt((int64) br4.statusCode(), 401,
+                "basic: base64 garbage → 401, not 500");
+    }
+
+    // ---- Bearer ----------------------------------------------------------
+
+    static void bearerAuth(Check c) {
+        BearerAuth ba = BearerAuth.create("api");
+        (String) -> boolean verify =
+            (t) -> Credentials.constantTimeEquals(t, "tok-abc");
+        ba.verifier(#verify);
+        Middleware am = BearerAuth.middleware(ba);
+        MiddlewareChain chain = heap MiddlewareChain();
+        chain.use(#am);
+        (HttpRequest) -> #HttpResponse term = (req) -> MiddlewareAuthRateTests.ok(req);
+        (HttpRequest) -> #HttpResponse app = chain.compose(term);
+
+        HttpRequest r1 = HttpRequest.of("GET", "/x");
+        r1.setHeader("Authorization", "Bearer tok-abc");
+        HttpResponse er1 = app(r1);
+        c.eqInt((int64) er1.statusCode(), 200, "bearer: valid token admitted");
+
+        HttpRequest r2 = HttpRequest.of("GET", "/x");
+        r2.setHeader("Authorization", "Bearer nope");
+        HttpResponse er2 = app(r2);
+        c.eqInt((int64) er2.statusCode(), 401, "bearer: bad token → 401");
+
+        HttpRequest r3 = HttpRequest.of("GET", "/x");
+        r3.setHeader("Authorization", "Basic abc");
+        HttpResponse er3 = app(r3);
+        c.eqInt((int64) er3.statusCode(), 401, "bearer: wrong scheme → 401");
+        HttpResponse er4 = app(HttpRequest.of("GET", "/x"));
+        String chal = er4.getHeaders().get("WWW-Authenticate");
+        c.that(chal != null && chal.startsWith("Bearer realm="),
+               "bearer: challenge names the realm");
+    }
+}
