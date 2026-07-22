@@ -27,6 +27,7 @@ public final class TestMain {
         MiddlewareTimeoutCorsTests.run(c);
         MiddlewareCompressionTests.run(c);
         MiddlewareAuthRateTests.run(c);
+        MiddlewareStaticEtagProxyTests.run(c);
         ClientTests.run(c);
         RedirectTests.run(c);
         ClientTimeoutTests.run(c);

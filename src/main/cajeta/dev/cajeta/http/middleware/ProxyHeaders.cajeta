@@ -1,0 +1,86 @@
+package dev.cajeta.http.middleware;
+
+import cajeta.lang.String;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.middleware.Middleware;
+
+/**
+ * **ProxyHeaders** middleware — plan item **2.2e**. Reconciles the
+ * `X-Forwarded-*` headers a reverse proxy adds, so a handler behind a trusted
+ * proxy sees the **real client** rather than the proxy — but a **spoofing
+ * client** cannot forge them.
+ *
+ * ```
+ * chain.use(ProxyHeaders.trusted());     // behind a trusted proxy
+ * chain.use(ProxyHeaders.untrusted());   // directly internet-facing
+ * ```
+ *
+ * ## Trusted vs. untrusted — the whole security point
+ *
+ *   - **Trusted** — the immediate peer is a proxy we control, so its
+ *     `X-Forwarded-*` are authoritative: the client IP (`X-Forwarded-For`'s
+ *     **first** hop) is resolved onto `X-Real-IP` for the handler, and
+ *     `X-Forwarded-Proto`/`-Host` are left in place.
+ *   - **Untrusted** — the peer is arbitrary, so every forwarded header is a
+ *     lie waiting to happen (`X-Forwarded-For: 127.0.0.1` to look local).
+ *     They are **stripped** before the handler runs, so no downstream check is
+ *     fooled.
+ *
+ * ## v1 limitation — trust is a flag, not a peer check
+ *
+ * "Trusted proxy" *should* be decided from the connection's peer address, but
+ * `HttpRequest` carries no connection-level peer yet, so trust is a
+ * **configuration** choice (place this middleware only where the deployment
+ * guarantees a trusted proxy). When a request peer address lands, this gains a
+ * trusted-CIDR allowlist and the flag becomes the fallback.
+ */
+public class ProxyHeaders {
+    boolean trust;
+
+    public ProxyHeaders(boolean trust) {
+        this.trust = trust;
+    }
+
+    /** Trust the peer's `X-Forwarded-*` (use only behind a trusted proxy). */
+    public static #ProxyHeaders trusted() {
+        return heap ProxyHeaders(true);
+    }
+
+    /** Strip forwarded headers (internet-facing / untrusted peer). */
+    public static #ProxyHeaders untrusted() {
+        return heap ProxyHeaders(false);
+    }
+
+    /** Build the middleware from config `cfg` (captured by the lambda). */
+    public static #Middleware middleware(ProxyHeaders cfg) {
+        (HttpRequest, (HttpRequest) -> #HttpResponse) -> #HttpResponse f =
+            (req, next) -> ProxyHeaders.apply(cfg, req, next);
+        return Middleware.of(#f);
+    }
+
+    static #HttpResponse apply(ProxyHeaders cfg, HttpRequest req,
+                               (HttpRequest) -> #HttpResponse next) {
+        if (cfg.trust) {
+            String xff = req.getHeaders().get("X-Forwarded-For");
+            if (xff != null) {
+                req.setHeader("X-Real-IP", ProxyHeaders.firstHop(xff));
+            }
+        } else {
+            req.getHeaders().remove("X-Forwarded-For");
+            req.getHeaders().remove("X-Forwarded-Proto");
+            req.getHeaders().remove("X-Forwarded-Host");
+            req.getHeaders().remove("X-Real-IP");
+        }
+        return next(req);
+    }
+
+    /** The first (client) hop of an `X-Forwarded-For` list, trimmed. */
+    static #String firstHop(String xff) {
+        int64 comma = xff.indexOf(",");
+        if (comma < (int64) 0) {
+            return xff.trim();
+        }
+        return xff.substring(0, (int32) comma).trim();
+    }
+}

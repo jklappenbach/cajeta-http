@@ -1,0 +1,86 @@
+package dev.cajeta.http.middleware;
+
+import cajeta.lang.String;
+import cajeta.hash.XXHash3;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.middleware.Middleware;
+
+/**
+ * **ETag** middleware — plan item **2.2e**. Tags a buffered response with a
+ * strong `ETag` derived from a content hash, and short-circuits a matching
+ * conditional `GET` to **`304 Not Modified`** (no body re-sent).
+ *
+ * ```
+ * chain.use(ETag.middleware());
+ * ```
+ *
+ * On the way out: if the response has an in-memory body and no `ETag` already
+ * (a handler may set its own), hash the body and stamp `ETag: "<hex>"`
+ * (strong, quoted). Then, if the request's `If-None-Match` names that tag (or
+ * `*`), the body is dropped and a bare `304` (carrying the same `ETag`) is
+ * returned — the client's cached copy is still current.
+ *
+ * The hash is [`XXHash3`](../../../hash/XXHash3.cajeta) — fast and
+ * well-distributed; an ETag is a **cache validator**, not a security token, so
+ * a non-cryptographic hash is the right tool. Streamed (unknown-length)
+ * responses are left untagged: hashing them would mean buffering the very
+ * payload streaming exists to avoid.
+ */
+public class ETag {
+
+    /** Build the ETag middleware. */
+    public static #Middleware middleware() {
+        (HttpRequest, (HttpRequest) -> #HttpResponse) -> #HttpResponse f =
+            (req, next) -> ETag.apply(req, next);
+        return Middleware.of(#f);
+    }
+
+    static #HttpResponse apply(HttpRequest req,
+                               (HttpRequest) -> #HttpResponse next) {
+        HttpResponse resp = next(req);
+        if (!resp.hasBody) {
+            return #resp;
+        }
+        if (resp.getHeaders().contains("etag")) {
+            return #resp;
+        }
+        int64 h = XXHash3.hash(resp.body, (int64) resp.bodyLength());
+        String tag = "\"" + ETag.toHex(h) + "\"";
+        resp.setHeader("ETag", tag);
+
+        String inm = req.getHeaders().get("If-None-Match");
+        if (inm != null && ETag.matches(inm, tag)) {
+            HttpResponse notMod = HttpResponse.of(304);
+            notMod.setHeader("ETag", tag);
+            return #notMod;
+        }
+        return #resp;
+    }
+
+    /** Whether `If-None-Match` value `inm` satisfies `tag` (`*` or a member). */
+    static boolean matches(String inm, String tag) {
+        String t = inm.trim();
+        if (t.equals("*")) {
+            return true;
+        }
+        return t.contains(tag);
+    }
+
+    /** Lower-case 16-digit hex of an int64 (leading zeros kept). */
+    static #String toHex(int64 v) {
+        int8[] out = heap int8[16];
+        int32 i = 0;
+        while (i < 16) {
+            int32 shift = (15 - i) * 4;
+            int32 nib = (int32) ((v >> (int64) shift) & (int64) 0xF);
+            if (nib < 10) {
+                out[i] = (int8) (48 + nib);
+            } else {
+                out[i] = (int8) (97 + nib - 10);
+            }
+            i = i + 1;
+        }
+        return heap String(#out, 16);
+    }
+}

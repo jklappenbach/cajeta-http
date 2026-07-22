@@ -1415,7 +1415,7 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
         function-value call result) fails to resolve — bind the response to a
         local first, then call. (Both the closure-drop fix and the
         static-`apply` delegation from 2.2b/2.2c carry this unit too.)
-  - [ ] **2.2e `StaticFile` + `ETag` + `ProxyHeaders`.** StaticFile:
+  - [x] **2.2e `StaticFile` + `ETag` + `ProxyHeaders`.** StaticFile:
     root-jailed path resolution, MediaType from extension, index files,
     404/403 discipline. ETag: strong tag from content hash,
     `If-None-Match` → 304. ProxyHeaders: `X-Forwarded-For/Proto/Host`
@@ -1425,6 +1425,36 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
       percent-encoded dots, backslashes, absolute paths, symlink escape
       all stay jailed; 304 flow end-to-end; untrusted-source forwarded
       headers ignored.
+    - **Shipped:** `middleware.StaticPath` (pure jail), `StaticFile`,
+      `ETag`, `ProxyHeaders`. `MiddlewareStaticEtagProxyTests` (33
+      assertions); suite 678/678 × 4.
+      - **The jail is two layers.** `StaticPath.jail` is pure/FS-free:
+        percent-decode **first** (so `%2e%2e`/`%2f` can't smuggle past the
+        walk), reject control/NUL + backslashes, then a segment walk that
+        pops on `..` and **rejects** any pop above root. `StaticFile` layers
+        a **canonical** check — `Path.canonical()` (realpath) the resolved
+        file must stay under the canonical root — which is what defeats a
+        **symlink** escaping the root (a normal-looking name the lexical pass
+        can't catch). Lexical reject → 403, canonical escape → 403, clean
+        miss → 404. `Path.bytes` is a public field, so the canonical `Path`
+        round-trips back to a `String` for the prefix compare.
+      - **The traversal fuzz + symlink test runs against a real temp root**
+        under `build/test` (index/nested/missing files + a symlink to a
+        secret outside the root) — the canonical layer is exercised on an
+        actual escaping symlink, not mocked.
+      - **ETag** hashes buffered bodies with `XXHash3` (a cache validator,
+        not a security token — non-crypto is correct) → strong quoted tag;
+        `If-None-Match` (tag or `*`) → a bare `304` carrying the tag.
+        Streamed bodies are left untagged (hashing them would buffer the very
+        payload streaming avoids).
+      - **ProxyHeaders**: trusted → resolve `X-Forwarded-For`'s first hop
+        onto `X-Real-IP`; untrusted → **strip** all `X-Forwarded-*` +
+        `X-Real-IP` so a spoofing client can't forge them. **v1 caveat**
+        (in-source): trust is a config flag, not a peer-address check —
+        `HttpRequest` has no connection peer yet; a trusted-CIDR allowlist
+        lands when it does.
+      - v1 StaticFile reads whole files into memory (`File.readAllBytes`);
+        range requests + streamed sends of huge files are a later increment.
 
 ## 3 — HTTP/2
 

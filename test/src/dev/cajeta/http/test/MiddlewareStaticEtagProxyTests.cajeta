@@ -1,0 +1,210 @@
+package dev.cajeta.http.test;
+
+import cajeta.lang.String;
+import cajeta.io.file.File;
+import cajeta.io.file.Path;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.middleware.Middleware;
+import dev.cajeta.http.middleware.MiddlewareChain;
+import dev.cajeta.http.middleware.StaticFile;
+import dev.cajeta.http.middleware.StaticPath;
+import dev.cajeta.http.middleware.ETag;
+import dev.cajeta.http.middleware.ProxyHeaders;
+
+/**
+ * http:2.2e — `StaticFile` + `ETag` + `ProxyHeaders`.
+ *
+ * The security floor is the path jail: [`StaticPath.jail`](StaticPath.cajeta)
+ * is fuzzed with `..`, `%2e%2e`, `%2f`, backslashes, absolute paths, and NUL
+ * — all pure, no filesystem. Serving is then exercised against a real temp
+ * root under `build/test` (including a symlink escaping the root, caught by
+ * the canonical check). ETag round-trips a 304; ProxyHeaders resolves the
+ * trusted client and strips untrusted forwarded headers.
+ */
+public final class MiddlewareStaticEtagProxyTests {
+
+    public static void run(Check c) {
+        System.stdout.println("-- static: path jail fuzz (2.2e) --");
+        pathJail(c);
+        System.stdout.println("-- static: file serving (2.2e) --");
+        serving(c);
+        System.stdout.println("-- etag: conditional GET (2.2e) --");
+        etag(c);
+        System.stdout.println("-- proxy headers: trust (2.2e) --");
+        proxyHeaders(c);
+    }
+
+    static #HttpResponse marker(HttpRequest req) {
+        return HttpResponse.of(599);
+    }
+
+    // ---- path jail (pure fuzz) -------------------------------------------
+
+    static void pathJail(Check c) {
+        String j1 = StaticPath.jail("/a/b/c");
+        c.that(j1 != null && j1.equals("a/b/c"), "jail: plain path kept");
+        String j2 = StaticPath.jail("/a/./b");
+        c.that(j2 != null && j2.equals("a/b"), "jail: '.' segment dropped");
+        String j3 = StaticPath.jail("/a/../b");
+        c.that(j3 != null && j3.equals("b"), "jail: in-bounds '..' resolved");
+        String j4 = StaticPath.jail("/");
+        c.that(j4 != null && j4.equals(""), "jail: root maps to empty (index)");
+        String j5 = StaticPath.jail("//a///b");
+        c.that(j5 != null && j5.equals("a/b"), "jail: empty segments collapsed");
+
+        c.that(StaticPath.jail("/../etc/passwd") == null,
+               "jail: leading '..' escape rejected");
+        c.that(StaticPath.jail("/a/../../b") == null,
+               "jail: net-negative '..' escape rejected");
+        c.that(StaticPath.jail("/%2e%2e/etc/passwd") == null,
+               "jail: percent-encoded '..' rejected");
+        c.that(StaticPath.jail("/%2e%2e%2f%2e%2e%2fetc") == null,
+               "jail: percent-encoded '../../' rejected");
+        c.that(StaticPath.jail("/a\\..\\b") == null,
+               "jail: backslash rejected");
+        c.that(StaticPath.jail("/foo%00.txt") == null,
+               "jail: NUL byte rejected");
+
+        // A decoded %2f is a separator, not traversal — stays jailed.
+        String j6 = StaticPath.jail("/a%2fb");
+        c.that(j6 != null && j6.equals("a/b"), "jail: %2f is a separator, kept in bounds");
+    }
+
+    // ---- real filesystem serving -----------------------------------------
+
+    static void setupRoot(String root) {
+        Path.of(root).mkdirs();
+        String home = "<h1>home</h1>";
+        File.writeAllBytes(root + "/index.html", home.toBytes(), home.byteLength());
+        String a = "hello static";
+        File.writeAllBytes(root + "/a.txt", a.toBytes(), a.byteLength());
+        Path.of(root + "/sub").mkdirs();
+        String css = "body{color:red}";
+        File.writeAllBytes(root + "/sub/b.css", css.toBytes(), css.byteLength());
+        // A secret OUTSIDE the root, and a symlink inside pointing to it.
+        String secret = "TOPSECRET";
+        File.writeAllBytes("build/test/sfsecret.txt", secret.toBytes(), secret.byteLength());
+        Path link = Path.of(root + "/evil");
+        if (!link.exists()) {
+            link.symlinkTo(Path.of("../sfsecret.txt"));
+        }
+    }
+
+    static void serving(Check c) {
+        String root = "build/test/sfroot";
+        MiddlewareStaticEtagProxyTests.setupRoot(root);
+
+        StaticFile sf = StaticFile.create(root);
+        Middleware sm = StaticFile.middleware(sf);
+        MiddlewareChain chain = heap MiddlewareChain();
+        chain.use(#sm);
+        (HttpRequest) -> #HttpResponse term = (req) -> MiddlewareStaticEtagProxyTests.marker(req);
+        (HttpRequest) -> #HttpResponse app = chain.compose(term);
+
+        HttpResponse rFile = app(HttpRequest.of("GET", "/a.txt"));
+        c.eqInt((int64) rFile.statusCode(), 200, "serve: existing file → 200");
+        c.eqBytes(rFile.body, rFile.bodyLength(), "hello static", "serve: file body");
+        c.eqStr(rFile.getHeaders().get("Content-Type"), "text/plain; charset=utf-8",
+                "serve: content-type from extension");
+
+        HttpResponse rIndex = app(HttpRequest.of("GET", "/"));
+        c.eqInt((int64) rIndex.statusCode(), 200, "serve: directory → index file");
+        c.eqBytes(rIndex.body, rIndex.bodyLength(), "<h1>home</h1>", "serve: index body");
+
+        HttpResponse rCss = app(HttpRequest.of("GET", "/sub/b.css"));
+        c.eqStr(rCss.getHeaders().get("Content-Type"), "text/css; charset=utf-8",
+                "serve: nested file content-type");
+
+        HttpResponse r404 = app(HttpRequest.of("GET", "/nope.txt"));
+        c.eqInt((int64) r404.statusCode(), 404, "serve: missing file → 404");
+
+        HttpResponse rTrav = app(HttpRequest.of("GET", "/../sfsecret.txt"));
+        c.eqInt((int64) rTrav.statusCode(), 403, "serve: '..' traversal → 403");
+
+        HttpResponse rEnc = app(HttpRequest.of("GET", "/%2e%2e/sfsecret.txt"));
+        c.eqInt((int64) rEnc.statusCode(), 403, "serve: encoded traversal → 403");
+
+        HttpResponse rLink = app(HttpRequest.of("GET", "/evil"));
+        c.eqInt((int64) rLink.statusCode(), 403, "serve: symlink escaping root → 403");
+
+        HttpResponse rPost = app(HttpRequest.of("POST", "/a.txt"));
+        c.eqInt((int64) rPost.statusCode(), 599, "serve: non-GET falls through to next");
+    }
+
+    // ---- etag ------------------------------------------------------------
+
+    static #HttpResponse bodyHandler(HttpRequest req) {
+        String body = "the entity body";
+        return HttpResponse.ok().body(body.toBytes(), body.byteLength());
+    }
+
+    static void etag(Check c) {
+        Middleware em = ETag.middleware();
+        MiddlewareChain chain = heap MiddlewareChain();
+        chain.use(#em);
+        (HttpRequest) -> #HttpResponse term = (req) -> MiddlewareStaticEtagProxyTests.bodyHandler(req);
+        (HttpRequest) -> #HttpResponse app = chain.compose(term);
+
+        HttpResponse r1 = app(HttpRequest.of("GET", "/x"));
+        c.eqInt((int64) r1.statusCode(), 200, "etag: first GET is 200");
+        String tag = r1.getHeaders().get("ETag");
+        c.that(tag != null && tag.startsWith("\""), "etag: strong quoted tag stamped");
+
+        // Conditional GET with the same tag → 304, no body.
+        HttpRequest req2 = HttpRequest.of("GET", "/x");
+        req2.setHeader("If-None-Match", tag);
+        HttpResponse r2 = app(req2);
+        c.eqInt((int64) r2.statusCode(), 304, "etag: matching If-None-Match → 304");
+        c.that(!r2.hasBody, "etag: 304 carries no body");
+
+        // Wildcard → 304.
+        HttpRequest req3 = HttpRequest.of("GET", "/x");
+        req3.setHeader("If-None-Match", "*");
+        HttpResponse r3 = app(req3);
+        c.eqInt((int64) r3.statusCode(), 304, "etag: If-None-Match: * → 304");
+
+        // Non-matching tag → 200 with body.
+        HttpRequest req4 = HttpRequest.of("GET", "/x");
+        req4.setHeader("If-None-Match", "\"stale-tag\"");
+        HttpResponse r4 = app(req4);
+        c.eqInt((int64) r4.statusCode(), 200, "etag: stale tag → 200 with body");
+        c.that(r4.hasBody, "etag: 200 keeps the body");
+    }
+
+    // ---- proxy headers ---------------------------------------------------
+
+    static void proxyHeaders(Check c) {
+        // Trusted: the forwarded client is resolved onto X-Real-IP.
+        ProxyHeaders trust = ProxyHeaders.trusted();
+        Middleware tm = ProxyHeaders.middleware(trust);
+        MiddlewareChain tchain = heap MiddlewareChain();
+        tchain.use(#tm);
+        (HttpRequest) -> #HttpResponse tterm = (req) -> MiddlewareStaticEtagProxyTests.marker(req);
+        (HttpRequest) -> #HttpResponse tapp = tchain.compose(tterm);
+
+        HttpRequest tr = HttpRequest.of("GET", "/x");
+        tr.setHeader("X-Forwarded-For", "1.2.3.4, 5.6.7.8");
+        HttpResponse tResp = tapp(tr);
+        String real = tr.getHeaders().get("X-Real-IP");
+        c.that(real != null && real.equals("1.2.3.4"),
+               "proxy trusted: first forwarded hop resolved onto X-Real-IP");
+
+        // Untrusted: forwarded headers are stripped before the handler.
+        ProxyHeaders notrust = ProxyHeaders.untrusted();
+        Middleware um = ProxyHeaders.middleware(notrust);
+        MiddlewareChain uchain = heap MiddlewareChain();
+        uchain.use(#um);
+        (HttpRequest) -> #HttpResponse uterm = (req) -> MiddlewareStaticEtagProxyTests.marker(req);
+        (HttpRequest) -> #HttpResponse uapp = uchain.compose(uterm);
+
+        HttpRequest ur = HttpRequest.of("GET", "/x");
+        ur.setHeader("X-Forwarded-For", "9.9.9.9");
+        ur.setHeader("X-Real-IP", "spoofed");
+        HttpResponse uResp = uapp(ur);
+        c.that(ur.getHeaders().get("X-Forwarded-For") == null,
+               "proxy untrusted: X-Forwarded-For stripped");
+        c.that(ur.getHeaders().get("X-Real-IP") == null,
+               "proxy untrusted: spoofed X-Real-IP stripped");
+    }
+}
