@@ -1,0 +1,172 @@
+package dev.cajeta.http.test;
+
+import cajeta.lang.String;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.HttpException;
+import dev.cajeta.http.middleware.Middleware;
+import dev.cajeta.http.middleware.MiddlewareChain;
+import dev.cajeta.http.routing.Router;
+
+/**
+ * http:2.1 — middleware composition. Middlewares are plain functions
+ * `(HttpRequest, next) -> #HttpResponse`; a [`MiddlewareChain`] composes
+ * them around a terminal handler, first-registered outermost. These tests
+ * drive the composed handler directly (pure — no socket) and read a shared
+ * trace to prove ordering, short-circuit, and exception-crossing.
+ */
+public final class MiddlewareTests {
+
+    public static void run(Check c) {
+        System.stdout.println("-- middleware: composition (2.1) --");
+        order(c);
+        shortCircuit(c);
+        exceptionCrossing(c);
+        perRouteInsideGlobal(c);
+    }
+
+    // Per-route middleware composes INSIDE the global (server-level) chain:
+    // global A/B wrap the router dispatch, the matched route's own chain (C)
+    // wraps its handler (H).
+    static void perRouteInsideGlobal(Check c) {
+        Trace t = heap Trace();
+
+        Middleware cc = Middleware.of((req, next) -> {
+            t.mark((int8) 67);                 // 'C' (per-route)
+            HttpResponse r = next(req);
+            t.mark((int8) 99);                 // 'c'
+            return r;
+        });
+        MiddlewareChain routeChain = heap MiddlewareChain();
+        routeChain.use(#cc);
+        (HttpRequest) -> #HttpResponse handler = (req) -> {
+            t.mark((int8) 72);                 // 'H'
+            return HttpResponse.of(200);
+        };
+        Router router = heap Router();
+        router.routeMw("GET", "/x", #routeChain, handler);
+
+        Middleware a = Middleware.of((req, next) -> {
+            t.mark((int8) 65);                 // 'A' (global)
+            HttpResponse r = next(req);
+            t.mark((int8) 97);                 // 'a'
+            return r;
+        });
+        Middleware b = Middleware.of((req, next) -> {
+            t.mark((int8) 66);                 // 'B' (global)
+            HttpResponse r = next(req);
+            t.mark((int8) 98);                 // 'b'
+            return r;
+        });
+        MiddlewareChain global = heap MiddlewareChain();
+        global.use(#a).use(#b);
+        (HttpRequest) -> #HttpResponse dispatchH = (req) -> router.dispatch(req);
+        (HttpRequest) -> #HttpResponse app = global.compose(dispatchH);
+
+        HttpResponse resp = app(HttpRequest.of("GET", "/x"));
+        c.eqInt((int64) resp.statusCode(), 200,
+                "per-route-inside-global reaches the handler");
+        c.eqStr(t.str(), "ABCHcba",
+                "global wraps per-route wraps handler (both nest correctly)");
+    }
+
+    // A tag-order trace: middlewares append a byte on the way in and out.
+    static void order(Check c) {
+        Trace t = heap Trace();
+        Middleware a = Middleware.of((req, next) -> {
+            t.mark((int8) 65);                 // 'A' in
+            HttpResponse r = next(req);
+            t.mark((int8) 97);                 // 'a' out
+            return r;
+        });
+        Middleware b = Middleware.of((req, next) -> {
+            t.mark((int8) 66);                 // 'B'
+            HttpResponse r = next(req);
+            t.mark((int8) 98);                 // 'b'
+            return r;
+        });
+        Middleware cc = Middleware.of((req, next) -> {
+            t.mark((int8) 67);                 // 'C'
+            HttpResponse r = next(req);
+            t.mark((int8) 99);                 // 'c'
+            return r;
+        });
+        (HttpRequest) -> #HttpResponse h = (req) -> {
+            t.mark((int8) 72);                 // 'H'
+            return HttpResponse.of(200);
+        };
+
+        MiddlewareChain chain = heap MiddlewareChain();
+        chain.use(#a).use(#b).use(#cc);
+        (HttpRequest) -> #HttpResponse app = chain.compose(h);
+
+        HttpResponse resp = app(HttpRequest.of("GET", "/x"));
+        c.eqInt((int64) resp.statusCode(), 200, "composed chain reaches the handler");
+        c.eqStr(t.str(), "ABCHcba",
+                "first-registered outermost; response bubbles back out");
+    }
+
+    // A short-circuiting middleware returns without calling next — inner
+    // middleware and the handler never run.
+    static void shortCircuit(Check c) {
+        Trace t = heap Trace();
+        Middleware a = Middleware.of((req, next) -> {
+            t.mark((int8) 65);                 // 'A'
+            HttpResponse r = next(req);
+            t.mark((int8) 97);                 // 'a'
+            return r;
+        });
+        Middleware deny = Middleware.of((req, next) -> {
+            t.mark((int8) 68);                 // 'D' — deny, no next
+            return HttpResponse.of(403);
+        });
+        Middleware cc = Middleware.of((req, next) -> {
+            t.mark((int8) 67);                 // 'C' (should never run)
+            return next(req);
+        });
+        (HttpRequest) -> #HttpResponse h = (req) -> {
+            t.mark((int8) 72);                 // 'H' (should never run)
+            return HttpResponse.of(200);
+        };
+
+        MiddlewareChain chain = heap MiddlewareChain();
+        chain.use(#a).use(#deny).use(#cc);
+        (HttpRequest) -> #HttpResponse app = chain.compose(h);
+
+        HttpResponse resp = app(HttpRequest.of("GET", "/x"));
+        c.eqInt((int64) resp.statusCode(), 403, "short-circuit returns the deny response");
+        // 'A' in, 'D' deny; inner 'C'/'H' skipped, and 'a' still runs on the
+        // way out (A wrapped deny's returned response).
+        c.eqStr(t.str(), "ADa", "short-circuit skips inner middleware + handler");
+    }
+
+    // A throwing handler propagates through the composed chain unharmed
+    // (catching it is Recover's job in 2.2a).
+    static void exceptionCrossing(Check c) {
+        Trace t = heap Trace();
+        Middleware a = Middleware.of((req, next) -> {
+            t.mark((int8) 65);                 // 'A'
+            HttpResponse r = next(req);
+            t.mark((int8) 97);                 // 'a' — must NOT run (throw crosses)
+            return r;
+        });
+        (HttpRequest) -> #HttpResponse h = (req) -> {
+            t.mark((int8) 72);                 // 'H'
+            throw heap HttpException("boom");
+        };
+
+        MiddlewareChain chain = heap MiddlewareChain();
+        chain.use(#a);
+        (HttpRequest) -> #HttpResponse app = chain.compose(h);
+
+        boolean caught = false;
+        try {
+            HttpResponse resp = app(HttpRequest.of("GET", "/x"));
+        } catch (HttpException e) {
+            caught = true;
+        }
+        c.that(caught, "handler exception crosses the middleware stack to the caller");
+        c.eqStr(t.str(), "AH",
+                "post-next code does not run when the inner chain throws");
+    }
+}

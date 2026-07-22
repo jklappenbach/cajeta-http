@@ -1,0 +1,93 @@
+package dev.cajeta.http.middleware;
+
+import cajeta.lang.String;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+
+/**
+ * A single **middleware** — plan item **2.1** — wrapping the request/response
+ * pipeline around a `next` handler. A middleware is the function shape
+ *
+ * ```
+ * (HttpRequest, (HttpRequest) -> #HttpResponse) -> #HttpResponse
+ * ```
+ *
+ * — it receives the request and the **next** handler (the rest of the chain,
+ * terminating in the route handler), and returns a response. It may inspect
+ * or rewrite the request, call `next(req)` to continue, short-circuit by
+ * returning its **own** response without calling `next` (an auth deny, a
+ * cache hit), or wrap the call in a `try`/timeout. Middleware and handlers
+ * **compose as plain functions**.
+ *
+ * ## Why a holder class, not a bare function type
+ *
+ * The middleware *value* is a bare higher-order function, but cajeta cannot
+ * allocate an **array** of a function type (`heap (…)[n]` does not parse), so
+ * [`MiddlewareChain`](MiddlewareChain.cajeta) stores `Middleware[]` — this
+ * one-field holder — and reaches the function through [`fn`](#fn). It also
+ * gives the middleware a name to hang the [`of`](#of) factory and the
+ * [`identity`](#identity) / [`wrapOne`](#wrapOne) composition statics on.
+ *
+ * ## Capture rules this design threads
+ *
+ * cajeta lambdas cannot capture `this` nor **invoke** a captured
+ * function-value, but they *can* capture an object and pass a captured
+ * function-value as an **argument**. [`wrapOne`](#wrapOne) is built exactly
+ * within those limits: `(req) -> m.fn(req, inner)` captures the holder `m`
+ * (an object — member call resolves) and forwards `inner` as an argument
+ * (the user middleware invokes it through its own `next` parameter).
+ */
+public class Middleware {
+    /** The wrapped middleware function. */
+    public (HttpRequest, (HttpRequest) -> #HttpResponse) -> #HttpResponse fn;
+
+    /**
+     * Cached [`identity`](#identity) singleton. The composed handler captures
+     * its seed middleware **by reference**, so that object must outlive the
+     * handler — a per-call temp would dangle. A process-lifetime singleton is
+     * always safe to capture.
+     */
+    static Middleware IDENTITY_INSTANCE;
+
+    /** Wrap a middleware function in a holder. */
+    public Middleware(
+            (HttpRequest, (HttpRequest) -> #HttpResponse) -> #HttpResponse fn) {
+        this.fn = fn;
+    }
+
+    /** Factory: a heap `Middleware` wrapping `fn`. */
+    public static #Middleware of(
+            (HttpRequest, (HttpRequest) -> #HttpResponse) -> #HttpResponse fn) {
+        return heap Middleware(fn);
+    }
+
+    /**
+     * The **identity** middleware — `(req, next) -> next(req)` — which simply
+     * continues to the next handler. Used by
+     * [`MiddlewareChain.compose`](MiddlewareChain.cajeta#compose) to seed the
+     * fold with an always-owned wrap, so composing an **empty** chain still
+     * yields a valid handler (just the terminal) without special-casing.
+     */
+    public static Middleware identity() {
+        if (Middleware.IDENTITY_INSTANCE == null) {
+            (HttpRequest, (HttpRequest) -> #HttpResponse) -> #HttpResponse f =
+                (req, next) -> next(req);
+            Middleware.IDENTITY_INSTANCE = heap Middleware(#f);
+        }
+        return Middleware.IDENTITY_INSTANCE;
+    }
+
+    /**
+     * Wrap `inner` with the single middleware `m`, returning the composed
+     * handler `(req) -> m.fn(req, inner)` — `m` is the outer layer, `inner`
+     * the rest of the chain. Returned **owned** (a multi-parameter function
+     * returning a function value must transfer ownership). This is the one
+     * composition primitive [`MiddlewareChain`](MiddlewareChain.cajeta) folds
+     * over.
+     */
+    public static #((HttpRequest) -> #HttpResponse) wrapOne(Middleware m,
+            (HttpRequest) -> #HttpResponse inner) {
+        (HttpRequest) -> #HttpResponse outer = (req) -> m.fn(req, inner);
+        return #outer;
+    }
+}

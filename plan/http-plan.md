@@ -1181,7 +1181,7 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
 
 ## 2 — Middleware
 
-- [ ] **2.1** Composition. `Middleware.wrap(HttpRequest, Handler) →
+- [x] **2.1** Composition. `Middleware.wrap(HttpRequest, Handler) →
   HttpResponse` with `Handler` as the shared handler shape; global
   (server-level) and per-route registration; registration order =
   wrapping order (first registered outermost); middleware and handlers
@@ -1192,6 +1192,59 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
     job, 2.2a); per-route composes inside global.
   - Acceptance: the Router/HttpServer wire-through lands here and is the
     only core change the whole bundled set needs.
+    - **Shipped:** new package `dev.cajeta.http.middleware`. A
+      **`Middleware`** is a holder for the bare higher-order function
+      `(HttpRequest, (HttpRequest) -> #HttpResponse) -> #HttpResponse`
+      (a holder because cajeta cannot allocate an array of a function
+      type). **`MiddlewareChain.use(m)`** accumulates (first registered
+      outermost); **`compose(terminal)`** folds them around the terminal
+      handler, last-to-first, returning one composed
+      `(HttpRequest) -> #HttpResponse`. The fold primitive
+      `Middleware.wrapOne(m, inner)` = `(req) -> m.fn(req, inner)`;
+      `compose` seeds with a process-lifetime **identity** singleton so an
+      empty chain still yields a valid handler and every intermediate is an
+      owned wrap. **Global (server-level)** middleware = compose the chain
+      around the whole app handler at the bind boundary
+      (`server.handler(chain.compose(app))`) — no new server surface needed,
+      since `bind`/`handler` already take the composed handler.
+      **Per-route** = **`Router.routeMw(method, pattern, chain, handler)`**;
+      the route owns the chain and `Router.dispatch` composes it around the
+      route handler at dispatch, **inside** any global chain. New
+      `MiddlewareTests` (+8, suite 556 → **564**): order triple
+      (`ABCHcba`), short-circuit (`ADa`, 403, inner skipped), exception
+      crossing (`AH`, handler throw propagates uncaught), and
+      per-route-inside-global (`ABCHcba` through a real Router). 2.1's own
+      checks are deterministic and green every run.
+    - **cajeta lambda/closure limits that shaped the design (all probed —
+      see the `cajeta-lambda-closure-limits` memory):** lambdas CANNOT
+      capture `this`, nor **invoke** a captured function-value (misresolves
+      as a static call); they CAN capture scalars/object-refs and **pass** a
+      captured function-value as an argument. Hence: the composition
+      primitive captures the holder object `m` and forwards `inner`; a user
+      middleware `(req, next) -> next(req)` invokes `next` as its own param;
+      global wiring uses a `(req) -> router.dispatch(req)` object-method
+      forwarder. Also: a function type may take a function parameter, but an
+      **array** of a function type does not parse (→ holder class); a
+      multi-param function returning a function must return it **owned**
+      (`#(...)`); a returned lambda needs a function-typed local to pin
+      inference; and an escaping composed handler captures its middleware
+      objects by ref, so the chain must stay alive (owned by the Route, or
+      composed-and-invoked within one dispatch).
+    - **Deferred to a follow-up (noted, not built):** an
+      `HttpServerBuilder.use(Middleware)` sugar (global is expressible today
+      as `compose` at the handler boundary); carrying per-route middleware
+      through `mount` (a mounted sub-route currently loses its own chain —
+      2.1's TDD does not exercise mount + middleware).
+    - **Test-robustness finding (fixed):** during 2.1 loops the 1.5c
+      `ServerAcceptControlTests` intermittently *hung* (not failed) — root
+      cause was **external CPU starvation** (box at load ~35 on 32 cores
+      from unrelated work), which stalls the wall-clock `serve()` deadlines
+      and the tests' un-deadlined client `await`s. NOT a code fault and off
+      the 2.1 path (that test uses a static handler). Confirmed by 15/15
+      green once the box was idle (load ~3). Hardened `getPath` with a 15 s
+      `HttpClient.exchangeTimeout` + `catch` so a future starved run **fails
+      fast** (`-3` → clean assertion) instead of a 120 s hang — a wall-clock
+      deadline can only bound the hang, not make a starved exchange pass.
 - [ ] **2.2** Bundled set — grouped by dependency weight; every
   middleware is golden-tested through a real loopback server, not just
   unit-called.

@@ -6,6 +6,7 @@ import dev.cajeta.http.HttpRequest;
 import dev.cajeta.http.HttpResponse;
 import dev.cajeta.http.routing.Route;
 import dev.cajeta.http.PathParams;
+import dev.cajeta.http.middleware.MiddlewareChain;
 
 /**
  * The **minimal HTTP router** — plan item **NET-9.3**. Maps an incoming
@@ -139,6 +140,27 @@ public class Router {
         }
         Route r = heap Route(method, pattern, handler);
         r.maxBodyBytes = maxBodyBytes;
+        this.append(#r);
+        return this;
+    }
+
+    /**
+     * Register a `handler` with a **per-route middleware chain** (http:2.1) —
+     * `chain` is composed around `handler` at dispatch, first-registered
+     * outermost, and **inside** any global (server-level) chain the caller
+     * wraps around the whole router. Otherwise like [`route`](#route). Takes
+     * ownership of `chain` (the route holds it, keeping its middleware objects
+     * alive for the composed handler to capture).
+     */
+    public Router routeMw(String method, String pattern,
+                          #MiddlewareChain chain,
+                          (HttpRequest) -> #HttpResponse handler) {
+        String err = Router.patternError(pattern);
+        if (err != null) {
+            throw heap UnrecoverableException(#err);
+        }
+        Route r = heap Route(method, pattern, handler);
+        r.mw = #chain;
         this.append(#r);
         return this;
     }
@@ -366,6 +388,16 @@ public class Router {
             PathParams params = heap PathParams();
             chosen.matchAndScore(segs, segCount, params);
             request.bindPathParams(#params);
+            // Per-route middleware (http:2.1): compose the route's chain
+            // around its handler and invoke it. The chain (owned by the
+            // route) keeps its middleware objects alive for the composed
+            // handler to capture; the composition is built and invoked within
+            // this dispatch (non-escaping).
+            if (chosen.mw != null) {
+                (HttpRequest) -> #HttpResponse composed =
+                    chosen.mw.compose(chosen.handler);
+                return composed(request);
+            }
             return chosen.handler(request);
         }
 

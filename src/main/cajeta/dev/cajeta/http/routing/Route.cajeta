@@ -4,6 +4,7 @@ import cajeta.lang.String;
 import dev.cajeta.http.HttpRequest;
 import dev.cajeta.http.HttpResponse;
 import dev.cajeta.http.PathParams;
+import dev.cajeta.http.middleware.MiddlewareChain;
 import cajeta.io.net.uri.PercentCodec;
 import cajeta.io.net.uri.MalformedUriException;
 
@@ -74,6 +75,16 @@ public class Route {
      */
     public int64 maxBodyBytes;
 
+    /**
+     * Optional **per-route middleware** (http:2.1), or `null` when none.
+     * When set, [`Router.dispatch`](Router.cajeta) composes this chain around
+     * [`handler`](#handler) at dispatch — **inside** any global (server-level)
+     * chain — so route-specific concerns (a per-route auth, rate limit, or
+     * body decode) wrap only this route. Set via
+     * [`Router.routeMw`](Router.cajeta#routeMw).
+     */
+    public MiddlewareChain mw;
+
     /** The handler to invoke when this route matches. */
     public (HttpRequest) -> #HttpResponse handler;
 
@@ -88,6 +99,7 @@ public class Route {
         this.pattern = pattern.substring(0, pattern.byteLength());
         this.handler = handler;
         this.maxBodyBytes = 0;
+        this.mw = null;
         this.splitPattern(pattern);
         this.hasDoubleStar = this.computeDoubleStar();
     }

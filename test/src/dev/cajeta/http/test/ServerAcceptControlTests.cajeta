@@ -89,22 +89,37 @@ public final class ServerAcceptControlTests {
 
     // ---- client fibers ---------------------------------------------------
 
-    /** GET `path`; 1 on the expected body, negative codes otherwise. */
+    /**
+     * GET `path`; 1 on the expected body, negative codes otherwise. A
+     * generous per-exchange deadline (15 s) makes a run **fail fast** under
+     * external CPU starvation — where the box is oversubscribed and the
+     * fiber carriers get starved of scheduling — instead of hanging
+     * indefinitely on an un-deadlined `await`. The legitimate serialized
+     * BLOCK exchange completes in ~1 s, so 15 s never trips under normal
+     * load; a starved run reports `-3` and fails a clean assertion rather
+     * than a 120 s timeout (the deadline is wall-clock, so it can only bound
+     * the hang, not make a genuinely-starved exchange succeed).
+     */
     public static async int32 getPath(int32 port, String path, String want) {
         HttpClient client = heap HttpClient();
+        client.exchangeTimeout(15000);
         String url = "http://127.0.0.1:" + port + path;
-        HttpResponse resp = client.get(url);
-        if (resp.statusCode() != 200) { return -1; }
-        int32 n = resp.bodyLength();
-        int8[] copy = heap int8[n];
-        int32 i = 0;
-        while (i < n) {
-            copy[i] = resp.body[i];
-            i = i + 1;
+        try {
+            HttpResponse resp = client.get(url);
+            if (resp.statusCode() != 200) { return -1; }
+            int32 n = resp.bodyLength();
+            int8[] copy = heap int8[n];
+            int32 i = 0;
+            while (i < n) {
+                copy[i] = resp.body[i];
+                i = i + 1;
+            }
+            String got = heap String(#copy, n);
+            if (!got.equals(want)) { return -2; }
+            return 1;
+        } catch (Exception e) {
+            return -3;                         // failed fast (timeout/fault)
         }
-        String got = heap String(#copy, n);
-        if (!got.equals(want)) { return -2; }
-        return 1;
     }
 
     /**

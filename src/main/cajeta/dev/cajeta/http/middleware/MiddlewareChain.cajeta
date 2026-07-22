@@ -1,0 +1,87 @@
+package dev.cajeta.http.middleware;
+
+import cajeta.lang.String;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.middleware.Middleware;
+
+/**
+ * An ordered list of [`Middleware`](Middleware.cajeta) that
+ * [`compose`](#compose)s around a terminal handler — plan item **2.1**.
+ *
+ * **Registration order = wrapping order, first registered outermost.** With
+ * middlewares `[A, B]` and a handler `H`, `compose(H)` yields a handler that
+ * runs `A` first, which calls `next` into `B`, which calls `next` into `H`;
+ * the response bubbles back out `H → B → A`. This is the same convention as
+ * `net/http`'s handler-wrapping and Express's `app.use` order.
+ *
+ * The chain is used two ways (2.1's dual registration):
+ *
+ *   - **Global / server-level** — compose the chain around the whole
+ *     application handler at the bind boundary
+ *     (`server.handler(chain.compose(app))`), so every request runs it.
+ *   - **Per-route** — attach a chain to one route
+ *     ([`Router.routeMw`](../routing/Router.cajeta#routeMw)); the
+ *     [`Router`](../routing/Router.cajeta) composes it around that route's
+ *     handler at dispatch, **inside** any global chain.
+ *
+ * A [`Middleware`](Middleware.cajeta) is a plain function value (freely
+ * shareable), so the same instance may sit in several chains.
+ */
+public class MiddlewareChain {
+    Middleware[] mws;
+    int32 count;
+
+    /** An empty chain (composes to just the terminal handler). */
+    public MiddlewareChain() {
+        this.mws = heap Middleware[4];
+        this.count = 0;
+    }
+
+    /** The number of registered middlewares. */
+    public int32 size() {
+        return this.count;
+    }
+
+    /**
+     * Append `m` to the chain (taking ownership) and return the borrowed
+     * `this` so registrations chain: `chain.use(a).use(b)`. `a` ends up the
+     * **outermost** layer (first registered outermost).
+     */
+    public MiddlewareChain use(#Middleware m) {
+        if (this.count >= this.mws.count()) {
+            int32 newCap = this.mws.count() * 2;
+            Middleware[] grown = heap Middleware[newCap];
+            int32 j = 0;
+            while (j < this.count) {
+                grown[j] = this.mws[j];
+                j = j + 1;
+            }
+            this.mws = grown;
+        }
+        this.mws[this.count] = #m;
+        this.count = this.count + 1;
+        return this;
+    }
+
+    /**
+     * Compose the chain around `terminal`, returning the single composed
+     * handler (owned). The fold seeds with the
+     * [`identity`](Middleware.cajeta#identity) middleware — so an empty chain
+     * still returns a valid handler (just `terminal`) and every intermediate
+     * `h` is an owned `wrapOne` result — then wraps the registered
+     * middlewares from **last to first**, leaving the first-registered one
+     * outermost.
+     */
+    public #((HttpRequest) -> #HttpResponse) compose(
+            (HttpRequest) -> #HttpResponse terminal) {
+        (HttpRequest) -> #HttpResponse h =
+            Middleware.wrapOne(Middleware.identity(), terminal);
+        int32 i = this.count - 1;
+        while (i >= 0) {
+            h = Middleware.wrapOne(this.mws[i], h);
+            i = i - 1;
+        }
+        return #h;
+    }
+}

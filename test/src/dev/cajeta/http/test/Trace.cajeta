@@ -1,0 +1,41 @@
+package dev.cajeta.http.test;
+
+import cajeta.lang.String;
+
+// A tiny ordered byte-trace for the middleware tests: each stage appends a
+// marker byte, and the accumulated string reveals execution order.
+public final class Trace {
+    int8[] buf;
+    int32 len;
+
+    public Trace() {
+        this.buf = heap int8[64];
+        this.len = 0;
+    }
+
+    // Append one marker byte (grows on demand).
+    public void mark(int8 ch) {
+        if (this.len >= this.buf.count()) {
+            int8[] grown = heap int8[this.buf.count() * 2];
+            int32 i = 0;
+            while (i < this.len) {
+                grown[i] = this.buf[i];
+                i = i + 1;
+            }
+            this.buf = grown;
+        }
+        this.buf[this.len] = ch;
+        this.len = this.len + 1;
+    }
+
+    // The accumulated markers as a String.
+    public #String str() {
+        int8[] copy = heap int8[this.len];
+        int32 i = 0;
+        while (i < this.len) {
+            copy[i] = this.buf[i];
+            i = i + 1;
+        }
+        return heap String(#copy, this.len);
+    }
+}
