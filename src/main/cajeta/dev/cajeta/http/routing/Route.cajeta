@@ -135,10 +135,51 @@ public class Route {
         return open && close;
     }
 
-    /** The parameter name of segment `i` — the text inside the braces. */
+    /**
+     * The byte index of the `:` inside param segment `i` that separates the
+     * name from its type (`{id:int64}`), or `-1` when the segment is an
+     * untyped `{name}`. Only the braces' interior is scanned.
+     */
+    int32 paramColon(int32 i) {
+        String seg = this.segments[i];
+        int32 len = seg.byteLength();
+        int32 k = 1;                                 // skip '{'
+        while (k < len - 1) {                        // stop before '}'
+            if ((((int32) seg.byteAt(k)) & 0xff) == 58) {    // ':'
+                return k;
+            }
+            k = k + 1;
+        }
+        return -1;
+    }
+
+    /**
+     * The parameter name of segment `i` — the text between `{` and either
+     * the type separator `:` (`{id:int64}` → `id`) or the closing `}`
+     * (`{id}` → `id`).
+     */
     public #String paramName(int32 i) {
         String seg = this.segments[i];
-        return seg.substring(1, seg.byteLength() - 1);
+        int32 len = seg.byteLength();
+        int32 colon = this.paramColon(i);
+        int32 end = colon < 0 ? (len - 1) : colon;
+        return seg.substring(1, end);
+    }
+
+    /**
+     * The declared type token of param segment `i` — the text between `:`
+     * and `}` (`{id:int64}` → `int64`), or `"string"` for an untyped
+     * `{name}`. See [`PathParams.matchesType`](../PathParams.cajeta) for the
+     * per-type match rules.
+     */
+    public #String paramType(int32 i) {
+        String seg = this.segments[i];
+        int32 len = seg.byteLength();
+        int32 colon = this.paramColon(i);
+        if (colon < 0) {
+            return "string".substring(0, 6);
+        }
+        return seg.substring(colon + 1, len - 1);
     }
 
     /** The literal text of segment `i` (only meaningful when not a param). */
@@ -170,13 +211,18 @@ public class Route {
         while (i < this.segmentCount) {
             String reqSeg = pathSegs[i];
             if (this.isParam(i)) {
-                // A parameter binds any non-empty segment.
+                // A parameter binds any non-empty segment whose decoded
+                // value satisfies the segment's declared type (http:1.7a).
                 if (reqSeg.byteLength() == 0) {
                     return false;
                 }
                 String name = this.paramName(i);
+                String type = this.paramType(i);
                 try {
                     String decoded = PercentCodec.decode(reqSeg);
+                    if (!PathParams.matchesType(type, decoded)) {
+                        return false;                // type mismatch -> 404
+                    }
                     out.put(#name, #decoded);
                 } catch (MalformedUriException e) {
                     return false;

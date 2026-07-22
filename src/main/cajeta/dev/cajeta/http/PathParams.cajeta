@@ -113,6 +113,224 @@ public class PathParams {
         return -1;
     }
 
+    // -- typed getters (http:1.7a) -----------------------------------------
+
+    /**
+     * The value bound for `name` parsed as a signed `int64`, or `fallback`
+     * when `name` is unbound or its value is not a canonical decimal
+     * integer. For a route segment typed `{name:int64}` the value was
+     * already range-validated at match time, so this parse never overflows
+     * for such routes; reading a *string* param (`{name}`) whose value is
+     * non-numeric falls back cleanly. Mirrors the `req.pathParamInt64`
+     * handler surface ([`HttpRequest`](HttpRequest.cajeta)).
+     */
+    public int64 getInt64(String name, int64 fallback) {
+        int32 i = this.indexOf(name);
+        if (i < 0) {
+            return fallback;
+        }
+        return PathParams.decToInt64(this.values[i], fallback);
+    }
+
+    /**
+     * The value bound for `name` parsed as a signed `int32` (the low 32
+     * bits of [`getInt64`](#getInt64)), or `fallback` when unbound /
+     * unparseable. For a `{name:int32}` route the value was range-checked
+     * at match time, so the narrowing is loss-free there.
+     */
+    public int32 getInt32(String name, int32 fallback) {
+        int32 i = this.indexOf(name);
+        if (i < 0) {
+            return fallback;
+        }
+        return (int32) PathParams.decToInt64(this.values[i], (int64) fallback);
+    }
+
+    /**
+     * The value bound for `name` as a boolean — `true` for the exact token
+     * `"true"`, `false` for `"false"`, and `fallback` for anything else
+     * (including an unbound name). A `{name:bool}` route only ever binds one
+     * of those two tokens.
+     */
+    public boolean getBool(String name, boolean fallback) {
+        int32 i = this.indexOf(name);
+        if (i < 0) {
+            return fallback;
+        }
+        String s = this.values[i];
+        if (s.equals("true")) {
+            return true;
+        }
+        if (s.equals("false")) {
+            return false;
+        }
+        return fallback;
+    }
+
+    // -- typed-param validation (http:1.7a) --------------------------------
+
+    /**
+     * True iff `type` is a path-param type token this router understands:
+     * `string` (any non-empty segment), the signed integers
+     * `int8`/`int16`/`int32`/`int64`, the unsigned `uint8`/`uint16`/`uint32`,
+     * or `bool`. An untyped `{name}` segment is treated as `string`. Unknown
+     * tokens are not rejected at registration in 1.7a — they simply never
+     * match (surfacing as a 404); strict registration rejection lands with
+     * 1.7b.
+     */
+    public static boolean isKnownType(String type) {
+        return type.equals("string")
+            || type.equals("int64") || type.equals("int32")
+            || type.equals("int16") || type.equals("int8")
+            || type.equals("uint32") || type.equals("uint16")
+            || type.equals("uint8") || type.equals("bool");
+    }
+
+    /**
+     * True iff the (already percent-decoded) segment `value` is a valid
+     * instance of the path-param `type`. A `type` mismatch makes the route
+     * a **non-match** (the [`Router`](Router.cajeta) resolves that to 404,
+     * never 405). Integer tokens require a **canonical** decimal: an
+     * optional leading `-` (signed only), then digits with no leading zeros
+     * unless the magnitude is exactly `0` (so `007` and `-0` are rejected),
+     * and the value must fit the type's range. `bool` is the exact token
+     * `true` or `false`. An unknown `type` never matches.
+     */
+    public static boolean matchesType(String type, String value) {
+        if (type.equals("string")) {
+            return value.byteLength() > 0;
+        }
+        if (type.equals("int64")) {
+            return PathParams.isDec(value, true,
+                                    "9223372036854775807", "9223372036854775808");
+        }
+        if (type.equals("int32")) {
+            return PathParams.isDec(value, true, "2147483647", "2147483648");
+        }
+        if (type.equals("int16")) {
+            return PathParams.isDec(value, true, "32767", "32768");
+        }
+        if (type.equals("int8")) {
+            return PathParams.isDec(value, true, "127", "128");
+        }
+        if (type.equals("uint32")) {
+            return PathParams.isDec(value, false, "4294967295", "4294967295");
+        }
+        if (type.equals("uint16")) {
+            return PathParams.isDec(value, false, "65535", "65535");
+        }
+        if (type.equals("uint8")) {
+            return PathParams.isDec(value, false, "255", "255");
+        }
+        if (type.equals("bool")) {
+            return value.equals("true") || value.equals("false");
+        }
+        return false;
+    }
+
+    /**
+     * Validate `v` as a canonical decimal integer. When `signed`, a single
+     * leading `-` is permitted (and selects `negMax` as the magnitude
+     * bound); otherwise `posMax` bounds the magnitude. `posMax`/`negMax` are
+     * the maximum magnitudes as digit strings (no leading zeros), so the
+     * range check is a length-then-lexicographic compare that never itself
+     * overflows.
+     */
+    static boolean isDec(String v, boolean signed, String posMax, String negMax) {
+        int32 n = v.byteLength();
+        if (n == 0) {
+            return false;
+        }
+        boolean neg = signed && ((((int32) v.byteAt(0)) & 0xff) == 45);   // '-'
+        int32 start = neg ? 1 : 0;
+        String maxMag = neg ? negMax : posMax;
+        return PathParams.isCanonMagInRange(v, start, neg, maxMag);
+    }
+
+    /**
+     * True iff `v[start..]` is a canonical decimal magnitude — no leading
+     * zeros unless it is exactly `"0"` (and `"-0"`, signalled by `neg`, is
+     * rejected) — whose numeric value is `<= maxMag` (compared by digit
+     * length, then byte-lexicographically since ASCII digits order
+     * correctly).
+     */
+    static boolean isCanonMagInRange(String v, int32 start, boolean neg,
+                                     String maxMag) {
+        int32 n = v.byteLength();
+        if (start >= n) {
+            return false;                          // empty magnitude (bare "-")
+        }
+        if ((((int32) v.byteAt(start)) & 0xff) == 48) {   // leading '0'
+            if (n - start != 1) {
+                return false;                      // "07", "00"
+            }
+            if (neg) {
+                return false;                      // "-0"
+            }
+            return true;                           // exactly "0"
+        }
+        int32 i = start;
+        while (i < n) {
+            int32 d = (((int32) v.byteAt(i)) & 0xff) - 48;
+            if (d < 0 || d > 9) {
+                return false;
+            }
+            i = i + 1;
+        }
+        int32 magLen = n - start;
+        int32 maxLen = maxMag.byteLength();
+        if (magLen < maxLen) {
+            return true;
+        }
+        if (magLen > maxLen) {
+            return false;
+        }
+        int32 j = 0;
+        while (j < magLen) {
+            int32 cv = ((int32) v.byteAt(start + j)) & 0xff;
+            int32 cm = ((int32) maxMag.byteAt(j)) & 0xff;
+            if (cv < cm) {
+                return true;
+            }
+            if (cv > cm) {
+                return false;
+            }
+            j = j + 1;
+        }
+        return true;                               // equal to the bound
+    }
+
+    /**
+     * Parse a canonical decimal `v` (optional leading `-`) to `int64`,
+     * returning `fallback` on any non-digit content. Only called on values
+     * a typed route already validated (so no overflow for the route's
+     * declared width) or on a best-effort string-param read.
+     */
+    static int64 decToInt64(String v, int64 fallback) {
+        int32 n = v.byteLength();
+        if (n == 0) {
+            return fallback;
+        }
+        boolean neg = ((((int32) v.byteAt(0)) & 0xff) == 45);   // '-'
+        int32 i = neg ? 1 : 0;
+        if (i >= n) {
+            return fallback;
+        }
+        int64 acc = 0;
+        while (i < n) {
+            int32 d = (((int32) v.byteAt(i)) & 0xff) - 48;
+            if (d < 0 || d > 9) {
+                return fallback;
+            }
+            acc = acc * (int64) 10 + (int64) d;
+            i = i + 1;
+        }
+        if (neg) {
+            return (int64) 0 - acc;
+        }
+        return acc;
+    }
+
     /** Grow the parallel arrays to hold at least `need` slots. */
     void ensureCapacity(int32 need) {
         if (need <= this.cap) {

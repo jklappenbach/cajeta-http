@@ -21,6 +21,7 @@ public final class TestMain {
         ClientPoolTests.run(c);
         CodecTests.run(c);
         ServerTests.run(c);
+        RouterTests.run(c);
         ClientTests.run(c);
         RedirectTests.run(c);
         ClientTimeoutTests.run(c);

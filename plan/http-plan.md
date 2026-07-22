@@ -1025,11 +1025,35 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
   moved here from 1.3e 2026-07-22 — the route table is where a
   per-route body cap attaches; the global `ServerLimits.maxBodyBytes`
   already rejects pre-handler.)*
-  - [ ] **1.7a Typed path params.** `{id:int64}` (and the other core
+  - [x] **1.7a Typed path params.** `{id:int64}` (and the other core
     scalar types): parse at match time; a type mismatch is a **404**,
     never reaches the handler; `PathParams` grows typed getters.
     - TDD: match/404 matrix per type (overflow int64, leading zeros,
       negatives), typed getter round-trip, string params unchanged.
+    - **Shipped:** a `{name:type}` pattern segment carries a type token
+      after the `:` (`{id:int64}`); untyped `{name}` stays `string`.
+      Supported tokens: `string` (any non-empty segment), signed
+      `int8`/`int16`/`int32`/`int64`, unsigned `uint8`/`uint16`/`uint32`,
+      and `bool`. Match-time validation (`PathParams.matchesType`, on the
+      **percent-decoded** value) demands a **canonical** decimal for
+      integers — optional leading `-` (signed only), no leading zeros
+      unless the magnitude is exactly `0` (so `007` and `-0` reject), and
+      in-range for the width. Range is checked by a length-then-
+      lexicographic magnitude compare against per-type max-magnitude digit
+      strings (`"9223372036854775808"` for int64 min, etc.), so the
+      validator itself never overflows — that's how int64 min/max+1 are
+      distinguished. `bool` is the exact token `true`/`false`. A type
+      mismatch makes the segment a **non-match**, so `Router.dispatch`
+      resolves it to **404** (never 405 — the path did not match), and
+      the Allow-header probe likewise excludes it. Typed getters:
+      `PathParams.getInt64/getInt32/getBool(name, fallback)` + the
+      handler surface `HttpRequest.pathParamInt64/pathParamInt32/
+      pathParamBool(name, fallback)` (fallback on unbound/unparseable —
+      no null-return for a scalar). **Unknown type tokens are NOT rejected
+      at registration in 1.7a** (they simply never match → 404); strict
+      registration rejection is 1.7b's job (it owns the machinery). New
+      `test/.../RouterTests.cajeta` (+41 checks, suite 482 → **523**);
+      full suite 523/523 × 15 loops incl. the serve()/deadline tests.
   - [ ] **1.7b Wildcards.** `{p:*}` — one segment; `{p:**}` — rest of
     the path (bound with `/` separators preserved); precedence: literal
     > typed/string param > `*` > `**`.

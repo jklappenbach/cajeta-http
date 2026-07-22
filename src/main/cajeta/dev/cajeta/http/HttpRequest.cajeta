@@ -449,6 +449,44 @@ public class HttpRequest {
         return this.pathParams.get(name);
     }
 
+    /**
+     * The path parameter `name` parsed as a signed `int64`, or `fallback`
+     * when there is no such parameter (no router, or the segment was not
+     * `{name}`) or its value is not a canonical decimal integer. For a route
+     * segment typed `{name:int64}` the value was range-validated at match
+     * time (a mismatch is a 404 the handler never sees), so the parse is
+     * exact for such routes — the 1.7a typed-param surface.
+     */
+    public int64 pathParamInt64(String name, int64 fallback) {
+        if (this.pathParams == null) {
+            return fallback;
+        }
+        return this.pathParams.getInt64(name, fallback);
+    }
+
+    /**
+     * The path parameter `name` parsed as a signed `int32`, or `fallback`
+     * when unbound / unparseable. For a `{name:int32}` route the value was
+     * range-checked at match time, so the result is loss-free there.
+     */
+    public int32 pathParamInt32(String name, int32 fallback) {
+        if (this.pathParams == null) {
+            return fallback;
+        }
+        return this.pathParams.getInt32(name, fallback);
+    }
+
+    /**
+     * The path parameter `name` as a boolean — `true`/`false` for those
+     * exact tokens (what a `{name:bool}` route binds), else `fallback`.
+     */
+    public boolean pathParamBool(String name, boolean fallback) {
+        if (this.pathParams == null) {
+            return fallback;
+        }
+        return this.pathParams.getBool(name, fallback);
+    }
+
     // -- Body model (http:1.3e) --------------------------------------------
 
     /**

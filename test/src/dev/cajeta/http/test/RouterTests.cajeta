@@ -1,0 +1,166 @@
+package dev.cajeta.http.test;
+
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.routing.Router;
+
+/**
+ * http:1.7 — Router completeness suite. Pure dispatch over the message
+ * model (no socket, no native), driving the router with hand-built
+ * requests and asserting status / bound params — the same golden-vector
+ * style ServerTests uses for the minimal router.
+ *
+ *   - 1.7a typed path params (`{id:int64}`): match/404 matrix per type,
+ *     typed getter round-trip, string params unchanged.
+ */
+public final class RouterTests {
+
+    public static void run(Check c) {
+        System.stdout.println("-- router: typed params (1.7a) --");
+        typedParams(c);
+    }
+
+    // Small helper: dispatch (method, target) and return the status code.
+    static int32 status(Router r, String method, String target) {
+        HttpResponse resp = r.dispatch(HttpRequest.of(method, target));
+        return resp.statusCode();
+    }
+
+    static void typedParams(Check c) {
+        // A handler that echoes the typed int64 param as the body, so a
+        // getter round-trip is observable end to end.
+        (HttpRequest) -> #HttpResponse i64Echo = (req) -> {
+            int64 v = req.pathParamInt64("v", (int64) -999);
+            String b = "" + v;
+            return HttpResponse.ok().body(b.toBytes(), b.byteLength());
+        };
+        (HttpRequest) -> #HttpResponse i32Echo = (req) -> {
+            int32 v = req.pathParamInt32("v", (int32) -999);
+            String b = "" + v;
+            return HttpResponse.ok().body(b.toBytes(), b.byteLength());
+        };
+        (HttpRequest) -> #HttpResponse boolEcho = (req) -> {
+            boolean v = req.pathParamBool("v", false);
+            return HttpResponse.of(v ? 222 : 223);
+        };
+        (HttpRequest) -> #HttpResponse strEcho = (req) -> {
+            String v = req.pathParam("v");
+            if (v == null) {
+                return HttpResponse.of(500);
+            }
+            return HttpResponse.ok().body(v.toBytes(), v.byteLength());
+        };
+
+        Router r = heap Router();
+        r.route("GET", "/i64/{v:int64}", i64Echo);
+        r.route("GET", "/i32/{v:int32}", i32Echo);
+        r.route("GET", "/u32/{v:uint32}", i64Echo);
+        r.route("GET", "/i8/{v:int8}", i64Echo);
+        r.route("GET", "/b/{v:bool}", boolEcho);
+        r.route("GET", "/s/{v}", strEcho);
+        r.route("GET", "/s2/{v:string}", strEcho);
+
+        // -- int64: match, round-trip, 404 matrix ---------------------------
+        HttpResponse hit = r.dispatch(HttpRequest.of("GET", "/i64/42"));
+        c.eqInt((int64) hit.statusCode(), 200, "int64 matches");
+        c.eqBytes(hit.body, hit.bodyLength(), "42", "int64 getter round-trip");
+
+        HttpResponse neg = r.dispatch(HttpRequest.of("GET", "/i64/-7"));
+        c.eqInt((int64) neg.statusCode(), 200, "int64 negative matches");
+        c.eqBytes(neg.body, neg.bodyLength(), "-7", "int64 negative round-trip");
+
+        HttpResponse zero = r.dispatch(HttpRequest.of("GET", "/i64/0"));
+        c.eqInt((int64) zero.statusCode(), 200, "int64 zero matches");
+        c.eqBytes(zero.body, zero.bodyLength(), "0", "int64 zero round-trip");
+
+        HttpResponse maxV = r.dispatch(HttpRequest.of("GET", "/i64/9223372036854775807"));
+        c.eqInt((int64) maxV.statusCode(), 200, "int64 max matches");
+
+        c.eqInt((int64) RouterTests.status(r, "GET", "/i64/abc"), 404,
+                "int64 non-numeric is 404");
+        c.eqInt((int64) RouterTests.status(r, "GET", "/i64/007"), 404,
+                "int64 leading zero is 404");
+        c.eqInt((int64) RouterTests.status(r, "GET", "/i64/-0"), 404,
+                "int64 negative zero is 404");
+        c.eqInt((int64) RouterTests.status(r, "GET", "/i64/12x"), 404,
+                "int64 trailing garbage is 404");
+        c.eqInt((int64) RouterTests.status(r, "GET",
+                "/i64/9223372036854775808"), 404,
+                "int64 overflow (max+1) is 404");
+        c.eqInt((int64) RouterTests.status(r, "GET",
+                "/i64/99999999999999999999"), 404,
+                "int64 overflow (20 digits) is 404");
+        c.eqInt((int64) RouterTests.status(r, "GET", "/i64/"), 404,
+                "int64 empty segment is 404 (no route)");
+
+        // -- int32: width-specific overflow ---------------------------------
+        c.eqInt((int64) RouterTests.status(r, "GET", "/i32/2147483647"), 200,
+                "int32 max matches");
+        HttpResponse i32neg = r.dispatch(HttpRequest.of("GET", "/i32/-2147483648"));
+        c.eqInt((int64) i32neg.statusCode(), 200, "int32 min matches");
+        c.eqBytes(i32neg.body, i32neg.bodyLength(), "-2147483648",
+                  "int32 min round-trip");
+        c.eqInt((int64) RouterTests.status(r, "GET", "/i32/2147483648"), 404,
+                "int32 overflow (max+1) is 404");
+        c.eqInt((int64) RouterTests.status(r, "GET", "/i32/-2147483649"), 404,
+                "int32 underflow (min-1) is 404");
+
+        // -- int8 -----------------------------------------------------------
+        c.eqInt((int64) RouterTests.status(r, "GET", "/i8/127"), 200,
+                "int8 max matches");
+        c.eqInt((int64) RouterTests.status(r, "GET", "/i8/-128"), 200,
+                "int8 min matches");
+        c.eqInt((int64) RouterTests.status(r, "GET", "/i8/128"), 404,
+                "int8 overflow is 404");
+
+        // -- uint32: no negatives, own bound --------------------------------
+        c.eqInt((int64) RouterTests.status(r, "GET", "/u32/0"), 200,
+                "uint32 zero matches");
+        c.eqInt((int64) RouterTests.status(r, "GET", "/u32/4294967295"), 200,
+                "uint32 max matches");
+        c.eqInt((int64) RouterTests.status(r, "GET", "/u32/-1"), 404,
+                "uint32 negative is 404");
+        c.eqInt((int64) RouterTests.status(r, "GET", "/u32/4294967296"), 404,
+                "uint32 overflow is 404");
+
+        // -- bool -----------------------------------------------------------
+        c.eqInt((int64) RouterTests.status(r, "GET", "/b/true"), 222,
+                "bool true matches, getter true");
+        c.eqInt((int64) RouterTests.status(r, "GET", "/b/false"), 223,
+                "bool false matches, getter false");
+        c.eqInt((int64) RouterTests.status(r, "GET", "/b/1"), 404,
+                "bool non-literal is 404");
+        c.eqInt((int64) RouterTests.status(r, "GET", "/b/True"), 404,
+                "bool is case-sensitive (404)");
+
+        // -- string params unchanged ----------------------------------------
+        HttpResponse s1 = r.dispatch(HttpRequest.of("GET", "/s/hello"));
+        c.eqInt((int64) s1.statusCode(), 200, "string param matches");
+        c.eqBytes(s1.body, s1.bodyLength(), "hello", "string param bound");
+
+        HttpResponse s2 = r.dispatch(HttpRequest.of("GET", "/s/a%2Fb"));
+        c.eqInt((int64) s2.statusCode(), 200, "string param percent-decoded match");
+        c.eqBytes(s2.body, s2.bodyLength(), "a/b", "string param percent-decoded");
+
+        // A digit path still matches a string param (types don't leak).
+        HttpResponse s3 = r.dispatch(HttpRequest.of("GET", "/s/42"));
+        c.eqInt((int64) s3.statusCode(), 200, "string param accepts digits");
+        c.eqBytes(s3.body, s3.bodyLength(), "42", "string param digit body");
+
+        // Explicit {v:string} behaves exactly like {v}.
+        HttpResponse s4 = r.dispatch(HttpRequest.of("GET", "/s2/world"));
+        c.eqInt((int64) s4.statusCode(), 200, "explicit string type matches");
+        c.eqBytes(s4.body, s4.bodyLength(), "world", "explicit string type bound");
+
+        // -- 404 vs 405: a type mismatch is 404, never 405 ------------------
+        // POST /i64/42 : path matches, method differs -> 405 + Allow: GET.
+        HttpResponse m405 = r.dispatch(HttpRequest.of("POST", "/i64/42"));
+        c.eqInt((int64) m405.statusCode(), 405, "typed path, wrong method is 405");
+        String allow = m405.getHeaders().get("Allow");
+        c.that(allow != null && allow.equals("GET"), "typed 405 carries Allow: GET");
+
+        // POST /i64/abc : path does NOT match (type mismatch) -> 404, not 405.
+        c.eqInt((int64) RouterTests.status(r, "POST", "/i64/abc"), 404,
+                "typed mismatch is 404 even for a registered path prefix");
+    }
+}
