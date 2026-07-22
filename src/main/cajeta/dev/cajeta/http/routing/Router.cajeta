@@ -203,6 +203,97 @@ public class Router {
         return this.routeCount;
     }
 
+    // -- mounting (http:1.7c) ----------------------------------------------
+
+    /**
+     * Nest `sub`'s routes under `prefix` (`/tenant/{tid}`), returning the
+     * borrowed `this` so mounts chain. Each of `sub`'s routes is registered
+     * on this router with its pattern **prefixed** — a route `GET
+     * /users/{id}` mounted under `/tenant/{tid}` becomes `GET
+     * /tenant/{tid}/users/{id}`, so a dispatched request binds **both** the
+     * prefix params (`tid`) and the sub-route params (`id`) before the
+     * sub-handler runs.
+     *
+     * Because mounting **flattens** into this router's one route table, the
+     * whole surface — score-based precedence
+     * ([`Route.matchAndScore`](Route.cajeta)), first-match shadowing, and
+     * the `405`/`Allow` aggregation ([`allowHeader`](#allowHeader)) — is
+     * computed across the merged tree automatically: a more-specific direct
+     * route shadows a mounted param route, and `Allow` lists the methods of
+     * both direct and mounted routes for a path. The prefix may itself carry
+     * path params or wildcards; a prefix containing a non-terminal `**` is
+     * rejected at registration (the combined pattern would place `**`
+     * mid-path). `sub` is **borrowed** — its handlers are copied into this
+     * router (a handler value is freely shareable), so the caller may
+     * discard `sub` afterward.
+     */
+    public Router mount(String prefix, Router sub) {
+        int32 i = 0;
+        while (i < sub.routeCount) {
+            Route r = sub.routes[i];
+            String combined = Router.joinPattern(prefix, r.pattern);
+            this.route(r.method, combined, r.handler);
+            i = i + 1;
+        }
+        return this;
+    }
+
+    /**
+     * Compose a mount `prefix` and a sub-route `pattern` into one absolute
+     * pattern by concatenating their segments — `/tenant/{tid}` +
+     * `/users/{id}` → `/tenant/{tid}/users/{id}` — normalizing slashes (each
+     * is split with the same rules [`dispatch`](#dispatch) applies to a
+     * request path, so leading/trailing/duplicate `/` collapse cleanly). An
+     * empty combination yields the root `"/"`.
+     */
+    static #String joinPattern(String prefix, String subPattern) {
+        String[] pa = Router.splitPath(prefix);
+        String[] sb = Router.splitPath(subPattern);
+        int32 pn = pa.count();
+        int32 bn = sb.count();
+        if (pn + bn == 0) {
+            return "/".substring(0, 1);
+        }
+        int32 len = 0;
+        int32 i = 0;
+        while (i < pn) {
+            len = len + 1 + pa[i].byteLength();       // '/' + segment
+            i = i + 1;
+        }
+        i = 0;
+        while (i < bn) {
+            len = len + 1 + sb[i].byteLength();
+            i = i + 1;
+        }
+        int8[] out = heap int8[len];
+        int32 dst = 0;
+        i = 0;
+        while (i < pn) {
+            dst = Router.copySeg(out, dst, pa[i]);
+            i = i + 1;
+        }
+        i = 0;
+        while (i < bn) {
+            dst = Router.copySeg(out, dst, sb[i]);
+            i = i + 1;
+        }
+        return heap String(#out, len);
+    }
+
+    /** Write `"/" + seg` into `out` at `dst`, returning the new cursor. */
+    static int32 copySeg(int8[] out, int32 dst, String seg) {
+        out[dst] = (int8) 47;                          // '/'
+        dst = dst + 1;
+        int32 n = seg.byteLength();
+        int32 j = 0;
+        while (j < n) {
+            out[dst] = seg.byteAt(j);
+            dst = dst + 1;
+            j = j + 1;
+        }
+        return dst;
+    }
+
     // -- dispatch -----------------------------------------------------------
 
     /**

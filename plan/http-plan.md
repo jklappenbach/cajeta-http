@@ -1088,11 +1088,36 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
       `CAJETA_ERROR_USE_AFTER_MOVE` on the second declaration. Dodge: give
       each branch's owned local a **distinct** name (`wName`/`pName`/
       `restName`). Error carries no file/line; bisect by `#ident` sites.
-  - [ ] **1.7c `mount(prefix, sub)`.** Nest a sub-router under a
+  - [x] **1.7c `mount(prefix, sub)`.** Nest a sub-router under a
     prefix; path params allowed in the prefix; 405/Allow computed
     across the merged tree.
     - TDD: nested dispatch with prefix params, mount-shadowing rules,
       405 aggregation across mounts.
+    - **Shipped:** `Router.mount(prefix, sub)` **flattens** — each of
+      `sub`'s routes is re-registered on the parent with its pattern
+      prefixed (`GET /users/{id}` under `/tenant/{tid}` →
+      `GET /tenant/{tid}/users/{id}`), via `Router.joinPattern` (segment
+      concat + slash normalization). Flattening means precedence
+      (`matchAndScore`), shadowing, and `405`/`Allow` aggregation all fall
+      out of the existing single-table dispatch across the merged tree — a
+      more-specific direct route shadows a mounted param route, and a
+      wrong-method request gets `Allow` listing both direct and mounted
+      methods (`"GET, POST"`). Prefix params/wildcards allowed; a prefix
+      with a non-terminal `**` is rejected (combined pattern places `**`
+      mid-path). `sub` is **borrowed** — handlers are copied (a function
+      value is freely shareable, as 1.7b's cross-router lambda reuse
+      proved), so the caller discards `sub` after. RouterTests +8 (suite
+      540 → **548**); 548/548 × 15 loops.
+  - [ ] **1.7d Per-route 413 thresholds** — split out 2026-07-22 from the
+    1.7 parent's scope note (per-route body caps attach at the route
+    table; the global `ServerLimits.maxBodyBytes` already rejects
+    pre-handler). NOT covered by 1.7a–c (those are pure dispatch); needs
+    **server-side** wiring — the matched route carries an optional
+    `maxBodyBytes` that overrides the global cap for that route, enforced
+    in the `HttpServer` request loop after routing resolves the match.
+    - TDD: a route with a tighter cap 413s an over-cap body while the
+      global limit would have allowed it; a route with a looser cap
+      admits a body the global limit would reject; unset = global default.
 - [x] **1.8** Server TLS termination — found unplanned during the
   2026-07-19 sweep: the client speaks `https` (shipped: `wrapTls` +
   ALPN offer + OS-trust verify) but `HttpServer` has **no TLS path**,

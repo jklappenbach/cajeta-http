@@ -15,6 +15,8 @@ import dev.cajeta.http.routing.Router;
  *   - 1.7b wildcards (`{p:*}` one segment, `{p:**}` rest of path):
  *     precedence literal > param > `*` > `**`, `**` binding incl. empty
  *     rest, and registration-time rejection of bad patterns.
+ *   - 1.7c `mount(prefix, sub)`: nested dispatch with prefix params,
+ *     mount-shadowing, and 405/Allow aggregated across the merged tree.
  */
 public final class RouterTests {
 
@@ -23,6 +25,8 @@ public final class RouterTests {
         typedParams(c);
         System.stdout.println("-- router: wildcards (1.7b) --");
         wildcards(c);
+        System.stdout.println("-- router: mount (1.7c) --");
+        mounts(c);
     }
 
     // Small helper: dispatch (method, target) and return the status code.
@@ -264,5 +268,59 @@ public final class RouterTests {
                "non-terminal ** rejected at registration");
         c.that(Router.patternError("/a/{x:bogus}") != null,
                "unknown path-param type rejected at registration");
+    }
+
+    static void mounts(Check c) {
+        (HttpRequest) -> #HttpResponse userH = (req) -> {
+            String tid = req.pathParam("tid");
+            String id = req.pathParam("id");
+            return RouterTests.text("T:" + tid + ",U:" + id);
+        };
+        (HttpRequest) -> #HttpResponse healthH = (req) ->
+            RouterTests.text("HEALTH");
+        (HttpRequest) -> #HttpResponse listH = (req) -> {
+            String id = req.pathParam("id");
+            return RouterTests.text("LIST:" + id);
+        };
+
+        // -- nested dispatch with prefix params ------------------------------
+        Router sub = heap Router();
+        sub.route("GET", "/users/{id}", userH);
+        sub.route("GET", "/health", healthH);
+        Router parent = heap Router();
+        parent.mount("/tenant/{tid}", sub);
+
+        c.eqStr(RouterTests.body(parent, "GET", "/tenant/acme/users/42"),
+                "T:acme,U:42", "mount: prefix param + sub param both bound");
+        c.eqStr(RouterTests.body(parent, "GET", "/tenant/acme/health"),
+                "HEALTH", "mount: nested literal route dispatches");
+        c.eqInt((int64) RouterTests.status(parent, "GET", "/tenant/acme/nope"),
+                404, "mount: unknown sub-path is 404");
+        c.eqInt((int64) RouterTests.status(parent, "GET", "/other/acme/health"),
+                404, "mount: prefix mismatch is 404");
+
+        // -- mount shadowing: a more-specific direct route beats the mount ---
+        Router sub2 = heap Router();
+        sub2.route("GET", "/{id}", listH);          // -> GET /api/{id}
+        Router p2 = heap Router();
+        p2.route("GET", "/api/health", healthH);    // literal, more specific
+        p2.mount("/api", sub2);
+        c.eqStr(RouterTests.body(p2, "GET", "/api/health"), "HEALTH",
+                "mount: literal parent route shadows mounted param route");
+        c.eqStr(RouterTests.body(p2, "GET", "/api/xyz"), "LIST:xyz",
+                "mount: mounted param route handles the rest");
+
+        // -- 405/Allow aggregated across the merged tree ---------------------
+        Router sub3 = heap Router();
+        sub3.route("POST", "/{id}", listH);         // -> POST /api2/{id}
+        Router p3 = heap Router();
+        p3.route("GET", "/api2/{id}", healthH);     // GET /api2/{id}
+        p3.mount("/api2", sub3);
+        HttpResponse d = p3.dispatch(HttpRequest.of("DELETE", "/api2/5"));
+        c.eqInt((int64) d.statusCode(), 405,
+                "mount: unmatched method across merged tree is 405");
+        String allow = d.getHeaders().get("Allow");
+        c.that(allow != null && allow.equals("GET, POST"),
+               "mount: Allow aggregates methods across direct + mounted routes");
     }
 }
