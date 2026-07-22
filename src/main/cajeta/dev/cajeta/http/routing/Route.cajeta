@@ -61,6 +61,19 @@ public class Route {
      */
     public boolean hasDoubleStar;
 
+    /**
+     * An optional **per-route body cap** in bytes (http:1.7d), or `0` when
+     * unset (the route inherits only the server's global
+     * `ServerLimits.maxBodyBytes`). When positive, [`Router.dispatch`](Router.cajeta)
+     * answers `413 Payload Too Large` before the handler runs for any
+     * request whose body — declared `Content-Length` or buffered bytes —
+     * exceeds it. A per-route cap only **tightens**: the global cap is the
+     * server-side pre-buffer gate; this refines it downward for one route
+     * (e.g. a login endpoint that accepts at most 1 KiB). Set via
+     * [`Router.routeLimited`](Router.cajeta#routeLimited).
+     */
+    public int64 maxBodyBytes;
+
     /** The handler to invoke when this route matches. */
     public (HttpRequest) -> #HttpResponse handler;
 
@@ -74,6 +87,7 @@ public class Route {
         this.method = method.substring(0, method.byteLength());
         this.pattern = pattern.substring(0, pattern.byteLength());
         this.handler = handler;
+        this.maxBodyBytes = 0;
         this.splitPattern(pattern);
         this.hasDoubleStar = this.computeDoubleStar();
     }

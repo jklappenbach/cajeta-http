@@ -122,6 +122,28 @@ public class Router {
     }
 
     /**
+     * Register a `handler` like [`route`](#route), but with a **per-route
+     * body cap** of `maxBodyBytes` (http:1.7d) — a request routed here whose
+     * body exceeds it gets `413 Payload Too Large` before the handler runs.
+     * The cap only **tightens** below the server's global
+     * `ServerLimits.maxBodyBytes` (the pre-buffer gate); pass `0` for no
+     * per-route cap (equivalent to [`route`](#route)). See
+     * [`Route.maxBodyBytes`](Route.cajeta#maxBodyBytes).
+     */
+    public Router routeLimited(String method, String pattern,
+                               int64 maxBodyBytes,
+                               (HttpRequest) -> #HttpResponse handler) {
+        String err = Router.patternError(pattern);
+        if (err != null) {
+            throw heap UnrecoverableException(#err);
+        }
+        Route r = heap Route(method, pattern, handler);
+        r.maxBodyBytes = maxBodyBytes;
+        this.append(#r);
+        return this;
+    }
+
+    /**
      * Validate a route `pattern` at **registration time**, returning `null`
      * when it is well-formed or a human-readable reason when it is not
      * (http:1.7b). [`route`](#route) calls this and raises a fatal
@@ -232,7 +254,7 @@ public class Router {
         while (i < sub.routeCount) {
             Route r = sub.routes[i];
             String combined = Router.joinPattern(prefix, r.pattern);
-            this.route(r.method, combined, r.handler);
+            this.routeLimited(r.method, combined, r.maxBodyBytes, r.handler);
             i = i + 1;
         }
         return this;
@@ -335,6 +357,12 @@ public class Router {
         // Pass 2 — re-bind the winner's params onto the request and dispatch.
         if (bestIdx >= 0) {
             Route chosen = this.routes[bestIdx];
+            // Per-route body cap (http:1.7d): reject an over-cap request with
+            // 413 before binding params or invoking the handler.
+            if (chosen.maxBodyBytes > (int64) 0
+                    && Router.overBodyCap(request, chosen.maxBodyBytes)) {
+                return HttpResponse.of(413);
+            }
             PathParams params = heap PathParams();
             chosen.matchAndScore(segs, segCount, params);
             request.bindPathParams(#params);
@@ -346,6 +374,23 @@ public class Router {
                                            segs, segCount);
         }
         return HttpResponse.of(404);
+    }
+
+    /**
+     * Whether `request`'s body exceeds `cap` bytes — the per-route `413`
+     * test (http:1.7d). Trusts **either** signal: a declared `Content-Length`
+     * over the cap (so an unbuffered/streaming request is rejected before it
+     * arrives) **or** already-buffered body bytes over the cap. `cap` is
+     * assumed positive (the caller guards on
+     * [`Route.maxBodyBytes`](Route.cajeta#maxBodyBytes) `> 0`).
+     */
+    static boolean overBodyCap(HttpRequest request, int64 cap) {
+        int64 declared = request.contentLength();     // -1 when absent
+        if (declared > cap) {
+            return true;
+        }
+        int64 buffered = (int64) request.bodyLength();
+        return buffered > cap;
     }
 
     // -- defaults -----------------------------------------------------------

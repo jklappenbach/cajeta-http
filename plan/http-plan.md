@@ -1018,7 +1018,7 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
       0.6.0 is local-olla only — tag v0.6.0 when ready so CI (remote
       Olla) resolves it; the http CI pin note from 1.6a still
       stands.**
-- [ ] **1.7** Router completeness — found unplanned during the
+- [x] **1.7** Router completeness — found unplanned during the
   2026-07-19 sweep: the extracted Router matches only literal and
   `{name}` (string) segments, but the spec promises typed params,
   wildcards, and nesting. *(Also owns **per-route 413 thresholds**,
@@ -1108,16 +1108,38 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
       value is freely shareable, as 1.7b's cross-router lambda reuse
       proved), so the caller discards `sub` after. RouterTests +8 (suite
       540 → **548**); 548/548 × 15 loops.
-  - [ ] **1.7d Per-route 413 thresholds** — split out 2026-07-22 from the
+  - [x] **1.7d Per-route 413 thresholds** — split out 2026-07-22 from the
     1.7 parent's scope note (per-route body caps attach at the route
     table; the global `ServerLimits.maxBodyBytes` already rejects
-    pre-handler). NOT covered by 1.7a–c (those are pure dispatch); needs
-    **server-side** wiring — the matched route carries an optional
-    `maxBodyBytes` that overrides the global cap for that route, enforced
-    in the `HttpServer` request loop after routing resolves the match.
+    pre-handler). NOT covered by 1.7a–c (those are pure dispatch).
     - TDD: a route with a tighter cap 413s an over-cap body while the
-      global limit would have allowed it; a route with a looser cap
-      admits a body the global limit would reject; unset = global default.
+      global limit would have allowed it; unset = no per-route restriction.
+    - **Shipped:** `Route` grows an optional `maxBodyBytes` (0 = unset),
+      set via **`Router.routeLimited(method, pattern, maxBodyBytes,
+      handler)`** and carried through `mount` (flattened routes keep their
+      cap). `Router.dispatch`, once it has selected the matched route,
+      answers `413` (via `Router.overBodyCap`) **before** binding params or
+      invoking the handler when the request's declared `Content-Length`
+      **or** buffered body exceeds the route's cap. RouterTests +8 (suite
+      548 → **556**); 556/556 × 15 loops, tour 17/17.
+    - **Design deviation from the original phrasing (and why):** the plan
+      said "enforced in the `HttpServer` request loop after routing resolves
+      the match." That does not fit the actual architecture — **routing is
+      userland**: `HttpServer.bind` takes a `(HttpRequest) -> #HttpResponse`
+      handler and the user's handler calls `router.dispatch`, so the server
+      never learns the matched route (it buffers the body against the global
+      cap first, then invokes the handler). The correct enforcement point is
+      therefore `Router.dispatch`, which is the only place that knows both
+      the matched route and the request. Consequence: a per-route cap only
+      **tightens** — it produces the correct `413` and bounds what reaches
+      the handler, but the *pre-buffer* DoS saving still belongs to the
+      global cap (the server may buffer up to the global limit before the
+      router rejects a tighter route). A "looser than global" per-route cap
+      is meaningless (the global already rejected pre-handler), so that TDD
+      leg was dropped. A future **Router-aware server mode** (bind a
+      `Router` directly so the loop can route the head and read the body
+      under the route's cap) would restore pre-buffer savings — noted, not
+      built.
 - [x] **1.8** Server TLS termination — found unplanned during the
   2026-07-19 sweep: the client speaks `https` (shipped: `wrapTls` +
   ALPN offer + OS-trust verify) but `HttpServer` has **no TLS path**,

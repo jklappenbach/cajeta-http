@@ -17,6 +17,9 @@ import dev.cajeta.http.routing.Router;
  *     rest, and registration-time rejection of bad patterns.
  *   - 1.7c `mount(prefix, sub)`: nested dispatch with prefix params,
  *     mount-shadowing, and 405/Allow aggregated across the merged tree.
+ *   - 1.7d per-route 413 thresholds: a route may carry a body cap tighter
+ *     than the global; over-cap requests 413 at dispatch before the
+ *     handler; unset inherits (no per-route restriction).
  */
 public final class RouterTests {
 
@@ -27,6 +30,15 @@ public final class RouterTests {
         wildcards(c);
         System.stdout.println("-- router: mount (1.7c) --");
         mounts(c);
+        System.stdout.println("-- router: per-route 413 (1.7d) --");
+        perRouteLimits(c);
+    }
+
+    // Dispatch (method, target) with an `n`-byte body, returning the status.
+    static int32 statusBody(Router r, String method, String target, int32 n) {
+        int8[] buf = heap int8[n];
+        HttpResponse resp = r.dispatch(HttpRequest.of(method, target).body(buf, n));
+        return resp.statusCode();
     }
 
     // Small helper: dispatch (method, target) and return the status code.
@@ -322,5 +334,52 @@ public final class RouterTests {
         String allow = d.getHeaders().get("Allow");
         c.that(allow != null && allow.equals("GET, POST"),
                "mount: Allow aggregates methods across direct + mounted routes");
+    }
+
+    static void perRouteLimits(Check c) {
+        (HttpRequest) -> #HttpResponse okH = (req) -> RouterTests.text("OK");
+
+        Router r = heap Router();
+        r.routeLimited("POST", "/upload", (int64) 100, okH);   // tight 100 B cap
+        r.route("POST", "/free", okH);                         // no per-route cap
+
+        // A tighter per-route cap 413s an over-cap body (the global cap,
+        // enforced server-side, would have admitted it).
+        c.eqInt((int64) RouterTests.statusBody(r, "POST", "/upload", 500), 413,
+                "per-route cap 413s an over-cap body");
+        // Within the cap, the handler runs (200).
+        c.eqInt((int64) RouterTests.statusBody(r, "POST", "/upload", 50), 200,
+                "per-route cap admits a within-cap body");
+        // Exactly at the cap is allowed (<=).
+        c.eqInt((int64) RouterTests.statusBody(r, "POST", "/upload", 100), 200,
+                "a body exactly at the cap is allowed");
+
+        // An unset per-route cap imposes no router-side restriction.
+        c.eqInt((int64) RouterTests.statusBody(r, "POST", "/free", 100000), 200,
+                "unset per-route cap admits a large body");
+
+        // A declared Content-Length over the cap 413s even with no buffered
+        // body (the router trusts the declared length too).
+        HttpResponse d = r.dispatch(
+            HttpRequest.of("POST", "/upload").setHeader("Content-Length", "1000"));
+        c.eqInt((int64) d.statusCode(), 413,
+                "declared Content-Length over cap 413s");
+        // The cap is per-route: a route without one admits the same declared body.
+        HttpResponse f = r.dispatch(
+            HttpRequest.of("POST", "/free").setHeader("Content-Length", "1000"));
+        c.eqInt((int64) f.statusCode(), 200,
+                "another route without a cap admits the same body");
+
+        // A per-route cap survives mounting into the merged tree.
+        Router sub = heap Router();
+        sub.routeLimited("POST", "/avatar", (int64) 100, okH);
+        Router parent = heap Router();
+        parent.mount("/users/{id}", sub);
+        c.eqInt((int64) RouterTests.statusBody(parent, "POST",
+                "/users/7/avatar", 500), 413,
+                "mounted route keeps its per-route cap");
+        c.eqInt((int64) RouterTests.statusBody(parent, "POST",
+                "/users/7/avatar", 50), 200,
+                "mounted route admits a within-cap body");
     }
 }
