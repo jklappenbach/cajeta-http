@@ -1536,7 +1536,7 @@ acceptance bar.
     (b) the fixed-frame parsers take `(buf, offset, length, …)` so the stream
     layer can call them against the reader's buffer at `payloadOffset()` with
     no copy — tests exercise them over `copyPayload()` for convenience.
-- [~] **3.3** Streams — 3.3a–d shipped; the multiplexing tail (3.3e) remains.
+- [x] **3.3** Streams — 3.3a–e shipped; the connection multiplexes on the wire.
   - **3.3a** (`Http2Settings`): SETTINGS state + validation, the preface matcher.
   - **3.3b** (`Http2Stream`/`Http2StreamTable`/`HeaderBlockAssembler`): the
     stream state machine, §5.1.1 id rules, CONTINUATION reassembly, and the
@@ -1552,15 +1552,37 @@ acceptance bar.
     response, GOAWAY/RST error contract. A **sequential** engine; a raw h2
     client proves GET, a DATA-body POST, and a 404 on the wire (5× green).
     PRIORITY parsed and ignored.
-  - **3.3e (remaining)**: the concurrency the sequential engine defers —
-    **fiber-per-stream** dispatch (needs the connection's write side —
-    AsyncWriter + a write Lock + the shared HpackEncoder — shared across the
-    reader fiber and N handler fibers), **flow-control parking** (park the
-    writer on a Channel when a window hits 0, wake on WINDOW_UPDATE), and
-    **RST_STREAM cancellation** of a running handler fiber. TDD still owed:
-    interleaved concurrent streams settle; window-exhaustion park+resume; RST
-    mid-response cancels. The 3.3c accounting + 3.3b state machine are the
-    pieces this wires up.
+  - **3.3e** (`Http2WriteSide`/`Http2SendGate` + reworked `Http2Connection`):
+    **multiplexing**. The reader fiber spawns a per-stream handler fiber into
+    the serving `scope`; handlers share the write half (`Http2WriteSide`: one
+    `Lock` serializes every socket write and keeps HPACK encode-order
+    consistent with the peer's decode) and send-flow/cancel state
+    (`Http2SendGate`: a condvar monitor — `takeUpTo` parks a writer when its
+    conn/stream window is exhausted, `grantConn/grantStream` wake it,
+    `cancel` stops it). Three wire tests, each looped green: **fiber-per-stream**
+    (`/slow` sleeps, `/fast` returns first → out-of-order completion, 5×);
+    **flow-control park+resume** (10-byte window → partial non-END chunk, then
+    WINDOW_UPDATE finishes the body, 5×); **RST_STREAM cancellation** (reset a
+    parked handler → it stops, no END_STREAM, a later stream still served and
+    the scope joins without timeout, 8×). Suite 1265 → 1283.
+    - Validated cajeta concurrency idioms (probed first, then shipped): share a
+      heap object across fibers by **plain borrow arg** (never `#` — that moves
+      it into one fiber), joined by an enclosing `scope`; `spawn` needs an
+      **unqualified** bare method name (`spawn f(...)`, not `spawn C.f(...)` →
+      `ASYNC_R3A`); the un-colored handler **function value** passes across a
+      fiber boundary and invokes via a local; `Cajeta.lock*/condvar*`
+      intrinsics are callable from library code for a custom condvar monitor;
+      `spawn` sites must be **lexical** to the joining `scope` (a completed
+      request is stashed in a field and spawned at the loop level).
+    - v1 limitation (noted in `Http2Connection`): request **bodies** use a
+      single assembly slot, so DATA for two streams must not interleave on the
+      wire — bodyless requests and non-interleaved bodies multiplex fully;
+      response bodies always do. Per-stream request assembly is the follow-on.
+    - Deferred, not yet wired: send-side stream-state transitions are omitted
+      from the handler path (the recv-side state machine — the validation that
+      matters — is intact); receive-window replenishment (server→client
+      WINDOW_UPDATE) is accounted but not emitted, so very large *uploads*
+      would eventually stall. Neither blocks 3.4/3.5.
 - [ ] **3.4** Negotiation: ALPN `h2` via the stdlib TLS (`supportAlpn`
   exists on `TlsListener`/`TlsStream`), h2c via `Upgrade: h2c` +
   `HTTP2-Settings`, prior-knowledge preface detection; the client
