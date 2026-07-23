@@ -1,0 +1,294 @@
+package dev.cajeta.http.sse;
+
+import cajeta.lang.String;
+
+/**
+ * The incremental **`text/event-stream` parser** (WHATWG SSE §9.2) — plan item
+ * **4.4a**, and the decode engine the [`SseClient`](../..) rides in 4.4c. Feed
+ * bytes as they arrive ([`feed`](#feed)); drain dispatched
+ * [`SseEvent`](SseEvent.cajeta)s ([`hasEvent`](#hasEvent)/[`nextEvent`](#nextEvent)).
+ *
+ * Handles the full line grammar: `\n`, `\r`, and `\r\n` endings; a leading UTF-8
+ * BOM stripped once; `:`-prefixed **comment** lines ignored (keep-alive); one
+ * leading space stripped after the field colon; multi-line `data:` joined with
+ * `\n`; `event`/`id`/`retry` fields; unknown fields ignored. A blank line
+ * dispatches the accumulated event — but only when a `data` field was present
+ * (an empty data buffer resets without dispatching, per spec); the last event
+ * `id` persists across events.
+ */
+public final class SseParser {
+    // current-event accumulators
+    String curEvent;
+    String curId;
+    int32 curRetry;
+    boolean hasData;
+    int8[] dataBuf;
+    int32 dataLen;
+
+    // line assembly
+    int8[] lineBuf;
+    int32 lineLen;
+    boolean lastCR;
+    boolean atStart;
+
+    // dispatched-event queue (FIFO)
+    SseEvent[] q;
+    int32 qHead;
+    int32 qTail;
+    int32 qCount;
+    int32 qCap;
+
+    public SseParser() {
+        this.curEvent = null;
+        this.curId = null;
+        this.curRetry = -1;
+        this.hasData = false;
+        this.dataBuf = heap int8[64];
+        this.dataLen = 0;
+        this.lineBuf = heap int8[64];
+        this.lineLen = 0;
+        this.lastCR = false;
+        this.atStart = true;
+        this.qCap = 8;
+        this.q = heap SseEvent[8];
+        this.qHead = 0;
+        this.qTail = 0;
+        this.qCount = 0;
+    }
+
+    /** Feed `n` bytes of the event stream. */
+    public void feed(int8[] bytes, int32 n) {
+        int32 i = 0;
+        // Strip a single leading UTF-8 BOM (EF BB BF) at the very start.
+        if (this.atStart && n >= 3
+                && (((int32) bytes[0]) & 0xFF) == 0xEF
+                && (((int32) bytes[1]) & 0xFF) == 0xBB
+                && (((int32) bytes[2]) & 0xFF) == 0xBF) {
+            i = 3;
+        }
+        this.atStart = false;
+        while (i < n) {
+            int8 b = bytes[i];
+            if (b == (int8) 13) {            // CR
+                this.processLine();
+                this.lastCR = true;
+            } else if (b == (int8) 10) {     // LF
+                if (this.lastCR) {
+                    this.lastCR = false;     // swallow the LF of a CRLF
+                } else {
+                    this.processLine();
+                }
+            } else {
+                this.lastCR = false;
+                this.appendLine(b);
+            }
+            i = i + 1;
+        }
+    }
+
+    void appendLine(int8 b) {
+        if (this.lineLen >= this.lineBuf.count()) {
+            this.lineBuf = SseParser.grow(this.lineBuf, this.lineLen);
+        }
+        this.lineBuf[this.lineLen] = b;
+        this.lineLen = this.lineLen + 1;
+    }
+
+    void appendData(int8[] src, int32 start, int32 end) {
+        int32 need = this.dataLen + (end - start) + 1;
+        while (need > this.dataBuf.count()) {
+            this.dataBuf = SseParser.grow(this.dataBuf, this.dataBuf.count());
+        }
+        int32 k = start;
+        while (k < end) {
+            this.dataBuf[this.dataLen] = src[k];
+            this.dataLen = this.dataLen + 1;
+            k = k + 1;
+        }
+        this.dataBuf[this.dataLen] = (int8) 10;   // '\n' between data segments
+        this.dataLen = this.dataLen + 1;
+        this.hasData = true;
+    }
+
+    // Process one complete line (the current lineBuf), then reset it.
+    void processLine() {
+        int32 len = this.lineLen;
+        this.lineLen = 0;
+        if (len == 0) {
+            this.dispatch();
+            return;
+        }
+        if (this.lineBuf[0] == (int8) 58) {   // ':' -> comment
+            return;
+        }
+        // Split on the first ':'.
+        int32 colon = -1;
+        int32 i = 0;
+        while (i < len && colon < 0) {
+            if (this.lineBuf[i] == (int8) 58) {
+                colon = i;
+            }
+            i = i + 1;
+        }
+        int32 fieldEnd = len;
+        int32 valStart = len;
+        if (colon >= 0) {
+            fieldEnd = colon;
+            valStart = colon + 1;
+            if (valStart < len && this.lineBuf[valStart] == (int8) 32) {
+                valStart = valStart + 1;   // strip one leading space
+            }
+        }
+        String field = SseParser.sliceStr(this.lineBuf, 0, fieldEnd);
+        if (field.equals("data")) {
+            this.appendData(this.lineBuf, valStart, len);
+        } else if (field.equals("event")) {
+            this.curEvent = SseParser.sliceStr(this.lineBuf, valStart, len);
+        } else if (field.equals("id")) {
+            // Ignore an id containing NUL (spec); otherwise it's the new last id.
+            if (!SseParser.hasNul(this.lineBuf, valStart, len)) {
+                this.curId = SseParser.sliceStr(this.lineBuf, valStart, len);
+            }
+        } else if (field.equals("retry")) {
+            int32 r = SseParser.parseDigits(this.lineBuf, valStart, len);
+            if (r >= 0) {
+                this.curRetry = r;
+            }
+        }
+        // Unknown field: ignored.
+    }
+
+    // A blank line dispatches the accumulated event (if any data was seen).
+    void dispatch() {
+        if (!this.hasData) {
+            this.curEvent = null;   // reset type, keep last id (spec)
+            return;
+        }
+        // Strip one trailing '\n' from the data buffer.
+        int32 dl = this.dataLen;
+        if (dl > 0 && this.dataBuf[dl - 1] == (int8) 10) {
+            dl = dl - 1;
+        }
+        SseEvent e = heap SseEvent();
+        e.data = SseParser.bytesToStr(this.dataBuf, dl);
+        if (this.curEvent != null) {
+            e.event = this.curEvent.substring(0, this.curEvent.byteLength());
+        }
+        if (this.curId != null) {
+            e.id = this.curId.substring(0, this.curId.byteLength());
+        }
+        e.retry = this.curRetry;
+        this.enqueue(#e);
+
+        // Reset per-event state (last id + retry persist across events).
+        this.curEvent = null;
+        this.dataLen = 0;
+        this.hasData = false;
+    }
+
+    // -- queue --------------------------------------------------------------
+
+    void enqueue(#SseEvent e) {
+        if (this.qCount == this.qCap) {
+            this.growQueue();
+        }
+        this.q[this.qTail] = #e;
+        this.qTail = (this.qTail + 1) % this.qCap;
+        this.qCount = this.qCount + 1;
+    }
+
+    /** Whether a dispatched event is waiting. */
+    public boolean hasEvent() {
+        return this.qCount > 0;
+    }
+
+    /** Take the next dispatched event (transfers ownership out). */
+    public #SseEvent nextEvent() {
+        SseEvent e #= this.q[this.qHead];
+        this.qHead = (this.qHead + 1) % this.qCap;
+        this.qCount = this.qCount - 1;
+        return #e;
+    }
+
+    void growQueue() {
+        int32 nc = this.qCap * 2;
+        SseEvent[] nq = heap SseEvent[nc];
+        int32 i = 0;
+        while (i < this.qCount) {
+            int32 idx = (this.qHead + i) % this.qCap;
+            nq[i] #= #this.q[idx];
+            i = i + 1;
+        }
+        this.q #= nq;
+        this.qHead = 0;
+        this.qTail = this.qCount;
+        this.qCap = nc;
+    }
+
+    // -- helpers ------------------------------------------------------------
+
+    static #int8[] grow(int8[] buf, int32 atLeast) {
+        int32 nc = buf.count() * 2;
+        if (nc < atLeast + 1) {
+            nc = atLeast + 1;
+        }
+        int8[] nb = heap int8[nc];
+        int32 i = 0;
+        int32 n = buf.count();
+        while (i < n) {
+            nb[i] = buf[i];
+            i = i + 1;
+        }
+        return #nb;
+    }
+
+    static #String sliceStr(int8[] buf, int32 start, int32 end) {
+        return SseParser.bytesToStr2(buf, start, end);
+    }
+
+    static #String bytesToStr(int8[] buf, int32 len) {
+        return SseParser.bytesToStr2(buf, 0, len);
+    }
+
+    static #String bytesToStr2(int8[] buf, int32 start, int32 end) {
+        int32 n = end - start;
+        if (n < 0) {
+            n = 0;
+        }
+        int8[] out = heap int8[n];
+        int32 i = 0;
+        while (i < n) {
+            out[i] = buf[start + i];
+            i = i + 1;
+        }
+        return heap String(#out, n);
+    }
+
+    static boolean hasNul(int8[] buf, int32 start, int32 end) {
+        int32 i = start;
+        while (i < end) {
+            if (buf[i] == (int8) 0) {
+                return true;
+            }
+            i = i + 1;
+        }
+        return false;
+    }
+
+    static int32 parseDigits(int8[] buf, int32 start, int32 end) {
+        if (end <= start) {
+            return -1;
+        }
+        int32 v = 0;
+        int32 i = start;
+        while (i < end) {
+            int32 d = (((int32) buf[i]) & 0xFF) - 48;
+            if (d < 0 || d > 9) {
+                return -1;
+            }
+            v = v * 10 + d;
+            i = i + 1;
+        }
+        return v;
+    }
+}

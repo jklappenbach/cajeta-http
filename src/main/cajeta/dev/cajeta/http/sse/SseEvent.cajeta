@@ -1,0 +1,83 @@
+package dev.cajeta.http.sse;
+
+import cajeta.lang.String;
+
+/**
+ * One **Server-Sent Event** (WHATWG `text/event-stream`) — plan item **4.4a**.
+ * A value type: the optional [`event`](#event) type (null → the default
+ * `"message"`), the [`data`](#data) payload (a possibly multi-line string —
+ * each `\n` becomes its own `data:` line on the wire), the optional last-event
+ * [`id`](#id), and [`retry`](#retry) (a reconnection hint in ms, `-1` when
+ * unset).
+ *
+ * [`serialize`](#serialize) renders the wire form; the incremental
+ * [`SseParser`](SseParser.cajeta) is the inverse. Together they round-trip an
+ * event byte-for-byte for the common (non-degenerate) case.
+ */
+public final class SseEvent {
+    public String event;
+    public String data;
+    public String id;
+    public int32 retry;
+
+    public SseEvent() {
+        this.event = null;
+        this.data = "";
+        this.id = null;
+        this.retry = -1;
+    }
+
+    /** A `message` event carrying `data` (copied). */
+    public static #SseEvent of(String data) {
+        SseEvent e = heap SseEvent();
+        e.data = data.substring(0, data.byteLength());
+        return #e;
+    }
+
+    /** A typed event (`event:` field = `type`) carrying `data`. */
+    public static #SseEvent typed(String type, String data) {
+        SseEvent e = heap SseEvent();
+        e.event = type.substring(0, type.byteLength());
+        e.data = data.substring(0, data.byteLength());
+        return #e;
+    }
+
+    /** The event type, or `"message"` when no `event:` field was set. */
+    public String typeOrDefault() {
+        if (this.event == null) {
+            return "message";
+        }
+        return this.event;
+    }
+
+    /**
+     * Render this event to its `text/event-stream` wire bytes: an `event:` line
+     * (if typed), one `data:` line per `\n`-separated segment, `id:`/`retry:`
+     * lines when set, and the terminating blank line. Uses `\n` line endings.
+     */
+    public #int8[] serialize() {
+        String out = "";
+        if (this.event != null) {
+            out = out + "event: " + this.event + "\n";
+        }
+        int32 n = this.data.byteLength();
+        int32 start = 0;
+        int32 i = 0;
+        while (i <= n) {
+            if (i == n || this.data.byteAt(i) == (int8) 10) {
+                String line = this.data.substring(start, i);
+                out = out + "data: " + line + "\n";
+                start = i + 1;
+            }
+            i = i + 1;
+        }
+        if (this.id != null) {
+            out = out + "id: " + this.id + "\n";
+        }
+        if (this.retry >= 0) {
+            out = out + "retry: " + this.retry + "\n";
+        }
+        out = out + "\n";
+        return out.toBytes();
+    }
+}

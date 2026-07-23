@@ -65,6 +65,7 @@ public final class TestMain {
         WsPerMessageDeflateTests.run(c);
         WsConnectTests.run(c);
         WsHandlerTests.run(c);
+        SseTests.run(c);
 
         System.stdout.println("");
         System.stdout.println("=== {} passed, {} failed ===",
