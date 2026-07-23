@@ -1656,15 +1656,43 @@ the wire.
 
 ## 4 — WebSocket completeness + SSE
 
-- [ ] **4.1** `permessage-deflate` (RFC 7692) *(gated on 1.6b)*:
-  offer/accept negotiation (window bits, `*_no_context_takeover`
-  params), RSV1 discipline, per-message deflate with the sliding window
-  shared across messages under context takeover. Decision per the
-  spec's lean: **default on**, matching browsers.
-  - TDD: the RFC 7692 worked examples; round-trips with and without
-    context takeover in both roles; negotiation-reject falls back to
-    plain frames; RSV1 on a continuation frame rejects; compressed
-    control frames reject.
+- [x] **4.1** `permessage-deflate` (RFC 7692) — shipped, built bottom-up
+  in four commits (4.1a RSV1 frames, 4.1b codec, 4.1c negotiation, 4.1d
+  live integration). All TDD green (32 checks, **socket-free** to dodge the
+  loopback flakiness).
+  - **4.1a** (`WsFrame`/decoder/encoder): RSV1/RSV2/RSV3 on `WsFrame`; the
+    decoder captures RSV1 and, with `allowCompression()`, permits it on data
+    frames — RSV2/RSV3 and RSV1-on-control stay violations; the encoder emits
+    RSV1 in byte 0. TDD: RSV1 round-trip, and the three rejects.
+  - **4.1b** (`PerMessageDeflate`): wraps the codec's streaming
+    `DeflateStream`/`InflateStream` — sync-flush + strip the trailing
+    `00 00 FF FF` on compress, append it on decompress (§7.2.1) — with
+    per-direction context-takeover control (persistent window vs a fresh
+    stream per message). TDD: the §7.2.1 **"Hello" vector matches byte-for-byte**
+    (`f2 48 cd c9 c9 07 00`), plain round-trips, takeover shrinks a repeat
+    while `no_context_takeover` keeps it independent (both decode).
+  - **4.1c** (`WsCompression`/`PmdParams`): builds the client offer, decides
+    the server response, and interprets the reply into per-direction takeover
+    flags → codec. v1 fixes the window at 15 bits: honours `*_no_context_takeover`,
+    **declines** a `server_max_window_bits<15` demand, and treats absent/
+    unrelated input as disabled (plain-frame fallback). TDD: accept/echo, both
+    takeover flags, window decline/accept, fallback, client-perspective mirror.
+  - **4.1d** (message layer + `WebSocket` + `WsUpgrade`): the assembler flags a
+    message compressed from the first frame's RSV1, propagates it, and rejects
+    RSV1 on a continuation frame (§6.1). `WebSocket.enableCompression(PmdParams)`
+    wires the codec + decoder; `send`/`sendBinary` compress + set RSV1,
+    `receive` decompresses in place. `WsUpgrade.acceptServer/connectClient` gain
+    opt-in overloads that negotiate over `Sec-WebSocket-Extensions`. TDD: the
+    continuation reject + compressed flag; a **live send→receive round-trip**
+    (compressed masked frame smaller than plaintext, decoded byte-exact, via an
+    in-memory `MemChannel` — no socket); the server 101 echoes the negotiated
+    extension.
+  - Deferred: **default-on** compression (the spec's browser-matching lean) is
+    left to the 4.2 convenience layer — `WsUpgrade` is opt-in so existing WS
+    callers are unchanged. A full compressed **loopback** echo waits on the
+    stdlib loopback-reliability follow-up (see the Phase-3 flakiness note);
+    the socket-free `MemChannel` round-trip proves the same send→wire→receive
+    path without it. Autobahn 12.*/13.* (4.3) will exercise it over the wire.
 - [ ] **4.2** Convenience surfaces.
   - [ ] **4.2a One-line client connect.** `WebSocket.connect(url)` —
     `ws`/`wss` dial (TLS via stdlib), upgrade request,
