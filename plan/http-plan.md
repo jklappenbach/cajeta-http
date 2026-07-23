@@ -1536,17 +1536,31 @@ acceptance bar.
     (b) the fixed-frame parsers take `(buf, offset, length, …)` so the stream
     layer can call them against the reader's buffer at `payloadOffset()` with
     no copy — tests exercise them over `copyPayload()` for convenience.
-- [ ] **3.3** Streams: connection preface + SETTINGS handshake, the
-  stream state machine, connection- and stream-level flow control
-  (WINDOW_UPDATE accounting both directions), CONTINUATION reassembly,
-  multiplexed dispatch onto the same un-colored handler
-  (fiber-per-stream), RST_STREAM cancellation, GOAWAY. PRIORITY is
-  parsed and ignored (RFC 9113 deprecates the priority tree).
-  - TDD: interleaved concurrent streams over loopback settle correctly;
-    window exhaustion parks the writing fiber and WINDOW_UPDATE resumes
-    it; RST mid-body cancels the handler fiber; protocol-violation
-    catalogue (headers after end-stream, even/reused stream ids, …) →
-    GOAWAY/RST with the right codes.
+- [~] **3.3** Streams — 3.3a–d shipped; the multiplexing tail (3.3e) remains.
+  - **3.3a** (`Http2Settings`): SETTINGS state + validation, the preface matcher.
+  - **3.3b** (`Http2Stream`/`Http2StreamTable`/`HeaderBlockAssembler`): the
+    stream state machine, §5.1.1 id rules, CONTINUATION reassembly, and the
+    protocol-violation catalogue (headers after end-stream, even/reused ids,
+    DATA/RST on idle) → the exact §7 codes.
+  - **3.3c** (`Http2FlowWindow`/`Http2FlowController`): connection + per-stream
+    flow-control **accounting** both directions (WINDOW_UPDATE, overflow,
+    negative-window recovery, the §6.9.2 initial-window delta).
+  - **3.3d** (`Http2Requests`/`Http2Connection`): the **end-to-end exchange**
+    over loopback — preface + SETTINGS handshake, frame decode, request
+    assembly (HEADERS[+CONTINUATION][+DATA]…END_STREAM), dispatch onto the
+    same un-colored `(HttpRequest)->#HttpResponse` handler, HEADERS+DATA
+    response, GOAWAY/RST error contract. A **sequential** engine; a raw h2
+    client proves GET, a DATA-body POST, and a 404 on the wire (5× green).
+    PRIORITY parsed and ignored.
+  - **3.3e (remaining)**: the concurrency the sequential engine defers —
+    **fiber-per-stream** dispatch (needs the connection's write side —
+    AsyncWriter + a write Lock + the shared HpackEncoder — shared across the
+    reader fiber and N handler fibers), **flow-control parking** (park the
+    writer on a Channel when a window hits 0, wake on WINDOW_UPDATE), and
+    **RST_STREAM cancellation** of a running handler fiber. TDD still owed:
+    interleaved concurrent streams settle; window-exhaustion park+resume; RST
+    mid-response cancels. The 3.3c accounting + 3.3b state machine are the
+    pieces this wires up.
 - [ ] **3.4** Negotiation: ALPN `h2` via the stdlib TLS (`supportAlpn`
   exists on `TlsListener`/`TlsStream`), h2c via `Upgrade: h2c` +
   `HTTP2-Settings`, prior-knowledge preface detection; the client
