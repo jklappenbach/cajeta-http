@@ -1,0 +1,170 @@
+package dev.cajeta.http.h2;
+
+import cajeta.lang.String;
+
+/**
+ * The **HPACK decoder** (RFC 7541 §6) — plan item **3.1**. Turns an encoded
+ * field block into an [`HpackFieldList`](HpackFieldList.cajeta), evolving the
+ * shared [dynamic table](HpackDynamicTable.cajeta) as it goes. One decoder
+ * instance serves one connection's inbound direction; its dynamic table is
+ * stateful across blocks.
+ *
+ * The five representations (§6.1–§6.3):
+ *   - **Indexed** (`1xxxxxxx`): a full field from the static or dynamic table.
+ *   - **Literal + incremental indexing** (`01xxxxxx`): name (indexed or
+ *     literal) + literal value, appended to the dynamic table.
+ *   - **Literal without indexing** (`0000xxxx`) / **never indexed**
+ *     (`0001xxxx`): emitted but not indexed; never-indexed is flagged
+ *     `sensitive` so an intermediary re-encodes it the same way.
+ *   - **Dynamic table size update** (`001xxxxx`): re-bounds the dynamic table;
+ *     an update above the configured `SETTINGS_HEADER_TABLE_SIZE` is a
+ *     `COMPRESSION_ERROR`.
+ *
+ * Guards (the plan's size-bomb requirement): every string literal is capped
+ * before allocation ([`HpackString`](HpackString.cajeta)), an out-of-range
+ * table index is rejected, and the cumulative decoded list size is capped at
+ * `maxListSize` — a block whose fields sum past it raises
+ * [`HpackException`](HpackException.cajeta) rather than allocating unboundedly.
+ */
+public final class HpackDecoder {
+    HpackStaticTable staticTable;
+    HpackDynamicTable dyn;
+    Huffman huffman;
+    int32 maxDynAllowed;    // SETTINGS_HEADER_TABLE_SIZE upper bound
+    int32 maxListSize;      // decoded-list size cap (bomb guard)
+    int32 maxStringLen;     // per-literal length cap
+
+    public HpackDecoder(int32 maxDynamicTableSize) {
+        this.staticTable = heap HpackStaticTable();
+        this.dyn = heap HpackDynamicTable(maxDynamicTableSize);
+        this.huffman = heap Huffman();
+        this.maxDynAllowed = maxDynamicTableSize;
+        this.maxListSize = 65536;
+        this.maxStringLen = 16384;
+    }
+
+    /** Set the decoded-list size cap (SETTINGS_MAX_HEADER_LIST_SIZE analogue). */
+    public void setMaxHeaderListSize(int32 n) {
+        this.maxListSize = n;
+    }
+
+    /** Set the per-string-literal length cap. */
+    public void setMaxStringLength(int32 n) {
+        this.maxStringLen = n;
+    }
+
+    /** The dynamic table, borrowed — for inspection/testing of shared state. */
+    public HpackDynamicTable dynamicTable() {
+        return this.dyn;
+    }
+
+    /** Decode one complete field block into a fresh owned field list. */
+    public #HpackFieldList decode(int8[] block, int32 len) {
+        HpackReader r = heap HpackReader(block, len);
+        HpackFieldList out = heap HpackFieldList();
+        int32 total = 0;
+        while (r.hasMore()) {
+            int32 b = r.peekByte();
+            if ((b & 0x80) != 0) {
+                total = this.indexed(r, out, total);
+            } else if ((b & 0x40) != 0) {
+                total = this.literal(r, out, total, 6, true, false);
+            } else if ((b & 0x20) != 0) {
+                this.sizeUpdate(r);
+            } else if ((b & 0x10) != 0) {
+                total = this.literal(r, out, total, 4, false, true);
+            } else {
+                total = this.literal(r, out, total, 4, false, false);
+            }
+        }
+        return #out;
+    }
+
+    // §6.1 Indexed Header Field.
+    int32 indexed(HpackReader r, HpackFieldList out, int32 total) {
+        int64 idxL = r.readInteger(7);
+        int32 index = (int32) idxL;
+        if (index == 0) {
+            throw heap HpackException("HPACK indexed field with index 0");
+        }
+        String nm = this.nameForIndex(index);
+        String vl = this.valueForIndex(index);
+        int32 nt = this.charge(total, nm.byteLength() + vl.byteLength());
+        String nc = nm.substring(0, nm.byteLength());
+        String vc = vl.substring(0, vl.byteLength());
+        out.put(#nc, #vc);
+        return nt;
+    }
+
+    // §6.2 Literal Header Field (incremental / without / never indexed).
+    int32 literal(HpackReader r, HpackFieldList out, int32 total,
+                  int32 prefixBits, boolean index, boolean sensitive) {
+        int64 nameIdxL = r.readInteger(prefixBits);
+        int32 nameIdx = (int32) nameIdxL;
+        String name;
+        if (nameIdx == 0) {
+            String lit = HpackString.decode(r, this.huffman, this.maxStringLen);
+            name = #lit;
+        } else {
+            String borrowed = this.nameForIndex(nameIdx);
+            name = borrowed.substring(0, borrowed.byteLength());
+        }
+        String value = HpackString.decode(r, this.huffman, this.maxStringLen);
+        int32 nt = this.charge(total, name.byteLength() + value.byteLength());
+
+        if (index) {
+            // Add a copy to the dynamic table, then emit.
+            String tn = name.substring(0, name.byteLength());
+            String tv = value.substring(0, value.byteLength());
+            HpackField entry = heap HpackField(#tn, #tv, false);
+            this.dyn.add(#entry);
+            out.put(#name, #value);
+        } else {
+            out.putSensitive(#name, #value, sensitive);
+        }
+        return nt;
+    }
+
+    // §6.3 Dynamic Table Size Update.
+    void sizeUpdate(HpackReader r) {
+        int64 newMaxL = r.readInteger(5);
+        int32 newMax = (int32) newMaxL;
+        if (newMax > this.maxDynAllowed) {
+            throw heap HpackException(
+                "HPACK dynamic table size update exceeds settings maximum");
+        }
+        this.dyn.setMaxSize(newMax);
+    }
+
+    // Resolve an absolute HPACK index to a borrowed name.
+    String nameForIndex(int32 index) {
+        if (index >= 1 && index <= HpackStaticTable.COUNT) {
+            return this.staticTable.nameAt(index);
+        }
+        int32 d = index - HpackStaticTable.COUNT;
+        if (d >= 1 && d <= this.dyn.count()) {
+            return this.dyn.nameAt(d);
+        }
+        throw heap HpackException("HPACK name index out of range");
+    }
+
+    // Resolve an absolute HPACK index to a borrowed value.
+    String valueForIndex(int32 index) {
+        if (index >= 1 && index <= HpackStaticTable.COUNT) {
+            return this.staticTable.valueAt(index);
+        }
+        int32 d = index - HpackStaticTable.COUNT;
+        if (d >= 1 && d <= this.dyn.count()) {
+            return this.dyn.valueAt(d);
+        }
+        throw heap HpackException("HPACK index out of range");
+    }
+
+    int32 charge(int32 total, int32 add) {
+        int32 nt = total + add + 32;
+        if (nt > this.maxListSize) {
+            throw heap HpackException("HPACK decoded header list exceeds cap");
+        }
+        return nt;
+    }
+}
