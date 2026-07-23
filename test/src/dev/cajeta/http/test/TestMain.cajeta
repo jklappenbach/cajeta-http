@@ -45,6 +45,7 @@ public final class TestMain {
         ServerAcceptControlTests.run(c);
         WsTests.run(c);
         HpackPrimitiveTests.run(c);
+        HpackTableTests.run(c);
 
         System.stdout.println("");
         System.stdout.println("=== {} passed, {} failed ===",

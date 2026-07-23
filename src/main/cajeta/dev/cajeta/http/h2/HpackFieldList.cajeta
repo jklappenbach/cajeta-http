@@ -1,0 +1,80 @@
+package dev.cajeta.http.h2;
+
+import cajeta.lang.String;
+
+/**
+ * An ordered, growable list of [`HpackField`](HpackField.cajeta) — plan item
+ * **3.1**. Serves both directions of the codec: the
+ * [`HpackDecoder`](HpackDecoder.cajeta) emits the decoded header list into
+ * one, and the [`HpackEncoder`](HpackEncoder.cajeta) takes one as the header
+ * list to encode.
+ *
+ * Fields are owned; [`add`](#add)/[`put`](#put) move them in, and the backing
+ * array grows with the move idiom (each element moved through, never
+ * borrow-copied) so a grow never leaves the old array's drop pointing at a
+ * live element.
+ */
+public final class HpackFieldList {
+    HpackField[] items;
+    int32 cap;
+    int32 count;
+
+    public HpackFieldList() {
+        this.items = heap HpackField[8];
+        this.cap = 8;
+        this.count = 0;
+    }
+
+    /** Number of fields. */
+    public int32 size() {
+        return this.count;
+    }
+
+    /** The field at position `i` (0-based), borrowed. */
+    public HpackField at(int32 i) {
+        return this.items[i];
+    }
+
+    /** The name at position `i`, borrowed. */
+    public String nameAt(int32 i) {
+        return this.items[i].name;
+    }
+
+    /** The value at position `i`, borrowed. */
+    public String valueAt(int32 i) {
+        return this.items[i].value;
+    }
+
+    /** Append an owned field. */
+    public void add(#HpackField f) {
+        if (this.count == this.cap) {
+            this.grow();
+        }
+        this.items[this.count] = #f;
+        this.count = this.count + 1;
+    }
+
+    /** Append a non-sensitive (name, value) field. */
+    public void put(#String name, #String value) {
+        HpackField f = heap HpackField(#name, #value, false);
+        this.add(#f);
+    }
+
+    /** Append a field with an explicit sensitivity flag. */
+    public void putSensitive(#String name, #String value, boolean sensitive) {
+        HpackField f = heap HpackField(#name, #value, sensitive);
+        this.add(#f);
+    }
+
+    void grow() {
+        int32 nc = this.cap * 2;
+        HpackField[] ne = heap HpackField[nc];
+        int32 i = 0;
+        while (i < this.count) {
+            ne[i] #= #this.items[i];
+            i = i + 1;
+        }
+        this.items #= ne;
+        this.cap = nc;
+    }
+}

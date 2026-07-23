@@ -1,0 +1,34 @@
+package dev.cajeta.http.h2;
+
+import cajeta.lang.String;
+
+/**
+ * One header field for the HPACK codec (RFC 7541) — plan item **3.1**: a
+ * `name`, a `value`, and a `sensitive` flag. A sensitive field (e.g. an
+ * `authorization` or `cookie` carrying a session secret) is encoded as a
+ * **never-indexed** literal (§6.2.3) so it is never placed in the dynamic
+ * table and any intermediary must re-encode it the same way.
+ *
+ * Both strings are owned — a dynamic-table entry outlives the block it was
+ * decoded from, and a decoded output field outlives the codec's scratch.
+ */
+public final class HpackField {
+    public String name;
+    public String value;
+    public boolean sensitive;
+
+    public HpackField(#String name, #String value, boolean sensitive) {
+        this.name = #name;
+        this.value = #value;
+        this.sensitive = sensitive;
+    }
+
+    /**
+     * The RFC 7541 §4.1 entry size: name octets + value octets + 32 (the
+     * per-entry overhead that bounds dynamic-table memory regardless of how
+     * short the strings are).
+     */
+    public int32 entrySize() {
+        return this.name.byteLength() + this.value.byteLength() + 32;
+    }
+}

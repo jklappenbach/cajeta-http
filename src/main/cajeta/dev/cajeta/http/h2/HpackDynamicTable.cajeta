@@ -1,0 +1,144 @@
+package dev.cajeta.http.h2;
+
+import cajeta.lang.String;
+
+/**
+ * The HPACK **dynamic table** (RFC 7541 §2.3.2, §4) — plan item **3.1**. A
+ * FIFO of recently-seen header fields, shared connection state that both
+ * peers evolve in lock-step as blocks are encoded/decoded. Newest entries get
+ * the lowest **dynamic index** (1 = most recent); the absolute HPACK index of
+ * dynamic entry `d` is `61 + d` (past the 61 static entries), a mapping the
+ * codec applies.
+ *
+ * Size is accounted in octets per §4.1 (`name + value + 32`). Adding an entry
+ * evicts the oldest entries until it fits (§4.4); an entry larger than the
+ * whole table empties the table and is *not* inserted. A **table size update**
+ * (§6.3, [`setMaxSize`](#setMaxSize)) evicts down to the new bound.
+ *
+ * Entries are stored newest-first (`entries[0]` is dynamic index 1); insertion
+ * shifts the small array up by one and eviction moves the tail entry out to a
+ * dropping local — both via the move idiom, so the owned strings are never
+ * borrow-aliased across the shift.
+ */
+public final class HpackDynamicTable {
+    HpackField[] entries;   // newest at [0]
+    int32 cap;
+    int32 count;
+    int32 curSize;
+    int32 maxSize;
+
+    public HpackDynamicTable(int32 maxSize) {
+        this.entries = heap HpackField[16];
+        this.cap = 16;
+        this.count = 0;
+        this.curSize = 0;
+        this.maxSize = maxSize;
+    }
+
+    /** Current number of entries. */
+    public int32 count() {
+        return this.count;
+    }
+
+    /** Current size in octets. */
+    public int32 currentSize() {
+        return this.curSize;
+    }
+
+    /** The configured maximum size in octets. */
+    public int32 maxSize() {
+        return this.maxSize;
+    }
+
+    /** The name of dynamic entry `d` (1 = newest), borrowed. */
+    public String nameAt(int32 d) {
+        return this.entries[d - 1].name;
+    }
+
+    /** The value of dynamic entry `d` (1 = newest), borrowed. */
+    public String valueAt(int32 d) {
+        return this.entries[d - 1].value;
+    }
+
+    /**
+     * Add an entry, evicting the oldest as needed (§4.4). Takes ownership of
+     * `field`; if it cannot fit even in an empty table, the table is emptied
+     * and the field is dropped without being inserted.
+     */
+    public void add(#HpackField field) {
+        int32 fsize = field.entrySize();
+        while (this.count > 0 && this.curSize + fsize > this.maxSize) {
+            this.evictOldest();
+        }
+        if (fsize > this.maxSize) {
+            HpackField dead #= #field;   // does not fit; drop it
+            return;
+        }
+        if (this.count == this.cap) {
+            this.grow();
+        }
+        int32 k = this.count;
+        while (k > 0) {
+            this.entries[k] #= #this.entries[k - 1];
+            k = k - 1;
+        }
+        this.entries[0] = #field;
+        this.count = this.count + 1;
+        this.curSize = this.curSize + fsize;
+    }
+
+    /**
+     * Apply a dynamic table size update (§6.3): set the new maximum and evict
+     * the oldest entries until the table is within it.
+     */
+    public void setMaxSize(int32 newMax) {
+        this.maxSize = newMax;
+        while (this.count > 0 && this.curSize > this.maxSize) {
+            this.evictOldest();
+        }
+    }
+
+    void evictOldest() {
+        int32 last = this.count - 1;
+        HpackField dead #= #this.entries[last];
+        this.curSize = this.curSize - dead.entrySize();
+        this.count = this.count - 1;
+    }
+
+    void grow() {
+        int32 nc = this.cap * 2;
+        HpackField[] ne = heap HpackField[nc];
+        int32 i = 0;
+        while (i < this.count) {
+            ne[i] #= #this.entries[i];
+            i = i + 1;
+        }
+        this.entries #= ne;
+        this.cap = nc;
+    }
+
+    /** The dynamic index (1 = newest) of an exact (name, value) match, or 0. */
+    public int32 findField(String name, String value) {
+        int32 i = 0;
+        while (i < this.count) {
+            if (this.entries[i].name.equals(name)
+                    && this.entries[i].value.equals(value)) {
+                return i + 1;
+            }
+            i = i + 1;
+        }
+        return 0;
+    }
+
+    /** The dynamic index (1 = newest) of the newest name match, or 0. */
+    public int32 findName(String name) {
+        int32 i = 0;
+        while (i < this.count) {
+            if (this.entries[i].name.equals(name)) {
+                return i + 1;
+            }
+            i = i + 1;
+        }
+        return 0;
+    }
+}

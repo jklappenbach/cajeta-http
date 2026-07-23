@@ -1,0 +1,143 @@
+package dev.cajeta.http.test;
+
+import cajeta.lang.String;
+import dev.cajeta.http.h2.HpackStaticTable;
+import dev.cajeta.http.h2.HpackDynamicTable;
+import dev.cajeta.http.h2.HpackField;
+import dev.cajeta.http.h2.HpackFieldList;
+
+/**
+ * http:3.1b — the HPACK **tables** (RFC 7541 §2.3, §4): the fixed 61-entry
+ * static table (by-index + reverse lookups), the size-bounded dynamic table
+ * (FIFO order, §4.1 entry sizing `name + value + 32`, §4.4 eviction, §6.3
+ * size update), and the owned-field list used on both codec directions.
+ */
+public final class HpackTableTests {
+
+    static #String own(String s) {
+        return s.substring(0, s.byteLength());
+    }
+
+    static #HpackField field(String n, String v) {
+        return heap HpackField(HpackTableTests.own(n), HpackTableTests.own(v),
+                               false);
+    }
+
+    public static void run(Check c) {
+        System.stdout.println("-- hpack: static table (Appendix A) --");
+        HpackTableTests.staticTable(c);
+        System.stdout.println("-- hpack: dynamic table (4.x) --");
+        HpackTableTests.dynamicTable(c);
+        System.stdout.println("-- hpack: field list --");
+        HpackTableTests.fieldList(c);
+    }
+
+    static void staticTable(Check c) {
+        HpackStaticTable t = heap HpackStaticTable();
+        c.eqInt((int64) t.size(), (int64) 61, "static size 61");
+        c.eqStr(t.nameAt(1), ":authority", "static[1] name");
+        c.eqStr(t.valueAt(1), "", "static[1] value empty");
+        c.eqStr(t.nameAt(2), ":method", "static[2] name");
+        c.eqStr(t.valueAt(2), "GET", "static[2] value");
+        c.eqStr(t.nameAt(16), "accept-encoding", "static[16] name");
+        c.eqStr(t.valueAt(16), "gzip, deflate", "static[16] value");
+        c.eqStr(t.nameAt(61), "www-authenticate", "static[61] name");
+
+        c.eqInt((int64) t.findField(":method", "GET"), (int64) 2,
+                "findField :method GET -> 2");
+        c.eqInt((int64) t.findField(":method", "POST"), (int64) 3,
+                "findField :method POST -> 3");
+        c.eqInt((int64) t.findName(":method"), (int64) 2,
+                "findName :method -> 2 (lowest)");
+        c.eqInt((int64) t.findName(":status"), (int64) 8,
+                "findName :status -> 8");
+        c.eqInt((int64) t.findField("x-nope", "y"), (int64) 0,
+                "findField miss -> 0");
+        c.eqInt((int64) t.findName("x-nope"), (int64) 0,
+                "findName miss -> 0");
+    }
+
+    static void dynamicTable(Check c) {
+        HpackDynamicTable t = heap HpackDynamicTable(4096);
+        // C.2.1's entry sizes to 10 + 13 + 32 = 55.
+        HpackField f1 = HpackTableTests.field("custom-key", "custom-header");
+        t.add(#f1);
+        c.eqInt((int64) t.count(), (int64) 1, "dyn count 1");
+        c.eqInt((int64) t.currentSize(), (int64) 55, "dyn size 55 (C.2.1)");
+        c.eqStr(t.nameAt(1), "custom-key", "dyn[1] name");
+        c.eqStr(t.valueAt(1), "custom-header", "dyn[1] value");
+
+        // FIFO: newest gets index 1.
+        HpackField f2 = HpackTableTests.field("second", "two");
+        t.add(#f2);
+        c.eqInt((int64) t.count(), (int64) 2, "dyn count 2");
+        c.eqStr(t.nameAt(1), "second", "newest at index 1");
+        c.eqStr(t.nameAt(2), "custom-key", "older at index 2");
+        c.eqInt((int64) t.findField("custom-key", "custom-header"), (int64) 2,
+                "dyn findField -> 2");
+        c.eqInt((int64) t.findName("second"), (int64) 1, "dyn findName -> 1");
+        c.eqInt((int64) t.findField("second", "nope"), (int64) 0,
+                "dyn findField value miss -> 0");
+
+        // Eviction: cap the table so an add pushes the oldest out.
+        HpackDynamicTable e = heap HpackDynamicTable(100);
+        HpackField a = HpackTableTests.field("aaa", "bbb");   // 3+3+32 = 38
+        HpackField b = HpackTableTests.field("ccc", "ddd");   // 38
+        e.add(#a);
+        e.add(#b);
+        c.eqInt((int64) e.currentSize(), (int64) 76, "two entries -> 76");
+        HpackField d = HpackTableTests.field("eee", "fff");   // 38, 76+38=114 > 100
+        e.add(#d);
+        c.eqInt((int64) e.count(), (int64) 2, "eviction keeps 2");
+        c.eqInt((int64) e.currentSize(), (int64) 76, "size back to 76");
+        c.eqStr(e.nameAt(1), "eee", "newest kept");
+        c.eqStr(e.nameAt(2), "ccc", "middle kept");
+        c.eqInt((int64) e.findName("aaa"), (int64) 0, "oldest evicted");
+
+        // An entry larger than the whole table empties it and is not added.
+        HpackDynamicTable s = heap HpackDynamicTable(40);
+        HpackField small = HpackTableTests.field("aaa", "bbb");   // 38 <= 40
+        s.add(#small);
+        c.eqInt((int64) s.count(), (int64) 1, "small entry added");
+        HpackField big = HpackTableTests.field("aaaaaaaaaa", "bbbbbbbbbb");  // 10+10+32=52 > 40
+        s.add(#big);
+        c.eqInt((int64) s.count(), (int64) 0, "oversize entry empties table");
+        c.eqInt((int64) s.currentSize(), (int64) 0, "size 0 after oversize");
+
+        // Table size update (6.3) evicts down to the new bound.
+        HpackDynamicTable u = heap HpackDynamicTable(200);
+        HpackField u1 = HpackTableTests.field("k1", "v1");   // 2+2+32=36
+        HpackField u2 = HpackTableTests.field("k2", "v2");   // 36
+        HpackField u3 = HpackTableTests.field("k3", "v3");   // 36
+        u.add(#u1);
+        u.add(#u2);
+        u.add(#u3);
+        c.eqInt((int64) u.currentSize(), (int64) 108, "three entries -> 108");
+        u.setMaxSize(80);
+        c.eqInt((int64) u.count(), (int64) 2, "size update evicts to 2");
+        c.eqInt((int64) u.currentSize(), (int64) 72, "size update -> 72");
+        c.eqStr(u.nameAt(1), "k3", "newest survives size update");
+        u.setMaxSize(0);
+        c.eqInt((int64) u.count(), (int64) 0, "zero size clears the table");
+    }
+
+    static void fieldList(Check c) {
+        HpackFieldList list = heap HpackFieldList();
+        list.put(HpackTableTests.own(":method"), HpackTableTests.own("GET"));
+        list.put(HpackTableTests.own(":path"), HpackTableTests.own("/"));
+        c.eqInt((int64) list.size(), (int64) 2, "list size 2");
+        c.eqStr(list.nameAt(0), ":method", "list[0] name");
+        c.eqStr(list.valueAt(1), "/", "list[1] value");
+
+        // Grow past the initial capacity of 8 (the move-idiom grow).
+        HpackFieldList g = heap HpackFieldList();
+        int32 i = 0;
+        while (i < 20) {
+            g.put(HpackTableTests.own("h"), HpackTableTests.own("x"));
+            i = i + 1;
+        }
+        c.eqInt((int64) g.size(), (int64) 20, "list grows past cap");
+        c.eqStr(g.nameAt(19), "h", "grown list last element intact");
+        c.eqStr(g.nameAt(0), "h", "grown list first element intact");
+    }
+}

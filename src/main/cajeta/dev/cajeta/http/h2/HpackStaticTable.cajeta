@@ -1,0 +1,140 @@
+package dev.cajeta.http.h2;
+
+import cajeta.lang.String;
+
+/**
+ * The HPACK **static table** (RFC 7541 Appendix A) — plan item **3.1**. A
+ * fixed 61-entry list of the most common header (name, value) pairs plus the
+ * HTTP/2 pseudo-headers, addressable by index `1..61`. Index `0` is unused.
+ *
+ * Names and values are held as owned copies (built once at construction) so
+ * lookups borrow without allocating. Beyond by-index access the encoder needs
+ * the reverse direction: [`findField`](#findField) returns the index of an
+ * exact name+value match (or 0), and [`findName`](#findName) the lowest index
+ * whose name matches (or 0) — the two lookups that decide indexed vs literal
+ * representation.
+ */
+public final class HpackStaticTable {
+    public static final int32 COUNT = 61;
+
+    String[] names;    // [1..61]; [0] unused
+    String[] values;
+
+    public HpackStaticTable() {
+        String[] n = heap String[62];
+        String[] v = heap String[62];
+        String empty = "";
+        n[0] = empty.substring(0, 0);
+        v[0] = empty.substring(0, 0);
+        HpackStaticTable.set(n, v, 1, ":authority", "");
+        HpackStaticTable.set(n, v, 2, ":method", "GET");
+        HpackStaticTable.set(n, v, 3, ":method", "POST");
+        HpackStaticTable.set(n, v, 4, ":path", "/");
+        HpackStaticTable.set(n, v, 5, ":path", "/index.html");
+        HpackStaticTable.set(n, v, 6, ":scheme", "http");
+        HpackStaticTable.set(n, v, 7, ":scheme", "https");
+        HpackStaticTable.set(n, v, 8, ":status", "200");
+        HpackStaticTable.set(n, v, 9, ":status", "204");
+        HpackStaticTable.set(n, v, 10, ":status", "206");
+        HpackStaticTable.set(n, v, 11, ":status", "304");
+        HpackStaticTable.set(n, v, 12, ":status", "400");
+        HpackStaticTable.set(n, v, 13, ":status", "404");
+        HpackStaticTable.set(n, v, 14, ":status", "500");
+        HpackStaticTable.set(n, v, 15, "accept-charset", "");
+        HpackStaticTable.set(n, v, 16, "accept-encoding", "gzip, deflate");
+        HpackStaticTable.set(n, v, 17, "accept-language", "");
+        HpackStaticTable.set(n, v, 18, "accept-ranges", "");
+        HpackStaticTable.set(n, v, 19, "accept", "");
+        HpackStaticTable.set(n, v, 20, "access-control-allow-origin", "");
+        HpackStaticTable.set(n, v, 21, "age", "");
+        HpackStaticTable.set(n, v, 22, "allow", "");
+        HpackStaticTable.set(n, v, 23, "authorization", "");
+        HpackStaticTable.set(n, v, 24, "cache-control", "");
+        HpackStaticTable.set(n, v, 25, "content-disposition", "");
+        HpackStaticTable.set(n, v, 26, "content-encoding", "");
+        HpackStaticTable.set(n, v, 27, "content-language", "");
+        HpackStaticTable.set(n, v, 28, "content-length", "");
+        HpackStaticTable.set(n, v, 29, "content-location", "");
+        HpackStaticTable.set(n, v, 30, "content-range", "");
+        HpackStaticTable.set(n, v, 31, "content-type", "");
+        HpackStaticTable.set(n, v, 32, "cookie", "");
+        HpackStaticTable.set(n, v, 33, "date", "");
+        HpackStaticTable.set(n, v, 34, "etag", "");
+        HpackStaticTable.set(n, v, 35, "expect", "");
+        HpackStaticTable.set(n, v, 36, "expires", "");
+        HpackStaticTable.set(n, v, 37, "from", "");
+        HpackStaticTable.set(n, v, 38, "host", "");
+        HpackStaticTable.set(n, v, 39, "if-match", "");
+        HpackStaticTable.set(n, v, 40, "if-modified-since", "");
+        HpackStaticTable.set(n, v, 41, "if-none-match", "");
+        HpackStaticTable.set(n, v, 42, "if-range", "");
+        HpackStaticTable.set(n, v, 43, "if-unmodified-since", "");
+        HpackStaticTable.set(n, v, 44, "last-modified", "");
+        HpackStaticTable.set(n, v, 45, "link", "");
+        HpackStaticTable.set(n, v, 46, "location", "");
+        HpackStaticTable.set(n, v, 47, "max-forwards", "");
+        HpackStaticTable.set(n, v, 48, "proxy-authenticate", "");
+        HpackStaticTable.set(n, v, 49, "proxy-authorization", "");
+        HpackStaticTable.set(n, v, 50, "range", "");
+        HpackStaticTable.set(n, v, 51, "referer", "");
+        HpackStaticTable.set(n, v, 52, "refresh", "");
+        HpackStaticTable.set(n, v, 53, "retry-after", "");
+        HpackStaticTable.set(n, v, 54, "server", "");
+        HpackStaticTable.set(n, v, 55, "set-cookie", "");
+        HpackStaticTable.set(n, v, 56, "strict-transport-security", "");
+        HpackStaticTable.set(n, v, 57, "transfer-encoding", "");
+        HpackStaticTable.set(n, v, 58, "user-agent", "");
+        HpackStaticTable.set(n, v, 59, "vary", "");
+        HpackStaticTable.set(n, v, 60, "via", "");
+        HpackStaticTable.set(n, v, 61, "www-authenticate", "");
+        this.names = #n;
+        this.values = #v;
+    }
+
+    // Store owned copies of the literal name/value into slot `i`.
+    static void set(String[] n, String[] v, int32 i, String nm, String vl) {
+        String nc = nm.substring(0, nm.byteLength());
+        n[i] = #nc;
+        String vc = vl.substring(0, vl.byteLength());
+        v[i] = #vc;
+    }
+
+    /** Number of entries (61). */
+    public int32 size() {
+        return HpackStaticTable.COUNT;
+    }
+
+    /** The name at index `i` (1..61), borrowed. */
+    public String nameAt(int32 i) {
+        return this.names[i];
+    }
+
+    /** The value at index `i` (1..61), borrowed. */
+    public String valueAt(int32 i) {
+        return this.values[i];
+    }
+
+    /** The index of an exact (name, value) match, or 0 if none. */
+    public int32 findField(String name, String value) {
+        int32 i = 1;
+        while (i <= HpackStaticTable.COUNT) {
+            if (this.names[i].equals(name) && this.values[i].equals(value)) {
+                return i;
+            }
+            i = i + 1;
+        }
+        return 0;
+    }
+
+    /** The lowest index whose name matches, or 0 if none. */
+    public int32 findName(String name) {
+        int32 i = 1;
+        while (i <= HpackStaticTable.COUNT) {
+            if (this.names[i].equals(name)) {
+                return i;
+            }
+            i = i + 1;
+        }
+        return 0;
+    }
+}
