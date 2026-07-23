@@ -1,0 +1,393 @@
+package dev.cajeta.http.h2;
+
+import cajeta.io.net.AsyncReader;
+import cajeta.io.net.AsyncWriter;
+import cajeta.io.net.NetException;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+
+/**
+ * A server-side **HTTP/2 connection** (RFC 9113) — plan item **3.3**. Drives
+ * the full connection lifecycle over an [`AsyncReader`](../AsyncReader.cajeta)/
+ * [`AsyncWriter`](../AsyncWriter.cajeta): validate the client preface, exchange
+ * SETTINGS, then decode frames and turn each request stream into an
+ * `HttpRequest` for the shared, un-colored `(HttpRequest) -> #HttpResponse`
+ * handler, encoding the `HttpResponse` back into HEADERS+DATA frames.
+ *
+ * This is the **sequential** engine (3.3d): one request is assembled and served
+ * to completion before the next frame is read. It wires the whole stack — HPACK
+ * ([`HpackDecoder`](HpackDecoder.cajeta)/[`HpackEncoder`](HpackEncoder.cajeta)),
+ * the frame codec, the stream state machine, CONTINUATION reassembly — end to
+ * end on the wire, and honours the protocol-error contract: a connection error
+ * emits `GOAWAY` with the §7 code, a stream error emits `RST_STREAM`. Concurrent
+ * fiber-per-stream dispatch, flow-control parking, and RST cancellation are the
+ * follow-on (3.3e); the flow-control *accounting* types are already wired.
+ */
+public final class Http2Connection {
+    AsyncReader reader;
+    AsyncWriter writer;
+    (HttpRequest) -> #HttpResponse handler;
+
+    HpackDecoder hdec;
+    HpackEncoder henc;
+    Http2Settings local;
+    Http2Settings remote;
+    Http2FlowController flow;
+    Http2StreamTable streams;
+    HeaderBlockAssembler assembler;
+
+    // In-progress request assembly (sequential: at most one at a time).
+    int32 curStreamId;
+    HttpRequest curRequest;
+    boolean curHasHeaders;
+    boolean hdrEndStream;      // END_STREAM of a HEADERS block awaiting CONTINUATION
+    int8[] curBody;
+    int32 curBodyLen;
+    int32 curBodyCap;
+
+    public Http2Connection(AsyncReader reader, AsyncWriter writer,
+                           (HttpRequest) -> #HttpResponse handler) {
+        this.reader = reader;
+        this.writer = writer;
+        this.handler = #handler;
+        this.hdec = heap HpackDecoder(Http2.DEFAULT_HEADER_TABLE_SIZE);
+        this.henc = heap HpackEncoder(Http2.DEFAULT_HEADER_TABLE_SIZE, true);
+        this.local = heap Http2Settings();
+        this.local.maxConcurrentStreams = (int64) 100;
+        this.remote = heap Http2Settings();
+        this.flow = heap Http2FlowController(Http2.DEFAULT_INITIAL_WINDOW_SIZE,
+                                             Http2.DEFAULT_INITIAL_WINDOW_SIZE);
+        this.streams = heap Http2StreamTable();
+        this.assembler = heap HeaderBlockAssembler();
+        this.curStreamId = 0;
+        this.curRequest = null;
+        this.curHasHeaders = false;
+        this.hdrEndStream = false;
+        this.curBody = heap int8[256];
+        this.curBodyLen = 0;
+        this.curBodyCap = 256;
+    }
+
+    /** Serve one HTTP/2 connection to completion (server role). */
+    public static void serve(AsyncReader reader, AsyncWriter writer,
+                             (HttpRequest) -> #HttpResponse handler) {
+        Http2Connection c = heap Http2Connection(reader, writer, #handler);
+        try {
+            c.run();
+        } catch (Http2Exception e) {
+            // A protocol fault that escaped the per-frame handler: the peer is
+            // already being torn down (GOAWAY sent); nothing more to do.
+        } catch (NetException e) {
+            // The connection dropped (client closed); a normal end.
+        }
+    }
+
+    void run() {
+        int8[] pf = heap int8[24];
+        if (!this.readFully(pf, 24)) {
+            return;
+        }
+        if (!Http2.matchesPreface(pf, 0, 24)) {
+            this.sendGoaway(Http2.PROTOCOL_ERROR);
+            return;
+        }
+        this.sendOurSettings();
+
+        boolean running = true;
+        while (running) {
+            int8[] hdr = heap int8[9];
+            if (!this.readFully(hdr, 9)) {
+                running = false;
+            } else {
+                running = this.readAndDispatch(hdr);
+            }
+        }
+    }
+
+    // Read the payload named by `hdr` and dispatch one frame. Returns false to
+    // stop the loop. A connection error -> GOAWAY + stop; a stream error ->
+    // RST_STREAM + continue.
+    boolean readAndDispatch(int8[] hdr) {
+        Http2FrameHeader h = Http2FrameHeader(hdr);
+        int32 type = h.typeCode();
+        int32 flags = h.flags();
+        int32 sid = h.streamId();
+        int32 len = h.length();
+        if (len > (int32) this.local.maxFrameSize) {
+            this.sendGoaway(Http2.FRAME_SIZE_ERROR);
+            return false;
+        }
+        int8[] payload = heap int8[len];
+        if (len > 0) {
+            this.reader.readExact(payload, 0, len);
+        }
+        if (this.assembler.isOpen() && type != Http2.FRAME_CONTINUATION) {
+            this.sendGoaway(Http2.PROTOCOL_ERROR);
+            return false;
+        }
+        boolean cont = true;
+        try {
+            cont = this.dispatchFrame(type, flags, sid, payload, len);
+        } catch (Http2Exception e) {
+            if (e.isConnectionError()) {
+                this.sendGoaway(e.errorCode);
+                cont = false;
+            } else {
+                this.sendRst(e.streamId, e.errorCode);
+            }
+        }
+        return cont;
+    }
+
+    boolean dispatchFrame(int32 type, int32 flags, int32 sid, int8[] payload,
+                          int32 len) {
+        if (type == Http2.FRAME_SETTINGS) {
+            this.onSettings(flags, payload, len, sid);
+        } else if (type == Http2.FRAME_HEADERS) {
+            this.onHeaders(flags, sid, payload, len);
+        } else if (type == Http2.FRAME_CONTINUATION) {
+            this.onContinuation(flags, sid, payload, len);
+        } else if (type == Http2.FRAME_DATA) {
+            this.onData(flags, sid, payload, len);
+        } else if (type == Http2.FRAME_WINDOW_UPDATE) {
+            this.onWindowUpdate(sid, payload, len);
+        } else if (type == Http2.FRAME_RST_STREAM) {
+            this.onRstStream(sid, payload, len);
+        } else if (type == Http2.FRAME_PING) {
+            this.onPing(flags, sid, payload, len);
+        } else if (type == Http2.FRAME_PRIORITY) {
+            Http2Frames.validatePriority(len, sid);
+        } else if (type == Http2.FRAME_GOAWAY) {
+            return false;
+        }
+        // Unknown frame types are ignored (RFC 9113 §4.1).
+        return true;
+    }
+
+    // -- inbound frame handlers ---------------------------------------------
+
+    void onSettings(int32 flags, int8[] payload, int32 len, int32 sid) {
+        if ((flags & Http2.FLAG_ACK) != 0) {
+            return;
+        }
+        Http2SettingsList list = Http2Frames.parseSettings(payload, 0, len,
+                                                           flags, sid);
+        this.remote.apply(list);
+        this.flow.setPeerMaxFrame((int32) this.remote.maxFrameSize);
+        this.sendSettingsAck();
+    }
+
+    void onHeaders(int32 flags, int32 sid, int8[] payload, int32 len) {
+        boolean endStream = (flags & Http2.FLAG_END_STREAM) != 0;
+        boolean endHeaders = (flags & Http2.FLAG_END_HEADERS) != 0;
+        this.streams.openIfAbsent(sid);
+        this.streams.recvHeaders(sid, endStream);
+        Http2Payload reg = Http2ContentFrames.parseHeaders(payload, len, flags,
+                                                           sid);
+        if (endHeaders) {
+            int8[] block = Http2Connection.slice(payload, reg.offset, reg.length);
+            this.completeRequest(sid, block, reg.length, endStream);
+        } else {
+            this.assembler.begin(sid, payload, reg.offset, reg.length);
+            this.hdrEndStream = endStream;
+        }
+    }
+
+    void onContinuation(int32 flags, int32 sid, int8[] payload, int32 len) {
+        boolean endHeaders = (flags & Http2.FLAG_END_HEADERS) != 0;
+        this.assembler.continueOn(sid, payload, 0, len);
+        if (endHeaders) {
+            int8[] block = this.assembler.complete();
+            this.completeRequest(sid, block, (int32) block.count(),
+                                 this.hdrEndStream);
+        }
+    }
+
+    void completeRequest(int32 sid, int8[] block, int32 blockLen,
+                         boolean endStream) {
+        HpackFieldList fields = this.hdec.decode(block, blockLen);
+        HttpRequest req = Http2Requests.fromFields(fields);
+        if (endStream) {
+            this.dispatchRequest(sid, #req, false);
+        } else {
+            this.curStreamId = sid;
+            this.curRequest = #req;
+            this.curHasHeaders = true;
+            this.curBodyLen = 0;
+        }
+    }
+
+    void onData(int32 flags, int32 sid, int8[] payload, int32 len) {
+        boolean endStream = (flags & Http2.FLAG_END_STREAM) != 0;
+        if (!this.streams.has(sid)) {
+            throw heap Http2Exception("DATA on unknown stream",
+                                      Http2.PROTOCOL_ERROR);
+        }
+        this.streams.recvData(sid, endStream);
+        this.flow.afterReceive(len);
+        Http2Payload reg = Http2ContentFrames.parseData(payload, len, flags, sid);
+        this.appendBody(payload, reg.offset, reg.length);
+        if (endStream) {
+            HttpRequest req #= this.curRequest;
+            this.curRequest = null;
+            this.curHasHeaders = false;
+            req.body(this.curBody, this.curBodyLen);
+            this.dispatchRequest(sid, #req, false);
+        }
+    }
+
+    void onWindowUpdate(int32 sid, int8[] payload, int32 len) {
+        int32 inc = Http2Frames.parseWindowUpdate(payload, 0, len, sid);
+        if (sid == 0) {
+            this.flow.connSend.increase(inc, 0);
+        }
+        // Per-stream send windows arrive with fiber-per-stream (3.3e).
+    }
+
+    void onRstStream(int32 sid, int8[] payload, int32 len) {
+        int64 code = Http2Frames.parseRstStream(payload, 0, len, sid);
+        if (this.streams.has(sid)) {
+            this.streams.recvRst(sid);
+        }
+        if (this.curStreamId == sid) {
+            this.curRequest = null;
+            this.curHasHeaders = false;
+        }
+    }
+
+    void onPing(int32 flags, int32 sid, int8[] payload, int32 len) {
+        Http2Frames.validatePing(len, sid);
+        if ((flags & Http2.FLAG_ACK) == 0) {
+            Http2FrameWriter fw = heap Http2FrameWriter();
+            Http2Frames.writePing(fw, payload, true);
+            this.writeOut(fw);
+        }
+    }
+
+    // -- request dispatch + response ----------------------------------------
+
+    void dispatchRequest(int32 sid, #HttpRequest req, boolean unused) {
+        HttpRequest r #= req;
+        (HttpRequest) -> #HttpResponse h = this.handler;
+        HttpResponse resp = h(r);
+        this.writeResponse(sid, resp);
+    }
+
+    void writeResponse(int32 sid, HttpResponse resp) {
+        HpackFieldList fields = Http2Requests.responseFields(resp);
+        int8[] block = this.henc.encode(fields);
+        int32 blockLen = (int32) block.count();
+        boolean hasBody = resp.hasBody && resp.bodyLength() > 0;
+
+        Http2FrameWriter fw = heap Http2FrameWriter();
+        Http2ContentFrames.writeHeaders(fw, sid, block, blockLen, !hasBody,
+                                        true, 0);
+        this.streams.sendHeaders(sid, !hasBody);
+
+        if (hasBody) {
+            int8[] body = resp.body;
+            int32 total = resp.bodyLength();
+            int32 maxChunk = (int32) this.remote.maxFrameSize;
+            int32 off = 0;
+            while (off < total) {
+                int32 chunk = total - off;
+                if (chunk > maxChunk) {
+                    chunk = maxChunk;
+                }
+                boolean last = (off + chunk) >= total;
+                int8[] slice = Http2Connection.slice(body, off, chunk);
+                Http2ContentFrames.writeData(fw, sid, slice, chunk, last, 0);
+                this.streams.sendData(sid, last);
+                off = off + chunk;
+            }
+        }
+        this.writeOut(fw);
+    }
+
+    // -- outbound helpers ----------------------------------------------------
+
+    void sendOurSettings() {
+        Http2FrameWriter fw = heap Http2FrameWriter();
+        Http2SettingsList l = this.local.toList();
+        Http2Frames.writeSettings(fw, l);
+        this.writeOut(fw);
+    }
+
+    void sendSettingsAck() {
+        Http2FrameWriter fw = heap Http2FrameWriter();
+        Http2Frames.writeSettingsAck(fw);
+        this.writeOut(fw);
+    }
+
+    void sendGoaway(int32 errorCode) {
+        Http2FrameWriter fw = heap Http2FrameWriter();
+        int8[] none = heap int8[0];
+        Http2Frames.writeGoaway(fw, this.streams.lastRemoteId(),
+                                (int64) errorCode, none, 0);
+        this.writeOut(fw);
+    }
+
+    void sendRst(int32 sid, int32 errorCode) {
+        Http2FrameWriter fw = heap Http2FrameWriter();
+        Http2Frames.writeRstStream(fw, sid, (int64) errorCode);
+        this.writeOut(fw);
+    }
+
+    void writeOut(Http2FrameWriter fw) {
+        int8[] bytes = fw.toBytes();
+        this.writer.writeAll(bytes, 0, (int32) bytes.count());
+        this.writer.flush();
+    }
+
+    // -- small utilities -----------------------------------------------------
+
+    void appendBody(int8[] src, int32 off, int32 len) {
+        int32 i = 0;
+        while (i < len) {
+            if (this.curBodyLen >= this.curBodyCap) {
+                this.growBody();
+            }
+            this.curBody[this.curBodyLen] = src[off + i];
+            this.curBodyLen = this.curBodyLen + 1;
+            i = i + 1;
+        }
+    }
+
+    void growBody() {
+        int32 nc = this.curBodyCap * 2;
+        int8[] dst = heap int8[nc];
+        int32 i = 0;
+        while (i < this.curBodyLen) {
+            dst[i] = this.curBody[i];
+            i = i + 1;
+        }
+        this.curBody = #dst;
+        this.curBodyCap = nc;
+    }
+
+    boolean readFully(int8[] buf, int32 n) {
+        int32 off = 0;
+        while (off < n) {
+            int32 g = this.reader.read(buf, off, n - off);
+            if (g == 0) {
+                if (off == 0) {
+                    return false;
+                }
+                throw heap Http2Exception("truncated frame at EOF",
+                                          Http2.PROTOCOL_ERROR);
+            }
+            off = off + g;
+        }
+        return true;
+    }
+
+    static #int8[] slice(int8[] src, int32 off, int32 len) {
+        int8[] out = heap int8[len];
+        int32 i = 0;
+        while (i < len) {
+            out[i] = src[off + i];
+            i = i + 1;
+        }
+        return #out;
+    }
+}

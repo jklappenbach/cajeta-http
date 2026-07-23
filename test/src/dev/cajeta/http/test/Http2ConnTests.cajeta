@@ -1,0 +1,250 @@
+package dev.cajeta.http.test;
+
+import cajeta.lang.String;
+import cajeta.io.net.IpAddress;
+import cajeta.io.net.SocketAddress;
+import cajeta.io.net.TcpListener;
+import cajeta.io.net.TcpStream;
+import cajeta.io.net.AsyncReader;
+import cajeta.io.net.AsyncWriter;
+import cajeta.concurrent.Tasks;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.h2.Http2;
+import dev.cajeta.http.h2.Http2Connection;
+import dev.cajeta.http.h2.Http2FrameHeader;
+import dev.cajeta.http.h2.Http2FrameWriter;
+import dev.cajeta.http.h2.Http2Frames;
+import dev.cajeta.http.h2.Http2SettingsList;
+import dev.cajeta.http.h2.Http2ContentFrames;
+import dev.cajeta.http.h2.Http2Payload;
+import dev.cajeta.http.h2.HpackEncoder;
+import dev.cajeta.http.h2.HpackDecoder;
+import dev.cajeta.http.h2.HpackFieldList;
+
+/**
+ * http:3.3d — the **end-to-end HTTP/2 exchange** over loopback (RFC 9113): a
+ * raw h2 client (preface + SETTINGS + HPACK-encoded HEADERS[/DATA]) drives the
+ * sequential [`Http2Connection`](../../../h2/Http2Connection.cajeta) server,
+ * which turns each stream into an `HttpRequest` for the *same* handler an h1
+ * server would use and encodes the `HttpResponse` back to HEADERS+DATA frames.
+ * Proves the whole stack — preface, SETTINGS handshake, HPACK both ways, the
+ * frame codec, the stream state machine — settles on the wire for a bodyless
+ * GET, a POST whose body arrives in a DATA frame, and a 404.
+ */
+public final class Http2ConnTests {
+
+    static #String own(String s) {
+        return s.substring(0, s.byteLength());
+    }
+
+    // Read exactly `n` bytes with a total timeout budget; false on timeout/EOF.
+    static boolean readExactWithin(AsyncReader r, int8[] buf, int32 n,
+                                   int32 timeoutMs) {
+        int32 off = 0;
+        while (off < n) {
+            int32 g = r.readWithin(buf, off, n - off, timeoutMs);
+            if (g <= 0) {
+                return false;
+            }
+            off = off + g;
+        }
+        return true;
+    }
+
+    // ---- server ----------------------------------------------------------
+
+    static #HttpResponse handle(HttpRequest req) {
+        String target = req.getTarget();
+        if (target.equals("/hello")) {
+            String b = "hello, h2";
+            return HttpResponse.ok().body(b.toBytes(), b.byteLength());
+        }
+        if (target.equals("/echo")) {
+            return HttpResponse.ok().body(req.body, req.bodyLength());
+        }
+        String nf = "nope";
+        return HttpResponse.of(404).body(nf.toBytes(), nf.byteLength());
+    }
+
+    public static async int32 h2Server(#TcpListener listener) {
+        TcpStream sock = listener.acceptAsync();
+        AsyncReader reader = heap AsyncReader(sock);
+        AsyncWriter writer = heap AsyncWriter(sock);
+        (HttpRequest) -> #HttpResponse h = (req) -> Http2ConnTests.handle(req);
+        Http2Connection.serve(reader, writer, #h);
+        sock.close();
+        return 1;
+    }
+
+    // ---- client ----------------------------------------------------------
+
+    static int32 statusOf(HpackFieldList fields) {
+        int32 i = 0;
+        while (i < fields.size()) {
+            if (fields.nameAt(i).equals(":status")) {
+                String v = fields.valueAt(i);
+                int32 s = 0;
+                int32 k = 0;
+                while (k < v.byteLength()) {
+                    s = s * 10 + ((((int32) v.byteAt(k)) & 0xFF) - 48);
+                    k = k + 1;
+                }
+                return s;
+            }
+            i = i + 1;
+        }
+        return -1;
+    }
+
+    static void client(Check c, int32 port, String method, String path,
+                       int8[] reqBody, int32 reqBodyLen, boolean hasReqBody,
+                       int32 expStatus, String expBody) {
+        IpAddress ca = IpAddress.loopbackV4();
+        SocketAddress connAddr = SocketAddress.of(#ca, port);
+        TcpStream sock = TcpStream.connectAsync(#connAddr);
+        AsyncReader reader = heap AsyncReader(sock);
+        AsyncWriter writer = heap AsyncWriter(sock);
+
+        // preface + client SETTINGS + request HEADERS (+ DATA).
+        int8[] pf = Http2.preface();
+        writer.writeAll(pf, 0, 24);
+
+        Http2FrameWriter fw = heap Http2FrameWriter();
+        Http2SettingsList empty = heap Http2SettingsList();
+        Http2Frames.writeSettings(fw, empty);
+
+        HpackEncoder enc = heap HpackEncoder(Http2.DEFAULT_HEADER_TABLE_SIZE, true);
+        HpackFieldList fl = heap HpackFieldList();
+        fl.put(Http2ConnTests.own(":method"), Http2ConnTests.own(method));
+        fl.put(Http2ConnTests.own(":path"), Http2ConnTests.own(path));
+        fl.put(Http2ConnTests.own(":scheme"), Http2ConnTests.own("http"));
+        fl.put(Http2ConnTests.own(":authority"), Http2ConnTests.own("127.0.0.1"));
+        int8[] block = enc.encode(fl);
+        Http2ContentFrames.writeHeaders(fw, 1, block, (int32) block.count(),
+                                        !hasReqBody, true, 0);
+        if (hasReqBody) {
+            Http2ContentFrames.writeData(fw, 1, reqBody, reqBodyLen, true, 0);
+        }
+        int8[] out = fw.toBytes();
+        writer.writeAll(out, 0, (int32) out.count());
+        writer.flush();
+
+        // Read frames until the response stream ends.
+        HpackDecoder dec = heap HpackDecoder(Http2.DEFAULT_HEADER_TABLE_SIZE);
+        int32 status = -1;
+        int8[] body = heap int8[256];
+        int32 bodyLen = 0;
+        int32 bodyCap = 256;
+        boolean done = false;
+        boolean timedOut = false;
+        while (!done && !timedOut) {
+            int8[] hdr = heap int8[9];
+            if (!Http2ConnTests.readExactWithin(reader, hdr, 9, 4000)) {
+                System.stdout.println("  CLT timeout waiting for frame header");
+                timedOut = true;
+            } else {
+            Http2FrameHeader h = Http2FrameHeader(hdr);
+            int32 type = h.typeCode();
+            int32 flags = h.flags();
+            int32 sid = h.streamId();
+            int32 len = h.length();
+            int8[] pl = heap int8[len];
+            if (len > 0) {
+                Http2ConnTests.readExactWithin(reader, pl, len, 4000);
+            }
+            if (type == Http2.FRAME_SETTINGS) {
+                if ((flags & Http2.FLAG_ACK) == 0) {
+                    Http2FrameWriter afw = heap Http2FrameWriter();
+                    Http2Frames.writeSettingsAck(afw);
+                    int8[] ab = afw.toBytes();
+                    writer.writeAll(ab, 0, (int32) ab.count());
+                    writer.flush();
+                }
+            } else if (type == Http2.FRAME_HEADERS) {
+                Http2Payload reg = Http2ContentFrames.parseHeaders(pl, len,
+                                                                  flags, sid);
+                int8[] blk = heap int8[reg.length];
+                int32 j = 0;
+                while (j < reg.length) {
+                    blk[j] = pl[reg.offset + j];
+                    j = j + 1;
+                }
+                HpackFieldList rf = dec.decode(blk, reg.length);
+                status = Http2ConnTests.statusOf(rf);
+                if ((flags & Http2.FLAG_END_STREAM) != 0) {
+                    done = true;
+                }
+            } else if (type == Http2.FRAME_DATA) {
+                Http2Payload reg = Http2ContentFrames.parseData(pl, len, flags,
+                                                               sid);
+                int32 j = 0;
+                while (j < reg.length) {
+                    if (bodyLen >= bodyCap) {
+                        int32 nc = bodyCap * 2;
+                        int8[] nb = heap int8[nc];
+                        int32 m = 0;
+                        while (m < bodyLen) {
+                            nb[m] = body[m];
+                            m = m + 1;
+                        }
+                        body = #nb;
+                        bodyCap = nc;
+                    }
+                    body[bodyLen] = pl[reg.offset + j];
+                    bodyLen = bodyLen + 1;
+                    j = j + 1;
+                }
+                if ((flags & Http2.FLAG_END_STREAM) != 0) {
+                    done = true;
+                }
+            }
+            }
+        }
+        sock.close();
+
+        c.that(!timedOut, "h2 exchange did not time out");
+        c.eqInt((int64) status, (int64) expStatus, "h2 exchange status");
+        boolean bodyOk = bodyLen == expBody.byteLength();
+        if (bodyOk) {
+            int32 j = 0;
+            while (j < bodyLen) {
+                if ((((int32) body[j]) & 0xFF)
+                        != (((int32) expBody.byteAt(j)) & 0xFF)) {
+                    bodyOk = false;
+                    j = bodyLen;
+                } else {
+                    j = j + 1;
+                }
+            }
+        }
+        c.that(bodyOk, "h2 exchange body");
+    }
+
+    static void oneExchange(Check c, String method, String path, int8[] reqBody,
+                            int32 reqBodyLen, boolean hasReqBody, int32 expStatus,
+                            String expBody) {
+        scope {
+            IpAddress la = IpAddress.loopbackV4();
+            SocketAddress bindAddr = SocketAddress.of(#la, 0);
+            TcpListener listener = TcpListener.bind(bindAddr);
+            int32 port = listener.boundPort();
+            Task<int32> sv = spawn h2Server(#listener);
+            Http2ConnTests.client(c, port, method, path, reqBody, reqBodyLen,
+                                  hasReqBody, expStatus, expBody);
+            int32 r = await sv;
+        }
+    }
+
+    public static void run(Check c) {
+        System.stdout.println("-- h2 conn: end-to-end exchange --");
+        int8[] none = heap int8[0];
+        Http2ConnTests.oneExchange(c, "GET", "/hello", none, 0, false, 200,
+                                   "hello, h2");
+        int8[] ping = { (int8) 0x70, (int8) 0x69, (int8) 0x6e, (int8) 0x67 };
+        Http2ConnTests.oneExchange(c, "POST", "/echo", ping, 4, true, 200,
+                                   "ping");
+        Http2ConnTests.oneExchange(c, "GET", "/nope", none, 0, false, 404,
+                                   "nope");
+    }
+}

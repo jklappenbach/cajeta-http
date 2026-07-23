@@ -1,0 +1,120 @@
+package dev.cajeta.http.h2;
+
+import cajeta.lang.String;
+import cajeta.io.net.Headers;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+
+/**
+ * The bridge between HTTP/2's HPACK header lists and the shared
+ * [`HttpRequest`](../HttpRequest.cajeta) / [`HttpResponse`](../HttpResponse.cajeta)
+ * types — plan item **3.3**. This is what keeps the handler contract
+ * *un-colored*: an h2 stream's decoded pseudo-headers become an ordinary
+ * `HttpRequest`, and an ordinary `HttpResponse` becomes an h2 header block, so
+ * the same `(HttpRequest) -> #HttpResponse` handler serves h1 and h2 alike.
+ *
+ * [`fromFields`](#fromFields) validates the RFC 9113 §8.3 request pseudo-header
+ * rules (`:method`/`:path`/`:scheme` required, all pseudo-headers before any
+ * regular field, no unknown pseudo-header) → `PROTOCOL_ERROR`.
+ * [`responseFields`](#responseFields) emits `:status` first and drops the
+ * §8.2.2 connection-specific headers that are illegal in HTTP/2.
+ */
+public final class Http2Requests {
+
+    static #String own(String s) {
+        return s.substring(0, s.byteLength());
+    }
+
+    static boolean isPseudo(String n) {
+        return n.byteLength() > 0 && n.byteAt(0) == (int8) 58;   // ':'
+    }
+
+    // RFC 9113 §8.2.2 — headers that must not appear in HTTP/2.
+    static boolean forbidden(String n) {
+        return n.equals("connection") || n.equals("keep-alive")
+            || n.equals("proxy-connection") || n.equals("transfer-encoding")
+            || n.equals("upgrade");
+    }
+
+    /** Build a request (without its body) from a decoded header list. */
+    public static #HttpRequest fromFields(HpackFieldList fields) {
+        String method = null;
+        String path = null;
+        String scheme = null;
+        String authority = null;
+        boolean sawRegular = false;
+        int32 i = 0;
+        while (i < fields.size()) {
+            String n = fields.nameAt(i);
+            String v = fields.valueAt(i);
+            if (Http2Requests.isPseudo(n)) {
+                if (sawRegular) {
+                    throw heap Http2Exception(
+                        "pseudo-header after regular header",
+                        Http2.PROTOCOL_ERROR);
+                }
+                if (n.equals(":method")) {
+                    method = v;
+                } else if (n.equals(":path")) {
+                    path = v;
+                } else if (n.equals(":scheme")) {
+                    scheme = v;
+                } else if (n.equals(":authority")) {
+                    authority = v;
+                } else {
+                    throw heap Http2Exception("unknown request pseudo-header",
+                                              Http2.PROTOCOL_ERROR);
+                }
+            } else {
+                sawRegular = true;
+            }
+            i = i + 1;
+        }
+        if (method == null || path == null || scheme == null) {
+            throw heap Http2Exception("missing required pseudo-header",
+                                      Http2.PROTOCOL_ERROR);
+        }
+        HttpRequest req = HttpRequest.of(method, path);
+        req.version("HTTP/2.0");
+        i = 0;
+        while (i < fields.size()) {
+            String n = fields.nameAt(i);
+            if (!Http2Requests.isPseudo(n)) {
+                req.setHeader(n, fields.valueAt(i));
+            }
+            i = i + 1;
+        }
+        if (authority != null) {
+            req.setHeader("host", authority);
+        }
+        return #req;
+    }
+
+    /** Build the HPACK header list for a response (`:status` first). */
+    public static #HpackFieldList responseFields(HttpResponse resp) {
+        HpackFieldList fl = heap HpackFieldList();
+        String status = Http2Requests.statusString(resp.status);
+        String sname = ":status";
+        fl.put(Http2Requests.own(sname), #status);
+        Headers h = resp.getHeaders();
+        int32 i = 0;
+        while (i < h.count()) {
+            String n = h.nameAt(i);
+            if (!Http2Requests.forbidden(n)) {
+                String v = h.valueAt(i);
+                fl.put(Http2Requests.own(n), Http2Requests.own(v));
+            }
+            i = i + 1;
+        }
+        return #fl;
+    }
+
+    /** A 3-digit status code as an owned decimal string. */
+    static #String statusString(int32 status) {
+        int8[] d = heap int8[3];
+        d[0] = (int8) (48 + ((status / 100) % 10));
+        d[1] = (int8) (48 + ((status / 10) % 10));
+        d[2] = (int8) (48 + (status % 10));
+        return heap String(#d, 3);
+    }
+}

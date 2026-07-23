@@ -71,6 +71,61 @@ public final class Http2StreamTable {
         return null;
     }
 
+    /** Whether a stream with `id` is tracked. */
+    public boolean has(int32 id) {
+        return this.indexOf(id) >= 0;
+    }
+
+    int32 indexOf(int32 id) {
+        int32 i = 0;
+        while (i < this.count) {
+            if (this.streams[i].id == id) {
+                return i;
+            }
+            i = i + 1;
+        }
+        return -1;
+    }
+
+    /** Open a client-initiated stream if not already present (validates ids). */
+    public void openIfAbsent(int32 id) {
+        if (this.indexOf(id) < 0) {
+            this.openRemote(id);
+        }
+    }
+
+    // Id-based state-machine operations — kept in-place (path expressions on
+    // the owned array element) so no whole-stream borrow ever escapes.
+
+    public void recvHeaders(int32 id, boolean endStream) {
+        this.streams[this.indexOf(id)].onRecvHeaders(endStream);
+    }
+
+    public void recvData(int32 id, boolean endStream) {
+        this.streams[this.indexOf(id)].onRecvData(endStream);
+    }
+
+    public void sendHeaders(int32 id, boolean endStream) {
+        this.streams[this.indexOf(id)].onSendHeaders(endStream);
+    }
+
+    public void sendData(int32 id, boolean endStream) {
+        this.streams[this.indexOf(id)].onSendData(endStream);
+    }
+
+    public void recvRst(int32 id) {
+        this.streams[this.indexOf(id)].onRecvRst();
+    }
+
+    /** Whether the stream with `id` is closed (false if untracked). */
+    public boolean isClosed(int32 id) {
+        int32 i = this.indexOf(id);
+        if (i < 0) {
+            return false;
+        }
+        return this.streams[i].isClosed();
+    }
+
     /** Number of streams not yet closed (live concurrency). */
     public int32 activeCount() {
         int32 n = 0;
