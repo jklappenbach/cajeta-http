@@ -90,6 +90,64 @@ public final class Http2Requests {
         return #req;
     }
 
+    /**
+     * Build the HPACK request header list (client side): the four request
+     * pseudo-headers first (`:method`/`:path`/`:scheme`/`:authority`), then the
+     * regular fields with lowercase names, dropping `host` (carried by
+     * `:authority`) and the §8.2.2 connection-specific headers.
+     */
+    public static #HpackFieldList requestFields(HttpRequest req, String scheme,
+                                                String authority) {
+        HpackFieldList fl = heap HpackFieldList();
+        fl.put(Http2Requests.own(":method"), Http2Requests.own(req.getMethod()));
+        fl.put(Http2Requests.own(":path"), Http2Requests.own(req.getTarget()));
+        fl.put(Http2Requests.own(":scheme"), Http2Requests.own(scheme));
+        fl.put(Http2Requests.own(":authority"), Http2Requests.own(authority));
+        Headers h = req.getHeaders();
+        int32 i = 0;
+        while (i < h.count()) {
+            String n = h.nameAt(i);
+            if (!Http2Requests.forbidden(n) && !n.equals("host")) {
+                fl.put(Http2Requests.own(n), Http2Requests.own(h.valueAt(i)));
+            }
+            i = i + 1;
+        }
+        return #fl;
+    }
+
+    /**
+     * Build a response (without its body) from a decoded response header list
+     * (client side): read `:status`, then copy the regular fields.
+     */
+    public static #HttpResponse responseFromFields(HpackFieldList fields) {
+        int32 status = 0;
+        int32 i = 0;
+        while (i < fields.size()) {
+            String n = fields.nameAt(i);
+            if (n.equals(":status")) {
+                String v = fields.valueAt(i);
+                int32 s = 0;
+                int32 k = 0;
+                while (k < v.byteLength()) {
+                    s = s * 10 + ((((int32) v.byteAt(k)) & 0xFF) - 48);
+                    k = k + 1;
+                }
+                status = s;
+            }
+            i = i + 1;
+        }
+        HttpResponse resp = HttpResponse.of(status);
+        i = 0;
+        while (i < fields.size()) {
+            String n = fields.nameAt(i);
+            if (!Http2Requests.isPseudo(n)) {
+                resp.setHeader(n, fields.valueAt(i));
+            }
+            i = i + 1;
+        }
+        return #resp;
+    }
+
     /** Build the HPACK header list for a response (`:status` first). */
     public static #HpackFieldList responseFields(HttpResponse resp) {
         HpackFieldList fl = heap HpackFieldList();

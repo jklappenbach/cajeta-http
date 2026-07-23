@@ -1,0 +1,163 @@
+package dev.cajeta.http.h2;
+
+import cajeta.lang.String;
+import cajeta.io.net.AsyncReader;
+import cajeta.io.net.AsyncWriter;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+
+/**
+ * A minimal **HTTP/2 client exchange** (plan item **3.4**) — the mirror of
+ * [`Http2Connection`](Http2Connection.cajeta) on the client side. Given an
+ * already-connected reader/writer (a plaintext socket, or a TLS stream that
+ * negotiated `h2` via ALPN) it runs one request/response on stream 1: send the
+ * client preface + SETTINGS, encode the [`HttpRequest`](../HttpRequest.cajeta)
+ * as HEADERS(+DATA), then read frames until the response stream ends and return
+ * the assembled [`HttpResponse`](../HttpResponse.cajeta).
+ *
+ * v1 scope is one request per connection (what `HttpClient.send` needs); it acks
+ * the server SETTINGS, honours END_STREAM on HEADERS or DATA, and leaves the
+ * socket for the caller to close. Response bodies larger than the default
+ * receive window are fine (the default 64 KiB window is not decremented back to
+ * the peer here — a single-exchange client never needs to), and trailers are not
+ * surfaced.
+ */
+public final class Http2Client {
+
+    /** Run one h2 request/response over `reader`/`writer`; returns the response. */
+    public static #HttpResponse exchange(AsyncReader reader, AsyncWriter writer,
+                                         HttpRequest req, String scheme,
+                                         String authority) {
+        // -- send: preface + SETTINGS + request HEADERS(+DATA) ---------------
+        int8[] pf = Http2.preface();
+        writer.writeAll(pf, 0, 24);
+
+        Http2FrameWriter fw = heap Http2FrameWriter();
+        Http2SettingsList empty = heap Http2SettingsList();
+        Http2Frames.writeSettings(fw, empty);
+
+        HpackEncoder enc = heap HpackEncoder(Http2.DEFAULT_HEADER_TABLE_SIZE, true);
+        HpackFieldList fl = Http2Requests.requestFields(req, scheme, authority);
+        int8[] block = enc.encode(fl);
+        boolean hasBody = req.hasBody && req.bodyLength() > 0;
+        Http2ContentFrames.writeHeaders(fw, 1, block, (int32) block.count(),
+                                        !hasBody, true, 0);
+        if (hasBody) {
+            Http2ContentFrames.writeData(fw, 1, req.body, req.bodyLength(),
+                                         true, 0);
+        }
+        int8[] out = fw.toBytes();
+        writer.writeAll(out, 0, (int32) out.count());
+        writer.flush();
+
+        // -- receive: frames until stream 1 ends -----------------------------
+        HpackDecoder dec = heap HpackDecoder(Http2.DEFAULT_HEADER_TABLE_SIZE);
+        int32 status = -1;
+        int8[] body = heap int8[256];
+        int32 bodyLen = 0;
+        int32 bodyCap = 256;
+        boolean sawHeaders = false;
+        HpackFieldList respFields = null;
+        boolean done = false;
+
+        while (!done) {
+            int8[] hdr = heap int8[9];
+            if (!Http2Client.readFully(reader, hdr, 9)) {
+                done = true;
+            } else {
+                Http2FrameHeader h = Http2FrameHeader(hdr);
+                int32 type = h.typeCode();
+                int32 flags = h.flags();
+                int32 len = h.length();
+                int8[] pl = heap int8[len];
+                if (len > 0) {
+                    reader.readExact(pl, 0, len);
+                }
+                int32 sid = h.streamId();
+                if (type == Http2.FRAME_SETTINGS) {
+                    if ((flags & Http2.FLAG_ACK) == 0) {
+                        Http2Client.sendSettingsAck(writer);
+                    }
+                } else if (type == Http2.FRAME_HEADERS) {
+                    Http2Payload reg = Http2ContentFrames.parseHeaders(pl, len,
+                                                                      flags, sid);
+                    int8[] blk = Http2Client.slice(pl, reg.offset, reg.length);
+                    respFields = dec.decode(blk, reg.length);
+                    sawHeaders = true;
+                    if ((flags & Http2.FLAG_END_STREAM) != 0) {
+                        done = true;
+                    }
+                } else if (type == Http2.FRAME_DATA) {
+                    Http2Payload reg = Http2ContentFrames.parseData(pl, len,
+                                                                   flags, sid);
+                    int32 j = 0;
+                    while (j < reg.length) {
+                        if (bodyLen >= bodyCap) {
+                            int32 nc = bodyCap * 2;
+                            int8[] nb = heap int8[nc];
+                            int32 m = 0;
+                            while (m < bodyLen) {
+                                nb[m] = body[m];
+                                m = m + 1;
+                            }
+                            body = #nb;
+                            bodyCap = nc;
+                        }
+                        body[bodyLen] = pl[reg.offset + j];
+                        bodyLen = bodyLen + 1;
+                        j = j + 1;
+                    }
+                    if ((flags & Http2.FLAG_END_STREAM) != 0) {
+                        done = true;
+                    }
+                } else if (type == Http2.FRAME_GOAWAY) {
+                    done = true;
+                }
+            }
+        }
+
+        if (!sawHeaders) {
+            throw heap Http2Exception("no response HEADERS received",
+                                      Http2.PROTOCOL_ERROR);
+        }
+        HttpResponse resp = Http2Requests.responseFromFields(respFields);
+        if (bodyLen > 0) {
+            resp.body(body, bodyLen);
+        }
+        return #resp;
+    }
+
+    static void sendSettingsAck(AsyncWriter writer) {
+        Http2FrameWriter fw = heap Http2FrameWriter();
+        Http2Frames.writeSettingsAck(fw);
+        int8[] b = fw.toBytes();
+        writer.writeAll(b, 0, (int32) b.count());
+        writer.flush();
+    }
+
+    static boolean readFully(AsyncReader reader, int8[] buf, int32 n) {
+        int32 off = 0;
+        while (off < n) {
+            int32 g = reader.read(buf, off, n - off);
+            if (g == 0) {
+                if (off == 0) {
+                    return false;
+                }
+                throw heap Http2Exception("truncated frame at EOF",
+                                          Http2.PROTOCOL_ERROR);
+            }
+            off = off + g;
+        }
+        return true;
+    }
+
+    static #int8[] slice(int8[] src, int32 off, int32 len) {
+        int8[] out = heap int8[len];
+        int32 i = 0;
+        while (i < len) {
+            out[i] = src[off + i];
+            i = i + 1;
+        }
+        return #out;
+    }
+}

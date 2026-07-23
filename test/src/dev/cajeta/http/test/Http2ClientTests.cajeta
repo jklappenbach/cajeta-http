@@ -1,0 +1,113 @@
+package dev.cajeta.http.test;
+
+import cajeta.lang.String;
+import cajeta.io.net.IpAddress;
+import cajeta.io.net.SocketAddress;
+import cajeta.io.net.TcpListener;
+import cajeta.io.net.TcpStream;
+import cajeta.io.net.AsyncReader;
+import cajeta.io.net.AsyncWriter;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.h2.Http2Connection;
+import dev.cajeta.http.h2.Http2Client;
+
+/**
+ * http:3.4a — the **HTTP/2 client** ([`Http2Client`](../../../h2/Http2Client.cajeta))
+ * exchanging with the [`Http2Connection`](../../../h2/Http2Connection.cajeta)
+ * server over a plaintext loopback socket, no hand-rolled framing: the real
+ * client encodes an `HttpRequest` to HEADERS(+DATA) and decodes the response
+ * back to an `HttpResponse`. Proves both directions of the client-side
+ * `Http2Requests` bridge (`requestFields`/`responseFromFields`) on the wire for
+ * a GET, a body POST, and a 404 — the piece ALPN/h2c negotiation (3.4b–d) will
+ * select into.
+ */
+public final class Http2ClientTests {
+
+    static #HttpResponse handle(HttpRequest req) {
+        String target = req.getTarget();
+        if (target.equals("/hello")) {
+            String b = "hello, h2";
+            return HttpResponse.ok().body(b.toBytes(), b.byteLength());
+        }
+        if (target.equals("/echo")) {
+            return HttpResponse.ok().body(req.body, req.bodyLength());
+        }
+        String nf = "nope";
+        return HttpResponse.of(404).body(nf.toBytes(), nf.byteLength());
+    }
+
+    public static async int32 h2Server(#TcpListener listener) {
+        TcpStream sock = listener.acceptAsync();
+        AsyncReader reader = heap AsyncReader(sock);
+        AsyncWriter writer = heap AsyncWriter(sock);
+        (HttpRequest) -> #HttpResponse h = (req) -> Http2ClientTests.handle(req);
+        Http2Connection.serve(reader, writer, #h);
+        sock.close();
+        return 1;
+    }
+
+    static boolean bodyEq(HttpResponse resp, String expected) {
+        int32 len = resp.bodyLength();
+        if (len != expected.byteLength()) {
+            return false;
+        }
+        int8[] b = resp.body;
+        int32 i = 0;
+        while (i < len) {
+            if ((((int32) b[i]) & 0xFF) != (((int32) expected.byteAt(i)) & 0xFF)) {
+                return false;
+            }
+            i = i + 1;
+        }
+        return true;
+    }
+
+    static void exchange(Check c, int32 port, String method, String path,
+                         int8[] reqBody, int32 reqBodyLen, boolean hasReqBody,
+                         int32 expStatus, String expBody) {
+        IpAddress ca = IpAddress.loopbackV4();
+        SocketAddress connAddr = SocketAddress.of(#ca, port);
+        TcpStream sock = TcpStream.connectAsync(#connAddr);
+        AsyncReader reader = heap AsyncReader(sock);
+        AsyncWriter writer = heap AsyncWriter(sock);
+
+        HttpRequest req = HttpRequest.of(method, path);
+        if (hasReqBody) {
+            req.body(reqBody, reqBodyLen);
+        }
+        HttpResponse resp = Http2Client.exchange(reader, writer, req, "http",
+                                                 "127.0.0.1");
+        sock.close();
+
+        c.eqInt((int64) resp.statusCode(), (int64) expStatus, "h2 client status");
+        c.that(Http2ClientTests.bodyEq(resp, expBody), "h2 client body");
+    }
+
+    static void oneExchange(Check c, String method, String path, int8[] reqBody,
+                            int32 reqBodyLen, boolean hasReqBody, int32 expStatus,
+                            String expBody) {
+        scope {
+            IpAddress la = IpAddress.loopbackV4();
+            SocketAddress bindAddr = SocketAddress.of(#la, 0);
+            TcpListener listener = TcpListener.bind(bindAddr);
+            int32 port = listener.boundPort();
+            Task<int32> sv = spawn h2Server(#listener);
+            Http2ClientTests.exchange(c, port, method, path, reqBody, reqBodyLen,
+                                      hasReqBody, expStatus, expBody);
+            int32 r = await sv;
+        }
+    }
+
+    public static void run(Check c) {
+        System.stdout.println("-- h2 client: exchange over loopback --");
+        int8[] none = heap int8[0];
+        Http2ClientTests.oneExchange(c, "GET", "/hello", none, 0, false, 200,
+                                     "hello, h2");
+        int8[] ping = { (int8) 0x70, (int8) 0x69, (int8) 0x6e, (int8) 0x67 };
+        Http2ClientTests.oneExchange(c, "POST", "/echo", ping, 4, true, 200,
+                                     "ping");
+        Http2ClientTests.oneExchange(c, "GET", "/nope", none, 0, false, 404,
+                                     "nope");
+    }
+}
