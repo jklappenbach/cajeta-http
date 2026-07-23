@@ -60,6 +60,7 @@ public final class TestMain {
         Http2RstCancelTests.run(c);
         Http2ClientTests.run(c);
         Http2AlpnTests.run(c);
+        Http2PriorKnowledgeTests.run(c);
 
         System.stdout.println("");
         System.stdout.println("=== {} passed, {} failed ===",

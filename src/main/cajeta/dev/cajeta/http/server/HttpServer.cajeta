@@ -28,6 +28,7 @@ import dev.cajeta.http.h1.KeepAlive;
 import dev.cajeta.http.HttpException;
 import dev.cajeta.http.server.Exchange;
 import cajeta.io.net.tls.TlsStream;
+import dev.cajeta.http.h2.Http2;
 import dev.cajeta.http.h2.Http2Connection;
 import cajeta.time.Duration;
 import cajeta.time.Clock;
@@ -240,6 +241,14 @@ public class HttpServer {
     public ConnectionLimiter limiter;
     public ConnectionLimits connLimits;
 
+    /**
+     * True iff this plaintext server sniffs the HTTP/2 connection preface on
+     * each new connection (RFC 9113 §3.3 "prior knowledge") and serves h2 when
+     * it matches, degrading to the h1 loop otherwise. Opt-in via the builder;
+     * `false` = plain h1. (h2 over TLS is selected by ALPN, independently.)
+     */
+    public boolean h2Prior;
+
     public HttpServer((HttpRequest) -> #HttpResponse handler) {
         this.handler = handler;
         this.server = null;
@@ -256,6 +265,7 @@ public class HttpServer {
         this.isTls = false;
         this.limiter = null;
         this.connLimits = null;
+        this.h2Prior = false;
     }
 
     // ----- bind / lifecycle ------------------------------------------------
@@ -335,7 +345,7 @@ public class HttpServer {
                                                    ServerModel model,
                                                    (HttpRequest) -> #HttpResponse handler) {
         return HttpServer.bindAddressWithModelAndLimits(#addr, model, handler,
-                                                        null, null);
+                                                        null, null, false);
     }
 
     /**
@@ -348,9 +358,10 @@ public class HttpServer {
     public static #HttpServer bindAddressWithModelAndLimits(
             #SocketAddress addr, ServerModel model,
             (HttpRequest) -> #HttpResponse handler, #ServerLimits limits,
-            #ConnectionLimits climits) {
+            #ConnectionLimits climits, boolean h2Prior) {
         HttpServer srv = heap HttpServer(handler);
         srv.model = model;
+        srv.h2Prior = h2Prior;
         if (limits != null) {
             ServerLimits l #= limits;
             srv.serverLimits #= l;
@@ -384,6 +395,13 @@ public class HttpServer {
                 (conn) -> HttpServer.serveConnectionAdmitted(h, lim, slim,
                                                              lm, conn));
             srv.server = #score;
+            return #srv;
+        }
+        if (h2Prior) {
+            // RFC 9113 prior knowledge: sniff the preface, serve h2 on a match.
+            Server h2core = model.bindServer(#addr,
+                (conn) -> HttpServer.serveConnectionSniffH2(h, lim, slim, conn));
+            srv.server = #h2core;
             return #srv;
         }
         Server core = model.bindServer(#addr,
@@ -828,6 +846,55 @@ public class HttpServer {
         AsyncReader reader = heap AsyncReader(conn);
         AsyncWriter writer = heap AsyncWriter(conn);
         HttpServer.serveLoopWithLimits(handler, parseLimits, limits, reader, writer);
+    }
+
+    /**
+     * Prior-knowledge (RFC 9113 §3.3) per-connection worker: peek the first
+     * bytes of the connection and, if they are the 24-octet HTTP/2 client
+     * preface, run the h2 engine; anything else is served by the hardened h1
+     * loop with the peeked bytes intact. The preface is sniffed off the raw
+     * `TcpStream` (one byte at a time, stopping at the first non-matching
+     * position) *before* the buffered [`AsyncReader`](../AsyncReader.cajeta)
+     * wraps it, then re-staged into the reader's empty ring so order is
+     * preserved for whichever protocol wins.
+     */
+    static void serveConnectionSniffH2((HttpRequest) -> #HttpResponse handler,
+                                       HttpParserLimits parseLimits,
+                                       ServerLimits limits, TcpStream conn) {
+        int8[] got = heap int8[24];
+        int32 n = HttpServer.sniffPreface(conn, got);
+        AsyncReader reader = heap AsyncReader(conn);
+        AsyncWriter writer = heap AsyncWriter(conn);
+        if (n > 0) {
+            reader.stage(got, n);
+        }
+        if (n == 24) {
+            Http2Connection.serve(reader, writer, handler);
+        } else {
+            HttpServer.serveLoopWithLimits(handler, parseLimits, limits,
+                                           reader, writer);
+        }
+    }
+
+    // Read up to the 24-byte h2 preface from `conn` into `got`, stopping at the
+    // first byte that diverges (or EOF). Returns the count read; `== 24` iff the
+    // full preface matched. Reads raw (pre-buffer) so nothing is over-consumed.
+    static int32 sniffPreface(TcpStream conn, int8[] got) {
+        int8[] pf = Http2.preface();
+        int32 n = 0;
+        boolean matching = true;
+        while (n < 24 && matching) {
+            int64 g = conn.readAsync(got, (int64) n, (int64) 1);
+            if (g <= (int64) 0) {
+                matching = false;
+            } else if (got[n] != pf[n]) {
+                n = n + 1;
+                matching = false;
+            } else {
+                n = n + 1;
+            }
+        }
+        return n;
     }
 
     // ----- NET-9.5: HTTPS (TLS termination) --------------------------------
@@ -1600,6 +1667,7 @@ public class HttpServerBuilder {
     private int8[] bKey;
     private int32 bKeyLen;
     private boolean bTls;
+    private boolean bH2Prior;
 
     /** Accept control (http:1.5c), or `null` for the uncapped default. */
     private ConnectionLimits bClimits;
@@ -1621,7 +1689,20 @@ public class HttpServerBuilder {
         this.bKey = #e2;
         this.bKeyLen = 0;
         this.bTls = false;
+        this.bH2Prior = false;
         this.bClimits = null;
+    }
+
+    /**
+     * Enable RFC 9113 **prior-knowledge** HTTP/2 on this plaintext server: each
+     * new connection is sniffed for the h2 connection preface and served over
+     * HTTP/2 when it matches, degrading cleanly to the h1 keep-alive loop
+     * otherwise. Off by default. (h2 over TLS is negotiated by ALPN and needs
+     * no flag.) Returns `this` to chain.
+     */
+    public HttpServerBuilder h2PriorKnowledge() {
+        this.bH2Prior = true;
+        return this;
     }
 
     /**
@@ -1770,7 +1851,8 @@ public class HttpServerBuilder {
             cl = #cmoved;
         }
         return HttpServer.bindAddressWithModelAndLimits(
-            SocketAddress.parse(this.addr), this.model, h, #l, #cl);
+            SocketAddress.parse(this.addr), this.model, h, #l, #cl,
+            this.bH2Prior);
     }
 
     /**
