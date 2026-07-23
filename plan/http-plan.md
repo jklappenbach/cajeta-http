@@ -1486,13 +1486,27 @@ turns it on; 3.5 rides 3.3. The user-facing surface (client / server /
 router / un-colored handlers) must not change — that is the phase's
 acceptance bar.
 
-- [ ] **3.1** HPACK (RFC 7541): integer/string primitives, static table,
-  size-bounded dynamic table with eviction and table-size updates,
-  Huffman encode/decode (the Appendix B code), never-indexed literals
-  for sensitive headers.
-  - TDD: Appendix C golden vectors verbatim (C.2–C.6 request/response
-    sequences, with and without Huffman, asserting dynamic-table state
-    after each block); decompressed-size bomb guard; eviction edges.
+- [x] **3.1** HPACK (RFC 7541) — shipped in `dev.cajeta.http.h2`, built
+  bottom-up in four commits (3.1a primitives, 3.1b tables, 3.1c decoder,
+  3.1d encoder). Integer/string primitives (`HpackWriter`/`HpackReader`,
+  `HpackString`), the Appendix A static table (`HpackStaticTable`), the
+  size-bounded dynamic table with §4.4 eviction and §6.3 table-size updates
+  (`HpackDynamicTable`), Huffman encode/decode (`Huffman`, Appendix B), and
+  never-indexed literals for sensitive headers (`HpackField.sensitive` →
+  `HpackEncoder` §6.2.3). Full `HpackDecoder` + `HpackEncoder`.
+  - TDD (done): Appendix C golden vectors verbatim — C.2 representations,
+    C.3/C.4 request sequences and C.5/C.6 response sequences (raw + Huffman),
+    each block asserting the decoded header list AND the dynamic-table state
+    (size + every entry) after it; the encoder reproduces the C.3–C.6 wire
+    bytes byte-for-byte (interop, not just round-trip). Decompressed-size
+    bomb guards (per-literal cap, out-of-range index, oversize table-update,
+    cumulative-list cap) and eviction edges covered. Suite 701→1065, 5x green.
+  - Two facts worth flagging for 3.2+: (a) the Huffman/static tables were
+    transcribed from the RFC via a validating extractor (Kraft=1, prefix-free,
+    257 entries; 61 static) — reuse that discipline for the frame/settings
+    constants; (b) the encoder must pick Huffman on a **tie** (`hlen <= len`),
+    which the C.6.2 "307" literal is the only vector to exercise — a `<` there
+    silently passes every other vector.
 - [ ] **3.2** Frame layer: the 9-byte frame header decoded **zero-copy
   via `view`** over a pooled buffer (the spec's canonical `view` case);
   encode/decode for all frame types (DATA, HEADERS, PRIORITY,

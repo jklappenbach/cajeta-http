@@ -47,6 +47,7 @@ public final class TestMain {
         HpackPrimitiveTests.run(c);
         HpackTableTests.run(c);
         HpackDecoderTests.run(c);
+        HpackEncoderTests.run(c);
 
         System.stdout.println("");
         System.stdout.println("=== {} passed, {} failed ===",

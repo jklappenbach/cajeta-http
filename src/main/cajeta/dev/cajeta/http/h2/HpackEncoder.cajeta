@@ -1,0 +1,135 @@
+package dev.cajeta.http.h2;
+
+import cajeta.lang.String;
+
+/**
+ * The **HPACK encoder** (RFC 7541 §6, encode side) — plan item **3.1**. Turns
+ * an [`HpackFieldList`](HpackFieldList.cajeta) into an encoded field block,
+ * evolving the shared [dynamic table](HpackDynamicTable.cajeta) so a peer
+ * decoder tracks it exactly. One instance serves one connection's outbound
+ * direction.
+ *
+ * Strategy (the one the RFC's own Appendix C examples use, so the output is
+ * byte-identical to them): a field found whole in the static or dynamic table
+ * is sent **indexed** (§6.1); otherwise it is a **literal with incremental
+ * indexing** (§6.2.1) — its name reused by index when known — and appended to
+ * the dynamic table. A field flagged `sensitive` is sent **never-indexed**
+ * (§6.2.3) and never enters the table. String literals are Huffman-coded when
+ * [`useHuffman`](#HpackEncoder) is set and Huffman is shorter.
+ *
+ * [`signalTableSizeUpdate`](#signalTableSizeUpdate) queues a §6.3 dynamic
+ * table size update, emitted at the head of the next block.
+ */
+public final class HpackEncoder {
+    HpackStaticTable staticTable;
+    HpackDynamicTable dyn;
+    Huffman huffman;
+    boolean useHuffman;
+    int32 pendingSizeUpdate;   // -1 = none
+
+    public HpackEncoder(int32 maxDynamicTableSize, boolean useHuffman) {
+        this.staticTable = heap HpackStaticTable();
+        this.dyn = heap HpackDynamicTable(maxDynamicTableSize);
+        this.huffman = heap Huffman();
+        this.useHuffman = useHuffman;
+        this.pendingSizeUpdate = -1;
+    }
+
+    /** The dynamic table, borrowed — for inspection/testing of shared state. */
+    public HpackDynamicTable dynamicTable() {
+        return this.dyn;
+    }
+
+    /**
+     * Queue a dynamic table size change (§6.3): the table is re-bounded now
+     * (evicting as needed) and a size-update instruction is emitted at the
+     * start of the next [`encode`](#encode).
+     */
+    public void signalTableSizeUpdate(int32 newMax) {
+        this.dyn.setMaxSize(newMax);
+        this.pendingSizeUpdate = newMax;
+    }
+
+    /** Encode a header list into a fresh owned field block. */
+    public #int8[] encode(HpackFieldList list) {
+        HpackWriter w = heap HpackWriter();
+        if (this.pendingSizeUpdate >= 0) {
+            w.writeInteger((int64) this.pendingSizeUpdate, 5, 0x20);
+            this.pendingSizeUpdate = -1;
+        }
+        int32 i = 0;
+        while (i < list.size()) {
+            HpackField f = list.at(i);
+            this.encodeField(w, f.name, f.value, f.sensitive);
+            i = i + 1;
+        }
+        return w.toBytes();
+    }
+
+    void encodeField(HpackWriter w, String name, String value,
+                     boolean sensitive) {
+        if (sensitive) {
+            // §6.2.3 Never Indexed.
+            int32 nameIdx = this.findNameAnywhere(name);
+            w.writeInteger((int64) nameIdx, 4, 0x10);
+            if (nameIdx == 0) {
+                this.encodeString(w, name);
+            }
+            this.encodeString(w, value);
+            return;
+        }
+        int32 idx = this.findFieldAnywhere(name, value);
+        if (idx != 0) {
+            // §6.1 Indexed.
+            w.writeInteger((int64) idx, 7, 0x80);
+            return;
+        }
+        // §6.2.1 Literal with Incremental Indexing.
+        int32 nameIdx = this.findNameAnywhere(name);
+        w.writeInteger((int64) nameIdx, 6, 0x40);
+        if (nameIdx == 0) {
+            this.encodeString(w, name);
+        }
+        this.encodeString(w, value);
+        String tn = name.substring(0, name.byteLength());
+        String tv = value.substring(0, value.byteLength());
+        HpackField entry = heap HpackField(#tn, #tv, false);
+        this.dyn.add(#entry);
+    }
+
+    void encodeString(HpackWriter w, String s) {
+        int8[] b = s.toBytes();
+        if (this.useHuffman) {
+            HpackString.encode(w, b, s.byteLength(), this.huffman);
+        } else {
+            HpackString.encode(w, b, s.byteLength(), null);
+        }
+    }
+
+    // Absolute index of a whole (name, value) match: static preferred, else
+    // dynamic (offset past the 61 static entries), else 0.
+    int32 findFieldAnywhere(String name, String value) {
+        int32 s = this.staticTable.findField(name, value);
+        if (s != 0) {
+            return s;
+        }
+        int32 d = this.dyn.findField(name, value);
+        if (d != 0) {
+            return HpackStaticTable.COUNT + d;
+        }
+        return 0;
+    }
+
+    // Absolute index of a name match: static preferred, else dynamic, else 0.
+    int32 findNameAnywhere(String name) {
+        int32 s = this.staticTable.findName(name);
+        if (s != 0) {
+            return s;
+        }
+        int32 d = this.dyn.findName(name);
+        if (d != 0) {
+            return HpackStaticTable.COUNT + d;
+        }
+        return 0;
+    }
+}

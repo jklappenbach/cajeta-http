@@ -8,8 +8,9 @@ import cajeta.lang.String;
  * length, followed by that many octets: either raw or
  * [`Huffman`](Huffman.cajeta)-coded per the flag.
  *
- * [`encode`](#encode) picks Huffman only when it is strictly shorter (the
- * RFC's recommended heuristic); pass a `null` `huffman` to force raw octets.
+ * [`encode`](#encode) picks Huffman when it is no longer than the raw octets
+ * (Huffman wins ties, matching the RFC's reference encoder — see the "307"
+ * literal in Appendix C.6.2); pass a `null` `huffman` to force raw octets.
  * [`decode`](#decode) enforces a caller-supplied length cap **before**
  * allocating, so a literal claiming a huge length cannot exhaust memory — the
  * decompressed-size bomb guard the plan calls for.
@@ -21,7 +22,7 @@ public final class HpackString {
                               Huffman huffman) {
         if (huffman != null) {
             int32 hlen = huffman.encodedLength(data, len);
-            if (hlen < len) {
+            if (hlen <= len) {
                 int8[] hb = huffman.encode(data, len);
                 w.writeInteger((int64) hlen, 7, 0x80);
                 w.writeBytes(hb, hlen);
