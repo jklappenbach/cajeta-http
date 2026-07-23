@@ -59,12 +59,38 @@ public class WsUpgrade {
      * [`WebSocket`](WebSocket.cajeta) over the same borrowed transport.
      */
     public static #WebSocket acceptServer(AsyncReader reader, AsyncWriter writer) {
+        return WsUpgrade.acceptServer(reader, writer, false);
+    }
+
+    /**
+     * Server upgrade with optional `permessage-deflate` (RFC 7692) negotiation.
+     * When `allowCompression` is set, the client's `Sec-WebSocket-Extensions`
+     * offer is negotiated ([`WsCompression`](WsCompression.cajeta)); if
+     * accepted, the agreed parameters are echoed in the `101` and the returned
+     * socket compresses. When off (the default overload), plain frames only.
+     */
+    public static #WebSocket acceptServer(AsyncReader reader, AsyncWriter writer,
+                                          boolean allowCompression) {
         HttpRequest request = WsUpgrade.readRequest(reader);
         HttpResponse response = WsServerHandshake.accept(request);
+        PmdParams params = WsUpgrade.serverParams(request, allowCompression);
+        if (params.enabled) {
+            response.setHeader("Sec-WebSocket-Extensions", params.responseHeader);
+        }
         int8[] bytes = HttpSerializer.response(response);
         writer.writeAll(bytes, 0, bytes.count());
         writer.flush();
-        return WebSocket.forServer(reader, writer);
+        WebSocket ws = WebSocket.forServer(reader, writer);
+        ws.enableCompression(params);
+        return #ws;
+    }
+
+    static #PmdParams serverParams(HttpRequest request, boolean allow) {
+        if (!allow) {
+            return heap PmdParams();
+        }
+        String offered = request.getHeaders().get("Sec-WebSocket-Extensions");
+        return WsCompression.negotiateServer(offered);
     }
 
     /**
@@ -78,14 +104,42 @@ public class WsUpgrade {
      */
     public static #WebSocket connectClient(AsyncReader reader, AsyncWriter writer,
                                            Uri uri, int32 keySeed) {
+        return WsUpgrade.connectClient(reader, writer, uri, keySeed, false);
+    }
+
+    /**
+     * Client upgrade with optional `permessage-deflate` (RFC 7692) offer. When
+     * `offerCompression` is set, the request advertises the extension and the
+     * server's reply is interpreted ([`WsCompression`](WsCompression.cajeta));
+     * if accepted, the returned socket compresses. When off (the default
+     * overload), plain frames only.
+     */
+    public static #WebSocket connectClient(AsyncReader reader, AsyncWriter writer,
+                                           Uri uri, int32 keySeed,
+                                           boolean offerCompression) {
         String key = WsClientHandshake.placeholderKey(keySeed);
         HttpRequest request = WsClientHandshake.buildRequest(uri, key);
+        if (offerCompression) {
+            String offer = WsCompression.clientOffer();
+            request.setHeader("Sec-WebSocket-Extensions", offer);
+        }
         int8[] bytes = HttpSerializer.request(request);
         writer.writeAll(bytes, 0, bytes.count());
         writer.flush();
         HttpResponse response = WsUpgrade.readResponse(reader);
         WsClientHandshake.requireAccept(response, key);
-        return WebSocket.forClient(reader, writer);
+        PmdParams params = WsUpgrade.clientParams(response, offerCompression);
+        WebSocket ws = WebSocket.forClient(reader, writer);
+        ws.enableCompression(params);
+        return #ws;
+    }
+
+    static #PmdParams clientParams(HttpResponse response, boolean offered) {
+        if (!offered) {
+            return heap PmdParams();
+        }
+        String ext = response.getHeaders().get("Sec-WebSocket-Extensions");
+        return WsCompression.confirmClient(ext);
     }
 
     // ----- head readers (byte-at-a-time; re-stage post-head bytes) ----------

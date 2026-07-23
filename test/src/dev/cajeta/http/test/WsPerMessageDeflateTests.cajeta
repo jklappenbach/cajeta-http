@@ -4,6 +4,7 @@ import cajeta.lang.String;
 import cajeta.io.net.AsyncReader;
 import cajeta.io.net.AsyncWriter;
 import dev.cajeta.http.ws.WebSocket;
+import dev.cajeta.http.ws.WsUpgrade;
 import dev.cajeta.http.ws.WsFrame;
 import dev.cajeta.http.ws.WsOpcode;
 import dev.cajeta.http.ws.WsFrameEncoder;
@@ -324,6 +325,61 @@ public final class WsPerMessageDeflateTests {
                "live permessage-deflate send -> receive round-trips");
     }
 
+    // ---- 4.1d: WsUpgrade server-side handshake negotiation ---------------
+
+    static boolean bufContains(int8[] buf, int32 len, String needle) {
+        int32 nl = needle.byteLength();
+        if (nl == 0 || len < nl) {
+            return false;
+        }
+        int32 i = 0;
+        while (i <= len - nl) {
+            int32 k = 0;
+            boolean hit = true;
+            while (hit && k < nl) {
+                if ((((int32) buf[i + k]) & 0xFF)
+                        != (((int32) needle.byteAt(k)) & 0xFF)) {
+                    hit = false;
+                }
+                k = k + 1;
+            }
+            if (hit) {
+                return true;
+            }
+            i = i + 1;
+        }
+        return false;
+    }
+
+    static void handshakeNegotiates(Check c) {
+        String req = "GET /chat HTTP/1.1\r\n"
+            + "Host: example.com\r\n"
+            + "Upgrade: websocket\r\n"
+            + "Connection: Upgrade\r\n"
+            + "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+            + "Sec-WebSocket-Version: 13\r\n"
+            + "Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits\r\n"
+            + "\r\n";
+        int8[] rb = req.toBytes();
+
+        MemChannel rin = heap MemChannel();
+        AsyncReader reader = heap AsyncReader(rin);
+        reader.stage(rb, req.byteLength());
+        reader.markEof();
+        MemChannel rout = heap MemChannel();
+        AsyncWriter writer = heap AsyncWriter(rout);
+
+        WebSocket ws = WsUpgrade.acceptServer(reader, writer, true);
+        writer.flush();
+        int8[] resp = rout.captured();
+        int32 rlen = rout.capturedLen();
+        c.that(WsPerMessageDeflateTests.bufContains(resp, rlen, "101"),
+               "handshake: server sends 101 Switching Protocols");
+        c.that(WsPerMessageDeflateTests.bufContains(resp, rlen,
+                "permessage-deflate"),
+               "handshake: 101 echoes the negotiated permessage-deflate");
+    }
+
     public static void run(Check c) {
         System.stdout.println("-- ws pmd: RSV1 frame discipline --");
         WsPerMessageDeflateTests.rsv1FrameCodec(c);
@@ -339,5 +395,7 @@ public final class WsPerMessageDeflateTests {
         WsPerMessageDeflateTests.messageCompression(c);
         System.stdout.println("-- ws pmd: live send->receive round-trip --");
         WsPerMessageDeflateTests.liveRoundTrip(c);
+        System.stdout.println("-- ws pmd: WsUpgrade server negotiation --");
+        WsPerMessageDeflateTests.handshakeNegotiates(c);
     }
 }
