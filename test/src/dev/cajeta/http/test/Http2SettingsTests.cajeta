@@ -1,0 +1,121 @@
+package dev.cajeta.http.test;
+
+import dev.cajeta.http.h2.Http2;
+import dev.cajeta.http.h2.Http2Settings;
+import dev.cajeta.http.h2.Http2SettingsList;
+import dev.cajeta.http.h2.Http2Exception;
+
+/**
+ * http:3.3a — the HTTP/2 **SETTINGS** state and connection **preface**
+ * (RFC 9113 §6.5.2, §3.4): protocol defaults, applying a peer's settings with
+ * per-value validation (the exact §7 error codes), unknown-id tolerance,
+ * a settings round-trip, and preface matching.
+ */
+public final class Http2SettingsTests {
+
+    public static void run(Check c) {
+        System.stdout.println("-- h2 settings: defaults + apply --");
+        Http2SettingsTests.applyAndValidate(c);
+        System.stdout.println("-- h2 settings: round-trip + preface --");
+        Http2SettingsTests.roundTripAndPreface(c);
+    }
+
+    static void applyAndValidate(Check c) {
+        Http2Settings s = heap Http2Settings();
+        c.eqInt(s.headerTableSize, (int64) 4096, "default HEADER_TABLE_SIZE");
+        c.eqInt((int64) s.enablePush, (int64) 1, "default ENABLE_PUSH");
+        c.eqInt(s.initialWindowSize, (int64) 65535, "default INITIAL_WINDOW_SIZE");
+        c.eqInt(s.maxFrameSize, (int64) 16384, "default MAX_FRAME_SIZE");
+        c.eqInt(s.maxConcurrentStreams, (int64) -1, "default MAX_CONCURRENT unlimited");
+
+        Http2SettingsList l = heap Http2SettingsList();
+        l.add(Http2.SETTINGS_HEADER_TABLE_SIZE, (int64) 8192);
+        l.add(Http2.SETTINGS_ENABLE_PUSH, (int64) 0);
+        l.add(Http2.SETTINGS_MAX_CONCURRENT_STREAMS, (int64) 100);
+        l.add(Http2.SETTINGS_INITIAL_WINDOW_SIZE, (int64) 1048576);
+        l.add(Http2.SETTINGS_MAX_FRAME_SIZE, (int64) 32768);
+        l.add((int32) 0xff, (int64) 12345);   // unknown id -> ignored
+        s.apply(l);
+        c.eqInt(s.headerTableSize, (int64) 8192, "applied HEADER_TABLE_SIZE");
+        c.eqInt((int64) s.enablePush, (int64) 0, "applied ENABLE_PUSH 0");
+        c.eqInt(s.maxConcurrentStreams, (int64) 100, "applied MAX_CONCURRENT");
+        c.eqInt(s.initialWindowSize, (int64) 1048576, "applied INITIAL_WINDOW");
+        c.eqInt(s.maxFrameSize, (int64) 32768, "applied MAX_FRAME_SIZE");
+        c.that(!s.pushEnabled(), "push disabled after ENABLE_PUSH 0");
+
+        // ENABLE_PUSH must be 0 or 1.
+        boolean e1 = false;
+        Http2Settings s1 = heap Http2Settings();
+        Http2SettingsList bad1 = heap Http2SettingsList();
+        bad1.add(Http2.SETTINGS_ENABLE_PUSH, (int64) 2);
+        try {
+            s1.apply(bad1);
+        } catch (Http2Exception e) {
+            e1 = e.errorCode == Http2.PROTOCOL_ERROR;
+        }
+        c.that(e1, "ENABLE_PUSH 2 -> PROTOCOL_ERROR");
+
+        // INITIAL_WINDOW_SIZE above 2^31-1 -> FLOW_CONTROL_ERROR.
+        boolean e2 = false;
+        Http2Settings s2 = heap Http2Settings();
+        Http2SettingsList bad2 = heap Http2SettingsList();
+        bad2.add(Http2.SETTINGS_INITIAL_WINDOW_SIZE, (int64) 2147483648);
+        try {
+            s2.apply(bad2);
+        } catch (Http2Exception e) {
+            e2 = e.errorCode == Http2.FLOW_CONTROL_ERROR;
+        }
+        c.that(e2, "INITIAL_WINDOW_SIZE too large -> FLOW_CONTROL_ERROR");
+
+        // MAX_FRAME_SIZE below 16384 -> PROTOCOL_ERROR.
+        boolean e3 = false;
+        Http2Settings s3 = heap Http2Settings();
+        Http2SettingsList bad3 = heap Http2SettingsList();
+        bad3.add(Http2.SETTINGS_MAX_FRAME_SIZE, (int64) 16383);
+        try {
+            s3.apply(bad3);
+        } catch (Http2Exception e) {
+            e3 = e.errorCode == Http2.PROTOCOL_ERROR;
+        }
+        c.that(e3, "MAX_FRAME_SIZE 16383 -> PROTOCOL_ERROR");
+
+        // MAX_FRAME_SIZE above 2^24-1 -> PROTOCOL_ERROR.
+        boolean e4 = false;
+        Http2Settings s4 = heap Http2Settings();
+        Http2SettingsList bad4 = heap Http2SettingsList();
+        bad4.add(Http2.SETTINGS_MAX_FRAME_SIZE, (int64) 16777216);
+        try {
+            s4.apply(bad4);
+        } catch (Http2Exception e) {
+            e4 = e.errorCode == Http2.PROTOCOL_ERROR;
+        }
+        c.that(e4, "MAX_FRAME_SIZE 2^24 -> PROTOCOL_ERROR");
+    }
+
+    static void roundTripAndPreface(Check c) {
+        // toList only serializes non-default values; apply reconstructs them.
+        Http2Settings s = heap Http2Settings();
+        s.maxConcurrentStreams = (int64) 250;
+        s.initialWindowSize = (int64) 131072;
+        s.enablePush = 0;
+        Http2SettingsList l = s.toList();
+        c.eqInt((int64) l.size(), (int64) 3, "toList emits 3 non-defaults");
+
+        Http2Settings back = heap Http2Settings();
+        back.apply(l);
+        c.eqInt(back.maxConcurrentStreams, (int64) 250, "round-trip MAX_CONCURRENT");
+        c.eqInt(back.initialWindowSize, (int64) 131072, "round-trip INITIAL_WINDOW");
+        c.eqInt((int64) back.enablePush, (int64) 0, "round-trip ENABLE_PUSH");
+        c.eqInt(back.maxFrameSize, (int64) 16384, "unset stays default");
+
+        // Preface matching.
+        int8[] pf = Http2.preface();
+        c.eqInt((int64) pf.count(), (int64) 24, "preface is 24 octets");
+        c.that(Http2.matchesPreface(pf, 0, (int32) pf.count()), "preface matches");
+
+        int8[] bad = Http2.preface();
+        bad[0] = (int8) 0x00;
+        c.that(!Http2.matchesPreface(bad, 0, 24), "corrupted preface rejected");
+        c.that(!Http2.matchesPreface(pf, 0, 20), "short buffer rejected");
+    }
+}

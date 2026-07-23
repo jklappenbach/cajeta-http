@@ -63,9 +63,28 @@ public final class Http2 {
     /** The 9-octet fixed frame-header length (RFC 9113 §4.1). */
     public static final int32 FRAME_HEADER_SIZE = 9;
 
+    /** Length of the client connection preface (RFC 9113 §3.4). */
+    public static final int32 PREFACE_SIZE = 24;
+
     /** The connection preface octets (RFC 9113 §3.4). */
     public static #int8[] preface() {
         String p = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
         return p.toBytes();
+    }
+
+    /** Whether `buf[offset..offset+PREFACE_SIZE)` is the client preface. */
+    public static boolean matchesPreface(int8[] buf, int32 offset, int32 len) {
+        if (len < Http2.PREFACE_SIZE) {
+            return false;
+        }
+        int8[] p = Http2.preface();
+        int32 i = 0;
+        while (i < Http2.PREFACE_SIZE) {
+            if ((((int32) buf[offset + i]) & 0xFF) != (((int32) p[i]) & 0xFF)) {
+                return false;
+            }
+            i = i + 1;
+        }
+        return true;
     }
 }

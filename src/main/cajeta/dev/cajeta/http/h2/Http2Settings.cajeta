@@ -1,0 +1,103 @@
+package dev.cajeta.http.h2;
+
+/**
+ * The mutable set of **HTTP/2 SETTINGS** in force for one direction of a
+ * connection (RFC 9113 §6.5.2) — plan item **3.3**. Initialized to the
+ * protocol defaults; [`apply`](#apply) folds in a peer's SETTINGS frame,
+ * validating each value and raising [`Http2Exception`](Http2Exception.cajeta)
+ * with the exact §7 code on an illegal one. [`toList`](#toList) serializes the
+ * settings a peer needs told (the ones that differ from the defaults).
+ *
+ * `maxConcurrentStreams` and `maxHeaderListSize` default to **unlimited**,
+ * represented as `-1`.
+ */
+public final class Http2Settings {
+    public int64 headerTableSize;
+    public int32 enablePush;
+    public int64 maxConcurrentStreams;   // -1 = unlimited
+    public int64 initialWindowSize;
+    public int64 maxFrameSize;
+    public int64 maxHeaderListSize;      // -1 = unlimited
+
+    public Http2Settings() {
+        this.headerTableSize = (int64) Http2.DEFAULT_HEADER_TABLE_SIZE;
+        this.enablePush = Http2.DEFAULT_ENABLE_PUSH;
+        this.maxConcurrentStreams = (int64) -1;
+        this.initialWindowSize = (int64) Http2.DEFAULT_INITIAL_WINDOW_SIZE;
+        this.maxFrameSize = (int64) Http2.DEFAULT_MAX_FRAME_SIZE;
+        this.maxHeaderListSize = (int64) -1;
+    }
+
+    /**
+     * Fold a peer's parsed SETTINGS into this set, validating each per
+     * §6.5.2. Unknown identifiers are ignored. An out-of-range ENABLE_PUSH or
+     * MAX_FRAME_SIZE is `PROTOCOL_ERROR`; an INITIAL_WINDOW_SIZE above 2^31-1
+     * is `FLOW_CONTROL_ERROR`.
+     */
+    public void apply(Http2SettingsList list) {
+        int32 i = 0;
+        while (i < list.size()) {
+            int32 id = list.idAt(i);
+            int64 v = list.valueAt(i);
+            if (id == Http2.SETTINGS_HEADER_TABLE_SIZE) {
+                this.headerTableSize = v;
+            } else if (id == Http2.SETTINGS_ENABLE_PUSH) {
+                if (v != (int64) 0 && v != (int64) 1) {
+                    throw heap Http2Exception("SETTINGS_ENABLE_PUSH not 0/1",
+                                              Http2.PROTOCOL_ERROR);
+                }
+                this.enablePush = (int32) v;
+            } else if (id == Http2.SETTINGS_MAX_CONCURRENT_STREAMS) {
+                this.maxConcurrentStreams = v;
+            } else if (id == Http2.SETTINGS_INITIAL_WINDOW_SIZE) {
+                if (v > (int64) Http2.MAX_WINDOW_SIZE) {
+                    throw heap Http2Exception(
+                        "SETTINGS_INITIAL_WINDOW_SIZE too large",
+                        Http2.FLOW_CONTROL_ERROR);
+                }
+                this.initialWindowSize = v;
+            } else if (id == Http2.SETTINGS_MAX_FRAME_SIZE) {
+                if (v < (int64) Http2.DEFAULT_MAX_FRAME_SIZE
+                        || v > (int64) Http2.MAX_ALLOWED_FRAME_SIZE) {
+                    throw heap Http2Exception(
+                        "SETTINGS_MAX_FRAME_SIZE out of range",
+                        Http2.PROTOCOL_ERROR);
+                }
+                this.maxFrameSize = v;
+            } else if (id == Http2.SETTINGS_MAX_HEADER_LIST_SIZE) {
+                this.maxHeaderListSize = v;
+            }
+            i = i + 1;
+        }
+    }
+
+    /** Serialize the non-default settings into a list to send to the peer. */
+    public #Http2SettingsList toList() {
+        Http2SettingsList s = heap Http2SettingsList();
+        if (this.headerTableSize != (int64) Http2.DEFAULT_HEADER_TABLE_SIZE) {
+            s.add(Http2.SETTINGS_HEADER_TABLE_SIZE, this.headerTableSize);
+        }
+        if (this.enablePush != Http2.DEFAULT_ENABLE_PUSH) {
+            s.add(Http2.SETTINGS_ENABLE_PUSH, (int64) this.enablePush);
+        }
+        if (this.maxConcurrentStreams >= (int64) 0) {
+            s.add(Http2.SETTINGS_MAX_CONCURRENT_STREAMS,
+                  this.maxConcurrentStreams);
+        }
+        if (this.initialWindowSize != (int64) Http2.DEFAULT_INITIAL_WINDOW_SIZE) {
+            s.add(Http2.SETTINGS_INITIAL_WINDOW_SIZE, this.initialWindowSize);
+        }
+        if (this.maxFrameSize != (int64) Http2.DEFAULT_MAX_FRAME_SIZE) {
+            s.add(Http2.SETTINGS_MAX_FRAME_SIZE, this.maxFrameSize);
+        }
+        if (this.maxHeaderListSize >= (int64) 0) {
+            s.add(Http2.SETTINGS_MAX_HEADER_LIST_SIZE, this.maxHeaderListSize);
+        }
+        return #s;
+    }
+
+    /** Whether server push is permitted by this (peer's) settings. */
+    public boolean pushEnabled() {
+        return this.enablePush == 1;
+    }
+}
