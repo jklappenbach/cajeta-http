@@ -1616,13 +1616,43 @@ acceptance bar.
     the h1 path that hands the socket to `Http2Connection` with the original
     request synthesized as a half-closed stream 1 — not a redesign.
     Suite 1283 → 1297; every case looped green.
-- [ ] **3.5** Server push — decision per the spec's lean: **include**,
-  with the deprecated-upstream note (non-browser clients still use it).
-  Opt-in server API; the client defaults `SETTINGS_ENABLE_PUSH=0` and
-  surfaces pushes only when explicitly enabled.
-  - TDD: enabled → pushed resource delivered with correct cache keying;
-    PUSH_PROMISE while disabled → connection error per RFC;
-    disabled-by-default proven client-side.
+- [x] **3.5** Server push (RFC 9113 §8.4) — **included** per the spec's lean,
+  with the deprecated-upstream note (Chrome removed it 2022; still in-RFC and
+  used by some non-browser clients).
+  - **Server API** (opt-in, un-colored): `HttpResponse.push(path, status,
+    body)` attaches transport-neutral `PushEntry` promises (ignored over h1).
+    A handler fiber, only when the peer left `SETTINGS_ENABLE_PUSH` on, emits
+    each `PUSH_PROMISE` on the request stream + the pushed response on a
+    reserved even stream — `Http2WriteSide.nextPromisedId` (even/increasing
+    under the write lock), `Http2Requests.promisedRequestFields` /
+    `statusOnlyFields`.
+  - **Client policy**: `Http2Client` advertises `SETTINGS_ENABLE_PUSH=0` and
+    treats any `PUSH_PROMISE` as a `PROTOCOL_ERROR` connection error.
+  - TDD (done): enabled → pushed `/style.css` delivered on the reserved even
+    stream and keyed by the promised `:path`, main body intact; the shipped
+    client's default `ENABLE_PUSH=0` captured by a rogue server, and its rogue
+    `PUSH_PROMISE` rejected as a `PROTOCOL_ERROR`. Suite 1297 → 1306.
+  - v1 limits: pushed responses carry status + body (no custom headers);
+    promised `:scheme` defaults to `https`.
+
+**Phase 3 (HTTP/2) is complete** — HPACK, frames, streams+multiplexing,
+ALPN/prior-knowledge negotiation, and server push all ship and multiplex on
+the wire.
+
+> **Known flakiness (pre-existing, stdlib-level — not h2 logic).** Looping the
+> full suite shows a low-rate (~4–8% over 25–30 runs) intermittent **hang** or
+> **TLS-teardown crash** under repeated concurrent loopback load. It is *not* in
+> the h2 protocol code: the hangs land in tests that predate all h2 work and use
+> only the shipped client/server over plaintext — `MiddlewareLoopbackTests`,
+> `ServerAcceptControlTests` — and the crashes are a TLS handshake/`close_notify`
+> race in the release-091 stdlib TLS/socket layer under the multi-carrier
+> scheduler. The h2 work added test volume that surfaces it more often but did
+> not cause it. Two genuinely h2-specific escapes *were* found and fixed here
+> (server + client `TlsException` escaping `serve`/`exchange`; `serveTlsStream`
+> close-time write to a vanished peer), plus a `Http2Client` read deadline so a
+> stalled peer can't block unboundedly. A single suite run is reliably green;
+> the residual race is a stdlib-reliability follow-up (lost-wakeup / TLS
+> close-handshake under loopback), tracked outside this plan.
 
 ## 4 — WebSocket completeness + SSE
 
