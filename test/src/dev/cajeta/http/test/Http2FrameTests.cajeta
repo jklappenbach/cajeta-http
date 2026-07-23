@@ -1,0 +1,168 @@
+package dev.cajeta.http.test;
+
+import dev.cajeta.http.h2.Http2;
+import dev.cajeta.http.h2.Http2FrameHeader;
+import dev.cajeta.http.h2.Http2FrameWriter;
+import dev.cajeta.http.h2.Http2FrameReader;
+import dev.cajeta.http.h2.Http2Exception;
+
+/**
+ * http:3.2a — the HTTP/2 **frame header** (RFC 9113 §4.1): the zero-copy
+ * `Http2FrameHeader` view (24-bit length split/recombine, R-bit masking,
+ * big-endian byte layout), the writer/reader round-trip over a buffer of
+ * concatenated frames, and `SETTINGS_MAX_FRAME_SIZE` / truncation faults
+ * mapping to `FRAME_SIZE_ERROR`.
+ */
+public final class Http2FrameTests {
+
+    public static void run(Check c) {
+        System.stdout.println("-- h2 frame: header view --");
+        Http2FrameTests.headerView(c);
+        System.stdout.println("-- h2 frame: writer/reader round-trip --");
+        Http2FrameTests.roundTrip(c);
+        System.stdout.println("-- h2 frame: size + truncation faults --");
+        Http2FrameTests.faults(c);
+    }
+
+    static void headerView(Check c) {
+        // Round-trip through set()/accessors at the max frame size.
+        int8[] buf = heap int8[9];
+        Http2FrameHeader h = Http2FrameHeader(buf);
+        h.set(16384, Http2.FRAME_HEADERS, Http2.FLAG_END_HEADERS, 7);
+        c.eqInt((int64) h.length(), (int64) 16384, "length round-trips");
+        c.eqInt((int64) h.typeCode(), (int64) Http2.FRAME_HEADERS, "type round-trips");
+        c.eqInt((int64) h.flags(), (int64) Http2.FLAG_END_HEADERS, "flags round-trip");
+        c.eqInt((int64) h.streamId(), (int64) 7, "streamId round-trips");
+
+        // Big-endian byte layout: 16384 = 0x004000 -> 00 40 00, type 0x01,
+        // flags 0x04, stream 00 00 00 07.
+        c.eqInt(((int64) buf[0]) & (int64) 0xFF, (int64) 0x00, "len byte0");
+        c.eqInt(((int64) buf[1]) & (int64) 0xFF, (int64) 0x40, "len byte1");
+        c.eqInt(((int64) buf[2]) & (int64) 0xFF, (int64) 0x00, "len byte2");
+        c.eqInt(((int64) buf[3]) & (int64) 0xFF, (int64) 0x01, "type byte");
+        c.eqInt(((int64) buf[4]) & (int64) 0xFF, (int64) 0x04, "flags byte");
+        c.eqInt(((int64) buf[8]) & (int64) 0xFF, (int64) 0x07, "stream low byte");
+
+        // The maximum 24-bit length encodes and decodes.
+        int8[] buf2 = heap int8[9];
+        Http2FrameHeader h2 = Http2FrameHeader(buf2);
+        h2.set(Http2.MAX_ALLOWED_FRAME_SIZE, Http2.FRAME_DATA, 0, 1);
+        c.eqInt((int64) h2.length(), (int64) Http2.MAX_ALLOWED_FRAME_SIZE,
+                "max 24-bit length round-trips");
+        c.eqInt(((int64) buf2[0]) & (int64) 0xFF, (int64) 0xFF, "max len byte0");
+        c.eqInt(((int64) buf2[2]) & (int64) 0xFF, (int64) 0xFF, "max len byte2");
+
+        // The reserved R bit is ignored on read: craft a header with R=1 and
+        // stream id 5, confirm streamId() masks it off.
+        int8[] buf3 = heap int8[9];
+        buf3[5] = (int8) 0x80;   // R bit
+        buf3[8] = (int8) 0x05;   // stream id 5
+        Http2FrameHeader h3 = Http2FrameHeader(buf3);
+        c.eqInt((int64) h3.streamId(), (int64) 5, "R bit masked off on read");
+
+        // set() clears the R bit even for a would-be-negative stream id input.
+        int8[] buf4 = heap int8[9];
+        Http2FrameHeader h4 = Http2FrameHeader(buf4);
+        h4.set(0, 0, 0, 0x7FFFFFFF);
+        c.eqInt((int64) h4.streamId(), (int64) 0x7FFFFFFF, "31-bit stream id");
+        c.eqInt(((int64) buf4[5]) & (int64) 0x80, (int64) 0, "R bit stays clear");
+    }
+
+    static void roundTrip(Check c) {
+        Http2FrameWriter w = heap Http2FrameWriter();
+        int8[] p1 = { (int8) 0xDE, (int8) 0xAD, (int8) 0xBE, (int8) 0xEF };
+        w.writeFrame(Http2.FRAME_DATA, Http2.FLAG_END_STREAM, 3, p1, 4);
+        w.writeEmptyFrame(Http2.FRAME_SETTINGS, Http2.FLAG_ACK, 0);
+        int8[] p3 = { (int8) 0x01, (int8) 0x02, (int8) 0x03 };
+        w.writeFrame(Http2.FRAME_HEADERS,
+                     Http2.FLAG_END_HEADERS | Http2.FLAG_END_STREAM, 5, p3, 3);
+
+        int8[] bytes = w.toBytes();
+        Http2FrameReader r = heap Http2FrameReader(bytes, (int32) bytes.count(),
+                                                   Http2.DEFAULT_MAX_FRAME_SIZE);
+
+        c.that(r.next(), "frame 1 present");
+        c.eqInt((int64) r.type(), (int64) Http2.FRAME_DATA, "f1 type DATA");
+        c.that(r.hasFlag(Http2.FLAG_END_STREAM), "f1 END_STREAM set");
+        c.eqInt((int64) r.streamId(), (int64) 3, "f1 stream 3");
+        c.eqInt((int64) r.length(), (int64) 4, "f1 length 4");
+        c.eqInt((int64) r.payloadByte(0), (int64) 0xDE, "f1 payload[0]");
+        c.eqInt((int64) r.payloadByte(3), (int64) 0xEF, "f1 payload[3]");
+
+        c.that(r.next(), "frame 2 present");
+        c.eqInt((int64) r.type(), (int64) Http2.FRAME_SETTINGS, "f2 type SETTINGS");
+        c.that(r.hasFlag(Http2.FLAG_ACK), "f2 ACK set");
+        c.eqInt((int64) r.streamId(), (int64) 0, "f2 stream 0");
+        c.eqInt((int64) r.length(), (int64) 0, "f2 length 0");
+
+        c.that(r.next(), "frame 3 present");
+        c.eqInt((int64) r.type(), (int64) Http2.FRAME_HEADERS, "f3 type HEADERS");
+        c.that(r.hasFlag(Http2.FLAG_END_HEADERS), "f3 END_HEADERS set");
+        c.that(r.hasFlag(Http2.FLAG_END_STREAM), "f3 END_STREAM set");
+        c.eqInt((int64) r.streamId(), (int64) 5, "f3 stream 5");
+        int8[] pl = r.copyPayload();
+        c.eqInt((int64) pl.count(), (int64) 3, "f3 payload copy length");
+        c.eqInt(((int64) pl[1]) & (int64) 0xFF, (int64) 0x02, "f3 payload copy[1]");
+
+        c.that(!r.next(), "no fourth frame");
+        c.that(!r.hasMore(), "reader exhausted");
+    }
+
+    static void faults(Check c) {
+        // Oversize payload vs the configured SETTINGS_MAX_FRAME_SIZE.
+        Http2FrameWriter w = heap Http2FrameWriter();
+        int8[] big = heap int8[16385];
+        w.writeFrame(Http2.FRAME_DATA, 0, 1, big, 16385);
+        int8[] bytes = w.toBytes();
+        boolean caught = false;
+        Http2FrameReader r = heap Http2FrameReader(bytes, (int32) bytes.count(),
+                                                   Http2.DEFAULT_MAX_FRAME_SIZE);
+        try {
+            boolean ok = r.next();
+        } catch (Http2Exception e) {
+            caught = e.errorCode == Http2.FRAME_SIZE_ERROR;
+        }
+        c.that(caught, "oversize frame -> FRAME_SIZE_ERROR");
+
+        // Incomplete header (fewer than 9 bytes).
+        int8[] tiny = { (int8) 0x00, (int8) 0x00, (int8) 0x04 };
+        boolean caught2 = false;
+        Http2FrameReader r2 = heap Http2FrameReader(tiny, 3,
+                                                    Http2.DEFAULT_MAX_FRAME_SIZE);
+        try {
+            boolean ok = r2.next();
+        } catch (Http2Exception e) {
+            caught2 = e.errorCode == Http2.FRAME_SIZE_ERROR;
+        }
+        c.that(caught2, "incomplete header -> FRAME_SIZE_ERROR");
+
+        // Truncated payload: header declares length 8, only 2 payload bytes.
+        int8[] trunc = {
+            (int8) 0x00, (int8) 0x00, (int8) 0x08,   // length 8
+            (int8) 0x06, (int8) 0x00,                // PING, no flags
+            (int8) 0x00, (int8) 0x00, (int8) 0x00, (int8) 0x00,  // stream 0
+            (int8) 0xAA, (int8) 0xBB                 // only 2 of 8 payload bytes
+        };
+        boolean caught3 = false;
+        Http2FrameReader r3 = heap Http2FrameReader(trunc, 11,
+                                                    Http2.DEFAULT_MAX_FRAME_SIZE);
+        try {
+            boolean ok = r3.next();
+        } catch (Http2Exception e) {
+            caught3 = e.errorCode == Http2.FRAME_SIZE_ERROR;
+        }
+        c.that(caught3, "truncated payload -> FRAME_SIZE_ERROR");
+
+        // Writer rejects an unencodable (> 2^24-1) declared length before
+        // touching the payload buffer.
+        Http2FrameWriter w4 = heap Http2FrameWriter();
+        int8[] dummy = heap int8[1];
+        boolean caught4 = false;
+        try {
+            w4.writeFrame(Http2.FRAME_DATA, 0, 1, dummy, 16777216);
+        } catch (Http2Exception e) {
+            caught4 = e.errorCode == Http2.FRAME_SIZE_ERROR;
+        }
+        c.that(caught4, "unencodable length -> FRAME_SIZE_ERROR");
+    }
+}

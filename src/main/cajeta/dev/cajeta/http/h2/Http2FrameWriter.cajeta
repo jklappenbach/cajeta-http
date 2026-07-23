@@ -1,0 +1,90 @@
+package dev.cajeta.http.h2;
+
+/**
+ * Serializes HTTP/2 frames into a growable buffer — plan item **3.2**. Each
+ * [`writeFrame`](#writeFrame) lays a 9-octet header (built through the
+ * [`Http2FrameHeader`](Http2FrameHeader.cajeta) view) followed by the payload;
+ * [`toBytes`](#toBytes) hands back the concatenated wire bytes.
+ *
+ * A payload longer than the 24-bit length field can hold
+ * (`Http2.MAX_ALLOWED_FRAME_SIZE`, 2^24-1) is unencodable and raises
+ * [`Http2Exception`](Http2Exception.cajeta) `FRAME_SIZE_ERROR`. The
+ * peer-advertised `SETTINGS_MAX_FRAME_SIZE` is a tighter, connection-scoped
+ * bound enforced by the stream layer (3.3) / the read side.
+ */
+public final class Http2FrameWriter {
+    int8[] buf;
+    int32 count;
+    int32 cap;
+
+    public Http2FrameWriter() {
+        this.buf = heap int8[256];
+        this.count = 0;
+        this.cap = 256;
+    }
+
+    /** Bytes written so far. */
+    public int32 size() {
+        return this.count;
+    }
+
+    /** Write a complete frame: 9-octet header + `payload[0..payloadLen)`. */
+    public void writeFrame(int32 type, int32 flags, int32 streamId,
+                           int8[] payload, int32 payloadLen) {
+        if (payloadLen < 0 || payloadLen > Http2.MAX_ALLOWED_FRAME_SIZE) {
+            throw heap Http2Exception("frame payload length not encodable",
+                                      Http2.FRAME_SIZE_ERROR);
+        }
+        int8[] hdr = heap int8[9];
+        Http2FrameHeader h = Http2FrameHeader(hdr);
+        h.set(payloadLen, type, flags, streamId);
+        this.appendBytes(hdr, 9);
+        if (payloadLen > 0) {
+            this.appendBytes(payload, payloadLen);
+        }
+    }
+
+    /** Write a frame with an empty payload (e.g. a SETTINGS or PING ack). */
+    public void writeEmptyFrame(int32 type, int32 flags, int32 streamId) {
+        int8[] hdr = heap int8[9];
+        Http2FrameHeader h = Http2FrameHeader(hdr);
+        h.set(0, type, flags, streamId);
+        this.appendBytes(hdr, 9);
+    }
+
+    /** A fresh owned copy of the written bytes. */
+    public #int8[] toBytes() {
+        int32 n = this.count;
+        int8[] out = heap int8[n];
+        int32 i = 0;
+        while (i < n) {
+            out[i] = this.buf[i];
+            i = i + 1;
+        }
+        return #out;
+    }
+
+    void appendBytes(int8[] b, int32 n) {
+        int32 i = 0;
+        while (i < n) {
+            if (this.count >= this.cap) {
+                this.grow();
+            }
+            this.buf[this.count] = b[i];
+            this.count = this.count + 1;
+            i = i + 1;
+        }
+    }
+
+    void grow() {
+        int32 nc = this.cap * 2;
+        int8[] dst = heap int8[nc];
+        int32 i = 0;
+        while (i < this.count) {
+            dst[i] = this.buf[i];
+            i = i + 1;
+        }
+        this.buf = #dst;
+        this.cap = nc;
+    }
+}

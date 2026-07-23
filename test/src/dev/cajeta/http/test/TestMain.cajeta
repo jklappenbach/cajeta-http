@@ -48,6 +48,7 @@ public final class TestMain {
         HpackTableTests.run(c);
         HpackDecoderTests.run(c);
         HpackEncoderTests.run(c);
+        Http2FrameTests.run(c);
 
         System.stdout.println("");
         System.stdout.println("=== {} passed, {} failed ===",

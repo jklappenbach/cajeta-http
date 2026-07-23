@@ -1,0 +1,71 @@
+package dev.cajeta.http.h2;
+
+/**
+ * HTTP/2 protocol constants (RFC 9113) — plan item **3.2**. Frame type codes
+ * (§6), frame flag bits (§6.x, per-type), connection/stream error codes (§7),
+ * and SETTINGS parameter identifiers with their protocol defaults (§6.5.2).
+ * Grouped here so the frame codec, the stream layer (3.3), and negotiation
+ * (3.4) share one source of truth.
+ */
+public final class Http2 {
+
+    // -- Frame types (RFC 9113 §6) -------------------------------------------
+    public static final int32 FRAME_DATA          = 0x0;
+    public static final int32 FRAME_HEADERS       = 0x1;
+    public static final int32 FRAME_PRIORITY      = 0x2;
+    public static final int32 FRAME_RST_STREAM    = 0x3;
+    public static final int32 FRAME_SETTINGS      = 0x4;
+    public static final int32 FRAME_PUSH_PROMISE  = 0x5;
+    public static final int32 FRAME_PING          = 0x6;
+    public static final int32 FRAME_GOAWAY        = 0x7;
+    public static final int32 FRAME_WINDOW_UPDATE = 0x8;
+    public static final int32 FRAME_CONTINUATION  = 0x9;
+
+    // -- Frame flags (RFC 9113 §6.x) — shared bit values across frame types --
+    public static final int32 FLAG_END_STREAM  = 0x1;   // DATA, HEADERS
+    public static final int32 FLAG_ACK         = 0x1;   // SETTINGS, PING
+    public static final int32 FLAG_END_HEADERS = 0x4;   // HEADERS, PUSH_PROMISE, CONTINUATION
+    public static final int32 FLAG_PADDED      = 0x8;   // DATA, HEADERS, PUSH_PROMISE
+    public static final int32 FLAG_PRIORITY    = 0x20;  // HEADERS
+
+    // -- Error codes (RFC 9113 §7) -------------------------------------------
+    public static final int32 NO_ERROR            = 0x0;
+    public static final int32 PROTOCOL_ERROR      = 0x1;
+    public static final int32 INTERNAL_ERROR      = 0x2;
+    public static final int32 FLOW_CONTROL_ERROR  = 0x3;
+    public static final int32 SETTINGS_TIMEOUT    = 0x4;
+    public static final int32 STREAM_CLOSED       = 0x5;
+    public static final int32 FRAME_SIZE_ERROR    = 0x6;
+    public static final int32 REFUSED_STREAM      = 0x7;
+    public static final int32 CANCEL              = 0x8;
+    public static final int32 COMPRESSION_ERROR   = 0x9;
+    public static final int32 CONNECT_ERROR       = 0xa;
+    public static final int32 ENHANCE_YOUR_CALM   = 0xb;
+    public static final int32 INADEQUATE_SECURITY = 0xc;
+    public static final int32 HTTP_1_1_REQUIRED   = 0xd;
+
+    // -- SETTINGS parameters (RFC 9113 §6.5.2) -------------------------------
+    public static final int32 SETTINGS_HEADER_TABLE_SIZE      = 0x1;
+    public static final int32 SETTINGS_ENABLE_PUSH            = 0x2;
+    public static final int32 SETTINGS_MAX_CONCURRENT_STREAMS = 0x3;
+    public static final int32 SETTINGS_INITIAL_WINDOW_SIZE    = 0x4;
+    public static final int32 SETTINGS_MAX_FRAME_SIZE         = 0x5;
+    public static final int32 SETTINGS_MAX_HEADER_LIST_SIZE   = 0x6;
+
+    // -- Protocol defaults (RFC 9113 §6.5.2, §4.2, §11.3) --------------------
+    public static final int32 DEFAULT_HEADER_TABLE_SIZE   = 4096;
+    public static final int32 DEFAULT_ENABLE_PUSH         = 1;
+    public static final int32 DEFAULT_INITIAL_WINDOW_SIZE = 65535;
+    public static final int32 DEFAULT_MAX_FRAME_SIZE      = 16384;    // 2^14
+    public static final int32 MAX_ALLOWED_FRAME_SIZE      = 16777215; // 2^24 - 1
+    public static final int32 MAX_WINDOW_SIZE             = 2147483647; // 2^31 - 1
+
+    /** The 9-octet fixed frame-header length (RFC 9113 §4.1). */
+    public static final int32 FRAME_HEADER_SIZE = 9;
+
+    /** The connection preface octets (RFC 9113 §3.4). */
+    public static #int8[] preface() {
+        String p = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+        return p.toBytes();
+    }
+}

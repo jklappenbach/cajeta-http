@@ -1,0 +1,132 @@
+package dev.cajeta.http.h2;
+
+/**
+ * Iterates the frames in a buffer of concatenated HTTP/2 frames — plan item
+ * **3.2**. [`next`](#next) decodes the 9-octet header through the
+ * [`Http2FrameHeader`](Http2FrameHeader.cajeta) view (typed, network-order,
+ * no bit-shuffling), validates the payload length against
+ * `SETTINGS_MAX_FRAME_SIZE`, and positions at the payload; the current frame's
+ * fields and payload region are then read via the accessors. Per-type payload
+ * parsing lives in [`Http2Frames`](Http2Frames.cajeta).
+ *
+ * Faults (RFC 9113 §4.2, §6.5.2) raise
+ * [`Http2Exception`](Http2Exception.cajeta) `FRAME_SIZE_ERROR`: a header
+ * straddling the end of the buffer, a payload longer than the configured
+ * maximum, or a payload truncated by the buffer's end.
+ */
+public final class Http2FrameReader {
+    int8[] buf;          // borrowed — the caller owns the frame bytes
+    int32 pos;
+    int32 limit;
+    int32 maxFrameSize;
+
+    // Decoded fields of the current frame (valid after a `true` from next()).
+    int32 curType;
+    int32 curFlags;
+    int32 curStreamId;
+    int32 curLength;
+    int32 curPayloadOffset;
+
+    public Http2FrameReader(int8[] buf, int32 limit, int32 maxFrameSize) {
+        this.buf = buf;
+        this.pos = 0;
+        this.limit = limit;
+        this.maxFrameSize = maxFrameSize;
+        this.curType = 0;
+        this.curFlags = 0;
+        this.curStreamId = 0;
+        this.curLength = 0;
+        this.curPayloadOffset = 0;
+    }
+
+    /** Whether any bytes remain to read. */
+    public boolean hasMore() {
+        return this.pos < this.limit;
+    }
+
+    /**
+     * Decode the next frame header and position at its payload. Returns `false`
+     * when the buffer is exactly exhausted; raises `FRAME_SIZE_ERROR` on an
+     * incomplete header, an oversize payload, or a truncated payload.
+     */
+    public boolean next() {
+        int32 remaining = this.limit - this.pos;
+        if (remaining == 0) {
+            return false;
+        }
+        if (remaining < Http2.FRAME_HEADER_SIZE) {
+            throw heap Http2Exception("incomplete HTTP/2 frame header",
+                                      Http2.FRAME_SIZE_ERROR);
+        }
+        int8[] hdr = heap int8[9];
+        int32 i = 0;
+        while (i < 9) {
+            hdr[i] = this.buf[this.pos + i];
+            i = i + 1;
+        }
+        Http2FrameHeader h = Http2FrameHeader(hdr);
+        int32 len = h.length();
+        if (len > this.maxFrameSize) {
+            throw heap Http2Exception(
+                "frame exceeds SETTINGS_MAX_FRAME_SIZE", Http2.FRAME_SIZE_ERROR);
+        }
+        if (this.pos + Http2.FRAME_HEADER_SIZE + len > this.limit) {
+            throw heap Http2Exception("truncated HTTP/2 frame payload",
+                                      Http2.FRAME_SIZE_ERROR);
+        }
+        this.curType = h.typeCode();
+        this.curFlags = h.flags();
+        this.curStreamId = h.streamId();
+        this.curLength = len;
+        this.curPayloadOffset = this.pos + Http2.FRAME_HEADER_SIZE;
+        this.pos = this.pos + Http2.FRAME_HEADER_SIZE + len;
+        return true;
+    }
+
+    /** The current frame's type code. */
+    public int32 type() {
+        return this.curType;
+    }
+
+    /** The current frame's flags octet. */
+    public int32 flags() {
+        return this.curFlags;
+    }
+
+    /** Whether the current frame has flag bit `f` set. */
+    public boolean hasFlag(int32 f) {
+        return (this.curFlags & f) != 0;
+    }
+
+    /** The current frame's stream identifier (reserved bit already masked). */
+    public int32 streamId() {
+        return this.curStreamId;
+    }
+
+    /** The current frame's payload length. */
+    public int32 length() {
+        return this.curLength;
+    }
+
+    /** Offset of the current frame's payload within the backing buffer. */
+    public int32 payloadOffset() {
+        return this.curPayloadOffset;
+    }
+
+    /** Payload byte `i` (0-based within the current frame's payload). */
+    public int32 payloadByte(int32 i) {
+        return ((int32) this.buf[this.curPayloadOffset + i]) & 0xFF;
+    }
+
+    /** A fresh owned copy of the current frame's payload. */
+    public #int8[] copyPayload() {
+        int32 n = this.curLength;
+        int8[] out = heap int8[n];
+        int32 i = 0;
+        while (i < n) {
+            out[i] = this.buf[this.curPayloadOffset + i];
+            i = i + 1;
+        }
+        return #out;
+    }
+}

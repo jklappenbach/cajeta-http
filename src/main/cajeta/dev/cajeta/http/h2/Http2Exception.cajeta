@@ -1,0 +1,42 @@
+package dev.cajeta.http.h2;
+
+import cajeta.lang.String;
+import dev.cajeta.http.HttpException;
+
+/**
+ * An HTTP/2 protocol fault (RFC 9113 §5.4) — plan item **3.2**. Carries the
+ * RFC 9113 §7 [`errorCode`](#errorCode) (e.g. `Http2.FRAME_SIZE_ERROR`,
+ * `Http2.PROTOCOL_ERROR`) and the [`streamId`](#streamId) it applies to: a
+ * value of `0` marks a **connection error** (the connection is closed with a
+ * `GOAWAY` carrying the code), a non-zero id a **stream error** (the stream is
+ * reset with `RST_STREAM`). The frame layer raises connection errors; the
+ * stream layer (3.3) chooses connection vs stream per the RFC.
+ *
+ * Lives under [`HttpException`](../HttpException.cajeta), classified
+ * `NetException.KIND_INVALID` (12).
+ */
+public class Http2Exception extends HttpException {
+    public int32 errorCode;
+    public int32 streamId;
+
+    public Http2Exception(String message, int32 errorCode) {
+        this.message = message;
+        this.cause = 0;
+        this.kind = 12;
+        this.errorCode = errorCode;
+        this.streamId = 0;
+    }
+
+    public Http2Exception(String message, int32 errorCode, int32 streamId) {
+        this.message = message;
+        this.cause = 0;
+        this.kind = 12;
+        this.errorCode = errorCode;
+        this.streamId = streamId;
+    }
+
+    /** Whether this is a connection error (stream 0) rather than a stream error. */
+    public boolean isConnectionError() {
+        return this.streamId == 0;
+    }
+}

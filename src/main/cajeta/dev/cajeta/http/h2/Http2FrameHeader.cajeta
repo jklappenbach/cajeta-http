@@ -1,0 +1,59 @@
+package dev.cajeta.http.h2;
+
+/**
+ * Zero-copy overlay of the **9-octet HTTP/2 frame header** (RFC 9113 §4.1) —
+ * plan item **3.2**, the spec's canonical `view` case. Reads and writes go
+ * straight through the borrowed buffer's bytes; no allocation, no copy.
+ *
+ * ```
+ *  +-----------------------------------------------+
+ *  |                 Length (24)                   |
+ *  +---------------+---------------+---------------+
+ *  |   Type (8)    |   Flags (8)   |
+ *  +-+-------------+---------------+-------------------------------+
+ *  |R|                 Stream Identifier (31)                     |
+ *  +=+=============================================================+
+ * ```
+ *
+ * The 24-bit `Length` has no primitive width, so it is split into a `uint16`
+ * high half and a `uint8` low byte and recombined by [`length`](#length). The
+ * reserved `R` bit rides the top of the 32-bit stream field and is masked off
+ * by [`streamId`](#streamId). All fields are network byte order (`@BigEndian`).
+ */
+@BigEndian
+public view Http2FrameHeader {
+    uint16 lenHi;       // top 16 bits of the 24-bit length
+    uint8  lenLo;       // low 8 bits of the length
+    uint8  frameType;
+    uint8  frameFlags;
+    uint32 streamRaw;   // R(1) + Stream Identifier(31)
+
+    /** The 24-bit frame payload length. */
+    public int32 length() {
+        return (((int32) this.lenHi) << 8) | ((int32) this.lenLo);
+    }
+
+    /** The frame type octet. */
+    public int32 typeCode() {
+        return (int32) this.frameType;
+    }
+
+    /** The frame flags octet. */
+    public int32 flags() {
+        return (int32) this.frameFlags;
+    }
+
+    /** The stream identifier, with the reserved bit masked off. */
+    public int32 streamId() {
+        return (int32) (this.streamRaw & (uint32) 0x7FFFFFFF);
+    }
+
+    /** Write all header fields (length is masked to 24 bits, R bit cleared). */
+    public void set(int32 length, int32 type, int32 flags, int32 streamId) {
+        this.lenHi = (uint16) ((length >> 8) & 0xFFFF);
+        this.lenLo = (uint8) (length & 0xFF);
+        this.frameType = (uint8) (type & 0xFF);
+        this.frameFlags = (uint8) (flags & 0xFF);
+        this.streamRaw = (uint32) (streamId & 0x7FFFFFFF);
+    }
+}
