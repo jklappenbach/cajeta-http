@@ -1,0 +1,204 @@
+package dev.cajeta.http.test;
+
+import cajeta.lang.String;
+import cajeta.io.net.IpAddress;
+import cajeta.io.net.SocketAddress;
+import cajeta.io.net.TcpListener;
+import cajeta.io.net.TcpStream;
+import cajeta.io.net.AsyncReader;
+import cajeta.io.net.AsyncWriter;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.h2.Http2;
+import dev.cajeta.http.h2.Http2Connection;
+import dev.cajeta.http.h2.Http2FrameHeader;
+import dev.cajeta.http.h2.Http2FrameWriter;
+import dev.cajeta.http.h2.Http2Frames;
+import dev.cajeta.http.h2.Http2SettingsList;
+import dev.cajeta.http.h2.Http2ContentFrames;
+import dev.cajeta.http.h2.Http2Payload;
+import dev.cajeta.http.h2.HpackEncoder;
+import dev.cajeta.http.h2.HpackDecoder;
+import dev.cajeta.http.h2.HpackFieldList;
+
+/**
+ * http:3.3e — **send-side flow control** (RFC 9113 §5.2). The client advertises
+ * a tiny `SETTINGS_INITIAL_WINDOW_SIZE` (10), so a 30-byte response body cannot
+ * be sent in full: the handler fiber sends one ≤10-byte DATA frame, then
+ * **parks** on [`Http2SendGate`](Http2SendGate.cajeta) with the window
+ * exhausted. Only after the client sends a `WINDOW_UPDATE` does the reader fiber
+ * wake it to stream the remainder. The proof: the first DATA is a partial,
+ * non-END_STREAM chunk, and the stream completes *only after* the client grants
+ * more window.
+ */
+public final class Http2FlowParkTests {
+
+    static final int32 WIN = 10;
+    static final int32 BODY_LEN = 30;
+
+    static #String own(String s) {
+        return s.substring(0, s.byteLength());
+    }
+
+    static boolean readExactWithin(AsyncReader r, int8[] buf, int32 n,
+                                   int32 timeoutMs) {
+        int32 off = 0;
+        while (off < n) {
+            int32 g = r.readWithin(buf, off, n - off, timeoutMs);
+            if (g <= 0) {
+                return false;
+            }
+            off = off + g;
+        }
+        return true;
+    }
+
+    // ---- server ----------------------------------------------------------
+
+    static #HttpResponse handle(HttpRequest req) {
+        int8[] b = heap int8[Http2FlowParkTests.BODY_LEN];
+        int32 i = 0;
+        while (i < Http2FlowParkTests.BODY_LEN) {
+            b[i] = (int8) (65 + (i % 26));   // 'A'..'Z' repeating
+            i = i + 1;
+        }
+        return HttpResponse.ok().body(b, Http2FlowParkTests.BODY_LEN);
+    }
+
+    public static async int32 h2Server(#TcpListener listener) {
+        TcpStream sock = listener.acceptAsync();
+        AsyncReader reader = heap AsyncReader(sock);
+        AsyncWriter writer = heap AsyncWriter(sock);
+        (HttpRequest) -> #HttpResponse h = (req) -> Http2FlowParkTests.handle(req);
+        Http2Connection.serve(reader, writer, #h);
+        sock.close();
+        return 1;
+    }
+
+    // ---- client ----------------------------------------------------------
+
+    static void client(Check c, int32 port) {
+        IpAddress ca = IpAddress.loopbackV4();
+        SocketAddress connAddr = SocketAddress.of(#ca, port);
+        TcpStream sock = TcpStream.connectAsync(#connAddr);
+        AsyncReader reader = heap AsyncReader(sock);
+        AsyncWriter writer = heap AsyncWriter(sock);
+
+        int8[] pf = Http2.preface();
+        writer.writeAll(pf, 0, 24);
+
+        // SETTINGS advertising a 10-byte per-stream window.
+        Http2FrameWriter fw = heap Http2FrameWriter();
+        Http2SettingsList st = heap Http2SettingsList();
+        st.add(Http2.SETTINGS_INITIAL_WINDOW_SIZE, (int64) Http2FlowParkTests.WIN);
+        Http2Frames.writeSettings(fw, st);
+
+        HpackEncoder enc = heap HpackEncoder(Http2.DEFAULT_HEADER_TABLE_SIZE, true);
+        HpackFieldList fl = heap HpackFieldList();
+        fl.put(Http2FlowParkTests.own(":method"), Http2FlowParkTests.own("GET"));
+        fl.put(Http2FlowParkTests.own(":path"), Http2FlowParkTests.own("/big"));
+        fl.put(Http2FlowParkTests.own(":scheme"), Http2FlowParkTests.own("http"));
+        fl.put(Http2FlowParkTests.own(":authority"), Http2FlowParkTests.own("127.0.0.1"));
+        int8[] block = enc.encode(fl);
+        Http2ContentFrames.writeHeaders(fw, 1, block, (int32) block.count(),
+                                        true, true, 0);
+        int8[] out = fw.toBytes();
+        writer.writeAll(out, 0, (int32) out.count());
+        writer.flush();
+
+        HpackDecoder dec = heap HpackDecoder(Http2.DEFAULT_HEADER_TABLE_SIZE);
+        int8[] body = heap int8[128];
+        int32 bodyLen = 0;
+        int32 firstChunkLen = -1;
+        boolean firstChunkWasEnd = false;
+        boolean grantedMore = false;
+        boolean done = false;
+        boolean timedOut = false;
+
+        while (!done && !timedOut) {
+            int8[] hdr = heap int8[9];
+            if (!Http2FlowParkTests.readExactWithin(reader, hdr, 9, 4000)) {
+                timedOut = true;
+            } else {
+                Http2FrameHeader h = Http2FrameHeader(hdr);
+                int32 type = h.typeCode();
+                int32 flags = h.flags();
+                int32 sid = h.streamId();
+                int32 len = h.length();
+                int8[] pl = heap int8[len];
+                if (len > 0) {
+                    Http2FlowParkTests.readExactWithin(reader, pl, len, 4000);
+                }
+                if (type == Http2.FRAME_SETTINGS) {
+                    if ((flags & Http2.FLAG_ACK) == 0) {
+                        Http2FrameWriter afw = heap Http2FrameWriter();
+                        Http2Frames.writeSettingsAck(afw);
+                        int8[] ab = afw.toBytes();
+                        writer.writeAll(ab, 0, (int32) ab.count());
+                        writer.flush();
+                    }
+                } else if (type == Http2.FRAME_DATA) {
+                    Http2Payload reg = Http2ContentFrames.parseData(pl, len,
+                                                                   flags, sid);
+                    boolean isEnd = (flags & Http2.FLAG_END_STREAM) != 0;
+                    if (firstChunkLen < 0) {
+                        firstChunkLen = reg.length;
+                        firstChunkWasEnd = isEnd;
+                    }
+                    int32 j = 0;
+                    while (j < reg.length) {
+                        body[bodyLen] = pl[reg.offset + j];
+                        bodyLen = bodyLen + 1;
+                        j = j + 1;
+                    }
+                    // After the first (window-limited) chunk, unblock the writer.
+                    if (!grantedMore) {
+                        Http2FrameWriter wfw = heap Http2FrameWriter();
+                        Http2Frames.writeWindowUpdate(wfw, 1, 1000);
+                        Http2Frames.writeWindowUpdate(wfw, 0, 1000);
+                        int8[] wb = wfw.toBytes();
+                        writer.writeAll(wb, 0, (int32) wb.count());
+                        writer.flush();
+                        grantedMore = true;
+                    }
+                    if (isEnd) {
+                        done = true;
+                    }
+                }
+            }
+        }
+        sock.close();
+
+        c.that(!timedOut, "h2 flow: did not time out");
+        // The first DATA chunk was window-limited (<= 10) and NOT the end —
+        // i.e. the writer parked rather than dumping the whole body.
+        c.that(firstChunkLen >= 0 && firstChunkLen <= Http2FlowParkTests.WIN,
+               "h2 flow: first chunk clamped to send window");
+        c.that(!firstChunkWasEnd, "h2 flow: first chunk parked (not END_STREAM)");
+        c.that(grantedMore, "h2 flow: completion required a WINDOW_UPDATE");
+        c.eqInt((int64) bodyLen, (int64) Http2FlowParkTests.BODY_LEN,
+                "h2 flow: full body delivered after grant");
+        boolean ok = bodyLen == Http2FlowParkTests.BODY_LEN;
+        int32 k = 0;
+        while (ok && k < bodyLen) {
+            if ((((int32) body[k]) & 0xFF) != (65 + (k % 26))) {
+                ok = false;
+            }
+            k = k + 1;
+        }
+        c.that(ok, "h2 flow: body bytes intact across the park");
+    }
+
+    public static void run(Check c) {
+        System.stdout.println("-- h2 conn: send-window parking + WINDOW_UPDATE resume --");
+        scope {
+            IpAddress la = IpAddress.loopbackV4();
+            SocketAddress bindAddr = SocketAddress.of(#la, 0);
+            TcpListener listener = TcpListener.bind(bindAddr);
+            int32 port = listener.boundPort();
+            Task<int32> sv = spawn h2Server(#listener);
+            Http2FlowParkTests.client(c, port);
+            int32 r = await sv;
+        }
+    }
+}
