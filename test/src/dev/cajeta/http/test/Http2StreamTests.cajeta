@@ -1,0 +1,219 @@
+package dev.cajeta.http.test;
+
+import dev.cajeta.http.h2.Http2;
+import dev.cajeta.http.h2.Http2Stream;
+import dev.cajeta.http.h2.Http2StreamTable;
+import dev.cajeta.http.h2.HeaderBlockAssembler;
+import dev.cajeta.http.h2.Http2Exception;
+
+/**
+ * http:3.3b — the HTTP/2 **stream state machine** (RFC 9113 §5.1), the stream
+ * **registry** with §5.1.1 id validation, and **CONTINUATION** reassembly
+ * (§6.10). The lifecycle happy paths, the protocol-violation catalogue
+ * (DATA/RST on idle, HEADERS after end-stream, non-trailer second HEADERS,
+ * even/reused/decreasing ids) with the exact §7 codes, and header-block
+ * assembly across fragments with its interleaving guards.
+ */
+public final class Http2StreamTests {
+
+    public static void run(Check c) {
+        System.stdout.println("-- h2 stream: state machine --");
+        Http2StreamTests.stateMachine(c);
+        System.stdout.println("-- h2 stream: registry + id rules --");
+        Http2StreamTests.registry(c);
+        System.stdout.println("-- h2 stream: CONTINUATION reassembly --");
+        Http2StreamTests.continuation(c);
+    }
+
+    static void stateMachine(Check c) {
+        // Full request/response with a body both ways.
+        Http2Stream s = heap Http2Stream(1);
+        c.eqInt((int64) s.state, (int64) Http2Stream.IDLE, "starts IDLE");
+        s.onRecvHeaders(false);
+        c.eqInt((int64) s.state, (int64) Http2Stream.OPEN, "HEADERS -> OPEN");
+        s.onRecvData(false);
+        c.eqInt((int64) s.state, (int64) Http2Stream.OPEN, "DATA -> OPEN");
+        s.onRecvData(true);
+        c.eqInt((int64) s.state, (int64) Http2Stream.HALF_CLOSED_REMOTE,
+                "DATA end -> HALF_CLOSED_REMOTE");
+        s.onSendHeaders(false);
+        c.eqInt((int64) s.state, (int64) Http2Stream.HALF_CLOSED_REMOTE,
+                "response HEADERS keeps state");
+        s.onSendData(true);
+        c.eqInt((int64) s.state, (int64) Http2Stream.CLOSED, "response end -> CLOSED");
+        c.that(s.isClosed(), "closed");
+
+        // Bodyless request (HEADERS with END_STREAM) + bodyless response.
+        Http2Stream s2 = heap Http2Stream(3);
+        s2.onRecvHeaders(true);
+        c.eqInt((int64) s2.state, (int64) Http2Stream.HALF_CLOSED_REMOTE,
+                "HEADERS end -> HALF_CLOSED_REMOTE");
+        s2.onSendHeaders(true);
+        c.eqInt((int64) s2.state, (int64) Http2Stream.CLOSED,
+                "response HEADERS end -> CLOSED");
+
+        // Violations.
+        boolean e1 = false;
+        Http2Stream i1 = heap Http2Stream(5);
+        try {
+            i1.onRecvData(false);
+        } catch (Http2Exception e) {
+            e1 = e.errorCode == Http2.PROTOCOL_ERROR;
+        }
+        c.that(e1, "DATA on idle -> PROTOCOL_ERROR");
+
+        boolean e2 = false;
+        Http2Stream i2 = heap Http2Stream(7);
+        i2.onRecvHeaders(true);   // now HALF_CLOSED_REMOTE
+        try {
+            i2.onRecvData(false);
+        } catch (Http2Exception e) {
+            e2 = e.errorCode == Http2.STREAM_CLOSED;
+        }
+        c.that(e2, "DATA after end-stream -> STREAM_CLOSED");
+
+        boolean e3 = false;
+        Http2Stream i3 = heap Http2Stream(9);
+        i3.onRecvHeaders(false);   // OPEN
+        try {
+            i3.onRecvHeaders(false);   // second HEADERS, not trailers
+        } catch (Http2Exception e) {
+            e3 = e.errorCode == Http2.PROTOCOL_ERROR;
+        }
+        c.that(e3, "non-trailer second HEADERS -> PROTOCOL_ERROR");
+
+        boolean e4 = false;
+        Http2Stream i4 = heap Http2Stream(11);
+        try {
+            i4.onRecvRst();   // RST on idle
+        } catch (Http2Exception e) {
+            e4 = e.errorCode == Http2.PROTOCOL_ERROR;
+        }
+        c.that(e4, "RST on idle -> PROTOCOL_ERROR");
+
+        // Trailers: HEADERS(false) then HEADERS(true).
+        Http2Stream t = heap Http2Stream(13);
+        t.onRecvHeaders(false);
+        t.onRecvHeaders(true);
+        c.eqInt((int64) t.state, (int64) Http2Stream.HALF_CLOSED_REMOTE,
+                "trailers -> HALF_CLOSED_REMOTE");
+
+        // RST closes an open stream.
+        Http2Stream r = heap Http2Stream(15);
+        r.onRecvHeaders(false);
+        r.onRecvRst();
+        c.that(r.isClosed(), "RST closes an open stream");
+    }
+
+    static void registry(Check c) {
+        Http2StreamTable t = heap Http2StreamTable();
+        Http2Stream a = t.openRemote(1);
+        c.eqInt((int64) a.id, (int64) 1, "opened stream 1");
+        Http2Stream b = t.openRemote(3);
+        c.eqInt((int64) t.lastRemoteId(), (int64) 3, "lastRemoteId 3");
+        c.eqInt((int64) t.size(), (int64) 2, "two streams");
+        c.eqInt((int64) t.get(1).id, (int64) 1, "get(1)");
+        c.that(t.get(99) == null, "get(99) null");
+
+        // Even id -> PROTOCOL_ERROR.
+        boolean e1 = false;
+        try {
+            Http2Stream x = t.openRemote(4);
+        } catch (Http2Exception e) {
+            e1 = e.errorCode == Http2.PROTOCOL_ERROR;
+        }
+        c.that(e1, "even client id -> PROTOCOL_ERROR");
+
+        // id 0 -> PROTOCOL_ERROR.
+        boolean e2 = false;
+        try {
+            Http2Stream x = t.openRemote(0);
+        } catch (Http2Exception e) {
+            e2 = e.errorCode == Http2.PROTOCOL_ERROR;
+        }
+        c.that(e2, "stream id 0 -> PROTOCOL_ERROR");
+
+        // Non-increasing id (reuse) -> PROTOCOL_ERROR.
+        boolean e3 = false;
+        try {
+            Http2Stream x = t.openRemote(3);
+        } catch (Http2Exception e) {
+            e3 = e.errorCode == Http2.PROTOCOL_ERROR;
+        }
+        c.that(e3, "reused id -> PROTOCOL_ERROR");
+        boolean e4 = false;
+        try {
+            Http2Stream x = t.openRemote(1);
+        } catch (Http2Exception e) {
+            e4 = e.errorCode == Http2.PROTOCOL_ERROR;
+        }
+        c.that(e4, "decreasing id -> PROTOCOL_ERROR");
+
+        // activeCount reflects closure.
+        a.onRecvHeaders(true);
+        a.onSendHeaders(true);
+        c.that(a.isClosed(), "stream 1 closed");
+        c.eqInt((int64) t.activeCount(), (int64) 1, "activeCount excludes closed");
+
+        // Grow past initial capacity: open many streams (odd ids 5..).
+        int32 id = 5;
+        while (id < 45) {
+            Http2Stream x = t.openRemote(id);
+            id = id + 2;
+        }
+        c.eqInt((int64) t.get(43).id, (int64) 43, "grown table keeps streams");
+        c.eqInt((int64) t.get(1).id, (int64) 1, "grown table keeps early streams");
+    }
+
+    static void continuation(Check c) {
+        int8[] fragA = { (int8) 0x82, (int8) 0x86 };
+        int8[] fragB = { (int8) 0x84, (int8) 0x41 };
+        int8[] fragC = { (int8) 0x8c, (int8) 0xf1, (int8) 0xe3 };
+
+        HeaderBlockAssembler h = heap HeaderBlockAssembler();
+        c.that(!h.isOpen(), "assembler starts closed");
+        h.begin(1, fragA, 0, 2);
+        c.that(h.isOpen(), "open after begin");
+        c.eqInt((int64) h.streamId(), (int64) 1, "block stream 1");
+        h.continueOn(1, fragB, 0, 2);
+        h.continueOn(1, fragC, 0, 3);
+        c.eqInt((int64) h.blockLength(), (int64) 7, "accumulated 7 bytes");
+        int8[] block = h.complete();
+        c.that(!h.isOpen(), "closed after complete");
+        c.eqInt((int64) block.count(), (int64) 7, "assembled block length 7");
+        c.eqInt(((int64) block[0]) & (int64) 0xFF, (int64) 0x82, "block[0]");
+        c.eqInt(((int64) block[2]) & (int64) 0xFF, (int64) 0x84, "block[2] (2nd frag)");
+        c.eqInt(((int64) block[4]) & (int64) 0xFF, (int64) 0x8c, "block[4] (3rd frag)");
+        c.eqInt(((int64) block[6]) & (int64) 0xFF, (int64) 0xe3, "block[6] last");
+
+        // begin while open -> PROTOCOL_ERROR.
+        boolean e1 = false;
+        HeaderBlockAssembler h2 = heap HeaderBlockAssembler();
+        h2.begin(1, fragA, 0, 2);
+        try {
+            h2.begin(3, fragB, 0, 2);
+        } catch (Http2Exception e) {
+            e1 = e.errorCode == Http2.PROTOCOL_ERROR;
+        }
+        c.that(e1, "begin while open -> PROTOCOL_ERROR");
+
+        // CONTINUATION on the wrong stream -> PROTOCOL_ERROR.
+        boolean e2 = false;
+        try {
+            h2.continueOn(5, fragC, 0, 3);
+        } catch (Http2Exception e) {
+            e2 = e.errorCode == Http2.PROTOCOL_ERROR;
+        }
+        c.that(e2, "CONTINUATION wrong stream -> PROTOCOL_ERROR");
+
+        // CONTINUATION with no open block -> PROTOCOL_ERROR.
+        boolean e3 = false;
+        HeaderBlockAssembler h3 = heap HeaderBlockAssembler();
+        try {
+            h3.continueOn(1, fragA, 0, 2);
+        } catch (Http2Exception e) {
+            e3 = e.errorCode == Http2.PROTOCOL_ERROR;
+        }
+        c.that(e3, "CONTINUATION with no open block -> PROTOCOL_ERROR");
+    }
+}

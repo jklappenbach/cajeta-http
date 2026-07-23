@@ -1,0 +1,131 @@
+package dev.cajeta.http.h2;
+
+/**
+ * One HTTP/2 **stream** and its state machine (RFC 9113 §5.1) — plan item
+ * **3.3**, server perspective. A stream advances through
+ * `IDLE → OPEN → HALF_CLOSED_{REMOTE,LOCAL} → CLOSED` as HEADERS/DATA frames
+ * (and their `END_STREAM` flags) flow in each direction; RST_STREAM closes it
+ * from anywhere. Illegal transitions raise [`Http2Exception`](Http2Exception.cajeta)
+ * with the RFC's code — receiving frames on a half-closed(remote) or closed
+ * stream is `STREAM_CLOSED`, a HEADERS/DATA on an idle stream or a non-trailer
+ * second HEADERS is `PROTOCOL_ERROR`.
+ *
+ * Flow-control windows live in [`Http2FlowController`](Http2FlowController.cajeta);
+ * this type owns only the lifecycle state.
+ */
+public final class Http2Stream {
+    public static final int32 IDLE               = 0;
+    public static final int32 OPEN               = 1;
+    public static final int32 HALF_CLOSED_LOCAL  = 2;
+    public static final int32 HALF_CLOSED_REMOTE = 3;
+    public static final int32 CLOSED             = 4;
+    public static final int32 RESERVED_LOCAL     = 5;
+    public static final int32 RESERVED_REMOTE    = 6;
+
+    public int32 id;
+    public int32 state;
+
+    public Http2Stream(int32 id) {
+        this.id = id;
+        this.state = Http2Stream.IDLE;
+    }
+
+    public boolean isClosed() {
+        return this.state == Http2Stream.CLOSED;
+    }
+
+    /** Whether the remote (client) half is still open for receiving. */
+    public boolean remoteOpen() {
+        return this.state == Http2Stream.OPEN
+            || this.state == Http2Stream.HALF_CLOSED_LOCAL;
+    }
+
+    // -- receive side (client -> server) ------------------------------------
+
+    public void onRecvHeaders(boolean endStream) {
+        if (this.state == Http2Stream.IDLE) {
+            this.state = endStream ? Http2Stream.HALF_CLOSED_REMOTE
+                                   : Http2Stream.OPEN;
+        } else if (this.state == Http2Stream.OPEN) {
+            if (!endStream) {
+                throw heap Http2Exception(
+                    "second HEADERS without END_STREAM (not trailers)",
+                    Http2.PROTOCOL_ERROR);
+            }
+            this.state = Http2Stream.HALF_CLOSED_REMOTE;
+        } else if (this.state == Http2Stream.HALF_CLOSED_LOCAL) {
+            if (!endStream) {
+                throw heap Http2Exception("trailers without END_STREAM",
+                                          Http2.PROTOCOL_ERROR);
+            }
+            this.state = Http2Stream.CLOSED;
+        } else {
+            throw heap Http2Exception("HEADERS on closed stream",
+                                      Http2.STREAM_CLOSED, this.id);
+        }
+    }
+
+    public void onRecvData(boolean endStream) {
+        if (this.state == Http2Stream.OPEN) {
+            if (endStream) {
+                this.state = Http2Stream.HALF_CLOSED_REMOTE;
+            }
+        } else if (this.state == Http2Stream.HALF_CLOSED_LOCAL) {
+            if (endStream) {
+                this.state = Http2Stream.CLOSED;
+            }
+        } else if (this.state == Http2Stream.IDLE) {
+            throw heap Http2Exception("DATA on idle stream",
+                                      Http2.PROTOCOL_ERROR);
+        } else {
+            throw heap Http2Exception("DATA on closed stream",
+                                      Http2.STREAM_CLOSED, this.id);
+        }
+    }
+
+    // -- send side (server -> client) ---------------------------------------
+
+    public void onSendHeaders(boolean endStream) {
+        if (this.state == Http2Stream.OPEN) {
+            if (endStream) {
+                this.state = Http2Stream.HALF_CLOSED_LOCAL;
+            }
+        } else if (this.state == Http2Stream.HALF_CLOSED_REMOTE) {
+            if (endStream) {
+                this.state = Http2Stream.CLOSED;
+            }
+        } else {
+            throw heap Http2Exception("cannot send HEADERS in this state",
+                                      Http2.INTERNAL_ERROR, this.id);
+        }
+    }
+
+    public void onSendData(boolean endStream) {
+        if (this.state == Http2Stream.OPEN) {
+            if (endStream) {
+                this.state = Http2Stream.HALF_CLOSED_LOCAL;
+            }
+        } else if (this.state == Http2Stream.HALF_CLOSED_REMOTE) {
+            if (endStream) {
+                this.state = Http2Stream.CLOSED;
+            }
+        } else {
+            throw heap Http2Exception("cannot send DATA in this state",
+                                      Http2.INTERNAL_ERROR, this.id);
+        }
+    }
+
+    // -- reset --------------------------------------------------------------
+
+    public void onRecvRst() {
+        if (this.state == Http2Stream.IDLE) {
+            throw heap Http2Exception("RST_STREAM on idle stream",
+                                      Http2.PROTOCOL_ERROR);
+        }
+        this.state = Http2Stream.CLOSED;
+    }
+
+    public void onSendRst() {
+        this.state = Http2Stream.CLOSED;
+    }
+}

@@ -1,0 +1,120 @@
+package dev.cajeta.http.h2;
+
+/**
+ * Reassembles a HEADERS/PUSH_PROMISE header block that spans **CONTINUATION**
+ * frames (RFC 9113 §6.10) — plan item **3.3**. A HEADERS or PUSH_PROMISE whose
+ * `END_HEADERS` flag is unset opens a block; the fragment bytes of the opening
+ * frame and every following CONTINUATION are concatenated until a frame
+ * carries `END_HEADERS`, at which point the whole block is HPACK-decoded.
+ *
+ * The RFC's interleaving rule — while a block is open, the *only* permitted
+ * frame is a CONTINUATION on the **same** stream — is enforced here:
+ * [`begin`](#begin) rejects a new block while one is open, and
+ * [`continueOn`](#continueOn) rejects a CONTINUATION with no open block or on
+ * the wrong stream, both `PROTOCOL_ERROR`. The connection loop additionally
+ * consults [`isOpen`](#isOpen) to reject any *other* frame type mid-block.
+ */
+public final class HeaderBlockAssembler {
+    int8[] buf;
+    int32 count;
+    int32 cap;
+    int32 stream;
+    boolean open;
+
+    public HeaderBlockAssembler() {
+        this.buf = heap int8[256];
+        this.cap = 256;
+        this.count = 0;
+        this.stream = 0;
+        this.open = false;
+    }
+
+    /** Whether a header block is currently being assembled. */
+    public boolean isOpen() {
+        return this.open;
+    }
+
+    /** The stream id of the open block (valid when [`isOpen`](#isOpen)). */
+    public int32 streamId() {
+        return this.stream;
+    }
+
+    /** Bytes accumulated so far. */
+    public int32 blockLength() {
+        return this.count;
+    }
+
+    /**
+     * Begin a new header block for `streamId` and append its first fragment.
+     * Rejects a new block while one is already open (`PROTOCOL_ERROR`).
+     */
+    public void begin(int32 streamId, int8[] frag, int32 offset, int32 len) {
+        if (this.open) {
+            throw heap Http2Exception(
+                "new header block while one is open", Http2.PROTOCOL_ERROR);
+        }
+        this.open = true;
+        this.stream = streamId;
+        this.count = 0;
+        this.appendFragment(frag, offset, len);
+    }
+
+    /**
+     * Append a CONTINUATION fragment, validating it belongs to the open block
+     * and rides the same stream (both else `PROTOCOL_ERROR`).
+     */
+    public void continueOn(int32 streamId, int8[] frag, int32 offset, int32 len) {
+        if (!this.open) {
+            throw heap Http2Exception("CONTINUATION with no open header block",
+                                      Http2.PROTOCOL_ERROR);
+        }
+        if (streamId != this.stream) {
+            throw heap Http2Exception("CONTINUATION on the wrong stream",
+                                      Http2.PROTOCOL_ERROR);
+        }
+        this.appendFragment(frag, offset, len);
+    }
+
+    /** Finish the block (END_HEADERS seen); returns the assembled bytes. */
+    public #int8[] complete() {
+        if (!this.open) {
+            throw heap Http2Exception("completing with no open header block",
+                                      Http2.PROTOCOL_ERROR);
+        }
+        int32 n = this.count;
+        int8[] out = heap int8[n];
+        int32 i = 0;
+        while (i < n) {
+            out[i] = this.buf[i];
+            i = i + 1;
+        }
+        this.open = false;
+        this.stream = 0;
+        this.count = 0;
+        return #out;
+    }
+
+    void appendFragment(int8[] frag, int32 offset, int32 len) {
+        int32 i = 0;
+        while (i < len) {
+            if (this.count >= this.cap) {
+                this.grow();
+            }
+            this.buf[this.count] = frag[offset + i];
+            this.count = this.count + 1;
+            i = i + 1;
+        }
+    }
+
+    void grow() {
+        int32 nc = this.cap * 2;
+        int8[] dst = heap int8[nc];
+        int32 i = 0;
+        while (i < this.count) {
+            dst[i] = this.buf[i];
+            i = i + 1;
+        }
+        this.buf = #dst;
+        this.cap = nc;
+    }
+}

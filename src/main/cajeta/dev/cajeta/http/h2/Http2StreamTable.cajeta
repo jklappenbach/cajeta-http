@@ -1,0 +1,98 @@
+package dev.cajeta.http.h2;
+
+/**
+ * The connection's registry of [`Http2Stream`](Http2Stream.cajeta)s — plan
+ * item **3.3**, server side. Owns each stream and enforces the RFC 9113 §5.1.1
+ * identifier rules on the receive side: a client-initiated stream id must be
+ * **odd and non-zero** and **strictly greater** than every client id seen so
+ * far (a re-used or decreasing id is `PROTOCOL_ERROR`).
+ *
+ * Closed streams are retained (v1) so late frames resolve to a real stream and
+ * hit the state machine's `STREAM_CLOSED` path rather than being mistaken for
+ * an idle stream; the connection loop caps live concurrency separately.
+ */
+public final class Http2StreamTable {
+    Http2Stream[] streams;
+    int32 cap;
+    int32 count;
+    int32 lastRemoteId;
+
+    public Http2StreamTable() {
+        this.streams = heap Http2Stream[16];
+        this.cap = 16;
+        this.count = 0;
+        this.lastRemoteId = 0;
+    }
+
+    /** Highest client-initiated stream id accepted so far. */
+    public int32 lastRemoteId() {
+        return this.lastRemoteId;
+    }
+
+    /** Number of streams tracked (including closed). */
+    public int32 size() {
+        return this.count;
+    }
+
+    /**
+     * Open a client-initiated stream, validating the §5.1.1 id rules, and
+     * return it (borrowed). The new stream is `IDLE`; the caller drives its
+     * first transition.
+     */
+    public Http2Stream openRemote(int32 id) {
+        if (id == 0 || (id & 1) == 0) {
+            throw heap Http2Exception(
+                "client stream id must be odd and non-zero",
+                Http2.PROTOCOL_ERROR);
+        }
+        if (id <= this.lastRemoteId) {
+            throw heap Http2Exception("stream id not strictly increasing",
+                                      Http2.PROTOCOL_ERROR);
+        }
+        this.lastRemoteId = id;
+        if (this.count == this.cap) {
+            this.grow();
+        }
+        Http2Stream s = heap Http2Stream(id);
+        this.streams[this.count] = #s;
+        this.count = this.count + 1;
+        return this.streams[this.count - 1];
+    }
+
+    /** The stream with `id`, borrowed, or `null` if not tracked. */
+    public Http2Stream get(int32 id) {
+        int32 i = 0;
+        while (i < this.count) {
+            if (this.streams[i].id == id) {
+                return this.streams[i];
+            }
+            i = i + 1;
+        }
+        return null;
+    }
+
+    /** Number of streams not yet closed (live concurrency). */
+    public int32 activeCount() {
+        int32 n = 0;
+        int32 i = 0;
+        while (i < this.count) {
+            if (!this.streams[i].isClosed()) {
+                n = n + 1;
+            }
+            i = i + 1;
+        }
+        return n;
+    }
+
+    void grow() {
+        int32 nc = this.cap * 2;
+        Http2Stream[] ne = heap Http2Stream[nc];
+        int32 i = 0;
+        while (i < this.count) {
+            ne[i] #= #this.streams[i];
+            i = i + 1;
+        }
+        this.streams #= ne;
+        this.cap = nc;
+    }
+}
