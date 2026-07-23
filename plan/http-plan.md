@@ -1583,13 +1583,39 @@ acceptance bar.
       matters — is intact); receive-window replenishment (server→client
       WINDOW_UPDATE) is accounted but not emitted, so very large *uploads*
       would eventually stall. Neither blocks 3.4/3.5.
-- [ ] **3.4** Negotiation: ALPN `h2` via the stdlib TLS (`supportAlpn`
-  exists on `TlsListener`/`TlsStream`), h2c via `Upgrade: h2c` +
-  `HTTP2-Settings`, prior-knowledge preface detection; the client
-  selects by ALPN with clean h1 fallback.
-  - TDD: alpn=h2 serves the same Router over h2; alpn=http/1.1 falls
-    back; h2c upgrade round-trip; a non-preface first byte on a
-    prior-knowledge port degrades to h1.
+- [x] **3.4** Negotiation — ALPN `h2` + prior-knowledge shipped; h2c
+  `Upgrade` **won't-do** (removed in RFC 9113). Built bottom-up:
+  - **3.4a** (`Http2Client` + client-direction `Http2Requests`): the h2
+    client exchange — preface + SETTINGS, encode `HttpRequest` to
+    HEADERS(+DATA) on stream 1, read to END_STREAM, return the
+    `HttpResponse`. `requestFields` (pseudo-headers first, drops host/§8.2.2)
+    + `responseFromFields`. Proven client↔`Http2Connection` over plaintext
+    loopback (GET, body POST, 404).
+  - **3.4b** (ALPN): `HttpServer.tlsWorker` advertises `h2`,`http/1.1` and
+    post-handshake routes a negotiated `h2` to `Http2Connection.serve` (else
+    the h1 loop); `HttpClient` offers `h2`,`http/1.1` and runs
+    `Http2Client.exchange` when `h2` is selected, clean h1 fallback otherwise.
+    `Http2Connection` now **borrows** the shared handler (was transfer).
+    Transparent: `client.get(https)` served over h2 by the same handler
+    (body proves `HTTP/2.0`); an http/1.1-only client falls back
+    (`HTTP/1.1`). The pre-existing `ServerTlsTests` HTTPS exchange now rides
+    h2 unchanged.
+  - **3.4d** (prior-knowledge, RFC 9113 §3.3): opt-in
+    `builder().h2PriorKnowledge()` sniffs the 24-octet preface off the raw
+    `TcpStream` (byte-at-a-time, stop at first divergence) and re-stages it
+    into the `AsyncReader`'s empty ring so order survives; a match runs
+    `Http2Connection.serve`, else the h1 loop. Test: h2 client → h2, h1
+    client → h1, same port.
+  - **3.4c h2c `Upgrade` — WON'T-DO.** RFC 9113 (June 2022, the phase's
+    reference) obsoleted RFC 7540 and **removed** the `Upgrade: h2c` +
+    `HTTP2-Settings` cleartext-upgrade mechanism; only ALPN and prior
+    knowledge remain. Browsers never used it; cleartext tooling uses
+    `--http2-prior-knowledge` (covered by 3.4d). All the pieces (the h2
+    engine, HPACK, settings codec, base64url in the codec dep) are in place,
+    so if a concrete consumer ever needs it it is a localized add — a 101 on
+    the h1 path that hands the socket to `Http2Connection` with the original
+    request synthesized as a half-closed stream 1 — not a redesign.
+    Suite 1283 → 1297; every case looped green.
 - [ ] **3.5** Server push — decision per the spec's lean: **include**,
   with the deprecated-upstream note (non-browser clients still use it).
   Opt-in server API; the client defaults `SETTINGS_ENABLE_PUSH=0` and
