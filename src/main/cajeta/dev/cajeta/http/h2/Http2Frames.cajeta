@@ -1,0 +1,237 @@
+package dev.cajeta.http.h2;
+
+/**
+ * Encode/decode for the **fixed-layout HTTP/2 frames** (RFC 9113 §6.3–§6.9) —
+ * plan item **3.2**: PRIORITY, RST_STREAM, SETTINGS, PING, GOAWAY, and
+ * WINDOW_UPDATE. Their payloads are position-determined (no HPACK, no
+ * padding), so they read/write directly through big-endian octet helpers; the
+ * content frames (DATA/HEADERS/PUSH_PROMISE/CONTINUATION, with padding and
+ * header-block fragments) live in [`Http2ContentFrames`](Http2ContentFrames.cajeta).
+ *
+ * Every decoder enforces the RFC's framing rules and raises
+ * [`Http2Exception`](Http2Exception.cajeta) with the exact §7 error code — a
+ * bad fixed length is `FRAME_SIZE_ERROR`, a stream-id in the wrong place or a
+ * zero WINDOW_UPDATE increment is `PROTOCOL_ERROR`.
+ */
+public final class Http2Frames {
+
+    // -- big-endian octet helpers -------------------------------------------
+
+    static void putU16(int8[] b, int32 o, int32 v) {
+        b[o] = (int8) ((v >> 8) & 0xFF);
+        b[o + 1] = (int8) (v & 0xFF);
+    }
+
+    static void putU32(int8[] b, int32 o, int64 v) {
+        b[o] = (int8) ((v >> (int64) 24) & (int64) 0xFF);
+        b[o + 1] = (int8) ((v >> (int64) 16) & (int64) 0xFF);
+        b[o + 2] = (int8) ((v >> (int64) 8) & (int64) 0xFF);
+        b[o + 3] = (int8) (v & (int64) 0xFF);
+    }
+
+    static int32 getU16(int8[] b, int32 o) {
+        return ((((int32) b[o]) & 0xFF) << 8) | (((int32) b[o + 1]) & 0xFF);
+    }
+
+    static int64 getU32(int8[] b, int32 o) {
+        int64 x = (((int64) b[o]) & (int64) 0xFF) << (int64) 24;
+        x = x | ((((int64) b[o + 1]) & (int64) 0xFF) << (int64) 16);
+        x = x | ((((int64) b[o + 2]) & (int64) 0xFF) << (int64) 8);
+        x = x | (((int64) b[o + 3]) & (int64) 0xFF);
+        return x;
+    }
+
+    // -- SETTINGS (§6.5) -----------------------------------------------------
+
+    /** Write a SETTINGS frame carrying the given parameters (stream 0). */
+    public static void writeSettings(Http2FrameWriter w, Http2SettingsList s) {
+        int32 n = s.size();
+        int8[] p = heap int8[n * 6];
+        int32 i = 0;
+        while (i < n) {
+            Http2Frames.putU16(p, i * 6, s.idAt(i));
+            Http2Frames.putU32(p, i * 6 + 2, s.valueAt(i));
+            i = i + 1;
+        }
+        w.writeFrame(Http2.FRAME_SETTINGS, 0, 0, p, n * 6);
+    }
+
+    /** Write an empty SETTINGS frame with the ACK flag. */
+    public static void writeSettingsAck(Http2FrameWriter w) {
+        w.writeEmptyFrame(Http2.FRAME_SETTINGS, Http2.FLAG_ACK, 0);
+    }
+
+    /** Parse a SETTINGS payload, validating stream/ack/length rules. */
+    public static #Http2SettingsList parseSettings(int8[] buf, int32 offset,
+                                                   int32 length, int32 flags,
+                                                   int32 streamId) {
+        if (streamId != 0) {
+            throw heap Http2Exception("SETTINGS on non-zero stream",
+                                      Http2.PROTOCOL_ERROR);
+        }
+        if ((flags & Http2.FLAG_ACK) != 0) {
+            if (length != 0) {
+                throw heap Http2Exception("SETTINGS ACK with payload",
+                                          Http2.FRAME_SIZE_ERROR);
+            }
+            return heap Http2SettingsList();
+        }
+        if (length % 6 != 0) {
+            throw heap Http2Exception("SETTINGS length not a multiple of 6",
+                                      Http2.FRAME_SIZE_ERROR);
+        }
+        Http2SettingsList s = heap Http2SettingsList();
+        int32 i = 0;
+        while (i < length) {
+            int32 id = Http2Frames.getU16(buf, offset + i);
+            int64 v = Http2Frames.getU32(buf, offset + i + 2);
+            s.add(id, v);
+            i = i + 6;
+        }
+        return #s;
+    }
+
+    // -- PING (§6.7) ---------------------------------------------------------
+
+    /** Write a PING frame with 8 opaque bytes (ACK flag optional). */
+    public static void writePing(Http2FrameWriter w, int8[] opaque8,
+                                 boolean ack) {
+        int32 fl = 0;
+        if (ack) {
+            fl = Http2.FLAG_ACK;
+        }
+        w.writeFrame(Http2.FRAME_PING, fl, 0, opaque8, 8);
+    }
+
+    /** Validate a PING frame's length and stream (payload read by caller). */
+    public static void validatePing(int32 length, int32 streamId) {
+        if (streamId != 0) {
+            throw heap Http2Exception("PING on non-zero stream",
+                                      Http2.PROTOCOL_ERROR);
+        }
+        if (length != 8) {
+            throw heap Http2Exception("PING length not 8",
+                                      Http2.FRAME_SIZE_ERROR);
+        }
+    }
+
+    // -- RST_STREAM (§6.4) ---------------------------------------------------
+
+    /** Write a RST_STREAM frame with the given error code. */
+    public static void writeRstStream(Http2FrameWriter w, int32 streamId,
+                                      int64 errorCode) {
+        int8[] p = heap int8[4];
+        Http2Frames.putU32(p, 0, errorCode);
+        w.writeFrame(Http2.FRAME_RST_STREAM, 0, streamId, p, 4);
+    }
+
+    /** Parse a RST_STREAM payload into its error code. */
+    public static int64 parseRstStream(int8[] buf, int32 offset, int32 length,
+                                       int32 streamId) {
+        if (streamId == 0) {
+            throw heap Http2Exception("RST_STREAM on stream 0",
+                                      Http2.PROTOCOL_ERROR);
+        }
+        if (length != 4) {
+            throw heap Http2Exception("RST_STREAM length not 4",
+                                      Http2.FRAME_SIZE_ERROR);
+        }
+        return Http2Frames.getU32(buf, offset);
+    }
+
+    // -- WINDOW_UPDATE (§6.9) ------------------------------------------------
+
+    /** Write a WINDOW_UPDATE frame (stream 0 = connection-level). */
+    public static void writeWindowUpdate(Http2FrameWriter w, int32 streamId,
+                                         int32 increment) {
+        int8[] p = heap int8[4];
+        Http2Frames.putU32(p, 0, ((int64) increment) & (int64) 0x7FFFFFFF);
+        w.writeFrame(Http2.FRAME_WINDOW_UPDATE, 0, streamId, p, 4);
+    }
+
+    /** Parse a WINDOW_UPDATE payload into its (non-zero) increment. */
+    public static int32 parseWindowUpdate(int8[] buf, int32 offset,
+                                          int32 length, int32 streamId) {
+        if (length != 4) {
+            throw heap Http2Exception("WINDOW_UPDATE length not 4",
+                                      Http2.FRAME_SIZE_ERROR);
+        }
+        int32 inc = (int32) (Http2Frames.getU32(buf, offset)
+                             & (int64) 0x7FFFFFFF);
+        if (inc == 0) {
+            // Connection error on stream 0, else a stream error (§6.9).
+            throw heap Http2Exception("WINDOW_UPDATE increment 0",
+                                      Http2.PROTOCOL_ERROR, streamId);
+        }
+        return inc;
+    }
+
+    // -- GOAWAY (§6.8) -------------------------------------------------------
+
+    /** Write a GOAWAY frame (stream 0) with optional debug data. */
+    public static void writeGoaway(Http2FrameWriter w, int32 lastStreamId,
+                                   int64 errorCode, int8[] debug,
+                                   int32 debugLen) {
+        int8[] p = heap int8[8 + debugLen];
+        Http2Frames.putU32(p, 0, ((int64) lastStreamId) & (int64) 0x7FFFFFFF);
+        Http2Frames.putU32(p, 4, errorCode);
+        int32 i = 0;
+        while (i < debugLen) {
+            p[8 + i] = debug[i];
+            i = i + 1;
+        }
+        w.writeFrame(Http2.FRAME_GOAWAY, 0, 0, p, 8 + debugLen);
+    }
+
+    /** Parse a GOAWAY payload. */
+    public static #Http2GoawayInfo parseGoaway(int8[] buf, int32 offset,
+                                               int32 length, int32 streamId) {
+        if (streamId != 0) {
+            throw heap Http2Exception("GOAWAY on non-zero stream",
+                                      Http2.PROTOCOL_ERROR);
+        }
+        if (length < 8) {
+            throw heap Http2Exception("GOAWAY shorter than 8 octets",
+                                      Http2.FRAME_SIZE_ERROR);
+        }
+        int32 last = (int32) (Http2Frames.getU32(buf, offset)
+                              & (int64) 0x7FFFFFFF);
+        int64 code = Http2Frames.getU32(buf, offset + 4);
+        int32 dlen = length - 8;
+        int8[] dbg = heap int8[dlen];
+        int32 i = 0;
+        while (i < dlen) {
+            dbg[i] = buf[offset + 8 + i];
+            i = i + 1;
+        }
+        return heap Http2GoawayInfo(last, code, #dbg, dlen);
+    }
+
+    // -- PRIORITY (§6.3, deprecated — parsed and ignored) --------------------
+
+    /** Write a PRIORITY frame (5-octet payload). */
+    public static void writePriority(Http2FrameWriter w, int32 streamId,
+                                     int32 streamDep, int32 weight,
+                                     boolean exclusive) {
+        int8[] p = heap int8[5];
+        int64 dep = ((int64) streamDep) & (int64) 0x7FFFFFFF;
+        if (exclusive) {
+            dep = dep | (int64) 0x80000000;
+        }
+        Http2Frames.putU32(p, 0, dep);
+        p[4] = (int8) (weight & 0xFF);
+        w.writeFrame(Http2.FRAME_PRIORITY, 0, streamId, p, 5);
+    }
+
+    /** Validate a PRIORITY frame's stream and length (contents ignored). */
+    public static void validatePriority(int32 length, int32 streamId) {
+        if (streamId == 0) {
+            throw heap Http2Exception("PRIORITY on stream 0",
+                                      Http2.PROTOCOL_ERROR);
+        }
+        if (length != 5) {
+            throw heap Http2Exception("PRIORITY length not 5",
+                                      Http2.FRAME_SIZE_ERROR);
+        }
+    }
+}

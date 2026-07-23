@@ -1,0 +1,75 @@
+package dev.cajeta.http.h2;
+
+/**
+ * A parsed **SETTINGS** frame's parameters (RFC 9113 §6.5) — plan item **3.2**.
+ * An ordered list of (identifier, value) pairs held in parallel arrays;
+ * duplicates are preserved in order (the last one wins per §6.5, which the
+ * consumer applies). Identifiers are 16-bit, values 32-bit unsigned (held in
+ * `int64`).
+ */
+public final class Http2SettingsList {
+    int32[] ids;
+    int64[] values;
+    int32 cap;
+    int32 count;
+
+    public Http2SettingsList() {
+        this.ids = heap int32[8];
+        this.values = heap int64[8];
+        this.cap = 8;
+        this.count = 0;
+    }
+
+    /** Number of settings entries. */
+    public int32 size() {
+        return this.count;
+    }
+
+    /** The identifier of entry `i`. */
+    public int32 idAt(int32 i) {
+        return this.ids[i];
+    }
+
+    /** The value of entry `i`. */
+    public int64 valueAt(int32 i) {
+        return this.values[i];
+    }
+
+    /** The value for identifier `id`, or `fallback` if absent (last wins). */
+    public int64 get(int32 id, int64 fallback) {
+        int64 v = fallback;
+        int32 i = 0;
+        while (i < this.count) {
+            if (this.ids[i] == id) {
+                v = this.values[i];
+            }
+            i = i + 1;
+        }
+        return v;
+    }
+
+    /** Append a setting. */
+    public void add(int32 id, int64 value) {
+        if (this.count == this.cap) {
+            this.grow();
+        }
+        this.ids[this.count] = id;
+        this.values[this.count] = value;
+        this.count = this.count + 1;
+    }
+
+    void grow() {
+        int32 nc = this.cap * 2;
+        int32[] ni = heap int32[nc];
+        int64[] nv = heap int64[nc];
+        int32 i = 0;
+        while (i < this.count) {
+            ni[i] = this.ids[i];
+            nv[i] = this.values[i];
+            i = i + 1;
+        }
+        this.ids = #ni;
+        this.values = #nv;
+        this.cap = nc;
+    }
+}

@@ -1,0 +1,270 @@
+package dev.cajeta.http.test;
+
+import dev.cajeta.http.h2.Http2;
+import dev.cajeta.http.h2.Http2FrameWriter;
+import dev.cajeta.http.h2.Http2FrameReader;
+import dev.cajeta.http.h2.Http2Frames;
+import dev.cajeta.http.h2.Http2SettingsList;
+import dev.cajeta.http.h2.Http2GoawayInfo;
+import dev.cajeta.http.h2.Http2Exception;
+
+/**
+ * http:3.2b — the **fixed-layout HTTP/2 frames** (RFC 9113 §6.3–§6.9):
+ * SETTINGS, PING, RST_STREAM, WINDOW_UPDATE, GOAWAY, PRIORITY. A golden
+ * SETTINGS wire vector, encode->read->parse round-trips per type, and the
+ * framing-error matrix mapping to the exact §7 codes (bad fixed length →
+ * FRAME_SIZE_ERROR; misplaced stream id / zero increment → PROTOCOL_ERROR).
+ */
+public final class Http2FixedFrameTests {
+
+    static boolean sameBytes(int8[] a, int32 an, int8[] b, int32 bn) {
+        if (an != bn) {
+            return false;
+        }
+        int32 i = 0;
+        while (i < an) {
+            if ((((int32) a[i]) & 0xFF) != (((int32) b[i]) & 0xFF)) {
+                return false;
+            }
+            i = i + 1;
+        }
+        return true;
+    }
+
+    public static void run(Check c) {
+        System.stdout.println("-- h2 fixed frames: SETTINGS --");
+        Http2FixedFrameTests.settings(c);
+        System.stdout.println("-- h2 fixed frames: PING/RST/WINDOW --");
+        Http2FixedFrameTests.pingRstWindow(c);
+        System.stdout.println("-- h2 fixed frames: GOAWAY/PRIORITY --");
+        Http2FixedFrameTests.goawayPriority(c);
+    }
+
+    static void settings(Check c) {
+        Http2SettingsList s = heap Http2SettingsList();
+        s.add(Http2.SETTINGS_HEADER_TABLE_SIZE, (int64) 4096);
+        s.add(Http2.SETTINGS_INITIAL_WINDOW_SIZE, (int64) 65535);
+        Http2FrameWriter w = heap Http2FrameWriter();
+        Http2Frames.writeSettings(w, s);
+        int8[] bytes = w.toBytes();
+
+        // Golden wire vector: header (len 12, type 0x04, flags 0, stream 0)
+        // then 00 01 00 00 10 00  00 04 00 00 ff ff.
+        int8[] exp = {
+            (int8) 0x00, (int8) 0x00, (int8) 0x0c, (int8) 0x04, (int8) 0x00,
+            (int8) 0x00, (int8) 0x00, (int8) 0x00, (int8) 0x00,
+            (int8) 0x00, (int8) 0x01, (int8) 0x00, (int8) 0x00, (int8) 0x10,
+            (int8) 0x00,
+            (int8) 0x00, (int8) 0x04, (int8) 0x00, (int8) 0x00, (int8) 0xff,
+            (int8) 0xff
+        };
+        c.that(Http2FixedFrameTests.sameBytes(bytes, (int32) bytes.count(),
+                                              exp, 21),
+               "SETTINGS golden wire bytes");
+
+        // Read back and parse.
+        Http2FrameReader r = heap Http2FrameReader(bytes, (int32) bytes.count(),
+                                                   Http2.DEFAULT_MAX_FRAME_SIZE);
+        c.that(r.next(), "settings frame present");
+        c.eqInt((int64) r.type(), (int64) Http2.FRAME_SETTINGS, "type SETTINGS");
+        int8[] pl = r.copyPayload();
+        Http2SettingsList got = Http2Frames.parseSettings(pl, 0, r.length(),
+                                                          r.flags(), r.streamId());
+        c.eqInt((int64) got.size(), (int64) 2, "parsed 2 settings");
+        c.eqInt(got.get(Http2.SETTINGS_HEADER_TABLE_SIZE, (int64) -1),
+                (int64) 4096, "HEADER_TABLE_SIZE 4096");
+        c.eqInt(got.get(Http2.SETTINGS_INITIAL_WINDOW_SIZE, (int64) -1),
+                (int64) 65535, "INITIAL_WINDOW_SIZE 65535");
+
+        // ACK round-trip.
+        Http2FrameWriter wa = heap Http2FrameWriter();
+        Http2Frames.writeSettingsAck(wa);
+        int8[] ab = wa.toBytes();
+        Http2FrameReader ra = heap Http2FrameReader(ab, (int32) ab.count(),
+                                                    Http2.DEFAULT_MAX_FRAME_SIZE);
+        ra.next();
+        c.that(ra.hasFlag(Http2.FLAG_ACK), "settings ACK flag");
+        c.eqInt((int64) ra.length(), (int64) 0, "settings ACK empty");
+        int8[] empty = heap int8[0];
+        Http2SettingsList as = Http2Frames.parseSettings(empty, 0, 0,
+                                                         Http2.FLAG_ACK, 0);
+        c.eqInt((int64) as.size(), (int64) 0, "ACK parses to empty list");
+
+        // Errors.
+        boolean e1 = false;
+        int8[] six = heap int8[6];
+        try {
+            Http2SettingsList x = Http2Frames.parseSettings(six, 0, 6,
+                                                            Http2.FLAG_ACK, 0);
+        } catch (Http2Exception e) {
+            e1 = e.errorCode == Http2.FRAME_SIZE_ERROR;
+        }
+        c.that(e1, "SETTINGS ACK with payload -> FRAME_SIZE_ERROR");
+
+        boolean e2 = false;
+        int8[] five = heap int8[5];
+        try {
+            Http2SettingsList x = Http2Frames.parseSettings(five, 0, 5, 0, 0);
+        } catch (Http2Exception e) {
+            e2 = e.errorCode == Http2.FRAME_SIZE_ERROR;
+        }
+        c.that(e2, "SETTINGS length %6 != 0 -> FRAME_SIZE_ERROR");
+
+        boolean e3 = false;
+        try {
+            Http2SettingsList x = Http2Frames.parseSettings(empty, 0, 0, 0, 1);
+        } catch (Http2Exception e) {
+            e3 = e.errorCode == Http2.PROTOCOL_ERROR;
+        }
+        c.that(e3, "SETTINGS on stream 1 -> PROTOCOL_ERROR");
+    }
+
+    static void pingRstWindow(Check c) {
+        // PING round-trip.
+        int8[] opaque = {
+            (int8) 0x01, (int8) 0x02, (int8) 0x03, (int8) 0x04,
+            (int8) 0x05, (int8) 0x06, (int8) 0x07, (int8) 0x08
+        };
+        Http2FrameWriter w = heap Http2FrameWriter();
+        Http2Frames.writePing(w, opaque, false);
+        int8[] pb = w.toBytes();
+        Http2FrameReader pr = heap Http2FrameReader(pb, (int32) pb.count(),
+                                                    Http2.DEFAULT_MAX_FRAME_SIZE);
+        pr.next();
+        c.eqInt((int64) pr.type(), (int64) Http2.FRAME_PING, "type PING");
+        c.that(!pr.hasFlag(Http2.FLAG_ACK), "PING not ack");
+        Http2Frames.validatePing(pr.length(), pr.streamId());
+        c.eqInt((int64) pr.payloadByte(7), (int64) 0x08, "PING opaque[7]");
+
+        boolean pe = false;
+        try {
+            Http2Frames.validatePing(7, 0);
+        } catch (Http2Exception e) {
+            pe = e.errorCode == Http2.FRAME_SIZE_ERROR;
+        }
+        c.that(pe, "PING length 7 -> FRAME_SIZE_ERROR");
+        boolean pe2 = false;
+        try {
+            Http2Frames.validatePing(8, 3);
+        } catch (Http2Exception e) {
+            pe2 = e.errorCode == Http2.PROTOCOL_ERROR;
+        }
+        c.that(pe2, "PING on stream 3 -> PROTOCOL_ERROR");
+
+        // RST_STREAM round-trip.
+        Http2FrameWriter wr = heap Http2FrameWriter();
+        Http2Frames.writeRstStream(wr, 3, (int64) Http2.CANCEL);
+        int8[] rb = wr.toBytes();
+        Http2FrameReader rr = heap Http2FrameReader(rb, (int32) rb.count(),
+                                                    Http2.DEFAULT_MAX_FRAME_SIZE);
+        rr.next();
+        int8[] rpl = rr.copyPayload();
+        int64 code = Http2Frames.parseRstStream(rpl, 0, rr.length(), rr.streamId());
+        c.eqInt(code, (int64) Http2.CANCEL, "RST_STREAM error CANCEL");
+        c.eqInt((int64) rr.streamId(), (int64) 3, "RST_STREAM stream 3");
+
+        boolean re = false;
+        int8[] four = heap int8[4];
+        try {
+            int64 x = Http2Frames.parseRstStream(four, 0, 4, 0);
+        } catch (Http2Exception e) {
+            re = e.errorCode == Http2.PROTOCOL_ERROR;
+        }
+        c.that(re, "RST_STREAM on stream 0 -> PROTOCOL_ERROR");
+        boolean re2 = false;
+        int8[] three = heap int8[3];
+        try {
+            int64 x = Http2Frames.parseRstStream(three, 0, 3, 1);
+        } catch (Http2Exception e) {
+            re2 = e.errorCode == Http2.FRAME_SIZE_ERROR;
+        }
+        c.that(re2, "RST_STREAM length 3 -> FRAME_SIZE_ERROR");
+
+        // WINDOW_UPDATE round-trip (connection-level, stream 0).
+        Http2FrameWriter ww = heap Http2FrameWriter();
+        Http2Frames.writeWindowUpdate(ww, 0, 65535);
+        int8[] wb = ww.toBytes();
+        Http2FrameReader wr2 = heap Http2FrameReader(wb, (int32) wb.count(),
+                                                     Http2.DEFAULT_MAX_FRAME_SIZE);
+        wr2.next();
+        int8[] wpl = wr2.copyPayload();
+        int32 inc = Http2Frames.parseWindowUpdate(wpl, 0, wr2.length(),
+                                                  wr2.streamId());
+        c.eqInt((int64) inc, (int64) 65535, "WINDOW_UPDATE increment 65535");
+
+        boolean we = false;
+        int8[] zero4 = heap int8[4];
+        try {
+            int32 x = Http2Frames.parseWindowUpdate(zero4, 0, 4, 0);
+        } catch (Http2Exception e) {
+            we = e.errorCode == Http2.PROTOCOL_ERROR;
+        }
+        c.that(we, "WINDOW_UPDATE increment 0 -> PROTOCOL_ERROR");
+    }
+
+    static void goawayPriority(Check c) {
+        // GOAWAY round-trip with debug data.
+        int8[] dbg = { (int8) 0x62, (int8) 0x79, (int8) 0x65 };   // "bye"
+        Http2FrameWriter w = heap Http2FrameWriter();
+        Http2Frames.writeGoaway(w, 5, (int64) Http2.NO_ERROR, dbg, 3);
+        int8[] gb = w.toBytes();
+        Http2FrameReader gr = heap Http2FrameReader(gb, (int32) gb.count(),
+                                                    Http2.DEFAULT_MAX_FRAME_SIZE);
+        gr.next();
+        c.eqInt((int64) gr.type(), (int64) Http2.FRAME_GOAWAY, "type GOAWAY");
+        int8[] gpl = gr.copyPayload();
+        Http2GoawayInfo gi = Http2Frames.parseGoaway(gpl, 0, gr.length(),
+                                                     gr.streamId());
+        c.eqInt((int64) gi.lastStreamId, (int64) 5, "GOAWAY last stream 5");
+        c.eqInt(gi.errorCode, (int64) Http2.NO_ERROR, "GOAWAY code NO_ERROR");
+        c.eqInt((int64) gi.debugLength, (int64) 3, "GOAWAY debug length 3");
+        c.eqInt(((int64) gi.debug[0]) & (int64) 0xFF, (int64) 0x62,
+                "GOAWAY debug[0] 'b'");
+
+        boolean ge = false;
+        int8[] seven = heap int8[7];
+        try {
+            Http2GoawayInfo x = Http2Frames.parseGoaway(seven, 0, 7, 0);
+        } catch (Http2Exception e) {
+            ge = e.errorCode == Http2.FRAME_SIZE_ERROR;
+        }
+        c.that(ge, "GOAWAY length 7 -> FRAME_SIZE_ERROR");
+        boolean ge2 = false;
+        int8[] eight = heap int8[8];
+        try {
+            Http2GoawayInfo x = Http2Frames.parseGoaway(eight, 0, 8, 1);
+        } catch (Http2Exception e) {
+            ge2 = e.errorCode == Http2.PROTOCOL_ERROR;
+        }
+        c.that(ge2, "GOAWAY on stream 1 -> PROTOCOL_ERROR");
+
+        // PRIORITY round-trip (parsed and ignored, but framed correctly).
+        Http2FrameWriter wp = heap Http2FrameWriter();
+        Http2Frames.writePriority(wp, 3, 1, 200, true);
+        int8[] pb = wp.toBytes();
+        Http2FrameReader pr = heap Http2FrameReader(pb, (int32) pb.count(),
+                                                    Http2.DEFAULT_MAX_FRAME_SIZE);
+        pr.next();
+        c.eqInt((int64) pr.type(), (int64) Http2.FRAME_PRIORITY, "type PRIORITY");
+        c.eqInt((int64) pr.length(), (int64) 5, "PRIORITY length 5");
+        Http2Frames.validatePriority(pr.length(), pr.streamId());
+        // Exclusive bit set in the first payload byte.
+        c.eqInt(((int64) pr.payloadByte(0)) & (int64) 0x80, (int64) 0x80,
+                "PRIORITY exclusive bit");
+
+        boolean pe = false;
+        try {
+            Http2Frames.validatePriority(5, 0);
+        } catch (Http2Exception e) {
+            pe = e.errorCode == Http2.PROTOCOL_ERROR;
+        }
+        c.that(pe, "PRIORITY on stream 0 -> PROTOCOL_ERROR");
+        boolean pe2 = false;
+        try {
+            Http2Frames.validatePriority(4, 1);
+        } catch (Http2Exception e) {
+            pe2 = e.errorCode == Http2.FRAME_SIZE_ERROR;
+        }
+        c.that(pe2, "PRIORITY length 4 -> FRAME_SIZE_ERROR");
+    }
+}

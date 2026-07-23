@@ -1,0 +1,21 @@
+package dev.cajeta.http.h2;
+
+/**
+ * A parsed **GOAWAY** frame (RFC 9113 §6.8) — plan item **3.2**: the last
+ * stream id the sender processed, the connection [`errorCode`](#errorCode),
+ * and any opaque debug data (owned copy).
+ */
+public final class Http2GoawayInfo {
+    public int32 lastStreamId;
+    public int64 errorCode;
+    public int8[] debug;
+    public int32 debugLength;
+
+    public Http2GoawayInfo(int32 lastStreamId, int64 errorCode,
+                           #int8[] debug, int32 debugLength) {
+        this.lastStreamId = lastStreamId;
+        this.errorCode = errorCode;
+        this.debug = #debug;
+        this.debugLength = debugLength;
+    }
+}
