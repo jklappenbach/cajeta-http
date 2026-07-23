@@ -1,0 +1,106 @@
+package dev.cajeta.http.h2;
+
+import cajeta.lang.String;
+
+/**
+ * A growable byte sink for building an HPACK field block — plan item **3.1**.
+ * Wraps the RFC 7541 §5.1 **prefix-integer** primitive and raw byte appends;
+ * the string primitive ([`HpackString`](HpackString.cajeta)) and the encoder
+ * ([`HpackEncoder`](HpackEncoder.cajeta)) build on it.
+ *
+ * The buffer starts small and doubles on demand (the same idiom as
+ * [`HttpSerializer`](../h1/HttpSerializer.cajeta)); [`toBytes`](#toBytes)
+ * hands back a fresh owned copy sized to the content.
+ */
+public final class HpackWriter {
+    int8[] buf;
+    int32 count;
+    int32 cap;
+
+    public HpackWriter() {
+        this.buf = heap int8[64];
+        this.count = 0;
+        this.cap = 64;
+    }
+
+    /** Bytes written so far. */
+    public int32 size() {
+        return this.count;
+    }
+
+    /** Append the low 8 bits of `b`. */
+    public void writeByte(int32 b) {
+        if (this.count >= this.cap) {
+            this.grow();
+        }
+        this.buf[this.count] = (int8) (b & 0xFF);
+        this.count = this.count + 1;
+    }
+
+    /** Append `data[0..n)`. */
+    public void writeBytes(int8[] data, int32 n) {
+        int32 i = 0;
+        while (i < n) {
+            this.writeByte((int32) data[i]);
+            i = i + 1;
+        }
+    }
+
+    /**
+     * Encode a non-negative integer with an **N-bit prefix** (RFC 7541 §5.1).
+     * `prefixBits` is 1..8; `flags` holds the high `8 - prefixBits` bits of the
+     * first octet already positioned (e.g. `0x80` for an indexed field, `0x40`
+     * for literal-with-incremental-indexing) — its low `prefixBits` are 0 and
+     * get filled here.
+     */
+    public void writeInteger(int64 value, int32 prefixBits, int32 flags) {
+        int64 max = ((int64) 1 << (int64) prefixBits) - (int64) 1;   // 2^N - 1
+        if (value < max) {
+            this.writeByte(flags | (int32) value);
+            return;
+        }
+        this.writeByte(flags | (int32) max);
+        int64 v = value - max;
+        while (v >= (int64) 128) {
+            this.writeByte((int32) ((v & (int64) 127) | (int64) 128));
+            v = v >> (int64) 7;
+        }
+        this.writeByte((int32) v);
+    }
+
+    /** A fresh owned copy of the written bytes. */
+    public #int8[] toBytes() {
+        int32 n = this.count;
+        int8[] out = heap int8[n];
+        int32 i = 0;
+        while (i < n) {
+            out[i] = this.buf[i];
+            i = i + 1;
+        }
+        return #out;
+    }
+
+    /** The written bytes as an owned `String` (byte-faithful). */
+    public #String toStringValue() {
+        int32 n = this.count;
+        int8[] out = heap int8[n];
+        int32 i = 0;
+        while (i < n) {
+            out[i] = this.buf[i];
+            i = i + 1;
+        }
+        return heap String(#out, n);
+    }
+
+    void grow() {
+        int32 nc = this.cap * 2;
+        int8[] dst = heap int8[nc];
+        int32 i = 0;
+        while (i < this.count) {
+            dst[i] = this.buf[i];
+            i = i + 1;
+        }
+        this.buf = #dst;
+        this.cap = nc;
+    }
+}

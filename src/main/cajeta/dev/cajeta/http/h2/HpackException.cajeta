@@ -1,0 +1,30 @@
+package dev.cajeta.http.h2;
+
+import cajeta.lang.String;
+import dev.cajeta.http.HttpException;
+
+/**
+ * Raised by the **HPACK** codec (RFC 7541, plan item **3.1**) when a header
+ * block cannot be decoded — a truncated representation, an index out of range
+ * (static + dynamic table), an invalid Huffman sequence (an EOS symbol inside
+ * the stream, or non-padding trailing bits), an integer that overflows the
+ * `int32` bound (the size-bomb guard on the varint continuation), or a
+ * decoded header list that exceeds the caller's configured size cap.
+ *
+ * Per RFC 7541 §4.4 and RFC 9113 §4.3, a failure to decode a field block is
+ * treated by HTTP/2 as a **connection error of type `COMPRESSION_ERROR`** —
+ * the dynamic table is shared connection state, so a single malformed block
+ * leaves it unrecoverable. The HTTP/2 layer (plan 3.3) maps this to that
+ * `GOAWAY`.
+ *
+ * Lives under [`HttpException`](../HttpException.cajeta) like every HTTP
+ * protocol fault, classified to `NetException.KIND_INVALID` (12) — the peer
+ * sent bytes that are not a valid HPACK field block.
+ */
+public class HpackException extends HttpException {
+    public HpackException(String message) {
+        this.message = message;
+        this.cause = 0;
+        this.kind = 12;   // NetException.KIND_INVALID (via HttpException)
+    }
+}

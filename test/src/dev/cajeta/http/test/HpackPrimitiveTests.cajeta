@@ -1,0 +1,221 @@
+package dev.cajeta.http.test;
+
+import cajeta.lang.String;
+import dev.cajeta.http.h2.HpackWriter;
+import dev.cajeta.http.h2.HpackReader;
+import dev.cajeta.http.h2.Huffman;
+import dev.cajeta.http.h2.HpackString;
+import dev.cajeta.http.h2.HpackException;
+
+/**
+ * http:3.1a — HPACK low-level primitives (RFC 7541 §5.1–§5.2, Appendix B):
+ * the N-bit prefix **integer** (Appendix C.1 golden vectors), the **Huffman**
+ * code (Appendix B — exact bytes from the C.4.1 example plus round-trips and
+ * the §5.2 decode-error cases), and the **string literal** (H flag + length +
+ * octets, raw and Huffman, with the size-cap bomb guard).
+ */
+public final class HpackPrimitiveTests {
+
+    // Bytes of a String as a fresh owned int8[] (values 0..255 preserved).
+    static #int8[] bytesOf(String s) {
+        int32 n = s.byteLength();
+        int8[] b = heap int8[n];
+        int32 i = 0;
+        while (i < n) {
+            b[i] = (int8) (((int32) s.byteAt(i)) & 0xFF);
+            i = i + 1;
+        }
+        return #b;
+    }
+
+    static boolean sameBytes(int8[] a, int32 an, int8[] b, int32 bn) {
+        if (an != bn) {
+            return false;
+        }
+        int32 i = 0;
+        while (i < an) {
+            if ((((int32) a[i]) & 0xFF) != (((int32) b[i]) & 0xFF)) {
+                return false;
+            }
+            i = i + 1;
+        }
+        return true;
+    }
+
+    public static void run(Check c) {
+        System.stdout.println("-- hpack: integer primitive (C.1) --");
+        HpackPrimitiveTests.integers(c);
+        System.stdout.println("-- hpack: Huffman (Appendix B / C.4.1) --");
+        HpackPrimitiveTests.huffman(c);
+        System.stdout.println("-- hpack: string literal (5.2) --");
+        HpackPrimitiveTests.strings(c);
+    }
+
+    // ---- RFC 7541 Appendix C.1 : integer representation examples ----------
+    static void integers(Check c) {
+        // C.1.1 — 10 with a 5-bit prefix -> single octet 0x0a.
+        HpackWriter w1 = heap HpackWriter();
+        w1.writeInteger((int64) 10, 5, 0x00);
+        int8[] b1 = w1.toBytes();
+        c.eqInt((int64) w1.size(), (int64) 1, "C.1.1 length");
+        c.eqInt(((int64) b1[0]) & (int64) 0xFF, (int64) 0x0a, "C.1.1 octet");
+
+        // C.1.2 — 1337 with a 5-bit prefix -> 0x1f 0x9a 0x0a.
+        HpackWriter w2 = heap HpackWriter();
+        w2.writeInteger((int64) 1337, 5, 0x00);
+        int8[] b2 = w2.toBytes();
+        c.eqInt((int64) w2.size(), (int64) 3, "C.1.2 length");
+        c.eqInt(((int64) b2[0]) & (int64) 0xFF, (int64) 0x1f, "C.1.2 octet0");
+        c.eqInt(((int64) b2[1]) & (int64) 0xFF, (int64) 0x9a, "C.1.2 octet1");
+        c.eqInt(((int64) b2[2]) & (int64) 0xFF, (int64) 0x0a, "C.1.2 octet2");
+
+        // C.1.3 — 42 at an octet boundary (8-bit prefix) -> 0x2a.
+        HpackWriter w3 = heap HpackWriter();
+        w3.writeInteger((int64) 42, 8, 0x00);
+        int8[] b3 = w3.toBytes();
+        c.eqInt((int64) w3.size(), (int64) 1, "C.1.3 length");
+        c.eqInt(((int64) b3[0]) & (int64) 0xFF, (int64) 0x2a, "C.1.3 octet");
+
+        // Round-trip through the reader, including the high flag bits.
+        HpackWriter w4 = heap HpackWriter();
+        w4.writeInteger((int64) 1337, 5, 0x20);   // flags in the top 3 bits
+        int8[] b4 = w4.toBytes();
+        c.eqInt(((int64) b4[0]) & (int64) 0xFF, (int64) 0x3f, "flagged octet0");
+        HpackReader r4 = heap HpackReader(b4, w4.size());
+        c.eqInt(r4.readInteger(5), (int64) 1337, "reader decodes 1337");
+
+        HpackReader r1 = heap HpackReader(b1, 1);
+        c.eqInt(r1.readInteger(5), (int64) 10, "reader decodes 10");
+        HpackReader r3 = heap HpackReader(b3, 1);
+        c.eqInt(r3.readInteger(8), (int64) 42, "reader decodes 42");
+
+        // A pathologically long continuation is rejected (size-bomb guard).
+        int8[] bomb = heap int8[12];
+        bomb[0] = (int8) 0xff;                     // 5-bit prefix all ones
+        int32 i = 1;
+        while (i < 11) {
+            bomb[i] = (int8) 0xff;                 // continuation, MSB set
+            i = i + 1;
+        }
+        bomb[11] = (int8) 0x7f;
+        boolean caught = false;
+        HpackReader rb = heap HpackReader(bomb, 12);
+        try {
+            int64 v = rb.readInteger(5);
+        } catch (HpackException e) {
+            caught = true;
+        }
+        c.that(caught, "overlong integer raises HpackException");
+
+        // Truncated (prefix says continue, no bytes follow).
+        int8[] trunc = heap int8[1];
+        trunc[0] = (int8) 0x1f;                    // 31 with 5-bit prefix -> needs more
+        boolean caught2 = false;
+        HpackReader rt = heap HpackReader(trunc, 1);
+        try {
+            int64 v = rt.readInteger(5);
+        } catch (HpackException e) {
+            caught2 = true;
+        }
+        c.that(caught2, "truncated integer raises HpackException");
+    }
+
+    // ---- RFC 7541 Appendix B : Huffman ------------------------------------
+    static void huffman(Check c) {
+        Huffman h = heap Huffman();
+
+        // From C.4.1: Huffman("www.example.com") = f1e3c2e5f23a6ba0ab90f4ff.
+        int8[] host = HpackPrimitiveTests.bytesOf("www.example.com");
+        int8[] enc = h.encode(host, (int32) host.count());
+        int8[] expect = {
+            (int8) 0xf1, (int8) 0xe3, (int8) 0xc2, (int8) 0xe5, (int8) 0xf2,
+            (int8) 0x3a, (int8) 0x6b, (int8) 0xa0, (int8) 0xab, (int8) 0x90,
+            (int8) 0xf4, (int8) 0xff
+        };
+        c.eqInt((int64) enc.count(), (int64) 12, "Huffman www.example.com length");
+        c.that(HpackPrimitiveTests.sameBytes(enc, (int32) enc.count(),
+                                             expect, 12),
+               "Huffman www.example.com bytes match C.4.1");
+        c.eqInt((int64) h.encodedLength(host, (int32) host.count()),
+                (int64) 12, "encodedLength matches");
+
+        // Decode back.
+        String back = h.decode(enc, (int32) enc.count());
+        c.eqStr(back, "www.example.com", "Huffman decode round-trips");
+
+        // A few more round-trips spanning short and long codes.
+        HpackPrimitiveTests.rtrip(c, h, "no-cache");
+        HpackPrimitiveTests.rtrip(c, h, "custom-value");
+        HpackPrimitiveTests.rtrip(c, h, "Mon, 21 Oct 2013 20:13:21 GMT");
+        HpackPrimitiveTests.rtrip(c, h, "https://www.example.com");
+        HpackPrimitiveTests.rtrip(c, h, "");
+        HpackPrimitiveTests.rtrip(c, h, "\t\n{}[]@!#");   // rarer symbols, long codes
+
+        // Decode error: a byte of all-zero bits cannot be valid padding
+        // (padding must be all ones); '0' is 5 zero bits, so 0x00 = '0''0'-ish
+        // then a zero remainder that is not all-ones padding.
+        int8[] bad = heap int8[1];
+        bad[0] = (int8) 0x00;                      // '0'(00000) + 3 zero bits
+        boolean caught = false;
+        try {
+            String s = h.decode(bad, 1);
+        } catch (HpackException e) {
+            caught = true;
+        }
+        c.that(caught, "invalid Huffman padding raises HpackException");
+    }
+
+    static void rtrip(Check c, Huffman h, String s) {
+        int8[] data = HpackPrimitiveTests.bytesOf(s);
+        int8[] enc = h.encode(data, (int32) data.count());
+        String back = h.decode(enc, (int32) enc.count());
+        c.eqStr(back, s, "Huffman round-trip");
+    }
+
+    // ---- RFC 7541 §5.2 : string literal -----------------------------------
+    static void strings(Check c) {
+        Huffman h = heap Huffman();
+
+        // Raw literal (huffman = null): "custom-key" -> 0x0a + 10 octets.
+        int8[] key = HpackPrimitiveTests.bytesOf("custom-key");
+        HpackWriter w = heap HpackWriter();
+        HpackString.encode(w, key, (int32) key.count(), null);
+        int8[] raw = w.toBytes();
+        c.eqInt((int64) raw.count(), (int64) 11, "raw literal length");
+        c.eqInt(((int64) raw[0]) & (int64) 0xFF, (int64) 0x0a, "raw literal H=0 len=10");
+        HpackReader r = heap HpackReader(raw, (int32) raw.count());
+        String dk = HpackString.decode(r, h, 4096);
+        c.eqStr(dk, "custom-key", "raw literal decodes");
+
+        // Huffman literal chosen when shorter: "www.example.com".
+        int8[] host = HpackPrimitiveTests.bytesOf("www.example.com");
+        HpackWriter w2 = heap HpackWriter();
+        HpackString.encode(w2, host, (int32) host.count(), h);
+        int8[] hl = w2.toBytes();
+        c.eqInt(((int64) hl[0]) & (int64) 0xFF, (int64) 0x8c,
+                "Huffman literal H=1 len=12");
+        HpackReader r2 = heap HpackReader(hl, (int32) hl.count());
+        String dh = HpackString.decode(r2, h, 4096);
+        c.eqStr(dh, "www.example.com", "Huffman literal decodes");
+
+        // Round-trip a value through encode(huffman) -> decode.
+        int8[] val = HpackPrimitiveTests.bytesOf("custom-header");
+        HpackWriter w3 = heap HpackWriter();
+        HpackString.encode(w3, val, (int32) val.count(), h);
+        int8[] vv = w3.toBytes();
+        HpackReader r3 = heap HpackReader(vv, (int32) vv.count());
+        String dv = HpackString.decode(r3, h, 4096);
+        c.eqStr(dv, "custom-header", "Huffman value round-trip");
+
+        // Size-cap bomb guard: a literal claiming more than maxLen rejects
+        // before allocation.
+        boolean caught = false;
+        HpackReader r4 = heap HpackReader(raw, (int32) raw.count());
+        try {
+            String s = HpackString.decode(r4, h, 4);   // cap below the 10-byte name
+        } catch (HpackException e) {
+            caught = true;
+        }
+        c.that(caught, "over-cap string literal raises HpackException");
+    }
+}

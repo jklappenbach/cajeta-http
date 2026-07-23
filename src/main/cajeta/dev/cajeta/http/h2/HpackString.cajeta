@@ -1,0 +1,59 @@
+package dev.cajeta.http.h2;
+
+import cajeta.lang.String;
+
+/**
+ * The HPACK **string literal** primitive (RFC 7541 §5.2) — plan item **3.1**.
+ * A string literal is a one-bit `H` (Huffman) flag packed into a 7-bit-prefix
+ * length, followed by that many octets: either raw or
+ * [`Huffman`](Huffman.cajeta)-coded per the flag.
+ *
+ * [`encode`](#encode) picks Huffman only when it is strictly shorter (the
+ * RFC's recommended heuristic); pass a `null` `huffman` to force raw octets.
+ * [`decode`](#decode) enforces a caller-supplied length cap **before**
+ * allocating, so a literal claiming a huge length cannot exhaust memory — the
+ * decompressed-size bomb guard the plan calls for.
+ */
+public final class HpackString {
+
+    /** Encode `data[0..len)` as a string literal into `w`. */
+    public static void encode(HpackWriter w, int8[] data, int32 len,
+                              Huffman huffman) {
+        if (huffman != null) {
+            int32 hlen = huffman.encodedLength(data, len);
+            if (hlen < len) {
+                int8[] hb = huffman.encode(data, len);
+                w.writeInteger((int64) hlen, 7, 0x80);
+                w.writeBytes(hb, hlen);
+                return;
+            }
+        }
+        w.writeInteger((int64) len, 7, 0x00);
+        w.writeBytes(data, len);
+    }
+
+    /**
+     * Decode one string literal from `r`. A declared length above `maxLen`
+     * raises [`HpackException`](HpackException.cajeta) before any allocation.
+     */
+    public static #String decode(HpackReader r, Huffman huffman, int32 maxLen) {
+        int32 first = r.peekByte();
+        boolean huff = (first & 0x80) != 0;
+        int64 lenL = r.readInteger(7);
+        if (lenL > (int64) maxLen) {
+            throw heap HpackException("HPACK string literal exceeds size cap");
+        }
+        int32 len = (int32) lenL;
+        int8[] raw = heap int8[len];
+        int32 i = 0;
+        while (i < len) {
+            raw[i] = (int8) r.readByte();
+            i = i + 1;
+        }
+        if (huff) {
+            String out = huffman.decode(raw, len);
+            return #out;
+        }
+        return heap String(#raw, len);
+    }
+}
