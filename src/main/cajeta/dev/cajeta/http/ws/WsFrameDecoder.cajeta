@@ -92,8 +92,12 @@ public class WsFrameDecoder {
 
     // -- current-frame header accumulators ----------------------------------
 
+    /** Whether RSV1 is permitted (permessage-deflate negotiated). */
+    boolean allowRsv1;
+
     int32 state;
     boolean curFin;
+    boolean curRsv1;
     int32 curOpcode;
     boolean curMasked;
     /** 7-bit length code (0..127) from byte 1. */
@@ -128,8 +132,10 @@ public class WsFrameDecoder {
     WsFrameDecoder() {
         this.expectMasked = true;
         this.maxFrame = WsFrameDecoder.DEFAULT_MAX_FRAME;
+        this.allowRsv1 = false;
         this.state = WsFrameDecoder.ST_B0;
         this.curFin = false;
+        this.curRsv1 = false;
         this.curOpcode = 0;
         this.curMasked = false;
         this.lenCode = 0;
@@ -174,6 +180,17 @@ public class WsFrameDecoder {
      * [`ProtocolViolationException`](ProtocolViolationException.cajeta)
      * rather than allocating. Returns `this` for chaining.
      */
+    /**
+     * Permit the **RSV1** bit on data frames — call once `permessage-deflate`
+     * (RFC 7692) has been negotiated for the connection. With RSV1 allowed, a
+     * set RSV1 marks a compressed message's first frame; RSV2/RSV3 and RSV1 on
+     * a control frame remain protocol violations. Returns `this` for chaining.
+     */
+    public WsFrameDecoder allowCompression() {
+        this.allowRsv1 = true;
+        return this;
+    }
+
     public WsFrameDecoder withMaxFrameLength(int32 maxBytes) {
         if (maxBytes < 0) {
             maxBytes = 0;
@@ -221,26 +238,34 @@ public class WsFrameDecoder {
 
     // -- header decoding ----------------------------------------------------
 
-    /** Byte 0: FIN (high bit) + 3 RSV bits (must be 0) + 4-bit opcode. */
+    /** Byte 0: FIN (high bit) + 3 RSV bits + 4-bit opcode. */
     void feedByte0(int8 c) {
         int32 b = ((int32) c) & 255;
         this.curFin = (b & 128) != 0;
-        // RSV1/2/3 — bits 0x40/0x20/0x10. No extension negotiated, so any
-        // set RSV bit is a protocol violation (RFC 6455 §5.2).
-        if ((b & 112) != 0) {
+        this.curRsv1 = (b & 64) != 0;   // 0x40
+        int32 op = b & 15;
+        // RSV2/RSV3 (0x20/0x10) are never valid; RSV1 (0x40) only with
+        // permessage-deflate negotiated (RFC 6455 §5.2 / RFC 7692 §6).
+        if ((b & 48) != 0 || (this.curRsv1 && !this.allowRsv1)) {
             throw heap ProtocolViolationException(
                 "RSV bit set with no negotiated extension",
                 this.streamPos - ((int64) 1));
         }
-        int32 op = b & 15;
         if (WsOpcode.isReserved(op)) {
             throw heap ProtocolViolationException(
                 "reserved opcode", this.streamPos - ((int64) 1));
         }
-        // A control frame MUST NOT be fragmented (RFC 6455 §5.5).
-        if (WsOpcode.isControl(op) && !this.curFin) {
-            throw heap ProtocolViolationException(
-                "fragmented control frame", this.streamPos - ((int64) 1));
+        // A control frame MUST NOT be fragmented (RFC 6455 §5.5), nor
+        // compressed (RFC 7692 §6.1 — RSV1 is meaningless on a control frame).
+        if (WsOpcode.isControl(op)) {
+            if (!this.curFin) {
+                throw heap ProtocolViolationException(
+                    "fragmented control frame", this.streamPos - ((int64) 1));
+            }
+            if (this.curRsv1) {
+                throw heap ProtocolViolationException(
+                    "RSV1 set on control frame", this.streamPos - ((int64) 1));
+            }
         }
         this.curOpcode = op;
         this.state = WsFrameDecoder.ST_B1;
@@ -371,7 +396,9 @@ public class WsFrameDecoder {
             boolean fin = this.curFin;
             int32 op = this.curOpcode;
             boolean masked = this.curMasked;
+            boolean rsv1 = this.curRsv1;
             WsFrame f = WsFrame.of(fin, op, masked, #pay);
+            f.rsv1 = rsv1;
             // TRANSFER the frame into the queue (`#f`) — without it the local
             // `f` is still an active owner and its scope-exit drop reclaims the
             // frame the queue now references, so nextFrame() later hands the

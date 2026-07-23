@@ -43,6 +43,15 @@ public class WsFrame {
     public boolean masked;
     /** The unmasked application payload (never null; may be empty). Field 3. */
     public int8[] payload;
+    /**
+     * The **RSV1** reserved bit (Field 4). Under `permessage-deflate`
+     * (RFC 7692) it flags the first frame of a **compressed** message; with no
+     * extension negotiated it must be `0`. RSV2/RSV3 are unused by any shipped
+     * extension and always `0`.
+     */
+    public boolean rsv1;
+    public boolean rsv2;
+    public boolean rsv3;
 
     /**
      * Field-pinning no-arg constructor: a final, empty, unmasked
@@ -54,6 +63,9 @@ public class WsFrame {
         this.opcode = 0;            // WsOpcode.CONTINUATION
         this.masked = false;
         this.payload = heap int8[0];
+        this.rsv1 = false;
+        this.rsv2 = false;
+        this.rsv3 = false;
     }
 
     /**
@@ -72,6 +84,11 @@ public class WsFrame {
     /** The FIN bit. */
     public boolean isFin() {
         return this.fin;
+    }
+
+    /** The RSV1 bit (compressed-message flag under permessage-deflate). */
+    public boolean isRsv1() {
+        return this.rsv1;
     }
 
     /** The opcode (`WsOpcode.*`). */

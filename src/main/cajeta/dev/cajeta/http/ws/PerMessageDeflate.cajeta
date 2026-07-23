@@ -1,0 +1,117 @@
+package dev.cajeta.http.ws;
+
+import dev.cajeta.codec.compress.DeflateStream;
+import dev.cajeta.codec.compress.InflateStream;
+
+/**
+ * The **`permessage-deflate`** message transform (RFC 7692) — plan item **4.1**.
+ * A WebSocket message's payload is compressed as one raw-DEFLATE stream and the
+ * first frame carries [`WsFrame.rsv1`](WsFrame.cajeta). Per §7.2.1 the
+ * compressor sync-flushes and **removes the trailing 4-octet `00 00 FF FF`**
+ * empty-block marker; the decompressor **appends it back** before inflating.
+ *
+ * The LZ77 window is stateful across messages (**context takeover**) via a
+ * persistent [`DeflateStream`](../coding) / `InflateStream`, so a repeated
+ * message compresses smaller. Each direction's `*_no_context_takeover`
+ * parameter resets its stream per message instead (independent messages, less
+ * memory) — modelled here by starting a fresh stream before each message.
+ *
+ * One instance is a single connection's codec: `compress` is the local→peer
+ * (outbound) side, `decompress` the peer→local (inbound) side, each with its own
+ * takeover policy. Not internally synchronised — the connection serialises sends
+ * under its write lock, and inbound decode runs on the single reader fiber.
+ */
+public final class PerMessageDeflate {
+    DeflateStream deflate;
+    InflateStream inflate;
+    boolean noContextTakeoverOut;
+    boolean noContextTakeoverIn;
+
+    public PerMessageDeflate(boolean noContextTakeoverOut,
+                             boolean noContextTakeoverIn) {
+        this.deflate = heap DeflateStream();
+        this.inflate = heap InflateStream();
+        this.noContextTakeoverOut = noContextTakeoverOut;
+        this.noContextTakeoverIn = noContextTakeoverIn;
+    }
+
+    /**
+     * Compress a whole message payload into the RSV1 frame payload: sync-flush
+     * and drop the trailing `00 00 FF FF` marker. When outbound context takeover
+     * is off, the window is reset first so this message is independent.
+     */
+    public #int8[] compress(int8[] data, int32 len) {
+        if (this.noContextTakeoverOut) {
+            this.deflate = heap DeflateStream();
+        }
+        this.deflate.write(data, len);
+        int8[] out = this.deflate.syncFlush();
+        int32 n = (int32) out.count();
+        int32 keep = n;
+        if (n >= 4
+                && out[n - 4] == (int8) 0x00 && out[n - 3] == (int8) 0x00
+                && out[n - 2] == (int8) 0xFF && out[n - 1] == (int8) 0xFF) {
+            keep = n - 4;
+        }
+        int8[] res = heap int8[keep];
+        int32 i = 0;
+        while (i < keep) {
+            res[i] = out[i];
+            i = i + 1;
+        }
+        return #res;
+    }
+
+    /**
+     * Decompress an RSV1 message payload: append the `00 00 FF FF` marker and
+     * inflate. When inbound context takeover is off, the window is reset first.
+     */
+    public #int8[] decompress(int8[] data, int32 len) {
+        if (this.noContextTakeoverIn) {
+            this.inflate = heap InflateStream();
+        }
+        this.inflate.feed(data, len);
+        int8[] marker = { (int8) 0x00, (int8) 0x00, (int8) 0xFF, (int8) 0xFF };
+        this.inflate.feed(marker, 4);
+
+        int8[] acc = heap int8[256];
+        int32 accLen = 0;
+        int32 accCap = 256;
+        boolean draining = true;
+        while (draining) {
+            int8[] got = this.inflate.drain();
+            int32 gn = (int32) got.count();
+            if (gn == 0) {
+                draining = false;
+            } else {
+                if (accLen + gn > accCap) {
+                    int32 nc = accCap * 2;
+                    while (nc < accLen + gn) {
+                        nc = nc * 2;
+                    }
+                    int8[] nb = heap int8[nc];
+                    int32 m = 0;
+                    while (m < accLen) {
+                        nb[m] = acc[m];
+                        m = m + 1;
+                    }
+                    acc = #nb;
+                    accCap = nc;
+                }
+                int32 j = 0;
+                while (j < gn) {
+                    acc[accLen] = got[j];
+                    accLen = accLen + 1;
+                    j = j + 1;
+                }
+            }
+        }
+        int8[] res = heap int8[accLen];
+        int32 k = 0;
+        while (k < accLen) {
+            res[k] = acc[k];
+            k = k + 1;
+        }
+        return #res;
+    }
+}

@@ -1,0 +1,189 @@
+package dev.cajeta.http.test;
+
+import cajeta.lang.String;
+import dev.cajeta.http.ws.WsFrame;
+import dev.cajeta.http.ws.WsOpcode;
+import dev.cajeta.http.ws.WsFrameEncoder;
+import dev.cajeta.http.ws.WsFrameDecoder;
+import dev.cajeta.http.ws.PerMessageDeflate;
+import dev.cajeta.http.ws.ProtocolViolationException;
+
+/**
+ * http:4.1a/4.1b — `permessage-deflate` (RFC 7692) at the frame + codec level.
+ *
+ *  - **RSV1 discipline** (`WsFrame`/decoder/encoder): RSV1 round-trips only when
+ *    the decoder has `allowCompression()`; a set RSV1 without it, RSV1 on a
+ *    control frame, and any RSV2/RSV3 bit are protocol violations.
+ *  - **PerMessageDeflate**: the RFC 7692 §7.2.1 "Hello" worked example, plain
+ *    round-trips, and the context-takeover contract (a repeated message
+ *    compresses smaller with takeover; identically-sized and independent
+ *    without).
+ */
+public final class WsPerMessageDeflateTests {
+
+    static boolean bytesEq(int8[] a, int32 an, int8[] b, int32 bn) {
+        if (an != bn) {
+            return false;
+        }
+        int32 i = 0;
+        while (i < an) {
+            if (a[i] != b[i]) {
+                return false;
+            }
+            i = i + 1;
+        }
+        return true;
+    }
+
+    static boolean strEq(int8[] a, int32 an, String s) {
+        if (an != s.byteLength()) {
+            return false;
+        }
+        int32 i = 0;
+        while (i < an) {
+            if ((((int32) a[i]) & 0xFF) != (((int32) s.byteAt(i)) & 0xFF)) {
+                return false;
+            }
+            i = i + 1;
+        }
+        return true;
+    }
+
+    // ---- 4.1a: RSV1 frame discipline -------------------------------------
+
+    static void rsv1FrameCodec(Check c) {
+        // A compressed data frame: RSV1 set, some payload.
+        int8[] pay = { (int8) 0xAB, (int8) 0xCD, (int8) 0xEF };
+        int8[] pcopy = { (int8) 0xAB, (int8) 0xCD, (int8) 0xEF };
+        WsFrame f = WsFrame.of(true, WsOpcode.BINARY, false, #pcopy);
+        f.rsv1 = true;
+        int8[] wire = WsFrameEncoder.encodeUnmasked(f);
+        int32 wn = (int32) wire.count();
+        // byte 0 high nibble = FIN(0x80)|RSV1(0x40)|opcode(0x2) = 0xC2.
+        c.eqInt((int64) (((int32) wire[0]) & 0xFF), (int64) 0xC2,
+                "rsv1 encodes into byte0 (0xC2)");
+
+        WsFrameDecoder d = WsFrameDecoder.forClient().allowCompression();
+        d.feed(wire, wn);
+        c.that(d.hasFrame(), "rsv1 frame decodes with compression allowed");
+        WsFrame g = d.nextFrame();
+        c.that(g.isRsv1(), "decoded frame carries RSV1");
+        c.that(WsPerMessageDeflateTests.bytesEq(g.getPayload(),
+                g.payloadLength(), pay, 3), "rsv1 frame payload intact");
+
+        // Same bytes, no compression negotiated -> protocol violation.
+        WsFrameDecoder d2 = WsFrameDecoder.forClient();
+        boolean threw = false;
+        try {
+            d2.feed(wire, wn);
+        } catch (ProtocolViolationException e) {
+            threw = true;
+        }
+        c.that(threw, "RSV1 without a negotiated extension is rejected");
+    }
+
+    static void rsv1ControlRejected(Check c) {
+        int8[] empty = heap int8[0];
+        WsFrame ping = WsFrame.of(true, WsOpcode.PING, false, #empty);
+        ping.rsv1 = true;
+        int8[] wire = WsFrameEncoder.encodeUnmasked(ping);
+        WsFrameDecoder d = WsFrameDecoder.forClient().allowCompression();
+        boolean threw = false;
+        try {
+            d.feed(wire, (int32) wire.count());
+        } catch (ProtocolViolationException e) {
+            threw = true;
+        }
+        c.that(threw, "RSV1 on a control frame is rejected");
+    }
+
+    static void rsv2Rejected(Check c) {
+        // Hand-craft a server->client frame with RSV2 (0x20) set on byte 0.
+        // 0x80 FIN | 0x20 RSV2 | 0x02 BINARY = 0xA2, then a 0-length byte1.
+        int8[] wire = { (int8) 0xA2, (int8) 0x00 };
+        WsFrameDecoder d = WsFrameDecoder.forClient().allowCompression();
+        boolean threw = false;
+        try {
+            d.feed(wire, 2);
+        } catch (ProtocolViolationException e) {
+            threw = true;
+        }
+        c.that(threw, "RSV2 is rejected even with compression allowed");
+    }
+
+    // ---- 4.1b: PerMessageDeflate codec -----------------------------------
+
+    static void helloVector(Check c) {
+        // RFC 7692 §7.2.1: "Hello" -> f2 48 cd c9 c9 07 00 (marker stripped).
+        PerMessageDeflate pmd = heap PerMessageDeflate(false, false);
+        String hello = "Hello";
+        int8[] hb = hello.toBytes();
+        int8[] comp = pmd.compress(hb, hello.byteLength());
+        int8[] expect = { (int8) 0xf2, (int8) 0x48, (int8) 0xcd, (int8) 0xc9,
+                          (int8) 0xc9, (int8) 0x07, (int8) 0x00 };
+        c.that(WsPerMessageDeflateTests.bytesEq(comp, (int32) comp.count(),
+                expect, 7), "permessage-deflate 'Hello' matches RFC 7692 §7.2.1");
+
+        // And it decompresses back on a matching context.
+        PerMessageDeflate rx = heap PerMessageDeflate(false, false);
+        int8[] back = rx.decompress(comp, (int32) comp.count());
+        c.that(WsPerMessageDeflateTests.strEq(back, (int32) back.count(), hello),
+               "permessage-deflate 'Hello' round-trips");
+    }
+
+    static void roundTrip(Check c) {
+        PerMessageDeflate tx = heap PerMessageDeflate(false, false);
+        PerMessageDeflate rx = heap PerMessageDeflate(false, false);
+        String msg = "the quick brown fox jumps over the lazy dog, "
+            + "the quick brown fox jumps over the lazy dog.";
+        int8[] mb = msg.toBytes();
+        int8[] comp = tx.compress(mb, msg.byteLength());
+        c.that(comp.count() < (int64) msg.byteLength(),
+               "a compressible message shrinks");
+        int8[] back = rx.decompress(comp, (int32) comp.count());
+        c.that(WsPerMessageDeflateTests.strEq(back, (int32) back.count(), msg),
+               "compressible message round-trips");
+    }
+
+    static void contextTakeover(Check c) {
+        String m = "the quick brown fox jumps over the lazy dog. ";
+        int8[] mb = m.toBytes();
+
+        // With takeover: the second identical message reuses the window.
+        PerMessageDeflate tx = heap PerMessageDeflate(false, false);
+        PerMessageDeflate rx = heap PerMessageDeflate(false, false);
+        int8[] c1 = tx.compress(mb, m.byteLength());
+        int8[] c2 = tx.compress(mb, m.byteLength());
+        c.that(c2.count() < c1.count(),
+               "context takeover: 2nd identical message compresses smaller");
+        int8[] b1 = rx.decompress(c1, (int32) c1.count());
+        int8[] b2 = rx.decompress(c2, (int32) c2.count());
+        c.that(WsPerMessageDeflateTests.strEq(b1, (int32) b1.count(), m)
+                && WsPerMessageDeflateTests.strEq(b2, (int32) b2.count(), m),
+               "context takeover: both messages decode");
+
+        // Without takeover: each message is independent (same size, still ok).
+        PerMessageDeflate txN = heap PerMessageDeflate(true, true);
+        PerMessageDeflate rxN = heap PerMessageDeflate(true, true);
+        int8[] n1 = txN.compress(mb, m.byteLength());
+        int8[] n2 = txN.compress(mb, m.byteLength());
+        c.eqInt((int64) n2.count(), (int64) n1.count(),
+                "no_context_takeover: identical messages compress identically");
+        int8[] q1 = rxN.decompress(n1, (int32) n1.count());
+        int8[] q2 = rxN.decompress(n2, (int32) n2.count());
+        c.that(WsPerMessageDeflateTests.strEq(q1, (int32) q1.count(), m)
+                && WsPerMessageDeflateTests.strEq(q2, (int32) q2.count(), m),
+               "no_context_takeover: both messages decode");
+    }
+
+    public static void run(Check c) {
+        System.stdout.println("-- ws pmd: RSV1 frame discipline --");
+        WsPerMessageDeflateTests.rsv1FrameCodec(c);
+        WsPerMessageDeflateTests.rsv1ControlRejected(c);
+        WsPerMessageDeflateTests.rsv2Rejected(c);
+        System.stdout.println("-- ws pmd: permessage-deflate codec --");
+        WsPerMessageDeflateTests.helloVector(c);
+        WsPerMessageDeflateTests.roundTrip(c);
+        WsPerMessageDeflateTests.contextTakeover(c);
+    }
+}

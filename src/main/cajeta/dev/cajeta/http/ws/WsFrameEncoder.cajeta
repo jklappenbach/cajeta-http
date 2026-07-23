@@ -81,10 +81,13 @@ public class WsFrameEncoder {
         int8[] out = heap int8[total];
         int32 w = 0;
 
-        // --- byte 0: FIN + RSV(000) + opcode ---
+        // --- byte 0: FIN + RSV1 + opcode ---
         int32 b0 = frame.opcode & 15;
         if (frame.fin) {
             b0 = b0 | 128;              // 0x80 — FIN
+        }
+        if (frame.rsv1) {
+            b0 = b0 | 64;               // 0x40 — RSV1 (permessage-deflate)
         }
         out[w] = (int8) b0;
         w = w + 1;
