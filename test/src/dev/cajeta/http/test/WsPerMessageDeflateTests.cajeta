@@ -5,6 +5,8 @@ import dev.cajeta.http.ws.WsFrame;
 import dev.cajeta.http.ws.WsOpcode;
 import dev.cajeta.http.ws.WsFrameEncoder;
 import dev.cajeta.http.ws.WsFrameDecoder;
+import dev.cajeta.http.ws.WsMessage;
+import dev.cajeta.http.ws.WsMessageAssembler;
 import dev.cajeta.http.ws.PerMessageDeflate;
 import dev.cajeta.http.ws.PmdParams;
 import dev.cajeta.http.ws.WsCompression;
@@ -229,6 +231,57 @@ public final class WsPerMessageDeflateTests {
                "client confirm: server_no_context_takeover -> peer resets");
     }
 
+    // ---- 4.1d(unit): message-layer RSV1 discipline + compressed flag -----
+
+    static void messageCompression(Check c) {
+        // A single compressed data frame -> a message flagged compressed.
+        int8[] p = { (int8) 1, (int8) 2, (int8) 3 };
+        WsFrame f = WsFrame.of(true, WsOpcode.TEXT, false, #p);
+        f.rsv1 = true;
+        WsMessageAssembler a1 = WsMessageAssembler.create();
+        WsMessage m1 = a1.accept(f);
+        c.that(m1 != null && m1.isCompressed(),
+               "single compressed frame -> compressed message");
+
+        // Fragmented compressed message: RSV1 only on the first frame.
+        int8[] q1 = { (int8) 1, (int8) 2 };
+        WsFrame g1 = WsFrame.of(false, WsOpcode.TEXT, false, #q1);
+        g1.rsv1 = true;
+        int8[] q2 = { (int8) 3, (int8) 4 };
+        WsFrame g2 = WsFrame.of(true, WsOpcode.CONTINUATION, false, #q2);
+        WsMessageAssembler a2 = WsMessageAssembler.create();
+        WsMessage none = a2.accept(g1);
+        WsMessage m2 = a2.accept(g2);
+        c.that(none == null && m2 != null && m2.isCompressed()
+                && m2.getPayload().count() == (int64) 4,
+               "fragmented compressed message assembles and stays flagged");
+
+        // RSV1 on a continuation frame is a protocol violation.
+        int8[] r1 = { (int8) 1, (int8) 2 };
+        WsFrame h1 = WsFrame.of(false, WsOpcode.TEXT, false, #r1);
+        h1.rsv1 = true;
+        int8[] r2 = { (int8) 3, (int8) 4 };
+        WsFrame h2 = WsFrame.of(true, WsOpcode.CONTINUATION, false, #r2);
+        h2.rsv1 = true;
+        WsMessageAssembler a3 = WsMessageAssembler.create();
+        WsMessage ignore = a3.accept(h1);
+        boolean threw = false;
+        try {
+            WsMessage bad = a3.accept(h2);
+        } catch (ProtocolViolationException e) {
+            threw = true;
+        }
+        c.that(threw, "RSV1 on a continuation frame is rejected (assembler)");
+
+        // A plain message is not flagged compressed.
+        int8[] s = { (int8) 9 };
+        WsFrame pf = WsFrame.of(true, WsOpcode.BINARY, false, #s);
+        WsMessageAssembler a4 = WsMessageAssembler.create();
+        WsMessage pm = a4.accept(pf);
+        c.that(pm != null && !pm.isCompressed(),
+               "an uncompressed message is not flagged");
+    }
+
     public static void run(Check c) {
         System.stdout.println("-- ws pmd: RSV1 frame discipline --");
         WsPerMessageDeflateTests.rsv1FrameCodec(c);
@@ -240,5 +293,7 @@ public final class WsPerMessageDeflateTests {
         WsPerMessageDeflateTests.contextTakeover(c);
         System.stdout.println("-- ws pmd: negotiation --");
         WsPerMessageDeflateTests.negotiation(c);
+        System.stdout.println("-- ws pmd: message-layer RSV1 discipline --");
+        WsPerMessageDeflateTests.messageCompression(c);
     }
 }

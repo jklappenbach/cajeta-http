@@ -87,6 +87,8 @@ public class WsMessageAssembler {
     boolean inProgress;
     /** The opcode of the message being assembled (the first frame's opcode). */
     int32 msgOpcode;
+    /** Whether the in-progress message is compressed (first frame had RSV1). */
+    boolean msgCompressed;
     /** Growable accumulator for the reassembled payload. */
     int8[] buf;
     /** Number of valid bytes in [`buf`](#buf). */
@@ -98,6 +100,7 @@ public class WsMessageAssembler {
         this.maxMessage = WsMessageAssembler.DEFAULT_MAX_MESSAGE;
         this.inProgress = false;
         this.msgOpcode = 0;
+        this.msgCompressed = false;
         this.buf = heap int8[0];
         this.bufLen = 0;
     }
@@ -171,6 +174,12 @@ public class WsMessageAssembler {
                 throw heap ProtocolViolationException(
                     "continuation frame with no message in progress");
             }
+            // RSV1 marks only the FIRST frame of a compressed message; a
+            // continuation frame must not set it (RFC 7692 §6.1).
+            if (frame.isRsv1()) {
+                throw heap ProtocolViolationException(
+                    "RSV1 set on a continuation frame");
+            }
             this.appendPayload(pay, payLen);
             if (fin) {
                 return this.finishMessage();
@@ -204,12 +213,13 @@ public class WsMessageAssembler {
                 out[i] = pay[i];
                 i = i + 1;
             }
-            return WsMessage.of(op, #out);
+            return WsMessage.ofCompressed(op, #out, frame.isRsv1());
         }
 
         // First frame of a fragmented message: open assembly.
         this.inProgress = true;
         this.msgOpcode = op;
+        this.msgCompressed = frame.isRsv1();
         this.bufLen = 0;
         this.buf = heap int8[0];
         this.appendPayload(pay, payLen);
@@ -285,11 +295,13 @@ public class WsMessageAssembler {
             i = i + 1;
         }
         int32 op = this.msgOpcode;
+        boolean compressed = this.msgCompressed;
         // Reset for the next message; drop the spent accumulator.
         this.inProgress = false;
         this.msgOpcode = 0;
+        this.msgCompressed = false;
         this.bufLen = 0;
         this.buf = heap int8[0];
-        return WsMessage.of(op, #out);
+        return WsMessage.ofCompressed(op, #out, compressed);
     }
 }

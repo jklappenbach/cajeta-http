@@ -39,6 +39,13 @@ public class WsMessage {
     public int32 opcode;
     /** The full reassembled application payload (never null; may be empty). Field 1. */
     public int8[] payload;
+    /**
+     * Whether the message arrived **compressed** (its first frame had RSV1
+     * under `permessage-deflate`). Field 2. The reassembled `payload` is still
+     * the compressed bytes until the connection's decompressor runs; a plain
+     * message is `false`.
+     */
+    public boolean compressed;
 
     /**
      * Field-pinning no-arg constructor: an empty binary message. The
@@ -48,6 +55,7 @@ public class WsMessage {
     public WsMessage() {
         this.opcode = 2;            // WsOpcode.BINARY
         this.payload = heap int8[0];
+        this.compressed = false;
     }
 
     /**
@@ -59,6 +67,21 @@ public class WsMessage {
         m.opcode = opcode;
         m.payload = #payload;
         return #m;
+    }
+
+    /** Build a message flagged compressed/plain (permessage-deflate). */
+    public static #WsMessage ofCompressed(int32 opcode, #int8[] payload,
+                                          boolean compressed) {
+        WsMessage m = heap WsMessage();
+        m.opcode = opcode;
+        m.payload = #payload;
+        m.compressed = compressed;
+        return #m;
+    }
+
+    /** Whether the message was received compressed (RSV1 / permessage-deflate). */
+    public boolean isCompressed() {
+        return this.compressed;
     }
 
     /** The message kind (`WsOpcode.TEXT` or `WsOpcode.BINARY`). */
