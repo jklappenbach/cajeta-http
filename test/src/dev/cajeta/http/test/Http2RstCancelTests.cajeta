@@ -1,0 +1,249 @@
+package dev.cajeta.http.test;
+
+import cajeta.lang.String;
+import cajeta.io.net.IpAddress;
+import cajeta.io.net.SocketAddress;
+import cajeta.io.net.TcpListener;
+import cajeta.io.net.TcpStream;
+import cajeta.io.net.AsyncReader;
+import cajeta.io.net.AsyncWriter;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.h2.Http2;
+import dev.cajeta.http.h2.Http2Connection;
+import dev.cajeta.http.h2.Http2FrameHeader;
+import dev.cajeta.http.h2.Http2FrameWriter;
+import dev.cajeta.http.h2.Http2Frames;
+import dev.cajeta.http.h2.Http2SettingsList;
+import dev.cajeta.http.h2.Http2ContentFrames;
+import dev.cajeta.http.h2.Http2Payload;
+import dev.cajeta.http.h2.HpackEncoder;
+import dev.cajeta.http.h2.HpackDecoder;
+import dev.cajeta.http.h2.HpackFieldList;
+
+/**
+ * http:3.3e — **RST_STREAM cancellation** (RFC 9113 §5.4 / §8.1). Stream 1's
+ * response is stalled at a tiny send window (its handler fiber is parked in
+ * [`Http2SendGate`](Http2SendGate.cajeta) mid-body). Instead of granting more
+ * window, the client resets the stream: the reader fiber flips the cancelled
+ * bit and wakes the handler, which stops streaming — no further DATA, no
+ * END_STREAM for stream 1. A subsequent stream 3 is served normally, proving
+ * (a) the connection survived the reset and (b) the cancelled handler fiber
+ * actually terminated (otherwise the serving `scope` could never join and the
+ * client would time out).
+ */
+public final class Http2RstCancelTests {
+
+    static final int32 WIN = 10;
+    static final int32 BODY_LEN = 30;
+    static final int32 CANCEL = 0x8;
+
+    static #String own(String s) {
+        return s.substring(0, s.byteLength());
+    }
+
+    static boolean readExactWithin(AsyncReader r, int8[] buf, int32 n,
+                                   int32 timeoutMs) {
+        int32 off = 0;
+        while (off < n) {
+            int32 g = r.readWithin(buf, off, n - off, timeoutMs);
+            if (g <= 0) {
+                return false;
+            }
+            off = off + g;
+        }
+        return true;
+    }
+
+    // ---- server ----------------------------------------------------------
+
+    static #HttpResponse handle(HttpRequest req) {
+        String target = req.getTarget();
+        if (target.equals("/stream")) {
+            int8[] b = heap int8[Http2RstCancelTests.BODY_LEN];
+            int32 i = 0;
+            while (i < Http2RstCancelTests.BODY_LEN) {
+                b[i] = (int8) (65 + (i % 26));
+                i = i + 1;
+            }
+            return HttpResponse.ok().body(b, Http2RstCancelTests.BODY_LEN);
+        }
+        String p = "pong";
+        return HttpResponse.ok().body(p.toBytes(), p.byteLength());
+    }
+
+    public static async int32 h2Server(#TcpListener listener) {
+        TcpStream sock = listener.acceptAsync();
+        AsyncReader reader = heap AsyncReader(sock);
+        AsyncWriter writer = heap AsyncWriter(sock);
+        (HttpRequest) -> #HttpResponse h = (req) -> Http2RstCancelTests.handle(req);
+        Http2Connection.serve(reader, writer, #h);
+        sock.close();
+        return 1;
+    }
+
+    // ---- client ----------------------------------------------------------
+
+    static int32 statusOf(HpackFieldList fields) {
+        int32 i = 0;
+        while (i < fields.size()) {
+            if (fields.nameAt(i).equals(":status")) {
+                String v = fields.valueAt(i);
+                int32 s = 0;
+                int32 k = 0;
+                while (k < v.byteLength()) {
+                    s = s * 10 + ((((int32) v.byteAt(k)) & 0xFF) - 48);
+                    k = k + 1;
+                }
+                return s;
+            }
+            i = i + 1;
+        }
+        return -1;
+    }
+
+    static void sendGet(AsyncWriter writer, HpackEncoder enc, int32 sid,
+                        String path) {
+        Http2FrameWriter fw = heap Http2FrameWriter();
+        HpackFieldList fl = heap HpackFieldList();
+        fl.put(Http2RstCancelTests.own(":method"), Http2RstCancelTests.own("GET"));
+        fl.put(Http2RstCancelTests.own(":path"), Http2RstCancelTests.own(path));
+        fl.put(Http2RstCancelTests.own(":scheme"), Http2RstCancelTests.own("http"));
+        fl.put(Http2RstCancelTests.own(":authority"),
+               Http2RstCancelTests.own("127.0.0.1"));
+        int8[] block = enc.encode(fl);
+        Http2ContentFrames.writeHeaders(fw, sid, block, (int32) block.count(),
+                                        true, true, 0);
+        int8[] out = fw.toBytes();
+        writer.writeAll(out, 0, (int32) out.count());
+        writer.flush();
+    }
+
+    static void client(Check c, int32 port) {
+        IpAddress ca = IpAddress.loopbackV4();
+        SocketAddress connAddr = SocketAddress.of(#ca, port);
+        TcpStream sock = TcpStream.connectAsync(#connAddr);
+        AsyncReader reader = heap AsyncReader(sock);
+        AsyncWriter writer = heap AsyncWriter(sock);
+
+        int8[] pf = Http2.preface();
+        writer.writeAll(pf, 0, 24);
+
+        Http2FrameWriter fw = heap Http2FrameWriter();
+        Http2SettingsList st = heap Http2SettingsList();
+        st.add(Http2.SETTINGS_INITIAL_WINDOW_SIZE, (int64) Http2RstCancelTests.WIN);
+        Http2Frames.writeSettings(fw, st);
+        int8[] sb = fw.toBytes();
+        writer.writeAll(sb, 0, (int32) sb.count());
+        writer.flush();
+
+        HpackEncoder enc = heap HpackEncoder(Http2.DEFAULT_HEADER_TABLE_SIZE, true);
+        Http2RstCancelTests.sendGet(writer, enc, 1, "/stream");
+
+        HpackDecoder dec = heap HpackDecoder(Http2.DEFAULT_HEADER_TABLE_SIZE);
+        boolean s1SawEnd = false;
+        int32 s1Bytes = 0;
+        int32 s3Status = -1;
+        int32 s3Bytes = 0;
+        int8[] s3Body = heap int8[64];
+        boolean s3Done = false;
+        boolean rstSent = false;
+        boolean timedOut = false;
+
+        while (!s3Done && !timedOut) {
+            int8[] hdr = heap int8[9];
+            if (!Http2RstCancelTests.readExactWithin(reader, hdr, 9, 4000)) {
+                timedOut = true;
+            } else {
+                Http2FrameHeader h = Http2FrameHeader(hdr);
+                int32 type = h.typeCode();
+                int32 flags = h.flags();
+                int32 sid = h.streamId();
+                int32 len = h.length();
+                int8[] pl = heap int8[len];
+                if (len > 0) {
+                    Http2RstCancelTests.readExactWithin(reader, pl, len, 4000);
+                }
+                boolean isEnd = (flags & Http2.FLAG_END_STREAM) != 0;
+                if (type == Http2.FRAME_SETTINGS) {
+                    if ((flags & Http2.FLAG_ACK) == 0) {
+                        Http2FrameWriter afw = heap Http2FrameWriter();
+                        Http2Frames.writeSettingsAck(afw);
+                        int8[] ab = afw.toBytes();
+                        writer.writeAll(ab, 0, (int32) ab.count());
+                        writer.flush();
+                    }
+                } else if (type == Http2.FRAME_HEADERS) {
+                    Http2Payload reg = Http2ContentFrames.parseHeaders(pl, len,
+                                                                      flags, sid);
+                    int8[] blk = heap int8[reg.length];
+                    int32 j = 0;
+                    while (j < reg.length) {
+                        blk[j] = pl[reg.offset + j];
+                        j = j + 1;
+                    }
+                    HpackFieldList rf = dec.decode(blk, reg.length);
+                    if (sid == 3) {
+                        s3Status = Http2RstCancelTests.statusOf(rf);
+                        if (isEnd) { s3Done = true; }
+                    }
+                    if (sid == 1 && isEnd) { s1SawEnd = true; }
+                } else if (type == Http2.FRAME_DATA) {
+                    Http2Payload reg = Http2ContentFrames.parseData(pl, len,
+                                                                   flags, sid);
+                    if (sid == 1) {
+                        s1Bytes = s1Bytes + reg.length;
+                        if (isEnd) { s1SawEnd = true; }
+                        // Stall reached: reset stream 1 instead of granting,
+                        // then open a fresh stream 3 to prove liveness.
+                        if (!rstSent) {
+                            Http2FrameWriter rfw = heap Http2FrameWriter();
+                            Http2Frames.writeRstStream(rfw, 1,
+                                (int64) Http2RstCancelTests.CANCEL);
+                            int8[] rb = rfw.toBytes();
+                            writer.writeAll(rb, 0, (int32) rb.count());
+                            writer.flush();
+                            rstSent = true;
+                            Http2RstCancelTests.sendGet(writer, enc, 3, "/ping");
+                        }
+                    } else {
+                        int32 j = 0;
+                        while (j < reg.length) {
+                            s3Body[s3Bytes] = pl[reg.offset + j];
+                            s3Bytes = s3Bytes + 1;
+                            j = j + 1;
+                        }
+                        if (isEnd) { s3Done = true; }
+                    }
+                }
+            }
+        }
+        sock.close();
+
+        c.that(!timedOut, "h2 rst: did not time out (cancelled fiber terminated)");
+        c.that(rstSent, "h2 rst: reached the stall and sent RST_STREAM");
+        // Stream 1 was cancelled mid-body: partial, never END_STREAM.
+        c.that(!s1SawEnd, "h2 rst: cancelled stream never completed");
+        c.that(s1Bytes <= Http2RstCancelTests.WIN,
+               "h2 rst: cancelled stream sent only the pre-stall chunk");
+        // Stream 3 served normally after the reset -> connection still live.
+        c.eqInt((int64) s3Status, (int64) 200, "h2 rst: later stream status 200");
+        boolean pongOk = s3Bytes == 4
+            && s3Body[0] == (int8) 0x70 && s3Body[1] == (int8) 0x6f
+            && s3Body[2] == (int8) 0x6e && s3Body[3] == (int8) 0x67;
+        c.that(pongOk, "h2 rst: later stream body 'pong'");
+    }
+
+    public static void run(Check c) {
+        System.stdout.println("-- h2 conn: RST_STREAM cancels a parked handler --");
+        scope {
+            IpAddress la = IpAddress.loopbackV4();
+            SocketAddress bindAddr = SocketAddress.of(#la, 0);
+            TcpListener listener = TcpListener.bind(bindAddr);
+            int32 port = listener.boundPort();
+            Task<int32> sv = spawn h2Server(#listener);
+            Http2RstCancelTests.client(c, port);
+            int32 r = await sv;
+        }
+    }
+}
