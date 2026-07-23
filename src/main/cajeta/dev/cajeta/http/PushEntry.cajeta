@@ -1,0 +1,30 @@
+package dev.cajeta.http;
+
+import cajeta.lang.String;
+
+/**
+ * One **server-push promise** attached to an [`HttpResponse`](HttpResponse.cajeta)
+ * — plan item **3.5**. A handler declares "while you fetch this response, I'll
+ * also push you `path`" via [`HttpResponse.push`](HttpResponse.cajeta#push); the
+ * HTTP/2 connection turns each entry into a `PUSH_PROMISE` (the promised
+ * `GET path` request) followed by the pushed response (`status` + `body`) on a
+ * reserved server-initiated stream — but only if the peer left
+ * `SETTINGS_ENABLE_PUSH` on. Over HTTP/1.1 the list is simply ignored.
+ *
+ * This is a transport-neutral value (no h2 types), so `HttpResponse` carries it
+ * without depending on the h2 package. v1 pushes carry a status + body; custom
+ * pushed-response headers are a follow-on.
+ */
+public final class PushEntry {
+    public String path;
+    public int32 status;
+    public int8[] body;
+    public int32 bodyLen;
+
+    public PushEntry(#String path, int32 status, #int8[] body, int32 bodyLen) {
+        this.path = #path;
+        this.status = status;
+        this.body = #body;
+        this.bodyLen = bodyLen;
+    }
+}

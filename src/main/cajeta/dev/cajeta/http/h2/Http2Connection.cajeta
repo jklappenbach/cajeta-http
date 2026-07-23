@@ -1,8 +1,10 @@
 package dev.cajeta.http.h2;
 
+import cajeta.lang.String;
 import cajeta.io.net.AsyncReader;
 import cajeta.io.net.AsyncWriter;
 import cajeta.io.net.NetException;
+import cajeta.io.net.tls.TlsException;
 import dev.cajeta.http.HttpRequest;
 import dev.cajeta.http.HttpResponse;
 
@@ -100,6 +102,10 @@ public final class Http2Connection {
             // already being torn down (GOAWAY sent); nothing more to do.
         } catch (NetException e) {
             // The connection dropped (client closed); a normal end.
+        } catch (TlsException e) {
+            // A TLS teardown race — a single-exchange peer that reset the
+            // socket instead of sending a clean close_notify surfaces as a
+            // read error rather than EOF. Also a normal end.
         }
     }
 
@@ -128,11 +134,13 @@ public final class Http2Connection {
                         HttpRequest req #= this.readyRequest;
                         int32 sid = this.readyStreamId;
                         int32 maxFrame = (int32) this.remote.maxFrameSize;
+                        boolean pushOk = this.remote.pushEnabled();
+                        int32 initWin = (int32) this.remote.initialWindowSize;
                         this.hasReady = false;
                         this.readyRequest = null;
                         (HttpRequest) -> #HttpResponse hl = this.handler;
-                        spawn handleStream(this.ws, this.gate,
-                                           hl, sid, maxFrame, #req);
+                        spawn handleStream(this.ws, this.gate, hl, sid,
+                                           maxFrame, pushOk, initWin, #req);
                     }
                 }
             }
@@ -323,37 +331,80 @@ public final class Http2Connection {
     public static async int32 handleStream(Http2WriteSide ws, Http2SendGate gate,
                                            (HttpRequest) -> #HttpResponse h,
                                            int32 sid, int32 maxFrame,
+                                           boolean pushEnabled, int32 initWin,
                                            #HttpRequest req) {
         HttpRequest r #= req;
         (HttpRequest) -> #HttpResponse fn = h;
         HttpResponse resp = fn(r);
 
+        // Server push (RFC 9113 §8.4), only when the peer left push enabled:
+        // emit each PUSH_PROMISE on this stream + its pushed response on a
+        // fresh reserved (even) stream, before the main response.
+        if (pushEnabled && resp.pushCount() > 0) {
+            String authority = Http2Connection.authorityOf(r);
+            int32 pc = resp.pushCount();
+            int32 pi = 0;
+            while (pi < pc) {
+                int32 promId = ws.nextPromisedId();
+                HpackFieldList prom = Http2Requests.promisedRequestFields(
+                    resp.pushPathAt(pi), authority);
+                ws.writePushPromise(sid, promId, prom);
+                gate.openStream(promId, initWin);
+                HpackFieldList pf = Http2Requests.statusOnlyFields(
+                    resp.pushStatusAt(pi));
+                int32 plen = resp.pushBodyLenAt(pi);
+                boolean pHasBody = plen > 0;
+                ws.writeHeaders(promId, pf, !pHasBody);
+                if (pHasBody) {
+                    Http2Connection.streamBody(ws, gate, promId,
+                                               resp.pushBodyAt(pi), plen,
+                                               maxFrame);
+                }
+                pi = pi + 1;
+            }
+        }
+
         HpackFieldList fields = Http2Requests.responseFields(resp);
         boolean hasBody = resp.hasBody && resp.bodyLength() > 0;
         ws.writeHeaders(sid, fields, !hasBody);
-
         if (hasBody) {
-            int8[] body = resp.body;
-            int32 total = resp.bodyLength();
-            int32 off = 0;
-            while (off < total) {
-                int64 want = (int64) (total - off);
-                int64 capBytes = (int64) maxFrame;
-                if (want > capBytes) {
-                    want = capBytes;
-                }
-                int64 g = gate.takeUpTo(sid, want);
-                if (g <= (int64) 0) {
-                    off = total;   // cancelled — stop streaming this response
-                } else {
-                    int32 gi = (int32) g;
-                    boolean last = (off + gi) >= total;
-                    ws.writeData(sid, body, off, gi, last);
-                    off = off + gi;
-                }
-            }
+            Http2Connection.streamBody(ws, gate, sid, resp.body,
+                                       resp.bodyLength(), maxFrame);
         }
         return sid;
+    }
+
+    // Stream `body[0 .. total)` as DATA on `streamId` under send-flow control,
+    // stopping early if the stream is cancelled (gate returns 0).
+    static void streamBody(Http2WriteSide ws, Http2SendGate gate, int32 streamId,
+                           int8[] body, int32 total, int32 maxFrame) {
+        int32 off = 0;
+        while (off < total) {
+            int64 want = (int64) (total - off);
+            int64 capBytes = (int64) maxFrame;
+            if (want > capBytes) {
+                want = capBytes;
+            }
+            int64 g = gate.takeUpTo(streamId, want);
+            if (g <= (int64) 0) {
+                off = total;   // cancelled — stop streaming
+            } else {
+                int32 gi = (int32) g;
+                boolean last = (off + gi) >= total;
+                ws.writeData(streamId, body, off, gi, last);
+                off = off + gi;
+            }
+        }
+    }
+
+    // The :authority for promised requests — the request's host, or loopback.
+    static #String authorityOf(HttpRequest r) {
+        String h #= r.getHeaders().get("host");
+        if (h == null) {
+            String d = "127.0.0.1";
+            return d.substring(0, d.byteLength());
+        }
+        return #h;
     }
 
     // -- outbound control helpers (reader fiber) -----------------------------

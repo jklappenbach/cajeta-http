@@ -3,6 +3,7 @@ package dev.cajeta.http.h2;
 import cajeta.lang.String;
 import cajeta.io.net.AsyncReader;
 import cajeta.io.net.AsyncWriter;
+import cajeta.io.net.tls.TlsException;
 import dev.cajeta.http.HttpRequest;
 import dev.cajeta.http.HttpResponse;
 
@@ -33,8 +34,11 @@ public final class Http2Client {
         writer.writeAll(pf, 0, 24);
 
         Http2FrameWriter fw = heap Http2FrameWriter();
-        Http2SettingsList empty = heap Http2SettingsList();
-        Http2Frames.writeSettings(fw, empty);
+        // Disable server push by default (RFC 9113 §8.4); this single-exchange
+        // client does not surface pushes, so a promise is a protocol violation.
+        Http2SettingsList st = heap Http2SettingsList();
+        st.add(Http2.SETTINGS_ENABLE_PUSH, (int64) 0);
+        Http2Frames.writeSettings(fw, st);
 
         HpackEncoder enc = heap HpackEncoder(Http2.DEFAULT_HEADER_TABLE_SIZE, true);
         HpackFieldList fl = Http2Requests.requestFields(req, scheme, authority);
@@ -60,6 +64,7 @@ public final class Http2Client {
         HpackFieldList respFields = null;
         boolean done = false;
 
+        try {
         while (!done) {
             int8[] hdr = heap int8[9];
             if (!Http2Client.readFully(reader, hdr, 9)) {
@@ -110,9 +115,23 @@ public final class Http2Client {
                     if ((flags & Http2.FLAG_END_STREAM) != 0) {
                         done = true;
                     }
+                } else if (type == Http2.FRAME_PUSH_PROMISE) {
+                    // We advertised SETTINGS_ENABLE_PUSH = 0; a PUSH_PROMISE is
+                    // a connection error (RFC 9113 §8.4 / §6.6).
+                    throw heap Http2Exception(
+                        "PUSH_PROMISE received with push disabled",
+                        Http2.PROTOCOL_ERROR);
                 } else if (type == Http2.FRAME_GOAWAY) {
                     done = true;
                 }
+            }
+        }
+        } catch (TlsException e) {
+            // A TLS teardown race (peer reset instead of a clean close_notify).
+            // If the full response already arrived, use it; otherwise it is a
+            // real failure.
+            if (!sawHeaders) {
+                throw #e;
             }
         }
 
@@ -135,11 +154,17 @@ public final class Http2Client {
         writer.flush();
     }
 
+    // A generous per-read deadline so a stalled/half-open peer surfaces as a
+    // clean error rather than an unbounded block (plaintext only; TLS v1 has no
+    // real readWithin and falls back to a blocking read).
+    static final int32 READ_TIMEOUT_MS = 15000;
+
     static boolean readFully(AsyncReader reader, int8[] buf, int32 n) {
         int32 off = 0;
         while (off < n) {
-            int32 g = reader.read(buf, off, n - off);
-            if (g == 0) {
+            int32 g = reader.readWithin(buf, off, n - off,
+                                        Http2Client.READ_TIMEOUT_MS);
+            if (g <= 0) {
                 if (off == 0) {
                     return false;
                 }

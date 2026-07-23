@@ -148,6 +148,29 @@ public final class Http2Requests {
         return #resp;
     }
 
+    /**
+     * Build the PUSH_PROMISE request header list for a promised `GET path`
+     * (server push, §8.4): the four request pseudo-headers. `:scheme` defaults
+     * to `https` (v1 — a production push would derive it from the transport).
+     */
+    public static #HpackFieldList promisedRequestFields(String path,
+                                                        String authority) {
+        HpackFieldList fl = heap HpackFieldList();
+        fl.put(Http2Requests.own(":method"), Http2Requests.own("GET"));
+        fl.put(Http2Requests.own(":path"), Http2Requests.own(path));
+        fl.put(Http2Requests.own(":scheme"), Http2Requests.own("https"));
+        fl.put(Http2Requests.own(":authority"), Http2Requests.own(authority));
+        return #fl;
+    }
+
+    /** Build a `:status`-only response header list (a pushed response, v1). */
+    public static #HpackFieldList statusOnlyFields(int32 status) {
+        HpackFieldList fl = heap HpackFieldList();
+        String s = Http2Requests.statusString(status);
+        fl.put(Http2Requests.own(":status"), #s);
+        return #fl;
+    }
+
     /** Build the HPACK header list for a response (`:status` first). */
     public static #HpackFieldList responseFields(HttpResponse resp) {
         HpackFieldList fl = heap HpackFieldList();

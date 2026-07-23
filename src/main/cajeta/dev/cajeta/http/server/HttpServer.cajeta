@@ -923,8 +923,18 @@ public class HttpServer {
                                       #TlsStream tls) {
         AsyncReader reader = heap AsyncReader(tls);
         AsyncWriter writer = heap AsyncWriter(tls);
-        HttpServer.serveLoopWithLimits(handler, parseLimits, limits, reader, writer);
-        tls.close();
+        try {
+            HttpServer.serveLoopWithLimits(handler, parseLimits, limits,
+                                           reader, writer);
+        } catch (Exception e) {
+            // A transport fault mid-exchange (peer reset) — this connection is
+            // done; the worker must not crash on it.
+        }
+        try {
+            tls.close();
+        } catch (Exception e) {
+            // Peer vanished before the TLS close handshake; nothing to flush.
+        }
     }
 
     /**

@@ -32,11 +32,41 @@ public final class Http2WriteSide {
     AsyncWriter writer;
     HpackEncoder henc;
     Lock lock;
+    int32 promisedId;   // last server-initiated (even) stream id handed out
 
     public Http2WriteSide(AsyncWriter writer) {
         this.writer = writer;
         this.henc = heap HpackEncoder(Http2.DEFAULT_HEADER_TABLE_SIZE, true);
         this.lock = heap Lock();
+        this.promisedId = 0;
+    }
+
+    /**
+     * Reserve the next server-initiated (even, increasing) stream id for a
+     * PUSH_PROMISE, under the write lock so concurrent handler fibers never
+     * collide (RFC 9113 §5.1.1).
+     */
+    public int32 nextPromisedId() {
+        LockGuard g = this.lock.acquire();
+        this.promisedId = this.promisedId + 2;
+        return this.promisedId;
+    }
+
+    /**
+     * Encode `fields` and write a PUSH_PROMISE on `streamId` reserving
+     * `promisedId`, atomically (HPACK order preserved like `writeHeaders`).
+     */
+    public void writePushPromise(int32 streamId, int32 promisedId,
+                                 HpackFieldList fields) {
+        LockGuard g = this.lock.acquire();
+        int8[] block = this.henc.encode(fields);
+        int32 blockLen = (int32) block.count();
+        Http2FrameWriter fw = heap Http2FrameWriter();
+        Http2ContentFrames.writePushPromise(fw, streamId, promisedId, block,
+                                            blockLen, true, 0);
+        int8[] bytes = fw.toBytes();
+        this.writer.writeAll(bytes, 0, (int32) bytes.count());
+        this.writer.flush();
     }
 
     /**

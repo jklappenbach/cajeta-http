@@ -85,6 +85,16 @@ public class HttpResponse {
     public Body bodyModel;
 
     /**
+     * HTTP/2 server-push promises (http:3.5), or `null` until the first
+     * [`push`](#push). Each [`PushEntry`](PushEntry.cajeta) becomes a
+     * `PUSH_PROMISE` + a pushed response on an h2 connection when the peer
+     * allows push; ignored over HTTP/1.1.
+     */
+    public PushEntry[] pushes;
+    int32 pushLen;
+    int32 pushCap;
+
+    /**
      * Field-pinning constructor. Defaults to a `200`/`OK`/`HTTP/1.1`
      * response with an empty header map and no body, so a
      * partially-built instance never carries dangling state. The
@@ -111,6 +121,76 @@ public class HttpResponse {
         this.body = #e;
         this.hasBody = false;
         this.bodyModel = null;
+        this.pushes = null;
+        this.pushLen = 0;
+        this.pushCap = 0;
+    }
+
+    // -- HTTP/2 server push (http:3.5) --------------------------------------
+
+    /**
+     * Declare an HTTP/2 server push: promise `GET path` and carry the pushed
+     * response as `status` + `body[0 .. bodyLen)`. Copied in, so the caller's
+     * buffers are theirs to reuse. Returns `this` to chain. On an HTTP/2
+     * connection whose peer left `SETTINGS_ENABLE_PUSH` on, this becomes a
+     * `PUSH_PROMISE` + a pushed response on a reserved stream; over h1 it is
+     * ignored.
+     */
+    public HttpResponse push(String path, int32 status, int8[] body,
+                             int32 bodyLen) {
+        if (this.pushes == null) {
+            this.pushes = heap PushEntry[4];
+            this.pushCap = 4;
+        } else if (this.pushLen == this.pushCap) {
+            this.growPushes();
+        }
+        String p = path.substring(0, path.byteLength());
+        int8[] b = heap int8[bodyLen];
+        int32 i = 0;
+        while (i < bodyLen) {
+            b[i] = body[i];
+            i = i + 1;
+        }
+        this.pushes[this.pushLen] = heap PushEntry(#p, status, #b, bodyLen);
+        this.pushLen = this.pushLen + 1;
+        return this;
+    }
+
+    /** Number of server-push promises attached. */
+    public int32 pushCount() {
+        return this.pushLen;
+    }
+
+    /** The promised request path of push `i` (borrowed). */
+    public String pushPathAt(int32 i) {
+        return this.pushes[i].path;
+    }
+
+    /** The pushed response status of push `i`. */
+    public int32 pushStatusAt(int32 i) {
+        return this.pushes[i].status;
+    }
+
+    /** The pushed response body of push `i` (borrowed). */
+    public int8[] pushBodyAt(int32 i) {
+        return this.pushes[i].body;
+    }
+
+    /** The pushed response body length of push `i`. */
+    public int32 pushBodyLenAt(int32 i) {
+        return this.pushes[i].bodyLen;
+    }
+
+    void growPushes() {
+        int32 nc = this.pushCap * 2;
+        PushEntry[] ne = heap PushEntry[nc];
+        int32 i = 0;
+        while (i < this.pushLen) {
+            ne[i] #= #this.pushes[i];
+            i = i + 1;
+        }
+        this.pushes #= ne;
+        this.pushCap = nc;
     }
 
     // -- factories ----------------------------------------------------------

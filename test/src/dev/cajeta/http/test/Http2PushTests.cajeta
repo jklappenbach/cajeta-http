@@ -1,0 +1,378 @@
+package dev.cajeta.http.test;
+
+import cajeta.lang.String;
+import cajeta.time.Duration;
+import cajeta.io.net.IpAddress;
+import cajeta.io.net.SocketAddress;
+import cajeta.io.net.TcpListener;
+import cajeta.io.net.TcpStream;
+import cajeta.io.net.AsyncReader;
+import cajeta.io.net.AsyncWriter;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.server.HttpServer;
+import dev.cajeta.http.server.HttpServerBuilder;
+import dev.cajeta.http.h2.Http2;
+import dev.cajeta.http.h2.Http2Client;
+import dev.cajeta.http.h2.Http2Exception;
+import dev.cajeta.http.h2.Http2FrameHeader;
+import dev.cajeta.http.h2.Http2FrameWriter;
+import dev.cajeta.http.h2.Http2Frames;
+import dev.cajeta.http.h2.Http2Settings;
+import dev.cajeta.http.h2.Http2SettingsList;
+import dev.cajeta.http.h2.Http2ContentFrames;
+import dev.cajeta.http.h2.Http2Payload;
+import dev.cajeta.http.h2.HpackEncoder;
+import dev.cajeta.http.h2.HpackDecoder;
+import dev.cajeta.http.h2.HpackFieldList;
+
+/**
+ * http:3.5 — **HTTP/2 server push** (RFC 9113 §8.4).
+ *
+ *  - *delivery + cache keying (enabled):* a prior-knowledge h2 server whose
+ *    handler declares `resp.push("/style.css", …)` emits a `PUSH_PROMISE` on the
+ *    request stream (promising `GET /style.css`) plus the pushed response on a
+ *    reserved even stream; a push-enabled client receives both and can key the
+ *    pushed bytes by the promised path;
+ *  - *client policy (disabled by default):* the shipped `Http2Client`
+ *    advertises `SETTINGS_ENABLE_PUSH = 0` and treats any `PUSH_PROMISE` as a
+ *    connection error — proven with a rogue server that both records the
+ *    client's advertised value and sends a promise anyway.
+ */
+public final class Http2PushTests {
+
+    static #String own(String s) {
+        return s.substring(0, s.byteLength());
+    }
+
+    static boolean readExactWithin(AsyncReader r, int8[] buf, int32 n,
+                                   int32 timeoutMs) {
+        int32 off = 0;
+        while (off < n) {
+            int32 g = r.readWithin(buf, off, n - off, timeoutMs);
+            if (g <= 0) {
+                return false;
+            }
+            off = off + g;
+        }
+        return true;
+    }
+
+    static #String fieldValue(HpackFieldList fields, String name) {
+        int32 i = 0;
+        while (i < fields.size()) {
+            if (fields.nameAt(i).equals(name)) {
+                String v = fields.valueAt(i);
+                return v.substring(0, v.byteLength());
+            }
+            i = i + 1;
+        }
+        return null;
+    }
+
+    static int32 statusOf(HpackFieldList fields) {
+        String v #= Http2PushTests.fieldValue(fields, ":status");
+        if (v == null) {
+            return -1;
+        }
+        int32 s = 0;
+        int32 k = 0;
+        while (k < v.byteLength()) {
+            s = s * 10 + ((((int32) v.byteAt(k)) & 0xFF) - 48);
+            k = k + 1;
+        }
+        return s;
+    }
+
+    // ================= case 1: server push delivered ======================
+
+    public static #HttpResponse handleIndex(HttpRequest req) {
+        String t = req.getTarget();
+        if (t.equals("/index")) {
+            String body = "INDEX";
+            String css = "body{margin:0}";
+            HttpResponse resp = HttpResponse.ok()
+                .body(body.toBytes(), body.byteLength());
+            resp.push("/style.css", 200, css.toBytes(), css.byteLength());
+            return #resp;
+        }
+        String nf = "nope";
+        return HttpResponse.of(404).body(nf.toBytes(), nf.byteLength());
+    }
+
+    public static async int32 serve(HttpServer srv) {
+        srv.serve();
+        return 1;
+    }
+
+    // Raw push-ENABLED client: request /index, collect the promise + both
+    // responses. Returns 1 iff promised path is /style.css, pushed body is the
+    // stylesheet, and the main body is INDEX.
+    static void pushClient(Check c, int32 port) {
+        IpAddress ca = IpAddress.loopbackV4();
+        SocketAddress connAddr = SocketAddress.of(#ca, port);
+        TcpStream sock = TcpStream.connectAsync(#connAddr);
+        AsyncReader reader = heap AsyncReader(sock);
+        AsyncWriter writer = heap AsyncWriter(sock);
+
+        int8[] pf = Http2.preface();
+        writer.writeAll(pf, 0, 24);
+        Http2FrameWriter fw = heap Http2FrameWriter();
+        Http2SettingsList st = heap Http2SettingsList();
+        st.add(Http2.SETTINGS_ENABLE_PUSH, (int64) 1);
+        Http2Frames.writeSettings(fw, st);
+        HpackEncoder enc = heap HpackEncoder(Http2.DEFAULT_HEADER_TABLE_SIZE, true);
+        HpackFieldList fl = heap HpackFieldList();
+        fl.put(Http2PushTests.own(":method"), Http2PushTests.own("GET"));
+        fl.put(Http2PushTests.own(":path"), Http2PushTests.own("/index"));
+        fl.put(Http2PushTests.own(":scheme"), Http2PushTests.own("http"));
+        fl.put(Http2PushTests.own(":authority"), Http2PushTests.own("127.0.0.1"));
+        int8[] block = enc.encode(fl);
+        Http2ContentFrames.writeHeaders(fw, 1, block, (int32) block.count(),
+                                        true, true, 0);
+        int8[] out = fw.toBytes();
+        writer.writeAll(out, 0, (int32) out.count());
+        writer.flush();
+
+        HpackDecoder dec = heap HpackDecoder(Http2.DEFAULT_HEADER_TABLE_SIZE);
+        boolean promisedStyleCss = false;
+        int32 promisedStream = -1;
+        int8[] s1 = heap int8[64];
+        int32 s1n = 0;
+        int8[] s2 = heap int8[64];
+        int32 s2n = 0;
+        boolean s1Done = false;
+        boolean s2Done = false;
+        boolean timedOut = false;
+
+        while (!(s1Done && s2Done) && !timedOut) {
+            int8[] hdr = heap int8[9];
+            if (!Http2PushTests.readExactWithin(reader, hdr, 9, 4000)) {
+                timedOut = true;
+            } else {
+                Http2FrameHeader h = Http2FrameHeader(hdr);
+                int32 type = h.typeCode();
+                int32 flags = h.flags();
+                int32 sid = h.streamId();
+                int32 len = h.length();
+                int8[] pl = heap int8[len];
+                if (len > 0) {
+                    Http2PushTests.readExactWithin(reader, pl, len, 4000);
+                }
+                if (type == Http2.FRAME_SETTINGS) {
+                    if ((flags & Http2.FLAG_ACK) == 0) {
+                        Http2FrameWriter afw = heap Http2FrameWriter();
+                        Http2Frames.writeSettingsAck(afw);
+                        int8[] ab = afw.toBytes();
+                        writer.writeAll(ab, 0, (int32) ab.count());
+                        writer.flush();
+                    }
+                } else if (type == Http2.FRAME_PUSH_PROMISE) {
+                    Http2Payload reg = Http2ContentFrames.parsePushPromise(pl,
+                                                                          len,
+                                                                          flags,
+                                                                          sid);
+                    promisedStream = reg.promisedStreamId;
+                    int8[] blk = Http2PushTests.slice(pl, reg.offset, reg.length);
+                    HpackFieldList pfields = dec.decode(blk, reg.length);
+                    String pp #= Http2PushTests.fieldValue(pfields, ":path");
+                    if (pp != null && pp.equals("/style.css")) {
+                        promisedStyleCss = true;
+                    }
+                } else if (type == Http2.FRAME_HEADERS) {
+                    Http2Payload reg = Http2ContentFrames.parseHeaders(pl, len,
+                                                                      flags, sid);
+                    int8[] blk = Http2PushTests.slice(pl, reg.offset, reg.length);
+                    HpackFieldList rf = dec.decode(blk, reg.length);
+                    Http2PushTests.statusOf(rf);   // keep the decoder in sync
+                    if ((flags & Http2.FLAG_END_STREAM) != 0) {
+                        if (sid == 1) { s1Done = true; } else { s2Done = true; }
+                    }
+                } else if (type == Http2.FRAME_DATA) {
+                    Http2Payload reg = Http2ContentFrames.parseData(pl, len,
+                                                                   flags, sid);
+                    int32 j = 0;
+                    while (j < reg.length) {
+                        int8 bv = pl[reg.offset + j];
+                        if (sid == 1) { s1[s1n] = bv; s1n = s1n + 1; }
+                        else { s2[s2n] = bv; s2n = s2n + 1; }
+                        j = j + 1;
+                    }
+                    if ((flags & Http2.FLAG_END_STREAM) != 0) {
+                        if (sid == 1) { s1Done = true; } else { s2Done = true; }
+                    }
+                }
+            }
+        }
+        sock.close();
+
+        c.that(!timedOut, "h2 push: exchange did not time out");
+        c.that(promisedStyleCss,
+               "h2 push: PUSH_PROMISE promises GET /style.css");
+        c.eqInt((int64) promisedStream, (int64) 2,
+                "h2 push: promised on a reserved even stream");
+        c.that(Http2PushTests.bytesEq(s2, s2n, "body{margin:0}"),
+               "h2 push: pushed /style.css delivered (keyed by promised path)");
+        c.that(Http2PushTests.bytesEq(s1, s1n, "INDEX"),
+               "h2 push: main response body intact");
+    }
+
+    static void serverPushDelivered(Check c) {
+        scope {
+            HttpServerBuilder b = HttpServer.builder();
+            b.bind("127.0.0.1:0");
+            (HttpRequest) -> #HttpResponse h =
+                (req) -> Http2PushTests.handleIndex(req);
+            b.handler(h);
+            b.h2PriorKnowledge();
+            HttpServer srv = b.build();
+            int32 port = srv.server.listener.boundPort();
+            Task<int32> sv = spawn serve(srv);
+
+            Http2PushTests.pushClient(c, port);
+
+            boolean drained = srv.shutdown(Duration.ofSeconds(2));
+            c.that(drained, "h2 push: server drained clean");
+            int32 s = await sv;
+        }
+    }
+
+    // ============ case 2: client rejects push when disabled ================
+
+    // Rogue server: record the client's advertised ENABLE_PUSH, then send a
+    // PUSH_PROMISE anyway. out[0] <- the client's SETTINGS_ENABLE_PUSH.
+    public static async int32 rogueServer(#TcpListener listener, int32[] out) {
+        TcpStream sock = listener.acceptAsync();
+        AsyncReader reader = heap AsyncReader(sock);
+        AsyncWriter writer = heap AsyncWriter(sock);
+
+        int8[] pf = heap int8[24];
+        Http2PushTests.readExactWithin(reader, pf, 24, 4000);
+
+        Http2FrameWriter sfw = heap Http2FrameWriter();
+        Http2SettingsList mine = heap Http2SettingsList();
+        Http2Frames.writeSettings(sfw, mine);
+        int8[] sb = sfw.toBytes();
+        writer.writeAll(sb, 0, (int32) sb.count());
+        writer.flush();
+
+        boolean sawSettings = false;
+        boolean sawHeaders = false;
+        while (!(sawSettings && sawHeaders)) {
+            int8[] hdr = heap int8[9];
+            if (!Http2PushTests.readExactWithin(reader, hdr, 9, 4000)) {
+                sawHeaders = true;
+                sawSettings = true;
+            } else {
+                Http2FrameHeader h = Http2FrameHeader(hdr);
+                int32 type = h.typeCode();
+                int32 flags = h.flags();
+                int32 sid = h.streamId();
+                int32 len = h.length();
+                int8[] pl = heap int8[len];
+                if (len > 0) {
+                    Http2PushTests.readExactWithin(reader, pl, len, 4000);
+                }
+                if (type == Http2.FRAME_SETTINGS && (flags & Http2.FLAG_ACK) == 0) {
+                    Http2SettingsList list = Http2Frames.parseSettings(pl, 0,
+                                                                      len, flags,
+                                                                      sid);
+                    Http2Settings s = heap Http2Settings();
+                    s.apply(list);
+                    out[0] = s.enablePush;
+                    sawSettings = true;
+                } else if (type == Http2.FRAME_HEADERS) {
+                    sawHeaders = true;
+                }
+            }
+        }
+
+        // Rogue PUSH_PROMISE (the client disabled push) on stream 1.
+        HpackEncoder enc = heap HpackEncoder(Http2.DEFAULT_HEADER_TABLE_SIZE, true);
+        HpackFieldList prom = heap HpackFieldList();
+        prom.put(Http2PushTests.own(":method"), Http2PushTests.own("GET"));
+        prom.put(Http2PushTests.own(":path"), Http2PushTests.own("/pushed"));
+        prom.put(Http2PushTests.own(":scheme"), Http2PushTests.own("http"));
+        prom.put(Http2PushTests.own(":authority"), Http2PushTests.own("127.0.0.1"));
+        int8[] pblock = enc.encode(prom);
+        Http2FrameWriter pfw = heap Http2FrameWriter();
+        Http2ContentFrames.writePushPromise(pfw, 1, 2, pblock,
+                                            (int32) pblock.count(), true, 0);
+        int8[] pbytes = pfw.toBytes();
+        writer.writeAll(pbytes, 0, (int32) pbytes.count());
+        writer.flush();
+
+        sock.close();
+        return 1;
+    }
+
+    static void clientRejectsPush(Check c) {
+        scope {
+            IpAddress la = IpAddress.loopbackV4();
+            SocketAddress bindAddr = SocketAddress.of(#la, 0);
+            TcpListener listener = TcpListener.bind(bindAddr);
+            int32 port = listener.boundPort();
+            int32[] out = heap int32[1];
+            out[0] = -1;
+            Task<int32> sv = spawn rogueServer(#listener, out);
+
+            IpAddress ca = IpAddress.loopbackV4();
+            SocketAddress connAddr = SocketAddress.of(#ca, port);
+            TcpStream sock = TcpStream.connectAsync(#connAddr);
+            AsyncReader reader = heap AsyncReader(sock);
+            AsyncWriter writer = heap AsyncWriter(sock);
+            HttpRequest req = HttpRequest.of("GET", "/index");
+
+            boolean threw = false;
+            int32 code = 0;
+            try {
+                HttpResponse r = Http2Client.exchange(reader, writer, req,
+                                                      "http", "127.0.0.1");
+            } catch (Http2Exception e) {
+                threw = true;
+                code = e.errorCode;
+            }
+            sock.close();
+            int32 sr = await sv;
+
+            c.eqInt((int64) out[0], (int64) 0,
+                    "client advertises SETTINGS_ENABLE_PUSH=0 by default");
+            c.that(threw, "client rejects a PUSH_PROMISE when push disabled");
+            c.eqInt((int64) code, (int64) Http2.PROTOCOL_ERROR,
+                    "rejection is a PROTOCOL_ERROR connection error");
+        }
+    }
+
+    // ---- helpers ---------------------------------------------------------
+
+    static boolean bytesEq(int8[] buf, int32 len, String expected) {
+        if (len != expected.byteLength()) {
+            return false;
+        }
+        int32 i = 0;
+        while (i < len) {
+            if ((((int32) buf[i]) & 0xFF) != (((int32) expected.byteAt(i)) & 0xFF)) {
+                return false;
+            }
+            i = i + 1;
+        }
+        return true;
+    }
+
+    static #int8[] slice(int8[] src, int32 off, int32 len) {
+        int8[] out = heap int8[len];
+        int32 i = 0;
+        while (i < len) {
+            out[i] = src[off + i];
+            i = i + 1;
+        }
+        return #out;
+    }
+
+    public static void run(Check c) {
+        System.stdout.println("-- h2 push: server push delivered (enabled) --");
+        Http2PushTests.serverPushDelivered(c);
+        System.stdout.println("-- h2 push: client disabled -> rejects PUSH_PROMISE --");
+        Http2PushTests.clientRejectsPush(c);
+    }
+}
