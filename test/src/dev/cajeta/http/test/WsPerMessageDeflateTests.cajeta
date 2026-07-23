@@ -6,6 +6,8 @@ import dev.cajeta.http.ws.WsOpcode;
 import dev.cajeta.http.ws.WsFrameEncoder;
 import dev.cajeta.http.ws.WsFrameDecoder;
 import dev.cajeta.http.ws.PerMessageDeflate;
+import dev.cajeta.http.ws.PmdParams;
+import dev.cajeta.http.ws.WsCompression;
 import dev.cajeta.http.ws.ProtocolViolationException;
 
 /**
@@ -176,6 +178,57 @@ public final class WsPerMessageDeflateTests {
                "no_context_takeover: both messages decode");
     }
 
+    // ---- 4.1c: negotiation ------------------------------------------------
+
+    static void negotiation(Check c) {
+        String offer = WsCompression.clientOffer();
+        c.that(offer.contains("permessage-deflate"),
+               "client offer advertises permessage-deflate");
+
+        // Plain accept: enabled, context takeover both sides (no reset flags).
+        PmdParams s1 = WsCompression.negotiateServer(
+            "permessage-deflate; client_max_window_bits");
+        c.that(s1.enabled && s1.responseHeader.contains("permessage-deflate"),
+               "server accepts a plain offer");
+        c.that(!s1.localNoContextTakeover && !s1.peerNoContextTakeover,
+               "plain accept keeps context takeover both sides");
+
+        // client_no_context_takeover -> our (server) decompressor resets, and
+        // the response echoes it.
+        PmdParams s2 = WsCompression.negotiateServer(
+            "permessage-deflate; client_no_context_takeover");
+        c.that(s2.enabled && s2.peerNoContextTakeover
+                && s2.responseHeader.contains("client_no_context_takeover"),
+               "client_no_context_takeover honoured + echoed");
+
+        // server_no_context_takeover -> our (server) compressor resets.
+        PmdParams s3 = WsCompression.negotiateServer(
+            "permessage-deflate; server_no_context_takeover");
+        c.that(s3.enabled && s3.localNoContextTakeover
+                && s3.responseHeader.contains("server_no_context_takeover"),
+               "server_no_context_takeover honoured + echoed");
+
+        // A demand for a smaller server window we cannot honour -> declined.
+        PmdParams s4 = WsCompression.negotiateServer(
+            "permessage-deflate; server_max_window_bits=10");
+        c.that(!s4.enabled,
+               "offer demanding server_max_window_bits<15 is declined");
+        PmdParams s5 = WsCompression.negotiateServer(
+            "permessage-deflate; server_max_window_bits=15");
+        c.that(s5.enabled, "server_max_window_bits=15 is acceptable");
+
+        // No extension / unrelated -> disabled (plain frames).
+        PmdParams s6 = WsCompression.negotiateServer("foo; bar");
+        c.that(!s6.enabled, "a non-permessage-deflate offer disables it");
+
+        // Client confirms the server reply; perspectives mirror.
+        PmdParams cc = WsCompression.confirmClient(
+            "permessage-deflate; server_no_context_takeover");
+        c.that(cc.enabled && cc.peerNoContextTakeover
+                && !cc.localNoContextTakeover,
+               "client confirm: server_no_context_takeover -> peer resets");
+    }
+
     public static void run(Check c) {
         System.stdout.println("-- ws pmd: RSV1 frame discipline --");
         WsPerMessageDeflateTests.rsv1FrameCodec(c);
@@ -185,5 +238,7 @@ public final class WsPerMessageDeflateTests {
         WsPerMessageDeflateTests.helloVector(c);
         WsPerMessageDeflateTests.roundTrip(c);
         WsPerMessageDeflateTests.contextTakeover(c);
+        System.stdout.println("-- ws pmd: negotiation --");
+        WsPerMessageDeflateTests.negotiation(c);
     }
 }

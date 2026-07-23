@@ -1,0 +1,33 @@
+package dev.cajeta.http.ws;
+
+import cajeta.lang.String;
+
+/**
+ * The negotiated `permessage-deflate` parameters for one connection (plan
+ * **4.1c**), produced by [`WsCompression`](WsCompression.cajeta). `enabled`
+ * gates whether messages are compressed at all; the two takeover flags map onto
+ * [`PerMessageDeflate`](PerMessageDeflate.cajeta)'s constructor — `local` is our
+ * own compressor (reset per message when set), `peer` our decompressor (reset
+ * when the peer resets its compressor). `responseHeader` is the
+ * `Sec-WebSocket-Extensions` value the **server** echoes back (empty on the
+ * client side or when the offer is declined).
+ */
+public final class PmdParams {
+    public boolean enabled;
+    public boolean localNoContextTakeover;
+    public boolean peerNoContextTakeover;
+    public String responseHeader;
+
+    public PmdParams() {
+        this.enabled = false;
+        this.localNoContextTakeover = false;
+        this.peerNoContextTakeover = false;
+        this.responseHeader = "";
+    }
+
+    /** A `PerMessageDeflate` codec configured from these params. */
+    public #PerMessageDeflate codec() {
+        return heap PerMessageDeflate(this.localNoContextTakeover,
+                                      this.peerNoContextTakeover);
+    }
+}

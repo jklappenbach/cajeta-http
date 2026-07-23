@@ -1,0 +1,112 @@
+package dev.cajeta.http.ws;
+
+import cajeta.lang.String;
+
+/**
+ * `permessage-deflate` **negotiation** over the `Sec-WebSocket-Extensions`
+ * header (RFC 7692 §7 / §9) — plan item **4.1c**. Builds the client offer,
+ * decides the server response, and interprets the server's reply into
+ * [`PmdParams`](PmdParams.cajeta).
+ *
+ * v1 uses a fixed 15-bit LZ77 window (the codec's default), so it negotiates the
+ * `*_no_context_takeover` parameters (fully honoured) but declines a
+ * `server_max_window_bits` demand for a window smaller than 15 rather than
+ * accept a limit it cannot enforce. It never *requests* a peer window limit, so
+ * a `client_max_window_bits` hint in the offer is simply left unexercised
+ * (the peer keeps 15). Absent or non-`permessage-deflate` input → disabled
+ * (plain frames), the correct fallback.
+ */
+public final class WsCompression {
+
+    /** The default client `Sec-WebSocket-Extensions` offer value. */
+    public static #String clientOffer() {
+        String s = "permessage-deflate; client_max_window_bits";
+        return s.substring(0, s.byteLength());
+    }
+
+    /**
+     * Server side: decide `permessage-deflate` from the client's offer value.
+     * Returns disabled params if absent or if it demands a server window < 15;
+     * otherwise enabled, echoing the agreed takeover flags in `responseHeader`.
+     */
+    public static #PmdParams negotiateServer(String offerValue) {
+        PmdParams p = heap PmdParams();
+        if (offerValue == null
+                || !offerValue.contains("permessage-deflate")) {
+            return #p;
+        }
+        if (WsCompression.serverWindowBits(offerValue) < 15) {
+            return #p;   // cannot honour a smaller server window
+        }
+        boolean clientNoCtx = offerValue.contains("client_no_context_takeover");
+        boolean serverNoCtx = offerValue.contains("server_no_context_takeover");
+        p.enabled = true;
+        p.localNoContextTakeover = serverNoCtx;   // our (server) compressor
+        p.peerNoContextTakeover = clientNoCtx;     // client's compressor
+        p.responseHeader = WsCompression.buildResponse(serverNoCtx, clientNoCtx);
+        return #p;
+    }
+
+    /** Client side: interpret the server's reply value into active params. */
+    public static #PmdParams confirmClient(String responseValue) {
+        PmdParams p = heap PmdParams();
+        if (responseValue == null
+                || !responseValue.contains("permessage-deflate")) {
+            return #p;
+        }
+        boolean clientNoCtx = responseValue.contains("client_no_context_takeover");
+        boolean serverNoCtx = responseValue.contains("server_no_context_takeover");
+        p.enabled = true;
+        p.localNoContextTakeover = clientNoCtx;   // our (client) compressor
+        p.peerNoContextTakeover = serverNoCtx;     // server's compressor
+        return #p;
+    }
+
+    static #String buildResponse(boolean serverNoCtx, boolean clientNoCtx) {
+        String out = "permessage-deflate";
+        if (clientNoCtx) {
+            out = out + "; client_no_context_takeover";
+        }
+        if (serverNoCtx) {
+            out = out + "; server_no_context_takeover";
+        }
+        return out.substring(0, out.byteLength());
+    }
+
+    // The requested server_max_window_bits value, or 15 if absent/unparsable.
+    static int32 serverWindowBits(String offer) {
+        int64 at = offer.indexOf("server_max_window_bits");
+        if (at < (int64) 0) {
+            return 15;
+        }
+        int32 i = (int32) at + 22;   // past "server_max_window_bits"
+        int32 n = offer.byteLength();
+        // skip spaces and a single '='
+        while (i < n && (offer.byteAt(i) == (int8) 32)) {
+            i = i + 1;
+        }
+        if (i >= n || offer.byteAt(i) != (int8) 61) {   // '='
+            return 15;   // token with no value — treat as no constraint
+        }
+        i = i + 1;
+        while (i < n && (offer.byteAt(i) == (int8) 32)) {
+            i = i + 1;
+        }
+        int32 v = 0;
+        boolean any = false;
+        while (i < n) {
+            int32 d = (((int32) offer.byteAt(i)) & 0xFF) - 48;
+            if (d < 0 || d > 9) {
+                i = n;
+            } else {
+                v = v * 10 + d;
+                any = true;
+                i = i + 1;
+            }
+        }
+        if (!any) {
+            return 15;
+        }
+        return v;
+    }
+}
