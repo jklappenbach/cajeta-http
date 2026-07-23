@@ -1,0 +1,181 @@
+package dev.cajeta.http.h2;
+
+/**
+ * The connection's **send-side flow-control + cancellation gate** (plan
+ * **3.3e**). HTTP/2 send windows (RFC 9113 §5.2) are shared state: a handler
+ * fiber *consumes* window as it writes DATA and must **park** when the
+ * connection- or stream-level window is exhausted, while the reader fiber
+ * *replenishes* it on `WINDOW_UPDATE` and must **wake** the parked writers.
+ * RST_STREAM (§5.4.2 / §8.1) is the same shape — the reader flips a per-stream
+ * cancelled bit and wakes the handler so it stops mid-body.
+ *
+ * This is a condition-variable monitor built directly on the runtime
+ * lock/condvar intrinsics (the same primitives
+ * [`Mutex`](../../../../cajeta/concurrent/Mutex.cajeta) and
+ * [`Channel`](../../../../cajeta/concurrent/Channel.cajeta) are built on):
+ * `takeUpTo` waits until the stream is sendable or cancelled, then consumes;
+ * `grantConn`/`grantStream` add credit and `notifyAll`; `cancel` sets the bit
+ * and `notifyAll`. The write [`Lock`](Http2WriteSide.cajeta) is never held
+ * across a park here, so a flow-stalled stream never blocks another fiber's
+ * writes or the reader's control frames.
+ */
+public final class Http2SendGate {
+    pointer handle;
+    pointer cond;
+    int64 connWindow;
+    int32[] ids;
+    int64[] wins;
+    boolean[] cancelledFlag;
+    int32 count;
+    int32 cap;
+
+    public Http2SendGate(int32 connInitial) {
+        this.handle = Cajeta.lockNew();
+        this.cond = Cajeta.condvarNew();
+        this.connWindow = (int64) connInitial;
+        this.ids = heap int32[16];
+        this.wins = heap int64[16];
+        this.cancelledFlag = heap boolean[16];
+        this.count = 0;
+        this.cap = 16;
+    }
+
+    public ~Http2SendGate() {
+        Cajeta.condvarDestroy(this.cond);
+        Cajeta.lockDestroy(this.handle);
+    }
+
+    // -- lock-held helpers ---------------------------------------------------
+
+    int32 idx(int32 sid) {
+        int32 i = 0;
+        while (i < this.count) {
+            if (this.ids[i] == sid) {
+                return i;
+            }
+            i = i + 1;
+        }
+        return -1;
+    }
+
+    // Sendable bytes for stream slot `i` = min(conn, stream) clamped at 0.
+    int64 sendableAt(int32 i) {
+        int64 s = this.connWindow;
+        if (this.wins[i] < s) {
+            s = this.wins[i];
+        }
+        if (s < 0) {
+            s = 0;
+        }
+        return s;
+    }
+
+    // -- reader-side registration --------------------------------------------
+
+    /** Register a stream's initial send window (the peer's INITIAL_WINDOW_SIZE). */
+    public void openStream(int32 sid, int32 initialWindow) {
+        Cajeta.lockAcquire(this.handle);
+        if (this.idx(sid) < 0) {
+            if (this.count == this.cap) {
+                this.grow();
+            }
+            this.ids[this.count] = sid;
+            this.wins[this.count] = (int64) initialWindow;
+            this.cancelledFlag[this.count] = false;
+            this.count = this.count + 1;
+        }
+        Cajeta.lockRelease(this.handle);
+    }
+
+    // -- handler-side consume (may park) -------------------------------------
+
+    /**
+     * Park until stream `sid` has sendable window or is cancelled, then consume
+     * and return `min(sendable, want)`. Returns `0` if the stream was cancelled
+     * (the handler should stop writing) or `want <= 0`.
+     */
+    public int64 takeUpTo(int32 sid, int64 want) {
+        if (want <= 0) {
+            return 0;
+        }
+        Cajeta.lockAcquire(this.handle);
+        int32 i = this.idx(sid);
+        if (i < 0) {
+            Cajeta.lockRelease(this.handle);
+            return 0;
+        }
+        while (this.sendableAt(i) <= 0 && !this.cancelledFlag[i]) {
+            Cajeta.condvarWait(this.cond, this.handle);
+        }
+        int64 granted = 0;
+        if (!this.cancelledFlag[i]) {
+            granted = this.sendableAt(i);
+            if (granted > want) {
+                granted = want;
+            }
+            this.connWindow = this.connWindow - granted;
+            this.wins[i] = this.wins[i] - granted;
+        }
+        Cajeta.lockRelease(this.handle);
+        return granted;
+    }
+
+    /** Whether stream `sid` has been cancelled (RST_STREAM received). */
+    public boolean isCancelled(int32 sid) {
+        Cajeta.lockAcquire(this.handle);
+        int32 i = this.idx(sid);
+        boolean c = i >= 0 && this.cancelledFlag[i];
+        Cajeta.lockRelease(this.handle);
+        return c;
+    }
+
+    // -- reader-side replenish / cancel (wake parked writers) ----------------
+
+    /** Add connection-level send credit (WINDOW_UPDATE on stream 0). */
+    public void grantConn(int32 add) {
+        Cajeta.lockAcquire(this.handle);
+        this.connWindow = this.connWindow + (int64) add;
+        Cajeta.condvarNotifyAll(this.cond);
+        Cajeta.lockRelease(this.handle);
+    }
+
+    /** Add stream-level send credit (WINDOW_UPDATE on a stream id). */
+    public void grantStream(int32 sid, int32 add) {
+        Cajeta.lockAcquire(this.handle);
+        int32 i = this.idx(sid);
+        if (i >= 0) {
+            this.wins[i] = this.wins[i] + (int64) add;
+        }
+        Cajeta.condvarNotifyAll(this.cond);
+        Cajeta.lockRelease(this.handle);
+    }
+
+    /** Mark a stream cancelled (RST_STREAM) and wake its parked handler. */
+    public void cancel(int32 sid) {
+        Cajeta.lockAcquire(this.handle);
+        int32 i = this.idx(sid);
+        if (i >= 0) {
+            this.cancelledFlag[i] = true;
+        }
+        Cajeta.condvarNotifyAll(this.cond);
+        Cajeta.lockRelease(this.handle);
+    }
+
+    void grow() {
+        int32 nc = this.cap * 2;
+        int32[] ni = heap int32[nc];
+        int64[] nw = heap int64[nc];
+        boolean[] ncf = heap boolean[nc];
+        int32 i = 0;
+        while (i < this.count) {
+            ni[i] = this.ids[i];
+            nw[i] = this.wins[i];
+            ncf[i] = this.cancelledFlag[i];
+            i = i + 1;
+        }
+        this.ids #= ni;
+        this.wins #= nw;
+        this.cancelledFlag #= ncf;
+        this.cap = nc;
+    }
+}

@@ -55,6 +55,7 @@ public final class TestMain {
         Http2StreamTests.run(c);
         Http2FlowTests.run(c);
         Http2ConnTests.run(c);
+        Http2ConcurrencyTests.run(c);
 
         System.stdout.println("");
         System.stdout.println("=== {} passed, {} failed ===",

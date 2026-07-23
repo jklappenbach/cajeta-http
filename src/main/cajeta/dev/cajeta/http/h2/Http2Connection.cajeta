@@ -14,29 +14,41 @@ import dev.cajeta.http.HttpResponse;
  * `HttpRequest` for the shared, un-colored `(HttpRequest) -> #HttpResponse`
  * handler, encoding the `HttpResponse` back into HEADERS+DATA frames.
  *
- * This is the **sequential** engine (3.3d): one request is assembled and served
- * to completion before the next frame is read. It wires the whole stack — HPACK
- * ([`HpackDecoder`](HpackDecoder.cajeta)/[`HpackEncoder`](HpackEncoder.cajeta)),
- * the frame codec, the stream state machine, CONTINUATION reassembly — end to
- * end on the wire, and honours the protocol-error contract: a connection error
- * emits `GOAWAY` with the §7 code, a stream error emits `RST_STREAM`. Concurrent
- * fiber-per-stream dispatch, flow-control parking, and RST cancellation are the
- * follow-on (3.3e); the flow-control *accounting* types are already wired.
+ * **Multiplexing (3.3e).** The reader fiber owns the decode/assembly side and,
+ * on each completed request, **spawns a per-stream handler fiber** into the
+ * serving `scope`; the scope joins every handler before the connection tears
+ * down. Handlers share the write half through
+ * [`Http2WriteSide`](Http2WriteSide.cajeta) (one lock serializes every socket
+ * write and keeps HPACK encode-order consistent) and flow control through
+ * [`Http2SendGate`](Http2SendGate.cajeta) (a handler parks when its send window
+ * is exhausted and the reader wakes it on `WINDOW_UPDATE`; `RST_STREAM` flips a
+ * cancelled bit that stops the handler mid-body). So a slow or flow-stalled
+ * stream never blocks another, and responses may complete out of request order.
+ *
+ * The protocol-error contract is unchanged: a connection error emits `GOAWAY`
+ * with the §7 code, a stream error emits `RST_STREAM`. PRIORITY is parsed and
+ * ignored (RFC 9113 §5.3.2).
+ *
+ * *v1 limitation:* request **bodies** are assembled in a single slot, so DATA
+ * for two different streams must not interleave on the wire (bodyless requests
+ * and non-interleaved bodies multiplex fully; response bodies always do). A
+ * per-stream request-assembly table is the follow-on.
  */
 public final class Http2Connection {
     AsyncReader reader;
-    AsyncWriter writer;
     (HttpRequest) -> #HttpResponse handler;
 
+    Http2WriteSide ws;
+    Http2SendGate gate;
+
     HpackDecoder hdec;
-    HpackEncoder henc;
     Http2Settings local;
     Http2Settings remote;
     Http2FlowController flow;
     Http2StreamTable streams;
     HeaderBlockAssembler assembler;
 
-    // In-progress request assembly (sequential: at most one at a time).
+    // In-progress request assembly (single-slot; see class note).
     int32 curStreamId;
     HttpRequest curRequest;
     boolean curHasHeaders;
@@ -45,13 +57,19 @@ public final class Http2Connection {
     int32 curBodyLen;
     int32 curBodyCap;
 
+    // A request completed this frame and is ready to spawn (kept lexical to the
+    // serving scope so the spawn registers with it).
+    boolean hasReady;
+    int32 readyStreamId;
+    HttpRequest readyRequest;
+
     public Http2Connection(AsyncReader reader, AsyncWriter writer,
                            (HttpRequest) -> #HttpResponse handler) {
         this.reader = reader;
-        this.writer = writer;
         this.handler = #handler;
+        this.ws = heap Http2WriteSide(writer);
+        this.gate = heap Http2SendGate(Http2.DEFAULT_INITIAL_WINDOW_SIZE);
         this.hdec = heap HpackDecoder(Http2.DEFAULT_HEADER_TABLE_SIZE);
-        this.henc = heap HpackEncoder(Http2.DEFAULT_HEADER_TABLE_SIZE, true);
         this.local = heap Http2Settings();
         this.local.maxConcurrentStreams = (int64) 100;
         this.remote = heap Http2Settings();
@@ -66,6 +84,9 @@ public final class Http2Connection {
         this.curBody = heap int8[256];
         this.curBodyLen = 0;
         this.curBodyCap = 256;
+        this.hasReady = false;
+        this.readyStreamId = 0;
+        this.readyRequest = null;
     }
 
     /** Serve one HTTP/2 connection to completion (server role). */
@@ -93,13 +114,27 @@ public final class Http2Connection {
         }
         this.sendOurSettings();
 
-        boolean running = true;
-        while (running) {
-            int8[] hdr = heap int8[9];
-            if (!this.readFully(hdr, 9)) {
-                running = false;
-            } else {
-                running = this.readAndDispatch(hdr);
+        // The serving scope: every per-stream handler fiber spawned below joins
+        // here before the connection (and its shared write side / gate) drops.
+        scope {
+            boolean running = true;
+            while (running) {
+                int8[] hdr = heap int8[9];
+                if (!this.readFully(hdr, 9)) {
+                    running = false;
+                } else {
+                    running = this.readAndDispatch(hdr);
+                    if (this.hasReady) {
+                        HttpRequest req #= this.readyRequest;
+                        int32 sid = this.readyStreamId;
+                        int32 maxFrame = (int32) this.remote.maxFrameSize;
+                        this.hasReady = false;
+                        this.readyRequest = null;
+                        (HttpRequest) -> #HttpResponse hl = this.handler;
+                        spawn handleStream(this.ws, this.gate,
+                                           hl, sid, maxFrame, #req);
+                    }
+                }
             }
         }
     }
@@ -181,6 +216,7 @@ public final class Http2Connection {
         boolean endStream = (flags & Http2.FLAG_END_STREAM) != 0;
         boolean endHeaders = (flags & Http2.FLAG_END_HEADERS) != 0;
         this.streams.openIfAbsent(sid);
+        this.gate.openStream(sid, (int32) this.remote.initialWindowSize);
         this.streams.recvHeaders(sid, endStream);
         Http2Payload reg = Http2ContentFrames.parseHeaders(payload, len, flags,
                                                            sid);
@@ -208,7 +244,7 @@ public final class Http2Connection {
         HpackFieldList fields = this.hdec.decode(block, blockLen);
         HttpRequest req = Http2Requests.fromFields(fields);
         if (endStream) {
-            this.dispatchRequest(sid, #req, false);
+            this.markReady(sid, #req);
         } else {
             this.curStreamId = sid;
             this.curRequest = #req;
@@ -232,7 +268,7 @@ public final class Http2Connection {
             this.curRequest = null;
             this.curHasHeaders = false;
             req.body(this.curBody, this.curBodyLen);
-            this.dispatchRequest(sid, #req, false);
+            this.markReady(sid, #req);
         }
     }
 
@@ -240,8 +276,10 @@ public final class Http2Connection {
         int32 inc = Http2Frames.parseWindowUpdate(payload, 0, len, sid);
         if (sid == 0) {
             this.flow.connSend.increase(inc, 0);
+            this.gate.grantConn(inc);
+        } else {
+            this.gate.grantStream(sid, inc);
         }
-        // Per-stream send windows arrive with fiber-per-stream (3.3e).
     }
 
     void onRstStream(int32 sid, int8[] payload, int32 len) {
@@ -249,6 +287,7 @@ public final class Http2Connection {
         if (this.streams.has(sid)) {
             this.streams.recvRst(sid);
         }
+        this.gate.cancel(sid);
         if (this.curStreamId == sid) {
             this.curRequest = null;
             this.curHasHeaders = false;
@@ -260,63 +299,76 @@ public final class Http2Connection {
         if ((flags & Http2.FLAG_ACK) == 0) {
             Http2FrameWriter fw = heap Http2FrameWriter();
             Http2Frames.writePing(fw, payload, true);
-            this.writeOut(fw);
+            this.ws.writeControl(fw);
         }
     }
 
-    // -- request dispatch + response ----------------------------------------
+    // -- request dispatch ----------------------------------------------------
 
-    void dispatchRequest(int32 sid, #HttpRequest req, boolean unused) {
-        HttpRequest r #= req;
-        (HttpRequest) -> #HttpResponse h = this.handler;
-        HttpResponse resp = h(r);
-        this.writeResponse(sid, resp);
+    // Stash a completed request for the serving loop to spawn (keeps the spawn
+    // site lexically inside the scope).
+    void markReady(int32 sid, #HttpRequest req) {
+        this.readyStreamId = sid;
+        this.readyRequest = #req;
+        this.hasReady = true;
     }
 
-    void writeResponse(int32 sid, HttpResponse resp) {
-        HpackFieldList fields = Http2Requests.responseFields(resp);
-        int8[] block = this.henc.encode(fields);
-        int32 blockLen = (int32) block.count();
-        boolean hasBody = resp.hasBody && resp.bodyLength() > 0;
+    /**
+     * Per-stream handler fiber: invoke the un-colored handler and stream the
+     * response back. HEADERS go out first (END_STREAM when there is no body),
+     * then DATA under [`Http2SendGate`](Http2SendGate.cajeta) flow control —
+     * parking when the send window is exhausted, stopping if the stream is
+     * cancelled (`RST_STREAM`) mid-body.
+     */
+    public static async int32 handleStream(Http2WriteSide ws, Http2SendGate gate,
+                                           (HttpRequest) -> #HttpResponse h,
+                                           int32 sid, int32 maxFrame,
+                                           #HttpRequest req) {
+        HttpRequest r #= req;
+        (HttpRequest) -> #HttpResponse fn = h;
+        HttpResponse resp = fn(r);
 
-        Http2FrameWriter fw = heap Http2FrameWriter();
-        Http2ContentFrames.writeHeaders(fw, sid, block, blockLen, !hasBody,
-                                        true, 0);
-        this.streams.sendHeaders(sid, !hasBody);
+        HpackFieldList fields = Http2Requests.responseFields(resp);
+        boolean hasBody = resp.hasBody && resp.bodyLength() > 0;
+        ws.writeHeaders(sid, fields, !hasBody);
 
         if (hasBody) {
             int8[] body = resp.body;
             int32 total = resp.bodyLength();
-            int32 maxChunk = (int32) this.remote.maxFrameSize;
             int32 off = 0;
             while (off < total) {
-                int32 chunk = total - off;
-                if (chunk > maxChunk) {
-                    chunk = maxChunk;
+                int64 want = (int64) (total - off);
+                int64 capBytes = (int64) maxFrame;
+                if (want > capBytes) {
+                    want = capBytes;
                 }
-                boolean last = (off + chunk) >= total;
-                int8[] slice = Http2Connection.slice(body, off, chunk);
-                Http2ContentFrames.writeData(fw, sid, slice, chunk, last, 0);
-                this.streams.sendData(sid, last);
-                off = off + chunk;
+                int64 g = gate.takeUpTo(sid, want);
+                if (g <= (int64) 0) {
+                    off = total;   // cancelled — stop streaming this response
+                } else {
+                    int32 gi = (int32) g;
+                    boolean last = (off + gi) >= total;
+                    ws.writeData(sid, body, off, gi, last);
+                    off = off + gi;
+                }
             }
         }
-        this.writeOut(fw);
+        return sid;
     }
 
-    // -- outbound helpers ----------------------------------------------------
+    // -- outbound control helpers (reader fiber) -----------------------------
 
     void sendOurSettings() {
         Http2FrameWriter fw = heap Http2FrameWriter();
         Http2SettingsList l = this.local.toList();
         Http2Frames.writeSettings(fw, l);
-        this.writeOut(fw);
+        this.ws.writeControl(fw);
     }
 
     void sendSettingsAck() {
         Http2FrameWriter fw = heap Http2FrameWriter();
         Http2Frames.writeSettingsAck(fw);
-        this.writeOut(fw);
+        this.ws.writeControl(fw);
     }
 
     void sendGoaway(int32 errorCode) {
@@ -324,19 +376,13 @@ public final class Http2Connection {
         int8[] none = heap int8[0];
         Http2Frames.writeGoaway(fw, this.streams.lastRemoteId(),
                                 (int64) errorCode, none, 0);
-        this.writeOut(fw);
+        this.ws.writeControl(fw);
     }
 
     void sendRst(int32 sid, int32 errorCode) {
         Http2FrameWriter fw = heap Http2FrameWriter();
         Http2Frames.writeRstStream(fw, sid, (int64) errorCode);
-        this.writeOut(fw);
-    }
-
-    void writeOut(Http2FrameWriter fw) {
-        int8[] bytes = fw.toBytes();
-        this.writer.writeAll(bytes, 0, (int32) bytes.count());
-        this.writer.flush();
+        this.ws.writeControl(fw);
     }
 
     // -- small utilities -----------------------------------------------------

@@ -1,0 +1,92 @@
+package dev.cajeta.http.h2;
+
+import cajeta.io.net.AsyncWriter;
+import cajeta.concurrent.Lock;
+import cajeta.concurrent.LockGuard;
+
+/**
+ * The **shared write half** of a concurrent HTTP/2 connection (plan **3.3e**).
+ * A single connection has one `AsyncWriter` and one HPACK *encoder*, and both
+ * the reader fiber (SETTINGS/PING acks, RST_STREAM, GOAWAY, WINDOW_UPDATE) and
+ * every per-stream handler fiber (HEADERS + DATA responses) must write through
+ * them. Two constraints make this a guarded object rather than raw fields:
+ *
+ *  1. **Frame atomicity** — a frame's bytes must reach the socket contiguously;
+ *     two fibers interleaving `writeAll` calls would corrupt the stream.
+ *  2. **HPACK order** — the encoder's dynamic table is stateful, and the peer's
+ *     decoder must see HEADERS blocks in the exact order they were encoded. So
+ *     *encode-then-write* must be one atomic critical section.
+ *
+ * A single [`Lock`](../../../../cajeta/concurrent/Lock.cajeta) covers both:
+ * every method here takes it for the whole encode+write, so the reader fiber
+ * and N handler fibers serialize cleanly. The lock is held only for the socket
+ * write, never across a flow-control park (that lives in
+ * [`Http2SendGate`](Http2SendGate.cajeta)), so a stalled stream never blocks
+ * another fiber's writes.
+ *
+ * The `AsyncWriter` is **borrowed** (owned by the connection's caller, which
+ * outlives every handler fiber via the serving `scope`); the encoder is owned
+ * here.
+ */
+public final class Http2WriteSide {
+    AsyncWriter writer;
+    HpackEncoder henc;
+    Lock lock;
+
+    public Http2WriteSide(AsyncWriter writer) {
+        this.writer = writer;
+        this.henc = heap HpackEncoder(Http2.DEFAULT_HEADER_TABLE_SIZE, true);
+        this.lock = heap Lock();
+    }
+
+    /**
+     * Write a pre-built control/response frame buffer (SETTINGS(+ACK), PING ACK,
+     * RST_STREAM, GOAWAY, WINDOW_UPDATE) as one atomic socket write.
+     */
+    public void writeControl(Http2FrameWriter fw) {
+        int8[] bytes = fw.toBytes();
+        int32 n = (int32) bytes.count();
+        LockGuard g = this.lock.acquire();
+        this.writer.writeAll(bytes, 0, n);
+        this.writer.flush();
+    }
+
+    /**
+     * Encode `fields` and write the resulting HEADERS frame in one critical
+     * section, so the encoder's dynamic-table mutation and the frame's position
+     * on the wire stay consistent with the peer's decode order.
+     */
+    public void writeHeaders(int32 sid, HpackFieldList fields, boolean endStream) {
+        LockGuard g = this.lock.acquire();
+        int8[] block = this.henc.encode(fields);
+        int32 blockLen = (int32) block.count();
+        Http2FrameWriter fw = heap Http2FrameWriter();
+        Http2ContentFrames.writeHeaders(fw, sid, block, blockLen, endStream,
+                                        true, 0);
+        int8[] bytes = fw.toBytes();
+        this.writer.writeAll(bytes, 0, (int32) bytes.count());
+        this.writer.flush();
+    }
+
+    /** Write one DATA frame carrying `body[off .. off+len)`. */
+    public void writeData(int32 sid, int8[] body, int32 off, int32 len,
+                          boolean last) {
+        int8[] slice = Http2WriteSide.slice(body, off, len);
+        LockGuard g = this.lock.acquire();
+        Http2FrameWriter fw = heap Http2FrameWriter();
+        Http2ContentFrames.writeData(fw, sid, slice, len, last, 0);
+        int8[] bytes = fw.toBytes();
+        this.writer.writeAll(bytes, 0, (int32) bytes.count());
+        this.writer.flush();
+    }
+
+    static #int8[] slice(int8[] src, int32 off, int32 len) {
+        int8[] out = heap int8[len];
+        int32 i = 0;
+        while (i < len) {
+            out[i] = src[off + i];
+            i = i + 1;
+        }
+        return #out;
+    }
+}
