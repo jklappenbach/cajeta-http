@@ -1693,21 +1693,32 @@ the wire.
     stdlib loopback-reliability follow-up (see the Phase-3 flakiness note);
     the socket-free `MemChannel` round-trip proves the same send→wire→receive
     path without it. Autobahn 12.*/13.* (4.3) will exercise it over the wire.
-- [ ] **4.2** Convenience surfaces.
-  - [ ] **4.2a One-line client connect.** `WebSocket.connect(url)` —
-    `ws`/`wss` dial (TLS via stdlib), upgrade request,
-    101 + `Sec-WebSocket-Accept` validation, subprotocol selection →
-    ready `WebSocket`.
-    - TDD: loopback connect against the extracted server upgrade; wrong
-      Accept or status → `HandshakeRejected`; subprotocol negotiation.
-  - [ ] **4.2b Server handler surface.** `WebSocketHandler`
-    (`onConnect`/`onMessage`/`onClose`) over a `WebSocketConnection`
-    (send/close), with the reader-fiber + writer-fiber pair and write
-    mutex managed by the library; registered on routes like HTTP
-    handlers (the spec's "richer server surface" paragraph).
-    - TDD: callback lifecycle order, close initiated from each side;
-      concurrent sends from multiple fibers interleave whole frames
-      (mutex proof); a throwing handler → 1011 close.
+- [x] **4.2** Convenience surfaces — 4.2a/b shipped.
+  - [x] **4.2a One-line client connect.** `WebSocket.connect(url)` /
+    `connectPinned(url, trust)`: parse `ws://`|`wss://`, resolve + dial (TLS
+    via the stdlib, system or pinned trust), run the `WsUpgrade` client
+    handshake, return a ready client socket that **owns** its transport
+    (held sock/tls + reader/writer fields — `forClient`/`forServer` borrow a
+    caller-owned transport). `selectedSubprotocol()` reads the server's
+    `Sec-WebSocket-Protocol` choice.
+    - TDD: loopback dial→upgrade→send→echo (12× green); a non-101 reply →
+      `HandshakeRejected` (socket-free). Subprotocol **offer** + server-side
+      selection deferred to a follow-up (connect reads back the choice only).
+  - [x] **4.2b Server handler surface.** `WebSocketHandler`
+    (`onConnect`/`onMessage`/`onClose`, an interface) over a
+    `WebSocketConnection` (`send`/`sendBinary`/`close`/`subprotocol`).
+    `WsUpgrade.serve(reader, writer, handler[, allowCompression])` upgrades
+    then drives the lifecycle; the library owns the read loop and the write
+    lock (so `WebSocketConnection` is fiber-safe — concurrent sends stay whole
+    frames). Fault-isolated: a throwing callback fails the connection with
+    `1011` (a protocol fault `1002`); teardown errors never escape.
+    - TDD: lifecycle order onConnect→onMessage→onClose + the peer close code
+      (1000); a throwing callback → the client observes a `1011` close (10×
+      green, loopback).
+    - Deferred: **Router auto-registration** of WS routes on `HttpServer`
+      (dispatch an upgrade request to a `WebSocketHandler` like an HTTP route),
+      and the explicit **concurrent-send interleave** stress test (the write-
+      lock mechanism is already in place and shared with the h1 write path).
 - [ ] **4.3** Autobahn conformance: an external-harness runner
   (`test/autobahn/run.sh`, wstest via docker or pip — a test-fixture
   dependency only; long suite → the tagged-run discipline from
