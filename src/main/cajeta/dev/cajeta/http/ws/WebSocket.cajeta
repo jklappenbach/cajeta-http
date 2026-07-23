@@ -104,6 +104,15 @@ public class WebSocket {
     /** Scratch buffer the reader fills from the socket before feeding the decoder. */
     int8[] readScratch;
 
+    /**
+     * The negotiated `permessage-deflate` codec (RFC 7692), or `null` when the
+     * connection sends plain frames. When set, outbound messages are compressed
+     * (RSV1 on the first frame) and inbound RSV1 messages are decompressed.
+     */
+    PerMessageDeflate codec;
+    /** `true` once `permessage-deflate` has been negotiated for this socket. */
+    boolean compress;
+
     // -- write-side state --------------------------------------------------
 
     /**
@@ -148,6 +157,8 @@ public class WebSocket {
         // value load.
         int32 rc = WebSocket.READ_CHUNK;
         this.readScratch = heap int8[rc];
+        this.codec = null;
+        this.compress = false;
         this.writeLock = null;
         this.isClient = false;
         this.maskCounter = 0;
@@ -211,6 +222,22 @@ public class WebSocket {
      * ping is surfaced (a later sub-phase) rather than answered; the read
      * loop still drains it. Returns `this` for chaining.
      */
+    /**
+     * Enable `permessage-deflate` on this socket from the negotiated
+     * [`PmdParams`](PmdParams.cajeta) (RFC 7692). No-op when the params are
+     * disabled. Wires the codec and lets the decoder accept RSV1 data frames.
+     * Called by [`WsUpgrade`](WsUpgrade.cajeta) once the handshake agrees on the
+     * extension. Returns `this` for chaining.
+     */
+    public WebSocket enableCompression(PmdParams params) {
+        if (params != null && params.enabled) {
+            this.codec = params.codec();
+            this.compress = true;
+            this.decoder.allowCompression();
+        }
+        return this;
+    }
+
     public WebSocket withAutoPong(boolean enabled) {
         this.protocol.withAutoPong(enabled);
         return this;
@@ -241,8 +268,7 @@ public class WebSocket {
             pay[i] = text.byteAt(i);
             i = i + 1;
         }
-        WsFrame f = WsFrame.of(true, WsOpcode.TEXT, false, #pay);
-        this.writeFrame(f);
+        this.writeData(WsOpcode.TEXT, pay, n);
     }
 
     /**
@@ -263,8 +289,22 @@ public class WebSocket {
             pay[i] = data[i];
             i = i + 1;
         }
-        WsFrame f = WsFrame.of(true, WsOpcode.BINARY, false, #pay);
-        this.writeFrame(f);
+        this.writeData(WsOpcode.BINARY, pay, n);
+    }
+
+    // Emit one unfragmented data message, compressing it (RSV1) when
+    // permessage-deflate is negotiated. Takes ownership of `pay`.
+    void writeData(int32 opcode, #int8[] pay, int32 n) {
+        int8[] body #= pay;
+        if (this.compress) {
+            int8[] cpay = this.codec.compress(body, n);
+            WsFrame f = WsFrame.of(true, opcode, false, #cpay);
+            f.rsv1 = true;
+            this.writeFrame(f);
+        } else {
+            WsFrame f = WsFrame.of(true, opcode, false, #body);
+            this.writeFrame(f);
+        }
     }
 
     // ===== receive =========================================================
@@ -302,7 +342,7 @@ public class WebSocket {
                 WsFrame f = this.decoder.nextFrame();
                 WsMessage m = this.dispatch(f);
                 if (m != null) {
-                    return #m;
+                    return this.decodeMessage(#m);
                 }
             }
             // Decoder is empty: pull more bytes from the socket. A 0 read is
@@ -330,6 +370,20 @@ public class WebSocket {
      * `MESSAGE`, write the reply for a `SEND_FRAME`, complete + raise on a
      * `CLOSED`, and return `null` (read on) otherwise.
      */
+    // Decompress a received message in place when it arrived compressed
+    // (RSV1 / permessage-deflate); a plain message passes straight through.
+    #WsMessage decodeMessage(#WsMessage msg) {
+        WsMessage m #= msg;
+        if (this.compress && m.isCompressed()) {
+            int8[] p = m.getPayload();
+            int32 n = (int32) p.count();
+            int8[] plain = this.codec.decompress(p, n);
+            m.payload = #plain;
+            m.compressed = false;
+        }
+        return #m;
+    }
+
     #WsMessage dispatch(WsFrame frame) {
         WsReadAction act = this.protocol.onFrame(frame);
         int32 kind = act.getKind();

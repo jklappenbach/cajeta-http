@@ -1,0 +1,70 @@
+package dev.cajeta.http.test;
+
+import cajeta.io.net.ByteChannel;
+
+/**
+ * A tiny in-memory [`ByteChannel`](../../../../cajeta/io/net/ByteChannel.cajeta)
+ * for socket-free WebSocket tests: `writeAllAsync` captures into a growable
+ * buffer (readable via [`captured`](#captured)/[`capturedLen`](#capturedLen)),
+ * and reads report EOF — the read side is driven by staging bytes into an
+ * `AsyncReader` instead. Lets a compressed send→receive round-trip run with no
+ * loopback socket (and no loopback flakiness).
+ */
+public final class MemChannel implements ByteChannel {
+    int8[] buf;
+    int32 len;
+    int32 cap;
+
+    public MemChannel() {
+        this.buf = heap int8[256];
+        this.len = 0;
+        this.cap = 256;
+    }
+
+    public int64 readAsync(int8[] b, int64 offset, int64 length) {
+        return (int64) 0;   // EOF — reads come from AsyncReader staging
+    }
+
+    public int64 readWithin(int8[] b, int64 offset, int64 length,
+                            int32 timeoutMs) {
+        return (int64) 0;
+    }
+
+    public void writeAllAsync(int8[] data, int64 offset, int64 length) {
+        int32 o = (int32) offset;
+        int32 n = (int32) length;
+        if (this.len + n > this.cap) {
+            int32 nc = this.cap * 2;
+            while (nc < this.len + n) {
+                nc = nc * 2;
+            }
+            int8[] nb = heap int8[nc];
+            int32 i = 0;
+            while (i < this.len) {
+                nb[i] = this.buf[i];
+                i = i + 1;
+            }
+            this.buf = #nb;
+            this.cap = nc;
+        }
+        int32 j = 0;
+        while (j < n) {
+            this.buf[this.len + j] = data[o + j];
+            j = j + 1;
+        }
+        this.len = this.len + n;
+    }
+
+    public void close() {
+    }
+
+    /** The captured bytes (borrowed; valid to `capturedLen()`). */
+    public int8[] captured() {
+        return this.buf;
+    }
+
+    /** Number of captured bytes. */
+    public int32 capturedLen() {
+        return this.len;
+    }
+}
