@@ -53,6 +53,7 @@ public final class TestMain {
         Http2ContentFrameTests.run(c);
         Http2SettingsTests.run(c);
         Http2StreamTests.run(c);
+        Http2FlowTests.run(c);
 
         System.stdout.println("");
         System.stdout.println("=== {} passed, {} failed ===",

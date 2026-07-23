@@ -1,0 +1,83 @@
+package dev.cajeta.http.h2;
+
+/**
+ * Connection-level **flow control** and the arbiter between the connection and
+ * per-stream windows (RFC 9113 §5.2) — plan item **3.3**. Owns the two
+ * connection-wide [`Http2FlowWindow`](Http2FlowWindow.cajeta)s (send toward the
+ * peer, receive from it) and remembers the peer's `INITIAL_WINDOW_SIZE` so new
+ * streams' send windows start at the right size.
+ *
+ * A DATA send is bounded by **both** the connection and the stream window (and
+ * the peer's max frame size): [`sendable`](#sendable) returns the largest
+ * chunk allowed right now — 0 means the writer must park until a
+ * `WINDOW_UPDATE` arrives (the connection loop does the parking). When the peer
+ * changes `INITIAL_WINDOW_SIZE`, [`initialWindowDelta`](#initialWindowDelta)
+ * gives the signed adjustment to apply to every existing stream's send window
+ * (§6.9.2).
+ */
+public final class Http2FlowController {
+    public Http2FlowWindow connSend;
+    public Http2FlowWindow connRecv;
+    int32 peerInitialWindow;    // peer's SETTINGS_INITIAL_WINDOW_SIZE
+    int32 ourMaxFrame;          // our SETTINGS_MAX_FRAME_SIZE (send chunking)
+
+    public Http2FlowController(int32 initialSend, int32 initialRecv) {
+        this.connSend = heap Http2FlowWindow(initialSend);
+        this.connRecv = heap Http2FlowWindow(initialRecv);
+        this.peerInitialWindow = initialSend;
+        this.ourMaxFrame = Http2.DEFAULT_MAX_FRAME_SIZE;
+    }
+
+    /** Set the peer's max frame size (bounds each DATA chunk we send). */
+    public void setPeerMaxFrame(int32 maxFrame) {
+        this.ourMaxFrame = maxFrame;
+    }
+
+    /** The send window a newly opened stream should start with. */
+    public int32 initialStreamSendWindow() {
+        return this.peerInitialWindow;
+    }
+
+    /**
+     * The largest DATA chunk sendable on a stream **now**: the minimum of the
+     * connection send window, the stream's send window, and the peer's max
+     * frame size — clamped to 0 (never negative). 0 ⇒ park until a
+     * WINDOW_UPDATE grows a window.
+     */
+    public int32 sendable(Http2FlowWindow streamSend) {
+        int64 lo = this.connSend.available();
+        int64 sw = streamSend.available();
+        if (sw < lo) {
+            lo = sw;
+        }
+        if (lo > (int64) this.ourMaxFrame) {
+            lo = (int64) this.ourMaxFrame;
+        }
+        if (lo < (int64) 0) {
+            return 0;
+        }
+        return (int32) lo;
+    }
+
+    /** Account `n` sent DATA octets against both the connection and stream. */
+    public void afterSend(Http2FlowWindow streamSend, int32 n) {
+        this.connSend.consume(n);
+        streamSend.consume(n);
+    }
+
+    /** Account `n` received DATA octets against the connection receive window. */
+    public void afterReceive(int32 n) {
+        this.connRecv.consume(n);
+    }
+
+    /**
+     * Record a new peer `INITIAL_WINDOW_SIZE` and return the signed delta the
+     * caller must [`adjust`](Http2FlowWindow.cajeta#adjust) into every existing
+     * stream's send window (§6.9.2).
+     */
+    public int64 initialWindowDelta(int32 newInitial) {
+        int64 delta = (int64) newInitial - (int64) this.peerInitialWindow;
+        this.peerInitialWindow = newInitial;
+        return delta;
+    }
+}

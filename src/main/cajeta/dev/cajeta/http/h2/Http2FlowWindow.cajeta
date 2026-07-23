@@ -1,0 +1,49 @@
+package dev.cajeta.http.h2;
+
+/**
+ * A single directional **flow-control window** (RFC 9113 §5.2, §6.9) — plan
+ * item **3.3**. Used both connection-wide and per-stream, in each direction.
+ * The window starts at an initial size and shrinks as DATA octets are
+ * accounted; a `WINDOW_UPDATE` grows it, and a `SETTINGS_INITIAL_WINDOW_SIZE`
+ * change [`adjust`](#adjust)s it by the delta.
+ *
+ * The size is a signed `int64` because §6.9.2 lets a reduced
+ * `INITIAL_WINDOW_SIZE` drive an existing window **negative** — no more DATA
+ * may be sent until a `WINDOW_UPDATE` brings it back positive. A `WINDOW_UPDATE`
+ * that would push the window past 2^31-1 is a `FLOW_CONTROL_ERROR`.
+ */
+public final class Http2FlowWindow {
+    int64 size;
+
+    public Http2FlowWindow(int32 initial) {
+        this.size = (int64) initial;
+    }
+
+    /** The octets currently available (may be negative). */
+    public int64 available() {
+        return this.size;
+    }
+
+    /** Account `n` octets sent/received against the window. */
+    public void consume(int32 n) {
+        this.size = this.size - (int64) n;
+    }
+
+    /**
+     * Apply a `WINDOW_UPDATE` increment. `streamId` (0 = connection) tags a
+     * resulting overflow as a stream vs connection `FLOW_CONTROL_ERROR`.
+     */
+    public void increase(int32 increment, int32 streamId) {
+        int64 ns = this.size + (int64) increment;
+        if (ns > (int64) Http2.MAX_WINDOW_SIZE) {
+            throw heap Http2Exception("flow-control window overflow",
+                                      Http2.FLOW_CONTROL_ERROR, streamId);
+        }
+        this.size = ns;
+    }
+
+    /** Shift the window by `delta` for a SETTINGS_INITIAL_WINDOW_SIZE change. */
+    public void adjust(int64 delta) {
+        this.size = this.size + delta;
+    }
+}

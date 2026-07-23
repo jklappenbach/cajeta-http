@@ -1,0 +1,100 @@
+package dev.cajeta.http.test;
+
+import dev.cajeta.http.h2.Http2;
+import dev.cajeta.http.h2.Http2FlowWindow;
+import dev.cajeta.http.h2.Http2FlowController;
+import dev.cajeta.http.h2.Http2Exception;
+
+/**
+ * http:3.3c — HTTP/2 **flow control** (RFC 9113 §5.2, §6.9): the directional
+ * window primitive (consume / WINDOW_UPDATE increase with overflow →
+ * FLOW_CONTROL_ERROR / negative window via a SETTINGS reduction) and the
+ * connection controller that bounds a DATA send by min(connection, stream,
+ * max-frame) and computes the §6.9.2 initial-window-size delta.
+ */
+public final class Http2FlowTests {
+
+    public static void run(Check c) {
+        System.stdout.println("-- h2 flow: window primitive --");
+        Http2FlowTests.window(c);
+        System.stdout.println("-- h2 flow: controller --");
+        Http2FlowTests.controller(c);
+    }
+
+    static void window(Check c) {
+        Http2FlowWindow w = heap Http2FlowWindow(65535);
+        c.eqInt(w.available(), (int64) 65535, "initial 65535");
+        w.consume(1000);
+        c.eqInt(w.available(), (int64) 64535, "after consume 1000");
+        w.increase(2000, 0);
+        c.eqInt(w.available(), (int64) 66535, "after WINDOW_UPDATE 2000");
+
+        // A SETTINGS reduction can drive the window negative.
+        Http2FlowWindow n = heap Http2FlowWindow(65535);
+        n.adjust((int64) -70000);
+        c.eqInt(n.available(), (int64) -4465, "negative window allowed");
+        // ... and a later WINDOW_UPDATE brings it back positive.
+        n.increase(10000, 1);
+        c.eqInt(n.available(), (int64) 5535, "WINDOW_UPDATE recovers negative");
+
+        // Overflow past 2^31-1 -> FLOW_CONTROL_ERROR.
+        boolean e = false;
+        Http2FlowWindow big = heap Http2FlowWindow(2147483637);   // 2^31-1 - 10
+        try {
+            big.increase(20, 7);
+        } catch (Http2Exception ex) {
+            e = ex.errorCode == Http2.FLOW_CONTROL_ERROR;
+        }
+        c.that(e, "WINDOW_UPDATE overflow -> FLOW_CONTROL_ERROR");
+    }
+
+    static void controller(Check c) {
+        Http2FlowController fc = heap Http2FlowController(65535, 65535);
+        c.eqInt((int64) fc.initialStreamSendWindow(), (int64) 65535,
+                "new stream send window 65535");
+
+        Http2FlowWindow streamSend = heap Http2FlowWindow(65535);
+        // Bounded by the default max frame size 16384.
+        c.eqInt((int64) fc.sendable(streamSend), (int64) 16384,
+                "sendable bounded by max frame 16384");
+
+        // A larger peer max frame lifts that bound.
+        fc.setPeerMaxFrame(32768);
+        c.eqInt((int64) fc.sendable(streamSend), (int64) 32768,
+                "sendable bounded by 32768 after setPeerMaxFrame");
+
+        // The connection window can be the binding constraint.
+        fc.connSend.consume(64535);   // conn now 1000
+        c.eqInt((int64) fc.sendable(streamSend), (int64) 1000,
+                "sendable bounded by connection window");
+
+        // Account a send against both windows.
+        fc.afterSend(streamSend, 1000);
+        c.eqInt(fc.connSend.available(), (int64) 0, "conn window drained");
+        c.eqInt(streamSend.available(), (int64) 64535, "stream window debited");
+        c.eqInt((int64) fc.sendable(streamSend), (int64) 0,
+                "sendable 0 when connection exhausted (park)");
+
+        // A negative stream window yields 0 sendable.
+        Http2FlowController fc2 = heap Http2FlowController(65535, 65535);
+        Http2FlowWindow neg = heap Http2FlowWindow(0);
+        neg.adjust((int64) -100);
+        c.eqInt((int64) fc2.sendable(neg), (int64) 0,
+                "negative stream window -> 0 sendable");
+
+        // INITIAL_WINDOW_SIZE change delta (§6.9.2).
+        Http2FlowController fc3 = heap Http2FlowController(65535, 65535);
+        int64 delta = fc3.initialWindowDelta(131072);
+        c.eqInt(delta, (int64) 65537, "initial-window delta 131072-65535");
+        c.eqInt((int64) fc3.initialStreamSendWindow(), (int64) 131072,
+                "peer initial window updated");
+        // Applying the delta to an existing stream window grows it.
+        Http2FlowWindow existing = heap Http2FlowWindow(65535);
+        existing.adjust(delta);
+        c.eqInt(existing.available(), (int64) 131072,
+                "existing stream window shifted by delta");
+        // A reduction produces a negative delta.
+        int64 delta2 = fc3.initialWindowDelta(1024);
+        c.eqInt(delta2, (int64) -130048, "reduction delta negative");
+    }
+}
