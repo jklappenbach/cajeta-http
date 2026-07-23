@@ -66,7 +66,7 @@ public final class Http2Connection {
     public Http2Connection(AsyncReader reader, AsyncWriter writer,
                            (HttpRequest) -> #HttpResponse handler) {
         this.reader = reader;
-        this.handler = #handler;
+        this.handler = handler;
         this.ws = heap Http2WriteSide(writer);
         this.gate = heap Http2SendGate(Http2.DEFAULT_INITIAL_WINDOW_SIZE);
         this.hdec = heap HpackDecoder(Http2.DEFAULT_HEADER_TABLE_SIZE);
@@ -92,7 +92,7 @@ public final class Http2Connection {
     /** Serve one HTTP/2 connection to completion (server role). */
     public static void serve(AsyncReader reader, AsyncWriter writer,
                              (HttpRequest) -> #HttpResponse handler) {
-        Http2Connection c = heap Http2Connection(reader, writer, #handler);
+        Http2Connection c = heap Http2Connection(reader, writer, handler);
         try {
             c.run();
         } catch (Http2Exception e) {

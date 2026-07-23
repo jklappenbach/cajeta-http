@@ -77,7 +77,7 @@ public final class Http2RstCancelTests {
         AsyncReader reader = heap AsyncReader(sock);
         AsyncWriter writer = heap AsyncWriter(sock);
         (HttpRequest) -> #HttpResponse h = (req) -> Http2RstCancelTests.handle(req);
-        Http2Connection.serve(reader, writer, #h);
+        Http2Connection.serve(reader, writer, h);
         sock.close();
         return 1;
     }

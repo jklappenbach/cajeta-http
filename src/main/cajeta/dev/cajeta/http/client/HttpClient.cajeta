@@ -19,6 +19,8 @@ import cajeta.io.file.File;
 import cajeta.io.file.FileWriter;
 import cajeta.io.file.OpenMode;
 import cajeta.io.net.AsyncReader;
+import cajeta.io.net.AsyncWriter;
+import dev.cajeta.http.h2.Http2Client;
 import dev.cajeta.http.HttpException;
 import dev.cajeta.http.Method;
 import dev.cajeta.http.body.Body;
@@ -388,9 +390,19 @@ public class HttpClient {
             TlsStream tls = HttpClient.wrapTls(#sock, hostBytes, hostLen,
                                                this.trustPem, this.trustLen,
                                                this.hasTrustAnchor);
-            int8[] alpn = HttpClient.alpnHttp11();
-            tls.offerAlpn(alpn, 9);
+            int8[] alpn = HttpClient.alpnH2Http11();
+            tls.offerAlpn(alpn, 12);
             tls.handshake();
+            // ALPN picks the wire protocol: `h2` runs the HTTP/2 exchange over
+            // the TLS stream, otherwise fall back to the h1 exchange.
+            if (HttpClient.alpnIsH2(tls)) {
+                AsyncReader h2r = heap AsyncReader(tls);
+                AsyncWriter h2w = heap AsyncWriter(tls);
+                HttpResponse rh2 = Http2Client.exchange(h2r, h2w, req, "https",
+                                                        host);
+                tls.close();
+                return #rh2;
+            }
             HttpResponse rtls = HttpClient.exchange(tls, req);
             tls.close();
             return #rtls;
@@ -1442,5 +1454,34 @@ public class HttpClient {
         a[7] = (int8) 46;    // '.'
         a[8] = (int8) 49;    // '1'
         return #a;
+    }
+
+    /**
+     * The ALPN wire list offering `h2` then `http/1.1` (12 bytes): a one-byte
+     * length `2` + `h2`, then length `8` + `http/1.1`. h2-preferred with a
+     * clean h1 fallback.
+     */
+    static #int8[] alpnH2Http11() {
+        int8[] a = heap int8[12];
+        a[0] = (int8) 2;
+        a[1] = (int8) 104;   // 'h'
+        a[2] = (int8) 50;    // '2'
+        a[3] = (int8) 8;
+        a[4] = (int8) 104;   // 'h'
+        a[5] = (int8) 116;   // 't'
+        a[6] = (int8) 116;   // 't'
+        a[7] = (int8) 112;   // 'p'
+        a[8] = (int8) 47;    // '/'
+        a[9] = (int8) 49;    // '1'
+        a[10] = (int8) 46;   // '.'
+        a[11] = (int8) 49;   // '1'
+        return #a;
+    }
+
+    /** Whether the TLS handshake negotiated the `h2` ALPN protocol. */
+    static boolean alpnIsH2(TlsStream tls) {
+        int8[] sel = heap int8[16];
+        int32 n = tls.negotiatedAlpn(sel, 16);
+        return n == 2 && sel[0] == (int8) 104 && sel[1] == (int8) 50;   // "h2"
     }
 }

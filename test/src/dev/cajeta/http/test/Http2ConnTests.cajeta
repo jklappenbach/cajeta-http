@@ -72,7 +72,7 @@ public final class Http2ConnTests {
         AsyncReader reader = heap AsyncReader(sock);
         AsyncWriter writer = heap AsyncWriter(sock);
         (HttpRequest) -> #HttpResponse h = (req) -> Http2ConnTests.handle(req);
-        Http2Connection.serve(reader, writer, #h);
+        Http2Connection.serve(reader, writer, h);
         sock.close();
         return 1;
     }

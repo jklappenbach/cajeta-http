@@ -59,6 +59,7 @@ public final class TestMain {
         Http2FlowParkTests.run(c);
         Http2RstCancelTests.run(c);
         Http2ClientTests.run(c);
+        Http2AlpnTests.run(c);
 
         System.stdout.println("");
         System.stdout.println("=== {} passed, {} failed ===",

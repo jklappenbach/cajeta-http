@@ -1,0 +1,214 @@
+package dev.cajeta.http.test;
+
+import cajeta.lang.String;
+import cajeta.io.net.AsyncReader;
+import cajeta.io.net.AsyncWriter;
+import cajeta.io.net.IpAddress;
+import cajeta.io.net.SocketAddress;
+import cajeta.io.net.TcpStream;
+import cajeta.io.net.tls.TlsStream;
+import cajeta.error.Exception;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.client.HttpClient;
+import dev.cajeta.http.server.HttpServer;
+import dev.cajeta.http.server.HttpServerBuilder;
+
+/**
+ * http:3.4b — **ALPN negotiation**. `HttpServer` now advertises `h2`,`http/1.1`
+ * and the shipped `HttpClient` offers the same, so a single `client.get(https…)`
+ * transparently selects HTTP/2 and is served by the *same* handler. The handler
+ * echoes the request's protocol version, so the response body proves which wire
+ * carried it:
+ *
+ *   - shipped client ↔ TLS server → negotiates `h2`, body `HTTP/2.0`;
+ *   - a client offering only `http/1.1` → negotiates `http/1.1`, the server
+ *     falls back to the hardened h1 loop, body `HTTP/1.1`.
+ *
+ * Cert: the shared self-signed P-256 fixture (CN/SAN 127.0.0.1).
+ */
+public final class Http2AlpnTests {
+
+    // The handler echoes the negotiated protocol back as the body.
+    public static #HttpResponse handle(HttpRequest req) {
+        String v = req.version;
+        return HttpResponse.ok().body(v.toBytes(), v.byteLength());
+    }
+
+    static #HttpServer tlsServer() {
+        String cp = ServerTlsTests.certPem();
+        String kp = ServerTlsTests.keyPem();
+        int8[] cert = cp.toBytes();
+        int8[] key = kp.toBytes();
+        HttpServerBuilder b = HttpServer.builder();
+        b.bind("127.0.0.1:0");
+        (HttpRequest) -> #HttpResponse h = (req) -> Http2AlpnTests.handle(req);
+        b.handler(h);
+        b.tls(cert, cp.byteLength(), key, kp.byteLength());
+        return b.build();
+    }
+
+    public static async int32 acceptTlsOnce(HttpServer srv) {
+        TcpStream conn #= srv.acceptTlsNext();
+        srv.dispatchTls(#conn);
+        return 1;
+    }
+
+    // ---- h2 via the shipped client --------------------------------------
+
+    // 1 => 200 + body "HTTP/2.0" (h2 confirmed); 2 => body "HTTP/1.1"; <0 else.
+    public static async int32 h2Client(int32 port) {
+        String cp = ServerTlsTests.certPem();
+        int8[] anchor = cp.toBytes();
+        HttpClient client = HttpClient.builder()
+            .trustAnchor(anchor, cp.byteLength())
+            .build();
+        String url = "https://127.0.0.1:" + port + "/proto";
+        HttpResponse resp = client.get(url);
+        if (resp.statusCode() != 200) {
+            return -1;
+        }
+        String body = Http2AlpnTests.bodyString(resp.body, resp.bodyLength());
+        if (body.equals("HTTP/2.0")) {
+            return 1;
+        }
+        if (body.equals("HTTP/1.1")) {
+            return 2;
+        }
+        return -2;
+    }
+
+    static #String bodyString(int8[] body, int32 n) {
+        int8[] copy = heap int8[n];
+        int32 i = 0;
+        while (i < n) {
+            copy[i] = body[i];
+            i = i + 1;
+        }
+        return heap String(#copy, n);
+    }
+
+    // ---- h1 fallback via a manual TLS client offering only http/1.1 ------
+
+    static #int8[] alpnHttp11() {
+        int8[] a = heap int8[9];
+        a[0] = (int8) 8;
+        a[1] = (int8) 104;  a[2] = (int8) 116;  a[3] = (int8) 116;
+        a[4] = (int8) 112;  a[5] = (int8) 47;   a[6] = (int8) 49;
+        a[7] = (int8) 46;   a[8] = (int8) 49;   // "http/1.1"
+        return #a;
+    }
+
+    // 1 => negotiated http/1.1 AND h1 exchange returned 200 + body "HTTP/1.1".
+    public static async int32 h1FallbackClient(int32 port) {
+        String cp = ServerTlsTests.certPem();
+        IpAddress ip = IpAddress.loopbackV4();
+        SocketAddress a = SocketAddress.of(#ip, port);
+        TcpStream sock = TcpStream.connectAsync(#a);
+        String host = "127.0.0.1";
+        int8[] hostBytes = host.toBytes();
+        int8[] anchor = cp.toBytes();
+        TlsStream tls = TlsStream.client(#sock, hostBytes, host.byteLength(),
+                                         anchor, cp.byteLength());
+        int8[] alpn = Http2AlpnTests.alpnHttp11();
+        tls.offerAlpn(alpn, 9);
+        tls.handshake();
+
+        int8[] sel = heap int8[16];
+        int32 selLen = tls.negotiatedAlpn(sel, 16);
+        // Negotiated protocol must be http/1.1 (len 8, starts 'h','t').
+        boolean h1 = selLen == 8 && sel[0] == (int8) 104 && sel[1] == (int8) 116;
+        if (!h1) {
+            tls.close();
+            return -1;
+        }
+
+        String reqLine = "GET /proto HTTP/1.1\r\nhost: 127.0.0.1\r\n"
+            + "Connection: close\r\n\r\n";
+        int8[] rb = reqLine.toBytes();
+        tls.writeAllAsync(rb, (int64) 0, (int64) reqLine.byteLength());
+
+        int8[] buf = heap int8[2048];
+        int32 total = 0;
+        try {
+            while (total < 2048) {
+                int64 g = tls.readAsync(buf, (int64) total,
+                                        (int64) (2048 - total));
+                if (g <= (int64) 0) {
+                    total = 2048;
+                } else {
+                    total = total + (int32) g;
+                }
+            }
+        } catch (Exception e) {
+        }
+        tls.close();
+
+        // total was clamped to 2048 as the EOF sentinel; recover the real count
+        // by finding the response — just check it ends with the 8-byte body.
+        return Http2AlpnTests.h1ResponseOk(buf) ? 1 : -2;
+    }
+
+    // The response must carry a 200 status line and end with body "HTTP/1.1".
+    static boolean h1ResponseOk(int8[] buf) {
+        boolean status200 = buf[9] == (int8) 50 && buf[10] == (int8) 48
+            && buf[11] == (int8) 48;   // "200" after "HTTP/1.1 "
+        // Find the CRLFCRLF header/body separator, then compare the body.
+        int32 sep = -1;
+        int32 i = 0;
+        while (i < 2044 && sep < 0) {
+            if (buf[i] == (int8) 13 && buf[i + 1] == (int8) 10
+                    && buf[i + 2] == (int8) 13 && buf[i + 3] == (int8) 10) {
+                sep = i + 4;
+            }
+            i = i + 1;
+        }
+        if (sep < 0) {
+            return false;
+        }
+        String expected = "HTTP/1.1";
+        boolean bodyOk = true;
+        int32 k = 0;
+        while (bodyOk && k < expected.byteLength()) {
+            if ((((int32) buf[sep + k]) & 0xFF)
+                    != (((int32) expected.byteAt(k)) & 0xFF)) {
+                bodyOk = false;
+            }
+            k = k + 1;
+        }
+        return status200 && bodyOk;
+    }
+
+    // ---- cases -----------------------------------------------------------
+
+    static void h2Negotiated(Check c) {
+        scope {
+            HttpServer srv = Http2AlpnTests.tlsServer();
+            int32 port = srv.tlsListener.boundPort();
+            Task<int32> s1 = spawn acceptTlsOnce(srv);
+            Task<int32> t1 = spawn h2Client(port);
+            c.eqInt((int64) await t1, 1,
+                    "ALPN selects h2: same handler served over HTTP/2");
+            c.eqInt((int64) await s1, 1, "h2 exchange accepted once");
+        }
+    }
+
+    static void h1Fallback(Check c) {
+        scope {
+            HttpServer srv = Http2AlpnTests.tlsServer();
+            int32 port = srv.tlsListener.boundPort();
+            Task<int32> s1 = spawn acceptTlsOnce(srv);
+            Task<int32> t1 = spawn h1FallbackClient(port);
+            c.eqInt((int64) await t1, 1,
+                    "ALPN http/1.1-only client falls back to the h1 loop");
+            c.eqInt((int64) await s1, 1, "fallback exchange accepted once");
+        }
+    }
+
+    public static void run(Check c) {
+        System.stdout.println("-- h2 alpn: h2 negotiated over TLS --");
+        Http2AlpnTests.h2Negotiated(c);
+        System.stdout.println("-- h2 alpn: http/1.1 fallback --");
+        Http2AlpnTests.h1Fallback(c);
+    }
+}
