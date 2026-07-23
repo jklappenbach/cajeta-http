@@ -63,6 +63,7 @@ public final class TestMain {
         Http2PriorKnowledgeTests.run(c);
         Http2PushTests.run(c);
         WsPerMessageDeflateTests.run(c);
+        WsConnectTests.run(c);
 
         System.stdout.println("");
         System.stdout.println("=== {} passed, {} failed ===",

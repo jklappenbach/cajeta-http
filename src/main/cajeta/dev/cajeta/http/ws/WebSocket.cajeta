@@ -3,8 +3,18 @@ package dev.cajeta.http.ws;
 import cajeta.lang.String;
 import cajeta.io.net.AsyncReader;
 import cajeta.io.net.AsyncWriter;
+import cajeta.io.net.TcpStream;
+import cajeta.io.net.SocketAddress;
+import cajeta.io.net.IpAddress;
+import cajeta.io.net.dns.Dns;
+import cajeta.io.net.dns.ResolveFamily;
+import cajeta.io.net.tls.TlsStream;
+import cajeta.io.net.uri.Uri;
 import cajeta.concurrent.Lock;
 import cajeta.concurrent.LockGuard;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.h1.HttpSerializer;
 
 /**
  * A live **RFC 6455 WebSocket connection** — plan item **NET-10.6**, the
@@ -113,6 +123,17 @@ public class WebSocket {
     /** `true` once `permessage-deflate` has been negotiated for this socket. */
     boolean compress;
 
+    // -- owned transport (only when built by `connect`) --------------------
+    // forServer/forClient BORROW a caller-owned reader/writer; `connect` dials
+    // the socket itself, so the WebSocket must own the transport to keep it
+    // alive. These are null for the borrowed-transport factories.
+    TcpStream heldSock;
+    TlsStream heldTls;
+    AsyncReader heldReader;
+    AsyncWriter heldWriter;
+    /** The server-selected subprotocol (`Sec-WebSocket-Protocol`), or null. */
+    String subprotocol;
+
     // -- write-side state --------------------------------------------------
 
     /**
@@ -159,6 +180,11 @@ public class WebSocket {
         this.readScratch = heap int8[rc];
         this.codec = null;
         this.compress = false;
+        this.heldSock = null;
+        this.heldTls = null;
+        this.heldReader = null;
+        this.heldWriter = null;
+        this.subprotocol = null;
         this.writeLock = null;
         this.isClient = false;
         this.maskCounter = 0;
@@ -203,6 +229,126 @@ public class WebSocket {
         ws.writeLock = heap Lock();
         ws.isClient = true;
         return #ws;
+    }
+
+    // ===== one-line client connect (4.2a) ==================================
+
+    /**
+     * **Dial + upgrade in one call.** Parse `url` (`ws://` or `wss://`),
+     * resolve + connect the transport (TLS via the stdlib for `wss`, system
+     * trust), run the [`WsUpgrade`](WsUpgrade.cajeta) client handshake, and
+     * return a ready client-role `WebSocket` that **owns** its transport (so
+     * the socket lives as long as the socket does — unlike
+     * [`forClient`](#forClient), which borrows a caller-owned reader/writer).
+     * Raises [`HandshakeRejectedException`](HandshakeRejectedException.cajeta)
+     * if the server's reply is not a valid `101` upgrade.
+     */
+    public static #WebSocket connect(String url) {
+        int8[] none = heap int8[0];
+        return WebSocket.connectImpl(url, false, none, 0);
+    }
+
+    /**
+     * [`connect`](#connect) for a `wss://` server whose certificate chains to a
+     * **pinned** trust anchor (`trustPem`) rather than the system store — the
+     * self-signed-fixture path the tests use.
+     */
+    public static #WebSocket connectPinned(String url, int8[] trustPem,
+                                           int32 trustLen) {
+        return WebSocket.connectImpl(url, true, trustPem, trustLen);
+    }
+
+    /** The server-selected subprotocol (`Sec-WebSocket-Protocol`), or null. */
+    public String selectedSubprotocol() {
+        return this.subprotocol;
+    }
+
+    static #WebSocket connectImpl(String url, boolean pinned, int8[] trustPem,
+                                  int32 trustLen) {
+        Uri uri = Uri.parse(url);
+        boolean secure = uri.getScheme().equals("wss");
+        String host = uri.getHost();
+        int32 port = uri.getPort();
+        if (port <= 0) {
+            port = 80;
+            if (secure) {
+                port = 443;
+            }
+        }
+        TcpStream sock = WebSocket.dial(host, port);
+
+        WebSocket ws = heap WebSocket();
+        ws.decoder = WsFrameDecoder.forClient();
+        ws.protocol = WsProtocol.create();
+        ws.writeLock = heap Lock();
+        ws.isClient = true;
+
+        if (secure) {
+            int8[] hostBytes = host.toBytes();
+            int32 hostLen = host.byteLength();
+            if (pinned) {
+                TlsStream tls = TlsStream.client(#sock, hostBytes, hostLen,
+                                                 trustPem, trustLen);
+                tls.handshake();
+                ws.heldTls = #tls;
+            } else {
+                TlsStream tls = TlsStream.clientSystemTrust(#sock, hostBytes,
+                                                            hostLen);
+                tls.handshake();
+                ws.heldTls = #tls;
+            }
+            ws.heldReader = heap AsyncReader(ws.heldTls);
+            ws.heldWriter = heap AsyncWriter(ws.heldTls);
+        } else {
+            ws.heldSock = #sock;
+            ws.heldReader = heap AsyncReader(ws.heldSock);
+            ws.heldWriter = heap AsyncWriter(ws.heldSock);
+        }
+        ws.reader = ws.heldReader;
+        ws.writer = ws.heldWriter;
+
+        // Client opening handshake over the owned transport.
+        String key = WsClientHandshake.placeholderKey(WebSocket.seedOf(url));
+        HttpRequest request = WsClientHandshake.buildRequest(uri, key);
+        int8[] bytes = HttpSerializer.request(request);
+        ws.writer.writeAll(bytes, 0, bytes.count());
+        ws.writer.flush();
+        HttpResponse response = WsUpgrade.readResponse(ws.reader);
+        WsClientHandshake.requireAccept(response, key);
+        String sp = response.getHeaders().get("Sec-WebSocket-Protocol");
+        if (sp != null) {
+            ws.subprotocol = sp.substring(0, sp.byteLength());
+        }
+        return #ws;
+    }
+
+    // Resolve `host` (IPv4) and open a TCP connection (mirrors the client's
+    // connectAny; the try-all-addresses fallback is a follow-up).
+    static #TcpStream dial(String host, int32 port) {
+        SocketAddress[] addrs = Dns.resolve(host, port, ResolveFamily.V4_ONLY);
+        SocketAddress a0 = addrs[0];
+        IpAddress ip = a0.getIp();
+        int8[] oct = ip.getOctets();
+        int32 olen = 16;
+        if (ip.isV4()) {
+            olen = 4;
+        }
+        IpAddress ipCopy = IpAddress.fromOctets(oct, olen);
+        SocketAddress connAddr = SocketAddress.of(#ipCopy, port);
+        return TcpStream.connectAsync(#connAddr);
+    }
+
+    // A deterministic Sec-WebSocket-Key seed from the URL bytes (the key is a
+    // placeholder in v1 — see WsClientHandshake's randomness scope note).
+    static int32 seedOf(String url) {
+        int32 s = 0x9e3779b1;
+        int32 i = 0;
+        int32 n = url.byteLength();
+        while (i < n) {
+            s = s * 31 + (((int32) url.byteAt(i)) & 0xFF);
+            i = i + 1;
+        }
+        return s;
     }
 
     /**
