@@ -1,0 +1,43 @@
+package dev.cajeta.http.ws;
+
+import cajeta.lang.String;
+
+/**
+ * The **application-facing handle** a [`WebSocketHandler`](WebSocketHandler.cajeta)
+ * is given for a live connection (plan **4.2b**): send text/binary and initiate
+ * a close. The receive side is owned by the library's serve loop
+ * ([`WsUpgrade.serve`](WsUpgrade.cajeta#serve)) which dispatches each inbound
+ * message to `onMessage`, so the handler never reads directly.
+ *
+ * `send`/`sendBinary` are safe to call from any fiber: the underlying
+ * [`WebSocket`](WebSocket.cajeta)'s write lock serializes whole frames, so
+ * concurrent senders never interleave on the wire. The wrapped socket is
+ * borrowed (owned by the serve loop, which outlives every callback).
+ */
+public final class WebSocketConnection {
+    WebSocket ws;
+
+    public WebSocketConnection(WebSocket ws) {
+        this.ws = ws;
+    }
+
+    /** Send a text message (UTF-8), compressed if permessage-deflate is on. */
+    public void send(String text) {
+        this.ws.send(text);
+    }
+
+    /** Send a binary message, compressed if permessage-deflate is on. */
+    public void sendBinary(int8[] data) {
+        this.ws.sendBinary(data);
+    }
+
+    /** Initiate the closing handshake with `code` + `reason` (RFC 6455 §5.5.1). */
+    public void close(int32 code, String reason) {
+        this.ws.close(code, reason);
+    }
+
+    /** The negotiated subprotocol (`Sec-WebSocket-Protocol`), or null. */
+    public String subprotocol() {
+        return this.ws.selectedSubprotocol();
+    }
+}

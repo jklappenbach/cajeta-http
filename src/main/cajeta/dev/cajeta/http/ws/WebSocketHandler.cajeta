@@ -1,0 +1,27 @@
+package dev.cajeta.http.ws;
+
+/**
+ * The **server-side WebSocket application surface** (plan **4.2b**): the
+ * lifecycle callbacks the library's serve loop
+ * ([`WsUpgrade.serve`](WsUpgrade.cajeta#serve)) drives over a
+ * [`WebSocketConnection`](WebSocketConnection.cajeta) — the WS analogue of the
+ * `(HttpRequest) -> #HttpResponse` HTTP handler, but stateful across a
+ * connection.
+ *
+ *   - [`onConnect`](#onConnect) — once, right after the upgrade completes.
+ *   - [`onMessage`](#onMessage) — per reassembled text/binary message, on the
+ *     library's reader fiber. Control frames (ping/pong/close) are handled by
+ *     the library and never surface here.
+ *   - [`onClose`](#onClose) — once, when the connection ends, carrying the
+ *     [`WsCloseCode`](WsCloseCode.cajeta): the peer's code on a clean close,
+ *     `1006` on an abnormal drop, `1002` on a protocol fault, or `1011` when a
+ *     callback threw (the library fails the connection for you).
+ *
+ * The `WebSocketConnection` is safe to hand to other fibers for concurrent
+ * `send`s — the write lock keeps frames whole.
+ */
+public interface WebSocketHandler {
+    void onConnect(WebSocketConnection conn);
+    void onMessage(WebSocketConnection conn, WsMessage message);
+    void onClose(WebSocketConnection conn, int32 code);
+}

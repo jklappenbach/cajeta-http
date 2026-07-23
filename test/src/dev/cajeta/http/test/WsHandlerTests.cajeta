@@ -1,0 +1,168 @@
+package dev.cajeta.http.test;
+
+import cajeta.lang.String;
+import cajeta.error.Exception;
+import cajeta.io.net.IpAddress;
+import cajeta.io.net.SocketAddress;
+import cajeta.io.net.TcpListener;
+import cajeta.io.net.TcpStream;
+import cajeta.io.net.AsyncReader;
+import cajeta.io.net.AsyncWriter;
+import dev.cajeta.http.ws.WebSocket;
+import dev.cajeta.http.ws.WebSocketConnection;
+import dev.cajeta.http.ws.WebSocketHandler;
+import dev.cajeta.http.ws.WsMessage;
+import dev.cajeta.http.ws.WsCloseCode;
+import dev.cajeta.http.ws.WsUpgrade;
+import dev.cajeta.http.ws.ConnectionClosedException;
+
+/** An echoing handler that records its lifecycle for the test to inspect. */
+final class EchoHandler implements WebSocketHandler {
+    int32 connects;
+    int32 messages;
+    int32 closes;
+    int32 lastCode;
+    int8[] order;
+    int32 orderLen;
+
+    EchoHandler() {
+        this.connects = 0;
+        this.messages = 0;
+        this.closes = 0;
+        this.lastCode = 0;
+        this.order = heap int8[16];
+        this.orderLen = 0;
+    }
+
+    void rec(int32 ch) {
+        this.order[this.orderLen] = (int8) ch;
+        this.orderLen = this.orderLen + 1;
+    }
+
+    public void onConnect(WebSocketConnection conn) {
+        this.connects = this.connects + 1;
+        this.rec(67);   // 'C'
+    }
+
+    public void onMessage(WebSocketConnection conn, WsMessage message) {
+        this.messages = this.messages + 1;
+        this.rec(77);   // 'M'
+        String t = message.text();
+        conn.send(t);
+    }
+
+    public void onClose(WebSocketConnection conn, int32 code) {
+        this.closes = this.closes + 1;
+        this.lastCode = code;
+        this.rec(88);   // 'X'
+    }
+}
+
+/** A handler whose onMessage throws — the library must fail-close with 1011. */
+final class ThrowingHandler implements WebSocketHandler {
+    public void onConnect(WebSocketConnection conn) {
+    }
+
+    public void onMessage(WebSocketConnection conn, WsMessage message) {
+        String boom = "handler boom";
+        throw heap Exception(boom.substring(0, boom.byteLength()));
+    }
+
+    public void onClose(WebSocketConnection conn, int32 code) {
+    }
+}
+
+/**
+ * http:4.2b — the server handler surface: [`WsUpgrade.serve`](../../../ws/WsUpgrade.cajeta)
+ * driving a [`WebSocketHandler`](../../../ws/WebSocketHandler.cajeta) over a
+ * [`WebSocketConnection`](../../../ws/WebSocketConnection.cajeta). Proves the
+ * `onConnect → onMessage → onClose` lifecycle (order + the peer's close code),
+ * and that a **throwing callback** fails the connection with `1011` — observed
+ * by the client as the close code.
+ */
+public final class WsHandlerTests {
+
+    public static async int32 handlerServer(#TcpListener listener,
+                                            EchoHandler h) {
+        TcpStream sock = listener.acceptAsync();
+        AsyncReader reader = heap AsyncReader(sock);
+        AsyncWriter writer = heap AsyncWriter(sock);
+        WsUpgrade.serve(reader, writer, h);
+        sock.close();
+        return 1;
+    }
+
+    public static async int32 throwingServer(#TcpListener listener,
+                                             ThrowingHandler h) {
+        TcpStream sock = listener.acceptAsync();
+        AsyncReader reader = heap AsyncReader(sock);
+        AsyncWriter writer = heap AsyncWriter(sock);
+        WsUpgrade.serve(reader, writer, h);
+        sock.close();
+        return 1;
+    }
+
+    static void lifecycle(Check c) {
+        scope {
+            EchoHandler h = heap EchoHandler();
+            IpAddress la = IpAddress.loopbackV4();
+            SocketAddress bindAddr = SocketAddress.of(#la, 0);
+            TcpListener listener = TcpListener.bind(bindAddr);
+            int32 port = listener.boundPort();
+            Task<int32> sv = spawn handlerServer(#listener, h);
+
+            String url = "ws://127.0.0.1:" + port + "/";
+            WebSocket client = WebSocket.connect(url);
+            client.send("ping");
+            WsMessage reply = client.receive();
+            c.that(reply.text().equals("ping"), "handler onMessage echoes");
+            client.close(WsCloseCode.NORMAL, "bye");
+            int32 r = await sv;
+
+            c.eqInt((int64) r, 1, "handler serve loop returned");
+            c.eqInt((int64) h.connects, 1, "onConnect fired once");
+            c.eqInt((int64) h.messages, 1, "onMessage fired once");
+            c.eqInt((int64) h.closes, 1, "onClose fired once");
+            c.eqInt((int64) h.lastCode, (int64) WsCloseCode.NORMAL,
+                    "onClose carries the peer close code (1000)");
+            boolean ordered = h.orderLen == 3
+                && h.order[0] == (int8) 67    // C
+                && h.order[1] == (int8) 77    // M
+                && h.order[2] == (int8) 88;   // X
+            c.that(ordered, "lifecycle order is onConnect -> onMessage -> onClose");
+        }
+    }
+
+    static void throwingHandlerFails1011(Check c) {
+        scope {
+            ThrowingHandler h = heap ThrowingHandler();
+            IpAddress la = IpAddress.loopbackV4();
+            SocketAddress bindAddr = SocketAddress.of(#la, 0);
+            TcpListener listener = TcpListener.bind(bindAddr);
+            int32 port = listener.boundPort();
+            Task<int32> sv = spawn throwingServer(#listener, h);
+
+            String url = "ws://127.0.0.1:" + port + "/";
+            WebSocket client = WebSocket.connect(url);
+            client.send("boom");
+            int32 code = 0;
+            try {
+                WsMessage m = client.receive();
+            } catch (ConnectionClosedException e) {
+                code = e.closeCode;
+            }
+            int32 r = await sv;
+
+            c.eqInt((int64) r, 1, "throwing-handler serve loop returned cleanly");
+            c.eqInt((int64) code, (int64) WsCloseCode.INTERNAL_ERROR,
+                    "a throwing callback fails the connection with 1011");
+        }
+    }
+
+    public static void run(Check c) {
+        System.stdout.println("-- ws handler: lifecycle onConnect/onMessage/onClose --");
+        WsHandlerTests.lifecycle(c);
+        System.stdout.println("-- ws handler: throwing callback -> 1011 close --");
+        WsHandlerTests.throwingHandlerFails1011(c);
+    }
+}

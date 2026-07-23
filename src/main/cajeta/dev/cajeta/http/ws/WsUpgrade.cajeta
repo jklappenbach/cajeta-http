@@ -8,6 +8,7 @@ import dev.cajeta.http.HttpRequest;
 import dev.cajeta.http.HttpResponse;
 import dev.cajeta.http.h1.HttpParser;
 import dev.cajeta.http.h1.HttpSerializer;
+import cajeta.error.Exception;
 import dev.cajeta.http.ws.WebSocket;
 import dev.cajeta.http.ws.WsServerHandshake;
 import dev.cajeta.http.ws.WsClientHandshake;
@@ -91,6 +92,57 @@ public class WsUpgrade {
         }
         String offered = request.getHeaders().get("Sec-WebSocket-Extensions");
         return WsCompression.negotiateServer(offered);
+    }
+
+    /**
+     * **Server handler loop** (plan 4.2b): upgrade the connection, then drive a
+     * [`WebSocketHandler`](WebSocketHandler.cajeta) over a
+     * [`WebSocketConnection`](WebSocketConnection.cajeta) — `onConnect`, then
+     * `onMessage` per inbound message (control frames handled by the library),
+     * then `onClose` with the final [`WsCloseCode`](WsCloseCode.cajeta). A
+     * callback that throws fails the connection with `1011` (a protocol fault
+     * with `1002`); the loop is fault-isolated so one bad connection never
+     * escapes to the acceptor.
+     */
+    public static void serve(AsyncReader reader, AsyncWriter writer,
+                             WebSocketHandler handler) {
+        WsUpgrade.serve(reader, writer, handler, false);
+    }
+
+    /** [`serve`](#serve) with optional `permessage-deflate` negotiation. */
+    public static void serve(AsyncReader reader, AsyncWriter writer,
+                             WebSocketHandler handler, boolean allowCompression) {
+        WebSocket ws = WsUpgrade.acceptServer(reader, writer, allowCompression);
+        WebSocketConnection conn = heap WebSocketConnection(ws);
+        int32 code = WsCloseCode.NORMAL;
+        try {
+            handler.onConnect(conn);
+            boolean running = true;
+            while (running) {
+                WsMessage m = ws.receive();
+                handler.onMessage(conn, m);
+            }
+        } catch (ConnectionClosedException e) {
+            code = e.closeCode;
+        } catch (WebSocketException e) {
+            code = WsCloseCode.PROTOCOL_ERROR;
+            WsUpgrade.closeQuietly(ws, code);
+        } catch (Exception e) {
+            code = WsCloseCode.INTERNAL_ERROR;
+            WsUpgrade.closeQuietly(ws, code);
+        }
+        try {
+            handler.onClose(conn, code);
+        } catch (Exception e) {
+        }
+    }
+
+    static void closeQuietly(WebSocket ws, int32 code) {
+        try {
+            String none = "";
+            ws.close(code, none);
+        } catch (Exception e) {
+        }
     }
 
     /**
