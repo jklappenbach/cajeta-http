@@ -1,0 +1,223 @@
+package dev.cajeta.http.h2;
+
+/**
+ * Encode/decode for the **content HTTP/2 frames** (RFC 9113 §6.1, §6.2, §6.6,
+ * §6.10) — plan item **3.2**: DATA, HEADERS, PUSH_PROMISE, CONTINUATION. Their
+ * payloads carry optional **padding** (a length-prefix byte + trailing pad
+ * octets) and, for HEADERS, an optional **priority** prefix; what remains is
+ * the application data (DATA) or the **header-block fragment** the HPACK codec
+ * consumes (HEADERS/PUSH_PROMISE/CONTINUATION). The stripped content region is
+ * returned as an [`Http2Payload`](Http2Payload.cajeta).
+ *
+ * Padding is validated per §6.1: a pad length that meets or exceeds the space
+ * available is a connection error of type `PROTOCOL_ERROR`; a payload too
+ * short to hold its own required fixed fields is `FRAME_SIZE_ERROR`. These
+ * frames never ride stream 0 (`PROTOCOL_ERROR` if they do).
+ */
+public final class Http2ContentFrames {
+
+    // -- DATA (§6.1) ---------------------------------------------------------
+
+    /** Write a DATA frame, optionally padded (`padLen` 0..255). */
+    public static void writeData(Http2FrameWriter w, int32 streamId,
+                                 int8[] data, int32 dataLen, boolean endStream,
+                                 int32 padLen) {
+        int32 flags = 0;
+        if (endStream) {
+            flags = flags | Http2.FLAG_END_STREAM;
+        }
+        if (padLen > 0) {
+            flags = flags | Http2.FLAG_PADDED;
+            int32 total = 1 + dataLen + padLen;
+            int8[] p = heap int8[total];
+            p[0] = (int8) (padLen & 0xFF);
+            int32 i = 0;
+            while (i < dataLen) {
+                p[1 + i] = data[i];
+                i = i + 1;
+            }
+            w.writeFrame(Http2.FRAME_DATA, flags, streamId, p, total);
+        } else {
+            w.writeFrame(Http2.FRAME_DATA, flags, streamId, data, dataLen);
+        }
+    }
+
+    /** Parse a DATA payload, stripping padding to the application-data region. */
+    public static #Http2Payload parseData(int8[] p, int32 length, int32 flags,
+                                          int32 streamId) {
+        if (streamId == 0) {
+            throw heap Http2Exception("DATA on stream 0", Http2.PROTOCOL_ERROR);
+        }
+        int32 start = 0;
+        int32 end = length;
+        if ((flags & Http2.FLAG_PADDED) != 0) {
+            if (length < 1) {
+                throw heap Http2Exception("DATA padded but empty",
+                                          Http2.FRAME_SIZE_ERROR);
+            }
+            int32 pad = ((int32) p[0]) & 0xFF;
+            start = 1;
+            end = length - pad;
+            if (end < start) {
+                throw heap Http2Exception("DATA pad length exceeds payload",
+                                          Http2.PROTOCOL_ERROR);
+            }
+        }
+        return heap Http2Payload(start, end - start, 0);
+    }
+
+    // -- HEADERS (§6.2) ------------------------------------------------------
+
+    /**
+     * Write a HEADERS frame carrying `block[0..blockLen)` (an HPACK
+     * header-block fragment), optionally padded. Priority is not emitted
+     * (RFC 9113 deprecates it).
+     */
+    public static void writeHeaders(Http2FrameWriter w, int32 streamId,
+                                    int8[] block, int32 blockLen,
+                                    boolean endStream, boolean endHeaders,
+                                    int32 padLen) {
+        int32 flags = 0;
+        if (endStream) {
+            flags = flags | Http2.FLAG_END_STREAM;
+        }
+        if (endHeaders) {
+            flags = flags | Http2.FLAG_END_HEADERS;
+        }
+        if (padLen > 0) {
+            flags = flags | Http2.FLAG_PADDED;
+            int32 total = 1 + blockLen + padLen;
+            int8[] p = heap int8[total];
+            p[0] = (int8) (padLen & 0xFF);
+            int32 i = 0;
+            while (i < blockLen) {
+                p[1 + i] = block[i];
+                i = i + 1;
+            }
+            w.writeFrame(Http2.FRAME_HEADERS, flags, streamId, p, total);
+        } else {
+            w.writeFrame(Http2.FRAME_HEADERS, flags, streamId, block, blockLen);
+        }
+    }
+
+    /**
+     * Parse a HEADERS payload to its header-block fragment, stripping the
+     * optional pad-length prefix, trailing padding, and (if PRIORITY is set)
+     * the 5-octet priority prefix.
+     */
+    public static #Http2Payload parseHeaders(int8[] p, int32 length,
+                                             int32 flags, int32 streamId) {
+        if (streamId == 0) {
+            throw heap Http2Exception("HEADERS on stream 0",
+                                      Http2.PROTOCOL_ERROR);
+        }
+        int32 start = 0;
+        int32 end = length;
+        if ((flags & Http2.FLAG_PADDED) != 0) {
+            if (length < 1) {
+                throw heap Http2Exception("HEADERS padded but empty",
+                                          Http2.FRAME_SIZE_ERROR);
+            }
+            int32 pad = ((int32) p[0]) & 0xFF;
+            start = 1;
+            end = length - pad;
+        }
+        if ((flags & Http2.FLAG_PRIORITY) != 0) {
+            if (end - start < 5) {
+                throw heap Http2Exception("HEADERS priority prefix truncated",
+                                          Http2.FRAME_SIZE_ERROR);
+            }
+            start = start + 5;
+        }
+        if (end < start) {
+            throw heap Http2Exception("HEADERS pad length exceeds payload",
+                                      Http2.PROTOCOL_ERROR);
+        }
+        return heap Http2Payload(start, end - start, 0);
+    }
+
+    // -- PUSH_PROMISE (§6.6) -------------------------------------------------
+
+    /** Write a PUSH_PROMISE frame with the promised stream id + header block. */
+    public static void writePushPromise(Http2FrameWriter w, int32 streamId,
+                                        int32 promisedStreamId, int8[] block,
+                                        int32 blockLen, boolean endHeaders,
+                                        int32 padLen) {
+        int32 flags = 0;
+        if (endHeaders) {
+            flags = flags | Http2.FLAG_END_HEADERS;
+        }
+        int32 lead = 0;
+        if (padLen > 0) {
+            flags = flags | Http2.FLAG_PADDED;
+            lead = 1;
+        }
+        int32 total = lead + 4 + blockLen + padLen;
+        int8[] p = heap int8[total];
+        if (lead == 1) {
+            p[0] = (int8) (padLen & 0xFF);
+        }
+        Http2Frames.putU32(p, lead,
+                           ((int64) promisedStreamId) & (int64) 0x7FFFFFFF);
+        int32 i = 0;
+        while (i < blockLen) {
+            p[lead + 4 + i] = block[i];
+            i = i + 1;
+        }
+        w.writeFrame(Http2.FRAME_PUSH_PROMISE, flags, streamId, p, total);
+    }
+
+    /** Parse a PUSH_PROMISE payload: promised stream id + header-block region. */
+    public static #Http2Payload parsePushPromise(int8[] p, int32 length,
+                                                 int32 flags, int32 streamId) {
+        if (streamId == 0) {
+            throw heap Http2Exception("PUSH_PROMISE on stream 0",
+                                      Http2.PROTOCOL_ERROR);
+        }
+        int32 start = 0;
+        int32 end = length;
+        if ((flags & Http2.FLAG_PADDED) != 0) {
+            if (length < 1) {
+                throw heap Http2Exception("PUSH_PROMISE padded but empty",
+                                          Http2.FRAME_SIZE_ERROR);
+            }
+            int32 pad = ((int32) p[0]) & 0xFF;
+            start = 1;
+            end = length - pad;
+        }
+        if (end - start < 4) {
+            throw heap Http2Exception("PUSH_PROMISE missing promised stream id",
+                                      Http2.FRAME_SIZE_ERROR);
+        }
+        int32 promised = (int32) (Http2Frames.getU32(p, start)
+                                  & (int64) 0x7FFFFFFF);
+        start = start + 4;
+        if (end < start) {
+            throw heap Http2Exception("PUSH_PROMISE pad length exceeds payload",
+                                      Http2.PROTOCOL_ERROR);
+        }
+        return heap Http2Payload(start, end - start, promised);
+    }
+
+    // -- CONTINUATION (§6.10) ------------------------------------------------
+
+    /** Write a CONTINUATION frame carrying a header-block fragment. */
+    public static void writeContinuation(Http2FrameWriter w, int32 streamId,
+                                         int8[] block, int32 blockLen,
+                                         boolean endHeaders) {
+        int32 flags = 0;
+        if (endHeaders) {
+            flags = flags | Http2.FLAG_END_HEADERS;
+        }
+        w.writeFrame(Http2.FRAME_CONTINUATION, flags, streamId, block, blockLen);
+    }
+
+    /** Parse a CONTINUATION payload — the whole payload is the fragment. */
+    public static #Http2Payload parseContinuation(int32 length, int32 streamId) {
+        if (streamId == 0) {
+            throw heap Http2Exception("CONTINUATION on stream 0",
+                                      Http2.PROTOCOL_ERROR);
+        }
+        return heap Http2Payload(0, length, 0);
+    }
+}

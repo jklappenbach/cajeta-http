@@ -50,6 +50,7 @@ public final class TestMain {
         HpackEncoderTests.run(c);
         Http2FrameTests.run(c);
         Http2FixedFrameTests.run(c);
+        Http2ContentFrameTests.run(c);
 
         System.stdout.println("");
         System.stdout.println("=== {} passed, {} failed ===",

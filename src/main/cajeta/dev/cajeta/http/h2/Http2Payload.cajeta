@@ -1,0 +1,22 @@
+package dev.cajeta.http.h2;
+
+/**
+ * The meaningful content region of a **content frame** after framing is
+ * stripped (RFC 9113 §6.1, §6.2, §6.6) — plan item **3.2**. For a DATA frame
+ * `[offset, offset+length)` is the application data (padding removed); for
+ * HEADERS/CONTINUATION it is the header-block fragment (padding and any
+ * priority prefix removed); for PUSH_PROMISE it is the header-block fragment
+ * and [`promisedStreamId`](#promisedStreamId) carries the promised stream
+ * (0 for the other frame types). Offsets are relative to the frame payload.
+ */
+public final class Http2Payload {
+    public int32 offset;
+    public int32 length;
+    public int32 promisedStreamId;
+
+    public Http2Payload(int32 offset, int32 length, int32 promisedStreamId) {
+        this.offset = offset;
+        this.length = length;
+        this.promisedStreamId = promisedStreamId;
+    }
+}

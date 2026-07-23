@@ -1507,13 +1507,35 @@ acceptance bar.
     constants; (b) the encoder must pick Huffman on a **tie** (`hlen <= len`),
     which the C.6.2 "307" literal is the only vector to exercise — a `<` there
     silently passes every other vector.
-- [ ] **3.2** Frame layer: the 9-byte frame header decoded **zero-copy
-  via `view`** over a pooled buffer (the spec's canonical `view` case);
-  encode/decode for all frame types (DATA, HEADERS, PRIORITY,
-  RST_STREAM, SETTINGS, PUSH_PROMISE, PING, GOAWAY, WINDOW_UPDATE,
-  CONTINUATION); padding; `SETTINGS_MAX_FRAME_SIZE` enforcement.
-  - TDD: per-type golden vectors + flag matrices; malformed frames →
-    the exact RFC 9113 error codes; oversize → FRAME_SIZE_ERROR.
+- [x] **3.2** Frame layer — shipped in `dev.cajeta.http.h2`, three commits
+  (3.2a header/writer/reader, 3.2b fixed frames, 3.2c content frames).
+  - **3.2a**: `Http2FrameHeader` — the 9-octet header as a zero-copy
+    `@BigEndian view` (the spec's canonical case; the `view` feature works in
+    the library build, verified via a probe first). 24-bit length split across
+    `uint16`+`uint8`; R bit masked off the 31-bit stream id. `Http2` constants
+    (types, flags, §7 error codes, SETTINGS ids + defaults, preface).
+    `Http2FrameWriter`/`Http2FrameReader` — the reader iterates concatenated
+    frames, decoding each header through the view and enforcing
+    `SETTINGS_MAX_FRAME_SIZE`; incomplete header / oversize / truncated payload
+    → `FRAME_SIZE_ERROR`. `Http2Exception` carries the §7 code + stream id
+    (0 = connection error) for 3.3's GOAWAY/RST_STREAM.
+  - **3.2b** (`Http2Frames`): SETTINGS(+ACK), PING(+ACK), RST_STREAM,
+    WINDOW_UPDATE, GOAWAY, PRIORITY — encode + validating parse with a golden
+    SETTINGS wire vector and the full §7 error matrix (bad fixed length →
+    FRAME_SIZE_ERROR; misplaced stream / zero increment → PROTOCOL_ERROR).
+    PRIORITY parsed then ignored per RFC 9113.
+  - **3.2c** (`Http2ContentFrames`): DATA, HEADERS, PUSH_PROMISE,
+    CONTINUATION — padding strip, HEADERS priority-prefix strip, PUSH_PROMISE
+    promised-id, header-block-fragment region as `Http2Payload`; pad ≥ payload
+    → PROTOCOL_ERROR, padded-but-empty → FRAME_SIZE_ERROR.
+  - TDD (done): per-type golden vectors + flag matrices, malformed → exact
+    RFC 9113 codes, oversize → FRAME_SIZE_ERROR. Suite 1106→1173.
+  - Notes for 3.3: (a) views overlay at offset 0 only (no offset-ctor in this
+    toolchain), so the reader copies the 9 header bytes to overlay — a per-frame
+    connection buffer positioned at the frame decodes in place if desired;
+    (b) the fixed-frame parsers take `(buf, offset, length, …)` so the stream
+    layer can call them against the reader's buffer at `payloadOffset()` with
+    no copy — tests exercise them over `copyPayload()` for convenience.
 - [ ] **3.3** Streams: connection preface + SETTINGS handshake, the
   stream state machine, connection- and stream-level flow control
   (WINDOW_UPDATE accounting both directions), CONTINUATION reassembly,
