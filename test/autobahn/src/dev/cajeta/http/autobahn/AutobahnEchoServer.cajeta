@@ -1,0 +1,46 @@
+package dev.cajeta.http.autobahn;
+
+import cajeta.error.Exception;
+import cajeta.io.net.AsyncReader;
+import cajeta.io.net.AsyncWriter;
+import cajeta.io.net.IpAddress;
+import cajeta.io.net.SocketAddress;
+import cajeta.io.net.TcpListener;
+import cajeta.io.net.TcpStream;
+import dev.cajeta.http.ws.WsUpgrade;
+
+/**
+ * The **Autobahn testee** — a minimal RFC 6455 **echo server** the Autobahn
+ * Testsuite `fuzzingclient` hammers to certify cajeta-http's WebSocket
+ * **server** conformance (plan item **4.3**). Each connection is served by an
+ * [`AutobahnEcho`](AutobahnEcho.cajeta) handler; the library handles the
+ * protocol edges the suite probes (fragmentation, control frames, close
+ * handshake, UTF-8, permessage-deflate — enabled so the 12.x / 13.x
+ * compression cases negotiate).
+ *
+ * One connection per case, run sequentially: accept, serve to close, repeat.
+ * A per-connection catch keeps a malformed case from tearing the server down.
+ */
+public final class AutobahnEchoServer {
+    public static int32 main() {
+        int32 port = 9001;
+        IpAddress la = IpAddress.loopbackV4();
+        SocketAddress bindAddr = SocketAddress.of(#la, port);
+        TcpListener listener = TcpListener.bind(bindAddr);
+        System.stdout.println("autobahn echo server: ws://127.0.0.1:{}", port);
+        boolean running = true;
+        while (running) {
+            TcpStream sock = listener.acceptAsync();
+            try {
+                AsyncReader reader = heap AsyncReader(sock);
+                AsyncWriter writer = heap AsyncWriter(sock);
+                AutobahnEcho h = heap AutobahnEcho();
+                WsUpgrade.serve(reader, writer, h, true);
+            } catch (Exception e) {
+                // A malformed case fails its own connection; keep serving.
+            }
+            sock.close();
+        }
+        return 0;
+    }
+}

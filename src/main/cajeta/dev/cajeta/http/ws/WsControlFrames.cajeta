@@ -227,6 +227,13 @@ public class WsControlFrames {
             rBytes[i] = pay[2 + i];
             i = i + 1;
         }
+        // The close reason MUST be valid UTF-8 (RFC 6455 §5.5.1); an invalid
+        // one is a protocol error (→ 1002 via the serve loop's
+        // WebSocketException handler), not a clean reciprocal close.
+        if (!Utf8Validator.isValid(rBytes, rLen)) {
+            throw heap ProtocolViolationException(
+                "close reason is not valid UTF-8", (int64) code);
+        }
         String reason = heap String(#rBytes, rLen);
         return WsCloseReason.of(code, #reason);
     }

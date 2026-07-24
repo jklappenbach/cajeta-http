@@ -211,9 +211,37 @@ public class WsProtocol {
         // --- data frames (RFC 6455 §5.4) → the reassembler ---
         WsMessage m = this.assembler.accept(frame);
         if (m != null) {
+            // A completed TEXT message MUST be valid UTF-8 (RFC 6455 §8.1);
+            // an invalid one fails the connection with 1007. Compressed text
+            // is validated after inflation (WebSocket.decodeMessage), so skip
+            // it here — the payload is still deflate bytes at this point.
+            if (m.isText() && !m.isCompressed()
+                    && !Utf8Validator.isValid(m.getPayload(), m.length())) {
+                return this.failInvalidUtf8();
+            }
             return WsReadAction.message(#m);
         }
         return WsReadAction.none();
+    }
+
+    /**
+     * Fail the connection with a `1007` *invalid payload* close (RFC 6455
+     * §8.1) — the reply the engine emits when a text message is not valid
+     * UTF-8. Records the local close so a subsequent inbound close is
+     * idempotent, and carries the `1007` reason out for
+     * [`getCloseReason`](#getCloseReason) / the handler's `onClose`.
+     */
+    #WsReadAction failInvalidUtf8() {
+        this.localCloseSent = true;
+        this.peerClosed = true;
+        WsFrame closeFrame = WsControlFrames.closeCode(WsCloseCode.INVALID_PAYLOAD);
+        String none = "";
+        WsCloseReason reason = WsCloseReason.of(WsCloseCode.INVALID_PAYLOAD,
+                                                none.substring(0, 0));
+        WsCloseReason retained = WsCloseReason.of(WsCloseCode.INVALID_PAYLOAD,
+                                                  none.substring(0, 0));
+        this.closeReason = #retained;
+        return WsReadAction.closed(#reason, #closeFrame);
     }
 
     /**

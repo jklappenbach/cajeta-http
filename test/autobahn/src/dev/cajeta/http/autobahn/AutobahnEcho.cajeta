@@ -1,0 +1,28 @@
+package dev.cajeta.http.autobahn;
+
+import cajeta.lang.String;
+import dev.cajeta.http.ws.WebSocketConnection;
+import dev.cajeta.http.ws.WebSocketHandler;
+import dev.cajeta.http.ws.WsMessage;
+
+/**
+ * The Autobahn testee's echo handler — every reassembled message goes back
+ * verbatim, text as text and binary as binary. The library handles the
+ * protocol edges (control frames, close, fragmentation, permessage-deflate).
+ */
+public final class AutobahnEcho implements WebSocketHandler {
+    public void onConnect(WebSocketConnection conn) {
+    }
+
+    public void onMessage(WebSocketConnection conn, WsMessage message) {
+        if (message.isBinary()) {
+            conn.sendBinary(message.getPayload());
+        } else {
+            String t = message.text();
+            conn.send(t);
+        }
+    }
+
+    public void onClose(WebSocketConnection conn, int32 code) {
+    }
+}

@@ -462,7 +462,15 @@ public class WsFrameDecoder {
         WsFrame[] grown = heap WsFrame[newCap];
         int32 i = 0;
         while (i < this.qCount) {
-            grown[i] = this.queue[(this.qHead + i) % this.qCap];
+            // `#=` TRANSFERS each queued frame into the new store — a plain
+            // `=` would leave the frame owned by the OLD `this.queue`, whose
+            // scope-exit drop (at `this.queue = #grown` below) then reclaims
+            // it, dangling `grown`'s alias. That use-after-free crashed the
+            // 10-ping Autobahn case 2.10 (a length byte read as an object
+            // pointer). Null the vacated slot so the old array's drop is a
+            // no-op for that element.
+            grown[i] #= this.queue[(this.qHead + i) % this.qCap];
+            this.queue[(this.qHead + i) % this.qCap] = null;
             i = i + 1;
         }
         // `#grown` transfers ownership of the fresh backing store into the

@@ -1719,13 +1719,24 @@ the wire.
       (dispatch an upgrade request to a `WebSocketHandler` like an HTTP route),
       and the explicit **concurrent-send interleave** stress test (the write-
       lock mechanism is already in place and shared with the h1 write path).
-- [ ] **4.3** Autobahn conformance: an external-harness runner
-  (`test/autobahn/run.sh`, wstest via docker or pip — a test-fixture
-  dependency only; long suite → the tagged-run discipline from
-  `~/code/CLAUDE.md`) plus a report parser turning the JSON results
-  into pass/fail.
-  - Acceptance: all cases green excluding 12.*/13.* before 4.1 lands,
-    including them after; "non-strict" allowed, no failures.
+- [~] **4.3** Autobahn conformance: the external-harness runner is **done**
+  (`test/autobahn/run.sh` + `config/fuzzingclient.json` + `parse_report.py`
+  + an `AutobahnEchoServer` testee), driving `crossbario/autobahn-testsuite`'s
+  `fuzzingclient` in docker (`--network host`) against our WS **server** and
+  parsing `reports/index.json` into a pass/fail exit code. Tagged-run only.
+  - **Core sections 1–11: 301/301 green, 0 crashes.** The harness caught and
+    (fixed here) **three real bugs**: (1) a `WsFrameDecoder.growQueue`
+    use-after-free — plain `=` copy of owned frames when the >8-frame ring
+    grew, crashing the 10-ping case 2.10 (a length byte deref'd as a
+    pointer); (2) no text-frame **UTF-8 validation** → `Utf8Validator` +
+    a `1007` close (RFC 6455 §8.1), fixing all of §6 (75 cases); (3) no
+    **close-reason UTF-8** check → `1002` (§5.5.1), fixing 7.5.1. WS unit
+    suite still 10/10 (no regression).
+  - **Remaining (blocker):** permessage-deflate cases **12.1 pass (18/18)**
+    but **12.2+ hang** — a specific PMD parameter combo (window bits /
+    context-takeover) makes the server stop responding, stalling the run.
+    Real bug to fix before 4.3 is green. Compression cases are the 12.*/13.*
+    the plan gates on 4.1; the plaintext conformance (1–11) is fully green.
 - [x] **4.4** SSE (`dev.cajeta.http.sse`) — codec (4.4a), server (4.4b),
   client (4.4c) all landed.
   - [x] **4.4a Wire codec.** `SseEvent` (id / event / data / retry)
