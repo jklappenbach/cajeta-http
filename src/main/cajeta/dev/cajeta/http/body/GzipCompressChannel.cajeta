@@ -39,9 +39,24 @@ public final class GzipCompressChannel implements ByteChannel {
     int32 phase;
     boolean closed;
 
+    /** Gzip `src` at the server default compression level (1). */
     public GzipCompressChannel(AsyncReader src) {
         this.src = src;
-        this.def = heap DeflateStream();
+        this.def = heap DeflateStream(1);
+        this.crc = heap Crc32();
+        this.isize = (int64) 0;
+        this.inbuf = heap int8[8192];
+        this.pending = null;
+        this.pendPos = 0;
+        this.pendLen = 0;
+        this.phase = 0;
+        this.closed = false;
+    }
+
+    /** Gzip `src` at an explicit DEFLATE `level` (1 = fastest .. 9 = max ratio). */
+    public GzipCompressChannel(AsyncReader src, int32 level) {
+        this.src = src;
+        this.def = heap DeflateStream(level);
         this.crc = heap Crc32();
         this.isize = (int64) 0;
         this.inbuf = heap int8[8192];

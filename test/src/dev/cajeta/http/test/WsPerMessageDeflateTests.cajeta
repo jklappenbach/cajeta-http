@@ -184,6 +184,34 @@ public final class WsPerMessageDeflateTests {
                "no_context_takeover: both messages decode");
     }
 
+    /** The outbound compression-level knob (default 1, overridable). */
+    static void levels(Check c) {
+        // PmdParams defaults to the server on-the-fly level (1).
+        PmdParams p = heap PmdParams();
+        c.eqInt((int64) p.level, (int64) 1,
+                "PmdParams default outbound compression level is 1");
+
+        String base = "the quick brown fox jumps over the lazy dog. ";
+        String msg = base + base + base + base + base + base + base + base;
+        int8[] mb = msg.toBytes();
+        int32 n = msg.byteLength();
+
+        PerMessageDeflate fast = heap PerMessageDeflate(false, false, 1);
+        PerMessageDeflate best = heap PerMessageDeflate(false, false, 9);
+        int8[] cf = fast.compress(mb, n);
+        int8[] cb = best.compress(mb, n);
+        c.that(cb.count() <= cf.count(),
+               "pmd level 9 is no larger than level 1");
+
+        PerMessageDeflate rxf = heap PerMessageDeflate(false, false);
+        PerMessageDeflate rxb = heap PerMessageDeflate(false, false);
+        int8[] bf = rxf.decompress(cf, (int32) cf.count());
+        int8[] bb = rxb.decompress(cb, (int32) cb.count());
+        c.that(WsPerMessageDeflateTests.strEq(bf, (int32) bf.count(), msg)
+                && WsPerMessageDeflateTests.strEq(bb, (int32) bb.count(), msg),
+               "both pmd levels round-trip byte-exactly");
+    }
+
     // ---- 4.1c: negotiation ------------------------------------------------
 
     static void negotiation(Check c) {
@@ -389,6 +417,7 @@ public final class WsPerMessageDeflateTests {
         WsPerMessageDeflateTests.helloVector(c);
         WsPerMessageDeflateTests.roundTrip(c);
         WsPerMessageDeflateTests.contextTakeover(c);
+        WsPerMessageDeflateTests.levels(c);
         System.stdout.println("-- ws pmd: negotiation --");
         WsPerMessageDeflateTests.negotiation(c);
         System.stdout.println("-- ws pmd: message-layer RSV1 discipline --");

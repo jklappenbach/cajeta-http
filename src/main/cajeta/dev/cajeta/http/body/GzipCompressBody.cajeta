@@ -33,11 +33,17 @@ public final class GzipCompressBody extends Body {
         this.rdr = null;
     }
 
-    /** Wrap `source`, gzipping its content on read; adopts the source. */
+    /** Wrap `source`, gzipping at the server default level (1); adopts source. */
     public static #GzipCompressBody of(#Body source) {
+        return GzipCompressBody.of(#source, 1);
+    }
+
+    /** Wrap `source`, gzipping at DEFLATE `level` (1..9); adopts the source. */
+    public static #GzipCompressBody of(#Body source, int32 level) {
         GzipCompressBody b = heap GzipCompressBody();
         b.source = #source;
-        GzipCompressChannel ch = heap GzipCompressChannel(b.source.reader());
+        GzipCompressChannel ch =
+            heap GzipCompressChannel(b.source.reader(), level);
         b.channel = #ch;
         AsyncReader r = heap AsyncReader(b.channel);
         b.rdr = #r;

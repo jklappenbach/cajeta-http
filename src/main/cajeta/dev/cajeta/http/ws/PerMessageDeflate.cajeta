@@ -26,10 +26,24 @@ public final class PerMessageDeflate {
     InflateStream inflate;
     boolean noContextTakeoverOut;
     boolean noContextTakeoverIn;
+    /** Outbound DEFLATE level 1..9 (see [`PmdParams`](PmdParams.cajeta)). */
+    int32 level;
 
+    /** A connection codec at the server's default compression level (1). */
     public PerMessageDeflate(boolean noContextTakeoverOut,
                              boolean noContextTakeoverIn) {
-        this.deflate = heap DeflateStream();
+        this.level = 1;
+        this.deflate = heap DeflateStream(1);
+        this.inflate = heap InflateStream();
+        this.noContextTakeoverOut = noContextTakeoverOut;
+        this.noContextTakeoverIn = noContextTakeoverIn;
+    }
+
+    /** A connection codec compressing outbound messages at `level` (1..9). */
+    public PerMessageDeflate(boolean noContextTakeoverOut,
+                             boolean noContextTakeoverIn, int32 level) {
+        this.level = level;
+        this.deflate = heap DeflateStream(level);
         this.inflate = heap InflateStream();
         this.noContextTakeoverOut = noContextTakeoverOut;
         this.noContextTakeoverIn = noContextTakeoverIn;
@@ -42,7 +56,7 @@ public final class PerMessageDeflate {
      */
     public #int8[] compress(int8[] data, int32 len) {
         if (this.noContextTakeoverOut) {
-            this.deflate = heap DeflateStream();
+            this.deflate = heap DeflateStream(this.level);
         }
         this.deflate.write(data, len);
         int8[] out = this.deflate.syncFlush();

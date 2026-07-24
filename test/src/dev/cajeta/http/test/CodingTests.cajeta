@@ -95,6 +95,50 @@ public final class CodingTests {
         rejects(c);
         System.stdout.println("-- coding: caps + tokens --");
         capsAndTokens(c);
+        System.stdout.println("-- coding: compression levels --");
+        levels(c);
+    }
+
+    static boolean bytesEqual(int8[] a, int8[] b) {
+        int32 an = (int32) a.count();
+        if (an != (int32) b.count()) { return false; }
+        int32 i = 0;
+        while (i < an) { if (a[i] != b[i]) { return false; } i = i + 1; }
+        return true;
+    }
+
+    /** The DEFLATE-level knob on the content-coding boundary (http:2.2c). */
+    static void levels(Check c) {
+        String base = CodingTests.phrase();
+        String big = base + base + base + base + base;   // ~1.8 KiB, matchy
+        int8[] data = big.toBytes();
+        int32 n = big.byteLength();
+
+        int8[] fast = ContentCoding.encode("gzip", data, n, 1);
+        int8[] best = ContentCoding.encode("gzip", data, n, 9);
+        int32 fn = (int32) fast.count();
+        int32 bn = (int32) best.count();
+        c.that(bn <= fn, "gzip level 9 is no larger than level 1");
+
+        // The no-level encode is the server's level-1 default policy.
+        int8[] dflt = ContentCoding.encode("gzip", data, n);
+        c.that(CodingTests.bytesEqual(dflt, fast),
+            "default gzip encode is level 1");
+
+        // Every level still decodes byte-exactly.
+        int8[] b1 = ContentCoding.decode("gzip", fast, fn, (int64) 1000000);
+        int8[] b9 = ContentCoding.decode("gzip", best, bn, (int64) 1000000);
+        c.that(CodingTests.matchesPhrase(b1, (int32) b1.count(), big),
+            "level-1 gzip decodes to the original");
+        c.that(CodingTests.matchesPhrase(b9, (int32) b9.count(), big),
+            "level-9 gzip decodes to the original");
+
+        // A zlib (`deflate` token) level round-trips too.
+        int8[] z9 = ContentCoding.encode("deflate", data, n, 9);
+        int8[] zb = ContentCoding.decode("deflate", z9, (int32) z9.count(),
+            (int64) 1000000);
+        c.that(CodingTests.matchesPhrase(zb, (int32) zb.count(), big),
+            "level-9 deflate decodes to the original");
     }
 
     static void roundTrips(Check c) {

@@ -16,7 +16,8 @@ import dev.cajeta.http.middleware.Middleware;
  * `Vary: Accept-Encoding`.
  *
  * ```
- * Compression comp = Compression.create().minSize(256);
+ * Compression comp = Compression.create().minSize(256);   // level 1 default
+ * // ...or trade CPU for ratio on cacheable content: .level(9)
  * chain.use(Compression.middleware(comp));
  * ```
  *
@@ -50,12 +51,21 @@ import dev.cajeta.http.middleware.Middleware;
 public class Compression {
     /** Buffered bodies strictly below this many bytes are left uncompressed. */
     int32 minBytes;
+    /**
+     * DEFLATE compression level 1..9 applied to response bodies. Defaults to
+     * **1** — on-the-fly response compression is CPU-in-the-request-path, the
+     * regime where a low level (nginx's `gzip_comp_level 1`) is right: the
+     * ~8pp larger body is trivial on the wire beside the ~2.6x throughput win.
+     * Raise it (via [`level`](#level)) for precompressed/cacheable content.
+     */
+    int32 compLevel;
 
     public Compression() {
         this.minBytes = 256;
+        this.compLevel = 1;
     }
 
-    /** A config with the default 256-byte minimum. */
+    /** A config with the default 256-byte minimum and compression level 1. */
     public static #Compression create() {
         return heap Compression();
     }
@@ -63,6 +73,12 @@ public class Compression {
     /** Set the minimum buffered-body size (bytes) worth compressing. */
     public Compression minSize(int32 n) {
         this.minBytes = n;
+        return this;
+    }
+
+    /** Set the DEFLATE level 1..9 (1 = fastest/default, 9 = max ratio). */
+    public Compression level(int32 n) {
+        this.compLevel = n;
         return this;
     }
 
@@ -94,7 +110,8 @@ public class Compression {
             if (blen < cfg.minBytes) {
                 return #resp;
             }
-            int8[] encoded = ContentCoding.encode(coding, resp.body, blen);
+            int8[] encoded =
+                ContentCoding.encode(coding, resp.body, blen, cfg.compLevel);
             int32 en = encoded.count();
             resp.body = #encoded;
             resp.setHeader("Content-Encoding", coding);
@@ -103,7 +120,7 @@ public class Compression {
         }
 
         if (resp.bodyModel != null && coding.equals("gzip")) {
-            return Compression.compressStreamed(resp);
+            return Compression.compressStreamed(resp, cfg.compLevel);
         }
         return #resp;
     }
@@ -112,10 +129,10 @@ public class Compression {
      * Wrap a streamed response body in a [`GzipCompressBody`](../body/GzipCompressBody.cajeta)
      * so it gzips incrementally as the chunked writer pulls it.
      */
-    static #HttpResponse compressStreamed(HttpResponse resp) {
+    static #HttpResponse compressStreamed(HttpResponse resp, int32 level) {
         Body src #= resp.bodyModel;
         resp.bodyModel = null;
-        GzipCompressBody cb = GzipCompressBody.of(#src);
+        GzipCompressBody cb = GzipCompressBody.of(#src, level);
         resp.bodyModel = #cb;
         resp.setHeader("Content-Encoding", "gzip");
         return #resp;

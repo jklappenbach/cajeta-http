@@ -17,17 +17,25 @@ public final class PmdParams {
     public boolean localNoContextTakeover;
     public boolean peerNoContextTakeover;
     public String responseHeader;
+    /**
+     * Outbound DEFLATE compression level 1..9 — defaults to **1**, the right
+     * choice for on-the-fly per-message compression (low CPU per send; context
+     * takeover already handles repeats). Raise it for a server that sends
+     * large, unique, bandwidth-sensitive messages.
+     */
+    public int32 level;
 
     public PmdParams() {
         this.enabled = false;
         this.localNoContextTakeover = false;
         this.peerNoContextTakeover = false;
         this.responseHeader = "";
+        this.level = 1;
     }
 
     /** A `PerMessageDeflate` codec configured from these params. */
     public #PerMessageDeflate codec() {
         return heap PerMessageDeflate(this.localNoContextTakeover,
-                                      this.peerNoContextTakeover);
+                                      this.peerNoContextTakeover, this.level);
     }
 }

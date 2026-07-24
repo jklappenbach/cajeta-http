@@ -49,11 +49,24 @@ public final class ContentCoding {
      * peer's `Accept-Encoding` — this is mechanism, not negotiation.
      */
     public static #int8[] encode(String token, int8[] data, int32 len) {
+        // On-the-fly server compression defaults to level 1 — the CPU-in-the-
+        // request-path regime where a low level (nginx's `gzip_comp_level 1`)
+        // is right: the ratio delta over level 6 is trivial on the wire next
+        // to the ~2.6x throughput win. Callers wanting max ratio pass a level.
+        return ContentCoding.encode(token, data, len, 1);
+    }
+
+    /**
+     * Encode at an explicit DEFLATE `level` (1 = fastest .. 9 = max ratio; see
+     * [`dev.cajeta.codec.compress.Deflate`]). `identity` ignores it.
+     */
+    public static #int8[] encode(String token, int8[] data, int32 len,
+                                 int32 level) {
         if (token.equals("gzip") || token.equals("x-gzip")) {
-            return Gzip.compress(data, (int64) len);
+            return Gzip.compress(data, (int64) len, level);
         }
         if (token.equals("deflate")) {
-            return Zlib.compress(data, (int64) len);
+            return Zlib.compress(data, (int64) len, level);
         }
         if (token.equals("identity")) {
             return ContentCoding.copy(data, len);
