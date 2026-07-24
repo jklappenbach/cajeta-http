@@ -36,6 +36,10 @@ if [[ ! -f "$CJA" ]]; then
     echo "  $CAJETA_BIN '*' src/main/cajeta build/archive --emit=cja --classpath=$CODEC -o $CJA" >&2
     exit 1
 fi
+# Built at the default O0: cajeta-http currently fails to LINK at any --opt
+# above O0 (missing `*_drop` destructor symbols — a toolchain bug). The codec's
+# speedup is algorithmic (fast Huffman table + bit accumulator + explicit
+# loadU64/storeU64 wide copies), so it lands in full at O0 regardless.
 "$CAJETA_BIN" "dev.cajeta.http.autobahn.AutobahnEchoServer::main" \
     "$HERE/src" "$BUILD_DIR" --emit=exe \
     --classpath="$CJA,$CODEC" -o "$SERVER_BIN"
