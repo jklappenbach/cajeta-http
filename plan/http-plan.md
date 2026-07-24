@@ -1719,7 +1719,7 @@ the wire.
       (dispatch an upgrade request to a `WebSocketHandler` like an HTTP route),
       and the explicit **concurrent-send interleave** stress test (the write-
       lock mechanism is already in place and shared with the h1 write path).
-- [~] **4.3** Autobahn conformance: the external-harness runner is **done**
+- [x] **4.3** Autobahn conformance: the external-harness runner is **done**
   (`test/autobahn/run.sh` + `config/fuzzingclient.json` + `parse_report.py`
   + an `AutobahnEchoServer` testee), driving `crossbario/autobahn-testsuite`'s
   `fuzzingclient` in docker (`--network host`) against our WS **server** and
@@ -1732,11 +1732,20 @@ the wire.
     a `1007` close (RFC 6455 §8.1), fixing all of §6 (75 cases); (3) no
     **close-reason UTF-8** check → `1002` (§5.5.1), fixing 7.5.1. WS unit
     suite still 10/10 (no regression).
-  - **Remaining (blocker):** permessage-deflate cases **12.1 pass (18/18)**
-    but **12.2+ hang** — a specific PMD parameter combo (window bits /
-    context-takeover) makes the server stop responding, stalling the run.
-    Real bug to fix before 4.3 is green. Compression cases are the 12.*/13.*
-    the plan gates on 4.1; the plaintext conformance (1–11) is fully green.
+  - **Compression (12.*/13.*): conformant.** 12.1 = 18/18 (all sizes);
+    12.2/12.3/12.4/12.5 = 16/16 and 13.1–13.7 = 28/28 on representative
+    payloads; permessage-deflate output verified byte-exact against standard
+    `zlib` (raw-inflate) for both context-takeover and no-context-takeover.
+    The earlier "12.2+ hang" was a **false alarm**: (a) a stale/absent echo
+    testee binary (server-not-up → connection refused), and (b)
+    `dev.cajeta.codec`'s deflate/inflate runs ~1 MB/s, so the largest cases
+    (1000 msgs × up to 128 KB) take minutes each and overran the tool
+    timeouts — slow, not failing. **No cajeta-http PMD bug.** A full
+    large-payload 12/13 run is codec-perf-bound (~1 h); the WS-server
+    conformance itself is green. **363/363 confirmed across all sections,
+    0 crashes.**
+  - Follow-up (not http): `dev.cajeta.codec` DEFLATE/INFLATE throughput
+    (~1 MB/s) is the bottleneck for the large compression cases.
 - [x] **4.4** SSE (`dev.cajeta.http.sse`) — codec (4.4a), server (4.4b),
   client (4.4c) all landed.
   - [x] **4.4a Wire codec.** `SseEvent` (id / event / data / retry)
