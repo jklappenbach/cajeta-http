@@ -50,4 +50,16 @@ public class Body {
     public AsyncReader reader() {
         return null;
     }
+
+    /**
+     * Called by the server when it can no longer drain this body — the
+     * peer went away mid-stream and a body chunk failed to write. The
+     * base body has no producer to stop, so this is a no-op; an
+     * open-ended streaming body (e.g. [`SseBody`](../sse/SseBody.cajeta))
+     * overrides it to signal its producing fiber to end (client
+     * disconnect ends the producer). Idempotent.
+     */
+    public void abort() {
+        return;
+    }
 }

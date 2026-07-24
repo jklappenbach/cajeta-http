@@ -1,0 +1,247 @@
+package dev.cajeta.http.sse;
+
+import cajeta.concurrent.Tasks;
+import cajeta.io.net.ByteChannel;
+import cajeta.time.Clock;
+import dev.cajeta.http.HttpException;
+
+/**
+ * The server-side **`text/event-stream` byte source** (plan item **4.4b**) —
+ * a [`ByteChannel`](../../../../../../cajeta/io/net/ByteChannel.cajeta) that
+ * renders [`SseEvent`](SseEvent.cajeta)s to their wire form **one event per
+ * read**, so the streaming server pump
+ * ([`HttpServer.writeExchange`](../server/HttpServer.cajeta)) frames and
+ * **flushes each event as its own chunk** — the peer sees events as they are
+ * produced, never buffered to stream end.
+ *
+ * Two sources feed it:
+ *
+ *   - [`overEvents`](#overEvents) — a **fixed** event list (the
+ *     [`SseResponse.stream`](SseResponse.cajeta#stream) path): serialize each
+ *     in turn, then EOF. No blocking, no producer.
+ *   - [`overChannel`](#overChannel) — a **live**
+ *     [`Channel``<SseEvent>`](../../../../../../cajeta/concurrent/Channel.cajeta)
+ *     (the [`SseResponse.channel`](SseResponse.cajeta#channel) path): each
+ *     read pulls the next event, **blocking** the pump fiber until the
+ *     producer sends one; the channel closing (and draining) is EOF. With a
+ *     positive keep-alive interval, a read that would otherwise wait past the
+ *     interval instead emits a `:` **comment** line (a keep-alive ping that
+ *     resets client idle timers without dispatching an event).
+ *
+ * A serialized event can exceed the pump's read buffer, so bytes are held in
+ * a `pending` slab and drained across as many reads as it takes before the
+ * next event is pulled.
+ *
+ * ## Cancellation
+ *
+ * [`cancel`](#cancel) makes every subsequent (and any in-flight
+ * keep-alive-polling) read report EOF, and — for the channel source —
+ * `close()`s the backing channel so a producer parked in `send()` wakes and
+ * raises. That is the **client-disconnect** path: when a body chunk fails to
+ * write, the server calls [`SseBody.abort`](SseBody.cajeta#abort), which
+ * cancels this channel, ending the producing fiber.
+ *
+ * Read-only: [`writeAllAsync`](#writeAllAsync) raises.
+ */
+public final class SseByteChannel implements ByteChannel {
+
+    // -- source: exactly one of these is active -----------------------------
+    SseChannel ch;             // channel source (borrowed), else null
+    SseEvent[] events;         // fixed source (borrowed), else null
+    int32 evTotal;
+    int32 evIdx;
+
+    // -- keep-alive (channel source only; 0 disables) -----------------------
+    int32 keepAliveMillis;
+
+    // -- pending serialized bytes not yet drained ---------------------------
+    int8[] pending;
+    int32 pendPos;
+    int32 pendLen;
+
+    // -- lifecycle ----------------------------------------------------------
+    boolean done;
+    boolean cancelled;
+
+    SseByteChannel() {
+        this.ch = null;
+        this.events = null;
+        this.evTotal = 0;
+        this.evIdx = 0;
+        this.keepAliveMillis = 0;
+        this.pending = heap int8[0];
+        this.pendPos = 0;
+        this.pendLen = 0;
+        this.done = false;
+        this.cancelled = false;
+    }
+
+    /**
+     * A byte source over a **fixed** list — `events[0 .. n)`, borrowed (the
+     * caller must keep the array and its events alive for the channel's
+     * lifetime). Serialize each in order, then EOF.
+     */
+    public static #SseByteChannel overEvents(SseEvent[] events, int32 n) {
+        SseByteChannel c = heap SseByteChannel();
+        c.events = events;
+        c.evTotal = n;
+        return #c;
+    }
+
+    /**
+     * A byte source over a **live** channel (borrowed). Each read blocks for
+     * the next [`SseEvent`](SseEvent.cajeta); the channel closing is EOF.
+     */
+    public static #SseByteChannel overChannel(SseChannel ch) {
+        SseByteChannel c = heap SseByteChannel();
+        c.ch = ch;
+        return #c;
+    }
+
+    /**
+     * A live-channel byte source that emits a `:` comment keep-alive ping
+     * whenever `keepAliveMillis` elapse with no event to send.
+     */
+    public static #SseByteChannel overChannel(SseChannel ch,
+                                              int32 keepAliveMillis) {
+        SseByteChannel c = heap SseByteChannel();
+        c.ch = ch;
+        c.keepAliveMillis = keepAliveMillis;
+        return #c;
+    }
+
+    /** The keep-alive comment ping bytes (`: keep-alive\n`). */
+    public static #int8[] keepAliveBytes() {
+        String s = ": keep-alive\n";
+        return s.toBytes();
+    }
+
+    // -- ByteChannel --------------------------------------------------------
+
+    public int64 readAsync(int8[] buf, int64 offset, int64 length) {
+        if (this.cancelled || this.done) {
+            return (int64) 0;
+        }
+        if (this.pendPos >= this.pendLen) {
+            if (!this.refill()) {
+                return (int64) 0;
+            }
+        }
+        int64 avail = (int64) (this.pendLen - this.pendPos);
+        int64 n = length;
+        if (n > avail) {
+            n = avail;
+        }
+        int64 i = (int64) 0;
+        while (i < n) {
+            buf[offset + i] = this.pending[this.pendPos + (int32) i];
+            i = i + (int64) 1;
+        }
+        this.pendPos = this.pendPos + (int32) n;
+        return n;
+    }
+
+    public int64 readWithin(int8[] buf, int64 offset, int64 length,
+                            int32 timeoutMs) {
+        return this.readAsync(buf, offset, length);
+    }
+
+    public void writeAllAsync(int8[] data, int64 offset, int64 length) {
+        throw heap HttpException("SseByteChannel is read-only");
+    }
+
+    public void close() {
+        this.cancel();
+    }
+
+    /**
+     * Stop the stream: subsequent reads report EOF, and (channel source) the
+     * backing channel is closed so a parked producer wakes. Idempotent.
+     */
+    public void cancel() {
+        this.cancelled = true;
+        if (this.ch != null) {
+            this.ch.close();
+        }
+    }
+
+    /** Whether the stream has been cancelled (client disconnect). */
+    public boolean isCancelled() {
+        return this.cancelled;
+    }
+
+    // -- refill -------------------------------------------------------------
+
+    // Load the next unit (event or keep-alive comment) into `pending`.
+    // Returns false at end-of-stream.
+    boolean refill() {
+        if (this.events != null) {
+            return this.refillFromEvents();
+        }
+        return this.refillFromChannel();
+    }
+
+    boolean refillFromEvents() {
+        if (this.evIdx >= this.evTotal) {
+            this.done = true;
+            return false;
+        }
+        int8[] wire = this.events[this.evIdx].serialize();
+        this.evIdx = this.evIdx + 1;
+        this.stash(#wire);
+        return true;
+    }
+
+    boolean refillFromChannel() {
+        if (this.keepAliveMillis > 0) {
+            return this.refillPolling();
+        }
+        // Blocking: park until the producer sends, or the channel drains.
+        SseEvent e = this.ch.receive();
+        if (e == null) {
+            this.done = true;
+            return false;
+        }
+        int8[] wire = e.serialize();
+        this.stash(#wire);
+        return true;
+    }
+
+    // Poll for the next event, emitting a keep-alive comment when the
+    // interval elapses with nothing buffered.
+    boolean refillPolling() {
+        int64 deadline = Clock.now().toEpochMilli()
+            + (int64) this.keepAliveMillis;
+        boolean going = true;
+        while (going) {
+            if (this.cancelled) {
+                this.done = true;
+                return false;
+            }
+            SseEvent e = this.ch.tryReceive();
+            if (e != null) {
+                int8[] wire = e.serialize();
+                this.stash(#wire);
+                return true;
+            }
+            if (this.ch.isClosed()) {
+                this.done = true;
+                return false;
+            }
+            int64 now = Clock.now().toEpochMilli();
+            if (now >= deadline) {
+                int8[] ka = SseByteChannel.keepAliveBytes();
+                this.stash(#ka);
+                return true;
+            }
+            Tasks.sleepMillis((int64) 5);
+        }
+        return false;
+    }
+
+    void stash(#int8[] wire) {
+        this.pending #= wire;
+        this.pendPos = 0;
+        this.pendLen = this.pending.count();
+    }
+}

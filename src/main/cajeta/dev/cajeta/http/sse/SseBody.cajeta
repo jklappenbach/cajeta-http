@@ -1,0 +1,68 @@
+package dev.cajeta.http.sse;
+
+import cajeta.io.net.AsyncReader;
+import dev.cajeta.http.MediaType;
+import dev.cajeta.http.body.Body;
+
+/**
+ * The streaming [`Body`](../body/Body.cajeta) an
+ * [`SseResponse`](SseResponse.cajeta) attaches (plan item **4.4b**) — an
+ * unknown-length (chunked-framed) `text/event-stream` body over an
+ * [`SseByteChannel`](SseByteChannel.cajeta).
+ *
+ * It **owns** both the byte channel and the reader over it, so the source
+ * lives as long as the response does (the server pumps the body *after* the
+ * handler returns). [`abort`](#abort) — the server's client-disconnect hook —
+ * cancels the byte channel, which ends any producing fiber.
+ */
+public final class SseBody extends Body {
+
+    SseByteChannel chan;
+    AsyncReader rdr;
+    MediaType type;
+
+    SseBody() {
+        this.chan = null;
+        this.rdr = null;
+        this.type = null;
+    }
+
+    /** Wrap `chan` (adopted); build the reader over it. */
+    public static #SseBody of(#SseByteChannel chan) {
+        SseBody b = heap SseBody();
+        AsyncReader r = heap AsyncReader(chan);
+        b.chan = #chan;
+        b.rdr = #r;
+        b.type = MediaType.parse("text/event-stream");
+        return #b;
+    }
+
+    /** Unknown length → chunked framing. */
+    public int64 contentLength() {
+        return (int64) 0 - (int64) 1;
+    }
+
+    public MediaType contentType() {
+        return this.type;
+    }
+
+    /** The reader over the event byte source — same instance every call. */
+    public AsyncReader reader() {
+        return this.rdr;
+    }
+
+    /**
+     * Client-disconnect hook: cancel the byte source. A producer parked in
+     * `Channel.send` wakes and raises; the pump stops. Idempotent.
+     */
+    public void abort() {
+        if (this.chan != null) {
+            this.chan.cancel();
+        }
+    }
+
+    /** The underlying byte source (for cancellation wiring / tests). */
+    public SseByteChannel channel() {
+        return this.chan;
+    }
+}

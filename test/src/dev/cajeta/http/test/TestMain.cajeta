@@ -66,6 +66,8 @@ public final class TestMain {
         WsConnectTests.run(c);
         WsHandlerTests.run(c);
         SseTests.run(c);
+        SseServerTests.run(c);
+        SseServerLoopbackTests.run(c);
 
         System.stdout.println("");
         System.stdout.println("=== {} passed, {} failed ===",

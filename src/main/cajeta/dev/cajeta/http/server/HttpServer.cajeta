@@ -1323,15 +1323,23 @@ public class HttpServer {
             AsyncReader r = b.reader();
             int8[] scratch = heap int8[8192];
             boolean going = true;
-            while (going) {
-                int32 got = r.read(scratch, 0, 8192);
-                if (got <= 0) {
-                    going = false;
-                } else {
-                    w.write(scratch, got);
+            try {
+                while (going) {
+                    int32 got = r.read(scratch, 0, 8192);
+                    if (got <= 0) {
+                        going = false;
+                    } else {
+                        w.write(scratch, got);
+                    }
                 }
+                w.finish();
+            } catch (Exception e) {
+                // The peer went away mid-stream (a body chunk failed to
+                // write, or the read side faulted). Tell the body so an
+                // open-ended producer (e.g. SSE) ends its fiber, then let
+                // the connection tear down.
+                b.abort();
             }
-            w.finish();
             return;
         }
         KeepAlive.applyConnectionHeader(response.getHeaders(),

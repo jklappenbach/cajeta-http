@@ -1,0 +1,134 @@
+package dev.cajeta.http.test;
+
+import cajeta.concurrent.Tasks;
+import cajeta.io.net.Server;
+import cajeta.io.net.TcpStream;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.client.HttpClient;
+import dev.cajeta.http.server.HttpServer;
+import dev.cajeta.http.server.HttpServerBuilder;
+import dev.cajeta.http.sse.SseChannel;
+import dev.cajeta.http.sse.SseEvent;
+import dev.cajeta.http.sse.SseParser;
+import dev.cajeta.http.sse.SseResponse;
+
+/**
+ * http:4.4b — the **SSE server over loopback**: a producer fiber pushes
+ * events onto a shared [`SseChannel`](../../../sse/SseChannel.cajeta), the
+ * handler returns [`SseResponse.channel`](../../../sse/SseResponse.cajeta#channel),
+ * and the streaming pump frames each event chunked on the wire. A real
+ * [`HttpClient`](../../../client/HttpClient.cajeta) reads the whole
+ * `text/event-stream` back, and the same [`SseParser`](../../../sse/SseParser.cajeta)
+ * recovers exactly the events that were sent — proving the channel → pump →
+ * chunk-framing → client → parse path end to end.
+ *
+ * Rides the streaming pump `ServerStreamingTests` already exercises; the
+ * per-event flush + client-disconnect abort are unit-proven socket-free in
+ * `SseServerTests` (the disconnect timing is too racy to assert over a real
+ * socket without flakiness).
+ */
+public final class SseServerLoopbackTests {
+
+    /** Shared source: outlives the handler frame (the pump runs after it). */
+    public static final class SseHolder {
+        public SseChannel ch;
+        public SseHolder(int32 cap) {
+            SseChannel c = heap SseChannel(cap);
+            this.ch = #c;
+        }
+    }
+
+    static SseHolder src = null;
+
+    // ---- fibers ----------------------------------------------------------
+
+    /** Accept one connection and dispatch it (local copy — bare-spawn rule). */
+    public static async int32 acceptAndDispatch(Server core) {
+        TcpStream conn #= core.acceptNext();
+        core.dispatch(#conn);
+        return 1;
+    }
+
+    /** Producer: push three events (one multi-line), then close the stream. */
+    public static async int32 produce(SseChannel ch) {
+        SseEvent e0 = SseEvent.of("first");
+        ch.send(#e0);
+        SseEvent e1 = SseEvent.typed("tick", "2");
+        ch.send(#e1);
+        SseEvent e2 = SseEvent.of("multi\nline");
+        ch.send(#e2);
+        ch.close();
+        return 1;
+    }
+
+    public static #HttpResponse handleSse(HttpRequest req) {
+        return SseResponse.channel(SseServerLoopbackTests.src.ch);
+    }
+
+    /** GET the SSE stream and recover the events with the parser. */
+    public static async int32 getSse(int32 port) {
+        HttpClient client = heap HttpClient();
+        String url = "http://127.0.0.1:" + port + "/events";
+        HttpResponse resp = client.get(url);
+        if (resp.statusCode() != 200) {
+            return -1;
+        }
+        String ct = resp.getHeaders().get("Content-Type");
+        if (ct == null || !ct.equals("text/event-stream")) {
+            return -2;
+        }
+        SseParser p = heap SseParser();
+        p.feed(resp.body, resp.bodyLength());
+        if (!p.hasEvent()) {
+            return -3;
+        }
+        SseEvent a = p.nextEvent();
+        if (!a.data.equals("first")) {
+            return -4;
+        }
+        SseEvent b = p.nextEvent();
+        if (b.event == null || !b.event.equals("tick") || !b.data.equals("2")) {
+            return -5;
+        }
+        SseEvent g = p.nextEvent();
+        if (!g.data.equals("multi\nline")) {
+            return -6;
+        }
+        if (p.hasEvent()) {
+            return -7;
+        }
+        return 1;
+    }
+
+    // ---- scenario --------------------------------------------------------
+
+    static void channelOverLoopback(Check c) {
+        scope {
+            SseHolder hold = heap SseHolder(8);
+            SseServerLoopbackTests.src #= hold;
+
+            HttpServerBuilder b = HttpServer.builder();
+            b.bind("127.0.0.1:0");
+            (HttpRequest) -> #HttpResponse h =
+                (req) -> SseServerLoopbackTests.handleSse(req);
+            b.handler(h);
+            HttpServer srv = b.build();
+            Server core = srv.server;
+            int32 port = core.listener.boundPort();
+
+            Task<int32> pr = spawn produce(SseServerLoopbackTests.src.ch);
+            Task<int32> s1 = spawn acceptAndDispatch(core);
+            Task<int32> t1 = spawn getSse(port);
+            c.eqInt((int64) await t1, 1,
+                    "channel-pushed SSE events round-trip over loopback");
+            c.eqInt((int64) await s1, 1, "the SSE exchange rode one connection");
+            c.eqInt((int64) await pr, 1, "the producer fiber completed");
+        }
+    }
+
+    public static void run(Check c) {
+        System.stdout.println("-- sse server loopback: channel over the wire --");
+        SseServerLoopbackTests.channelOverLoopback(c);
+    }
+}

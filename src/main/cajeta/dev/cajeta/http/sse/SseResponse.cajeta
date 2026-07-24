@@ -1,0 +1,93 @@
+package dev.cajeta.http.sse;
+
+import cajeta.lang.String;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+
+/**
+ * Builds a **Server-Sent Events response** (plan item **4.4b**) — a `200`
+ * with the `text/event-stream` content type and the caching headers the
+ * WHATWG spec and every proxy expect (`Cache-Control: no-cache`,
+ * `Connection: keep-alive`), streaming its body one
+ * [`SseEvent`](SseEvent.cajeta) at a time through an
+ * [`SseByteChannel`](SseByteChannel.cajeta) / [`SseBody`](SseBody.cajeta) so
+ * events reach the client incrementally (chunked framing, flushed per event),
+ * never buffered to stream end.
+ *
+ * ```cajeta
+ * // Fixed sequence:
+ * SseEvent[] evs = { SseEvent.of("hello"), SseEvent.typed("tick", "1") };
+ * return SseResponse.stream(evs, 2);
+ *
+ * // Live producer (a fiber sends onto `ch`; closing it ends the stream):
+ * SseChannel ch = heap SseChannel(8);
+ * return SseResponse.channel(ch);            // borrows ch — keep it alive
+ * ```
+ *
+ * [`lastEventId`](#lastEventId) reads a reconnecting client's
+ * `Last-Event-ID` request header (the resume point) — null when absent.
+ */
+public final class SseResponse {
+
+    SseResponse() {
+        return;
+    }
+
+    // -- builders -----------------------------------------------------------
+
+    /**
+     * A streamed response over a **fixed** event list `events[0 .. n)`
+     * (borrowed — keep it alive until the response finishes streaming). Each
+     * event is one chunk on the wire; EOF after the last.
+     */
+    public static #HttpResponse stream(SseEvent[] events, int32 n) {
+        SseByteChannel bc = SseByteChannel.overEvents(events, n);
+        return SseResponse.build(#bc);
+    }
+
+    /**
+     * A streamed response over a **live** [`SseChannel`](SseChannel.cajeta)
+     * (borrowed — keep it alive until the response finishes streaming). A
+     * producer fiber [`send`](SseChannel.cajeta#send)s events; each arrives as
+     * its own chunk; closing the channel ends the stream.
+     */
+    public static #HttpResponse channel(SseChannel ch) {
+        SseByteChannel bc = SseByteChannel.overChannel(ch);
+        return SseResponse.build(#bc);
+    }
+
+    /**
+     * A live-channel streamed response that also emits a `:` comment
+     * keep-alive whenever `keepAliveMillis` pass with no event to send.
+     */
+    public static #HttpResponse channel(SseChannel ch,
+                                        int32 keepAliveMillis) {
+        SseByteChannel bc = SseByteChannel.overChannel(ch, keepAliveMillis);
+        return SseResponse.build(#bc);
+    }
+
+    static #HttpResponse build(#SseByteChannel bc) {
+        SseBody body = SseBody.of(#bc);
+        HttpResponse resp = HttpResponse.ok();
+        resp.setHeader("Content-Type", "text/event-stream");
+        resp.setHeader("Cache-Control", "no-cache");
+        resp.setHeader("Connection", "keep-alive");
+        resp.body(#body);
+        return #resp;
+    }
+
+    // -- request view -------------------------------------------------------
+
+    /**
+     * A reconnecting client's `Last-Event-ID` header — the id it wants to
+     * resume after — or null when the header is absent. The server hands
+     * this to the producer so it can replay from that point.
+     */
+    public static #String lastEventId(HttpRequest req) {
+        String v = req.getHeaders().get("Last-Event-ID");
+        if (v == null) {
+            return null;
+        }
+        return #v;
+    }
+}

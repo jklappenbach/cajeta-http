@@ -1,0 +1,137 @@
+package dev.cajeta.http.sse;
+
+/**
+ * An **owning** bounded MPMC queue of [`SseEvent`](SseEvent.cajeta)s — the
+ * producer→server handoff for a live [`SseResponse.channel`](SseResponse.cajeta#channel)
+ * stream (plan item **4.4b**).
+ *
+ * ## Why not `cajeta.concurrent.Channel<SseEvent>`
+ *
+ * The plan named the stdlib channel, but `cajeta.concurrent.Channel` is — by
+ * its own doc — a **borrow** channel that "v1 targets value/primitive `T`":
+ * `send` stores a borrow-alias and `receive` hands ownership out, so for a
+ * **heap** element like `SseEvent` the sender and the receiver both believe
+ * they own the object (double-free), and a `#`-move into `send` frees the
+ * event before the reader ever sees it. This queue is the "owning channel —
+ * `#=` on the way in, a fused claim on the way out" the stdlib doc defers:
+ * `send` **takes ownership** (`#SseEvent`), `receive` **transfers it back
+ * out**, so every event has exactly one owner at every instant. See
+ * [[cajeta-stdlib-wrinkles-http-extraction]].
+ *
+ * Built on the same lock + condition-variable intrinsics
+ * (`Cajeta.lock*`/`Cajeta.condvar*`) as the stdlib channel: [`send`](#send)
+ * parks while full, [`receive`](#receive) parks while empty, and
+ * [`close`](#close) is a one-way wake that lets a drained reader see EOF
+ * (`null`). [`tryReceive`](#tryReceive) is the non-blocking form the
+ * keep-alive poll uses.
+ */
+public final class SseChannel {
+    pointer handle;   // lock
+    pointer cond;     // condition variable
+    SseEvent[] buf;   // ring buffer — OWNS its live slots
+    int32 capacity;
+    int32 head;
+    int32 tail;
+    int32 size;
+    boolean closed;
+
+    /** An open channel holding at most `capacity` events before `send` parks. */
+    public SseChannel(int32 capacity) {
+        this.handle = Cajeta.lockNew();
+        this.cond = Cajeta.condvarNew();
+        this.capacity = capacity;
+        this.buf = heap SseEvent[capacity];
+        this.head = 0;
+        this.tail = 0;
+        this.size = 0;
+        this.closed = false;
+    }
+
+    /** Free the primitives; drop any events still buffered (owned). */
+    public ~SseChannel() {
+        while (this.size > 0) {
+            SseEvent e #= this.buf[this.head];
+            this.head = (this.head + 1) % this.capacity;
+            this.size = this.size - 1;
+        }
+        Cajeta.condvarDestroy(this.cond);
+        Cajeta.lockDestroy(this.handle);
+    }
+
+    /**
+     * Enqueue `e` (ownership taken), parking the calling fiber while the
+     * buffer is full and the channel open. Raises `1` if the channel is
+     * closed.
+     */
+    public void send(#SseEvent e) {
+        Cajeta.lockAcquire(this.handle);
+        while (this.size >= this.capacity && !this.closed) {
+            Cajeta.condvarWait(this.cond, this.handle);
+        }
+        if (this.closed) {
+            Cajeta.lockRelease(this.handle);
+            throw 1;
+        }
+        this.buf[this.tail] #= #e;
+        this.tail = (this.tail + 1) % this.capacity;
+        this.size = this.size + 1;
+        Cajeta.condvarNotifyAll(this.cond);
+        Cajeta.lockRelease(this.handle);
+    }
+
+    /**
+     * Dequeue the next event (ownership transferred out), parking while the
+     * buffer is empty and the channel open. Returns `null` once the channel
+     * is closed **and** drained.
+     */
+    public #SseEvent receive() {
+        Cajeta.lockAcquire(this.handle);
+        while (this.size == 0 && !this.closed) {
+            Cajeta.condvarWait(this.cond, this.handle);
+        }
+        if (this.size == 0) {
+            Cajeta.lockRelease(this.handle);
+            return null;
+        }
+        SseEvent e #= this.buf[this.head];
+        this.head = (this.head + 1) % this.capacity;
+        this.size = this.size - 1;
+        Cajeta.condvarNotifyAll(this.cond);
+        Cajeta.lockRelease(this.handle);
+        return #e;
+    }
+
+    /**
+     * Non-blocking dequeue: the next event if one is buffered right now,
+     * else `null` (even while still open — distinguish via [`isClosed`](#isClosed)).
+     */
+    public #SseEvent tryReceive() {
+        Cajeta.lockAcquire(this.handle);
+        if (this.size == 0) {
+            Cajeta.lockRelease(this.handle);
+            return null;
+        }
+        SseEvent e #= this.buf[this.head];
+        this.head = (this.head + 1) % this.capacity;
+        this.size = this.size - 1;
+        Cajeta.condvarNotifyAll(this.cond);
+        Cajeta.lockRelease(this.handle);
+        return #e;
+    }
+
+    /** One-way close; wakes every parked sender/receiver to re-check. */
+    public void close() {
+        Cajeta.lockAcquire(this.handle);
+        this.closed = true;
+        Cajeta.condvarNotifyAll(this.cond);
+        Cajeta.lockRelease(this.handle);
+    }
+
+    /** Snapshot of the closed bit (does not imply drained). */
+    public boolean isClosed() {
+        Cajeta.lockAcquire(this.handle);
+        boolean c = this.closed;
+        Cajeta.lockRelease(this.handle);
+        return c;
+    }
+}

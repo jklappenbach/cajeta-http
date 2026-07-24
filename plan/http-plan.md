@@ -1732,14 +1732,29 @@ the wire.
     CR/LF/CRLF tolerance, UTF-8 + BOM tolerance.
     - TDD: golden vectors both directions (the WHATWG parsing
       examples); field-order and unknown-field tolerance.
-  - [ ] **4.4b Server.** `SseResponse.stream(events)` and
-    `.channel(Channel<SseEvent>)` (stdlib `cajeta.concurrent.Channel`):
-    `text/event-stream` + no-cache headers, flush per event, periodic
-    comment keep-alive, `Last-Event-ID` request view, client
-    disconnect ends the producing fiber.
-    - TDD: channel-pushed events arrive incrementally over loopback
-      (not buffered to stream end); disconnect stops the producer;
-      keep-alive cadence.
+  - [x] **4.4b Server.** `SseResponse.stream(events)` and
+    `.channel(SseChannel)`: `text/event-stream` + no-cache headers, flush
+    per event (one `SseByteChannel` read = one flushed chunk), periodic
+    comment keep-alive, `Last-Event-ID` request view (`SseResponse.lastEventId`),
+    client disconnect ends the producing fiber (`SseBody.abort` → cancel →
+    `SseChannel.close`, wired into `HttpServer.writeExchange`'s streaming
+    pump).
+    - TDD: `SseServerTests` (35 socket-free + loopback checks, 40× clean):
+      fixed list + live channel round-trip through the parser, header shape,
+      `Last-Event-ID`, keep-alive comment emission, cancellation; and
+      `SseServerLoopbackTests` — channel-pushed events round-trip over a real
+      socket. The disconnect→abort path is unit-proven (cancellation check);
+      strict per-event arrival timing is left to the pump (`ServerStreamingTests`)
+      rather than asserted over a racy socket.
+    - **Deviation (stdlib gap):** the plan named stdlib
+      `cajeta.concurrent.Channel<SseEvent>`, but that channel is a *borrow*
+      channel ("v1 targets value/primitive `T`") — for a heap `SseEvent` the
+      sender and receiver both claim ownership (double-free), and a `#`-move
+      into `send` frees the event before the reader sees it (empirically:
+      SIGSEGV, garbage read). cajeta-http ships its own **owning**
+      `SseChannel` (`#=` in, `#` claim out) — the "owning channel" the stdlib
+      doc explicitly defers. Revisit if/when stdlib `Channel` gains owned-`T`
+      support.
   - [ ] **4.4c Client.** `SseClient.subscribe(url)` → event iteration;
     auto-reconnect honoring `retry:` and replaying `Last-Event-ID`;
     an explicit stop/close surface.
