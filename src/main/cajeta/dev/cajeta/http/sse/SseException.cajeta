@@ -1,0 +1,20 @@
+package dev.cajeta.http.sse;
+
+import cajeta.lang.String;
+import dev.cajeta.http.HttpException;
+
+/**
+ * A **Server-Sent Events protocol error** (plan item **4.4c**) — the clean
+ * failure an [`SseClient`](SseClient.cajeta) raises when a subscription cannot
+ * proceed: a non-`200` status, or a response whose `Content-Type` is not
+ * `text/event-stream`. Distinct from a transport drop (which is *normal* for
+ * SSE and triggers a reconnect, not this) — this is a terminal, don't-retry
+ * condition.
+ */
+public class SseException extends HttpException {
+    public SseException(String message) {
+        this.message = message;
+        this.cause = 0;
+        this.kind = 12;   // NetException.KIND_INVALID (via HttpException)
+    }
+}

@@ -1,0 +1,255 @@
+package dev.cajeta.http.sse;
+
+import cajeta.concurrent.Tasks;
+import cajeta.io.net.IpAddress;
+import cajeta.io.net.NetException;
+import cajeta.io.net.SocketAddress;
+import cajeta.io.net.dns.Dns;
+import cajeta.io.net.dns.ResolveFamily;
+import cajeta.io.net.TcpStream;
+import cajeta.io.net.uri.Uri;
+import cajeta.lang.String;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.MediaType;
+import dev.cajeta.http.h1.BodyFraming;
+import dev.cajeta.http.h1.BodyReader;
+import dev.cajeta.http.h1.HttpParser;
+import dev.cajeta.http.h1.HttpSerializer;
+
+/**
+ * A **Server-Sent Events client** (plan item **4.4c**) — subscribe to a
+ * `text/event-stream` endpoint and receive [`SseEvent`](SseEvent.cajeta)s as
+ * they arrive, with the WHATWG reconnection behaviour built in:
+ *
+ *   - [`subscribe`](#subscribe) opens the stream and delivers each event to a
+ *     callback; when the stream drops (a normal EOF *or* a transport reset —
+ *     SSE streams are meant to be reconnected, not treated as errors) it
+ *     **reconnects** after the reconnection delay, replaying the last seen id
+ *     as `Last-Event-ID` so the server resumes where it left off.
+ *   - the reconnection delay is the server's `retry:` value once seen, else
+ *     [`defaultRetryMillis`](#defaultRetryMillis) (WHATWG default 3 s here).
+ *   - [`stop`](#stop) ends the loop from another fiber; [`subscribeOnce`](#subscribeOnce)
+ *     rides a single connection with no reconnect.
+ *   - a non-`200` status or a non-`text/event-stream` content type is a
+ *     **terminal** [`SseException`](SseException.cajeta) (not a reconnect).
+ *
+ * The decode + reconnection **state** lives in an [`SseDecoder`](SseDecoder.cajeta)
+ * (last id, retry), so [`buildRequest`](#buildRequest) /
+ * [`checkHead`](#checkHead) / [`reconnectDelayMillis`](#reconnectDelayMillis)
+ * are pure and testable without a socket. v1 is **plaintext** (`http`); TLS
+ * (`https`) SSE is a follow-up.
+ */
+public final class SseClient {
+    Uri uri;
+    String host;
+    int32 port;
+    SseDecoder decoder;
+    int32 defaultRetryMs;
+    boolean stopped;
+
+    /** Subscribe to `url` (an `http://…` event-stream endpoint). */
+    public SseClient(String url) {
+        Uri u = Uri.parse(url);
+        this.uri = #u;
+        String h = this.uri.getHost();
+        this.host = h.substring(0, h.byteLength());
+        int32 p = this.uri.getPort();
+        if (p <= 0) {
+            p = 80;
+        }
+        this.port = p;
+        this.decoder = heap SseDecoder();
+        this.defaultRetryMs = 3000;
+        this.stopped = false;
+    }
+
+    /** Override the fallback reconnection delay (ms) used until a `retry:`. */
+    public SseClient defaultRetryMillis(int32 ms) {
+        this.defaultRetryMs = ms;
+        return this;
+    }
+
+    /** Seed `Last-Event-ID` for the first request (resume a prior stream). */
+    public SseClient resumeFrom(String lastEventId) {
+        this.decoder.seedLastId(lastEventId);
+        return this;
+    }
+
+    // -- pure policy (socket-free) -----------------------------------------
+
+    /**
+     * The `GET` this client issues: origin-form target + `Host` from the URL,
+     * `Accept: text/event-stream`, `Cache-Control: no-cache`, and —
+     * when resuming — `Last-Event-ID` set to the last seen event id.
+     */
+    public #HttpRequest buildRequest() {
+        HttpRequest req = HttpRequest.fromUri("GET", this.uri);
+        req.setHeader("Accept", "text/event-stream");
+        req.setHeader("Cache-Control", "no-cache");
+        String last = this.decoder.lastEventId();
+        if (last != null) {
+            req.setHeader("Last-Event-ID", last);
+        }
+        return #req;
+    }
+
+    /**
+     * Validate a response head: a `200` whose `Content-Type` is
+     * `text/event-stream`. Anything else is a terminal
+     * [`SseException`](SseException.cajeta) — the caller must not reconnect.
+     */
+    public void checkHead(HttpResponse resp) {
+        if (resp.statusCode() != 200) {
+            throw heap SseException("SSE: non-200 response ("
+                + resp.statusCode() + ")");
+        }
+        MediaType ct = resp.contentType();
+        if (ct == null || !ct.is("text", "event-stream")) {
+            throw heap SseException(
+                "SSE: response is not text/event-stream");
+        }
+    }
+
+    /** The current reconnection delay (server `retry:` if seen, else default). */
+    public int32 reconnectDelayMillis() {
+        int32 r = this.decoder.retryMillis();
+        if (r >= 0) {
+            return r;
+        }
+        return this.defaultRetryMs;
+    }
+
+    /** The last event id seen (replayed on reconnect), or null. */
+    public String lastEventId() {
+        return this.decoder.lastEventId();
+    }
+
+    /** Ask the [`subscribe`](#subscribe) loop to end after the current pass. */
+    public void stop() {
+        this.stopped = true;
+    }
+
+    /** Whether [`stop`](#stop) has been requested. */
+    public boolean isStopped() {
+        return this.stopped;
+    }
+
+    // -- live subscription --------------------------------------------------
+
+    /**
+     * Open the stream and deliver each event to `onEvent`, reconnecting on
+     * drop (after [`reconnectDelayMillis`](#reconnectDelayMillis), replaying
+     * `Last-Event-ID`) until [`stop`](#stop). A terminal
+     * [`SseException`](SseException.cajeta) (bad status/type) propagates out.
+     */
+    public void subscribe((SseEvent) -> void onEvent) {
+        this.stopped = false;
+        boolean going = true;
+        while (going) {
+            try {
+                this.runOnce(onEvent);
+            } catch (SseException se) {
+                throw se;
+            } catch (NetException ne) {
+                // Transport drop / connect failure: reconnect below.
+            }
+            if (this.stopped) {
+                going = false;
+            } else {
+                Tasks.sleepMillis((int64) this.reconnectDelayMillis());
+            }
+        }
+    }
+
+    /** Ride a single connection: deliver events until the stream ends. */
+    public void subscribeOnce((SseEvent) -> void onEvent) {
+        this.stopped = false;
+        this.runOnce(onEvent);
+    }
+
+    // One connection: GET, validate, then pump the body into the decoder.
+    void runOnce((SseEvent) -> void onEvent) {
+        TcpStream conn #= SseClient.connect(this.host, this.port);
+        try {
+            int8[] reqBytes = HttpSerializer.request(this.buildRequest());
+            conn.writeAllAsync(reqBytes, (int64) 0, (int64) reqBytes.count());
+
+            HttpParser parser = HttpParser.forResponse();
+            int8[] scratch = heap int8[8192];
+            boolean heading = true;
+            while (heading) {
+                if (parser.isComplete()) {
+                    heading = false;
+                } else {
+                    int64 n = conn.readAsync(scratch, (int64) 0, (int64) 8192);
+                    if (n <= (int64) 0) {
+                        parser.endInput();
+                        heading = false;
+                    } else {
+                        parser.feed(scratch, (int32) n);
+                    }
+                }
+            }
+
+            HttpResponse resp = parser.takeResponse();
+            this.checkHead(resp);
+
+            BodyFraming framing = parser.getFraming();
+            BodyReader body = BodyReader.forFraming(framing);
+            int32 lo = parser.leftoverLength();
+            if (lo > 0) {
+                body.feed(parser.leftover(), lo);
+            }
+            this.pumpBody(body, conn, scratch, onEvent);
+        } finally {
+            conn.close();
+        }
+    }
+
+    void pumpBody(BodyReader body, TcpStream conn, int8[] scratch,
+                  (SseEvent) -> void onEvent) {
+        this.drainToEvents(body, onEvent);
+        boolean going = true;
+        while (going) {
+            if (body.isComplete() || this.stopped) {
+                going = false;
+            } else {
+                int64 n = conn.readAsync(scratch, (int64) 0, (int64) 8192);
+                if (n <= (int64) 0) {
+                    body.endInput();
+                } else {
+                    body.feed(scratch, (int32) n);
+                }
+                this.drainToEvents(body, onEvent);
+            }
+        }
+    }
+
+    void drainToEvents(BodyReader body, (SseEvent) -> void onEvent) {
+        int8[] piece = body.drain();
+        int32 pl = piece.count();
+        if (pl > 0) {
+            this.decoder.feed(piece, pl);
+        }
+        while (this.decoder.hasEvent()) {
+            SseEvent e = this.decoder.nextEvent();
+            onEvent(e);
+        }
+    }
+
+    // Resolve `host` (IPv4) and open a blocking-friendly connection to `port`.
+    static #TcpStream connect(String host, int32 port) {
+        SocketAddress[] addrs = Dns.resolve(host, port, ResolveFamily.V4_ONLY);
+        SocketAddress a0 = addrs[0];
+        IpAddress ip = a0.getIp();
+        int8[] oct = ip.getOctets();
+        int32 olen = 16;
+        if (ip.isV4()) {
+            olen = 4;
+        }
+        IpAddress ipCopy = IpAddress.fromOctets(oct, olen);
+        SocketAddress connAddr = SocketAddress.of(#ipCopy, port);
+        return TcpStream.connectAsync(#connAddr);
+    }
+}

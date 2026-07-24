@@ -1726,12 +1726,14 @@ the wire.
   into pass/fail.
   - Acceptance: all cases green excluding 12.*/13.* before 4.1 lands,
     including them after; "non-strict" allowed, no failures.
-- [ ] **4.4** SSE (`dev.cajeta.http.sse`).
-  - [ ] **4.4a Wire codec.** `SseEvent` (id / event / data / retry)
+- [x] **4.4** SSE (`dev.cajeta.http.sse`) — codec (4.4a), server (4.4b),
+  client (4.4c) all landed.
+  - [x] **4.4a Wire codec.** `SseEvent` (id / event / data / retry)
     serialize + parse: multi-line `data:`, comment lines (keep-alive),
     CR/LF/CRLF tolerance, UTF-8 + BOM tolerance.
     - TDD: golden vectors both directions (the WHATWG parsing
-      examples); field-order and unknown-field tolerance.
+      examples); field-order and unknown-field tolerance. `SseTests`
+      (17 socket-free).
   - [x] **4.4b Server.** `SseResponse.stream(events)` and
     `.channel(SseChannel)`: `text/event-stream` + no-cache headers, flush
     per event (one `SseByteChannel` read = one flushed chunk), periodic
@@ -1755,12 +1757,22 @@ the wire.
       `SseChannel` (`#=` in, `#` claim out) — the "owning channel" the stdlib
       doc explicitly defers. Revisit if/when stdlib `Channel` gains owned-`T`
       support.
-  - [ ] **4.4c Client.** `SseClient.subscribe(url)` → event iteration;
-    auto-reconnect honoring `retry:` and replaying `Last-Event-ID`;
-    an explicit stop/close surface.
-    - TDD: a server-dropped stream reconnects and resumes from the last
-      id; `retry:` honored (asserted via injected timing, not
-      wall-clock sleeps); non-200 or wrong content-type → clean error.
+  - [x] **4.4c Client.** `SseClient.subscribe(onEvent)` delivers events with
+    auto-reconnect (on EOF *or* transport drop) honoring `retry:` and
+    replaying `Last-Event-ID`; `subscribeOnce` for a single connection;
+    `stop()` to end from another fiber. `SseDecoder` folds `id`/`retry` into
+    reconnection state; `SseException` for the terminal non-200 /
+    wrong-content-type case. v1 is plaintext (`http`); `https` SSE is a
+    follow-up.
+    - TDD: `SseClientTests` (21 socket-free) — decoder tracks id/retry across
+      byte splits + seed; the resume request carries `Accept` +
+      `Last-Event-ID`; `checkHead` accepts 200 `text/event-stream` (charset
+      param tolerated) and raises a terminal `SseException` on non-200 /
+      wrong type; `reconnectDelayMillis` = default until a `retry:`.
+      `SseClientLoopbackTests` — a two-part stream split across two
+      connections is delivered as one `abcd` sequence, the client reconnecting
+      and resuming from `Last-Event-ID: 2` (40× clean). Retry timing is
+      asserted via the pure `reconnectDelayMillis`, not wall-clock.
 
 ## 5 — HTTP/3 (deferred)
 

@@ -1,0 +1,20 @@
+package dev.cajeta.http.test;
+
+import cajeta.lang.String;
+import dev.cajeta.http.sse.SseClient;
+
+/**
+ * Shared collector for the SSE-client loopback test — borrowed into the
+ * subscriber fiber (fiber-sharing by borrow + `scope` join). `seq` accrues
+ * each event's data in arrival order; `client` is the borrowed subscriber the
+ * callback stops once the full sequence has arrived.
+ */
+public final class SseCollectBox {
+    public String seq;
+    public SseClient client;
+
+    public SseCollectBox() {
+        this.seq = "";
+        this.client = null;
+    }
+}

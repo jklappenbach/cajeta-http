@@ -17,7 +17,7 @@ import dev.cajeta.http.HttpResponse;
  * ```cajeta
  * // Fixed sequence:
  * SseEvent[] evs = { SseEvent.of("hello"), SseEvent.typed("tick", "1") };
- * return SseResponse.stream(evs, 2);
+ * return SseResponse.stream(#evs, 2);
  *
  * // Live producer (a fiber sends onto `ch`; closing it ends the stream):
  * SseChannel ch = heap SseChannel(8);
@@ -36,12 +36,12 @@ public final class SseResponse {
     // -- builders -----------------------------------------------------------
 
     /**
-     * A streamed response over a **fixed** event list `events[0 .. n)`
-     * (borrowed — keep it alive until the response finishes streaming). Each
-     * event is one chunk on the wire; EOF after the last.
+     * A streamed response over a **fixed** event list `events[0 .. n)` (moved
+     * in — the response owns it, so a handler may build the list on its stack
+     * and hand it off). EOF after the last event.
      */
-    public static #HttpResponse stream(SseEvent[] events, int32 n) {
-        SseByteChannel bc = SseByteChannel.overEvents(events, n);
+    public static #HttpResponse stream(#SseEvent[] events, int32 n) {
+        SseByteChannel bc = SseByteChannel.overEvents(#events, n);
         return SseResponse.build(#bc);
     }
 

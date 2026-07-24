@@ -47,7 +47,7 @@ public final class SseByteChannel implements ByteChannel {
 
     // -- source: exactly one of these is active -----------------------------
     SseChannel ch;             // channel source (borrowed), else null
-    SseEvent[] events;         // fixed source (borrowed), else null
+    SseEvent[] events;         // fixed source (OWNED), else null
     int32 evTotal;
     int32 evIdx;
 
@@ -77,13 +77,13 @@ public final class SseByteChannel implements ByteChannel {
     }
 
     /**
-     * A byte source over a **fixed** list — `events[0 .. n)`, borrowed (the
-     * caller must keep the array and its events alive for the channel's
-     * lifetime). Serialize each in order, then EOF.
+     * A byte source over a **fixed** list — `events[0 .. n)`, **owned** (moved
+     * in, so the source outlives the handler frame — the server pumps the body
+     * after the handler returns). Serialize each in order, then EOF.
      */
-    public static #SseByteChannel overEvents(SseEvent[] events, int32 n) {
+    public static #SseByteChannel overEvents(#SseEvent[] events, int32 n) {
         SseByteChannel c = heap SseByteChannel();
-        c.events = events;
+        c.events #= #events;
         c.evTotal = n;
         return #c;
     }

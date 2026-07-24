@@ -1,0 +1,106 @@
+package dev.cajeta.http.test;
+
+import cajeta.io.net.Server;
+import cajeta.io.net.TcpStream;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.server.HttpServer;
+import dev.cajeta.http.server.HttpServerBuilder;
+import dev.cajeta.http.sse.SseClient;
+import dev.cajeta.http.sse.SseEvent;
+import dev.cajeta.http.sse.SseResponse;
+
+/**
+ * http:4.4c — the **SSE client over loopback**: a real
+ * [`SseClient`](../../../sse/SseClient.cajeta) subscribes to a live
+ * [`SseResponse`](../../../sse/SseResponse.cajeta) endpoint and receives the
+ * events; and — the key WHATWG behaviour — when the server ends the stream the
+ * client **reconnects and resumes** from the last id (`Last-Event-ID`), so a
+ * two-part stream split across two connections is delivered as one continuous
+ * sequence.
+ */
+public final class SseClientLoopbackTests {
+
+    static void collect(SseCollectBox box, SseEvent e) {
+        box.seq #= box.seq + e.data;
+        // Stop once the full expected sequence ("abcd") has arrived.
+        if (box.seq.byteLength() >= 4) {
+            box.client.stop();
+        }
+    }
+
+    // Resume-aware handler: first connect (no Last-Event-ID) serves ids 1,2;
+    // the reconnect (Last-Event-ID: 2) serves ids 3,4. Each stream then ends,
+    // dropping the connection so the client reconnects.
+    public static #HttpResponse handleResume(HttpRequest req) {
+        String last = SseResponse.lastEventId(req);
+        SseEvent[] evs = heap SseEvent[2];
+        if (last == null) {
+            SseEvent a = SseEvent.of("a");
+            a.id = "1".substring(0, 1);
+            a.retry = 20;
+            evs[0] = #a;
+            SseEvent b = SseEvent.of("b");
+            b.id = "2".substring(0, 1);
+            evs[1] = #b;
+        } else {
+            SseEvent cc = SseEvent.of("c");
+            cc.id = "3".substring(0, 1);
+            evs[0] = #cc;
+            SseEvent d = SseEvent.of("d");
+            d.id = "4".substring(0, 1);
+            evs[1] = #d;
+        }
+        return SseResponse.stream(#evs, 2);
+    }
+
+    /** Accept `n` connections and dispatch each (bare-spawn local copy). */
+    public static async int32 acceptN(Server core, int32 n) {
+        int32 i = 0;
+        while (i < n) {
+            TcpStream conn #= core.acceptNext();
+            core.dispatch(#conn);
+            i = i + 1;
+        }
+        return 1;
+    }
+
+    /** Subscribe with auto-reconnect; the callback stops us after 4 events. */
+    public static async int32 subscribeResume(int32 port, SseCollectBox box) {
+        String url = "http://127.0.0.1:" + port + "/events";
+        SseClient sc = heap SseClient(url);
+        sc.defaultRetryMillis(20);
+        box.client = sc;
+        (SseEvent) -> void h = (e) -> SseClientLoopbackTests.collect(box, e);
+        sc.subscribe(h);
+        return 1;
+    }
+
+    static void reconnectResume(Check c) {
+        scope {
+            SseCollectBox box = heap SseCollectBox();
+
+            HttpServerBuilder bld = HttpServer.builder();
+            bld.bind("127.0.0.1:0");
+            (HttpRequest) -> #HttpResponse handler =
+                (req) -> SseClientLoopbackTests.handleResume(req);
+            bld.handler(handler);
+            HttpServer srv = bld.build();
+            Server core = srv.server;
+            int32 port = core.listener.boundPort();
+
+            Task<int32> s1 = spawn acceptN(core, 2);
+            Task<int32> t1 = spawn subscribeResume(port, box);
+            c.eqInt((int64) await t1, 1, "subscribe delivered the full sequence");
+            c.eqInt((int64) await s1, 1, "server served two connections");
+
+            c.that(box.seq.equals("abcd"),
+                   "client received a,b,c,d across a reconnect (resumed at Last-Event-ID: 2)");
+        }
+    }
+
+    public static void run(Check c) {
+        System.stdout.println("-- sse client loopback: reconnect + resume --");
+        SseClientLoopbackTests.reconnectResume(c);
+    }
+}

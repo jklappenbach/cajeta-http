@@ -68,6 +68,8 @@ public final class TestMain {
         SseTests.run(c);
         SseServerTests.run(c);
         SseServerLoopbackTests.run(c);
+        SseClientTests.run(c);
+        SseClientLoopbackTests.run(c);
 
         System.stdout.println("");
         System.stdout.println("=== {} passed, {} failed ===",

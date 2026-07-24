@@ -69,7 +69,7 @@ public final class SseServerTests {
         evs[1] = SseEvent.typed("tick", "1");
         evs[2] = SseEvent.of("beta\ngamma");   // multi-line data
 
-        HttpResponse resp = SseResponse.stream(evs, 3);
+        HttpResponse resp = SseResponse.stream(#evs, 3);
         SseServerTests.headers(c, resp);
 
         SseParser p = SseServerTests.drainInto(resp.bodyModel);

@@ -1,0 +1,74 @@
+package dev.cajeta.http.sse;
+
+import cajeta.lang.String;
+
+/**
+ * The **client-side event decoder** (plan item **4.4c**) — an
+ * [`SseParser`](SseParser.cajeta) plus the two pieces of reconnection state
+ * the WHATWG spec keeps *between* connections: the **last event id** (replayed
+ * as `Last-Event-ID` on reconnect) and the **reconnection time** (`retry:`,
+ * milliseconds). Feed it decoded body bytes ([`feed`](#feed)); drain events
+ * ([`hasEvent`](#hasEvent)/[`nextEvent`](#nextEvent)). Draining an event
+ * updates [`lastEventId`](#lastEventId) (when the event carried an `id`) and
+ * [`retryMillis`](#retryMillis) (when it carried a `retry`), so the values
+ * persist across the stream drops an [`SseClient`](SseClient.cajeta) rides.
+ *
+ * Socket-free: this is pure over byte buffers, so the whole decode +
+ * reconnect-state path is testable without a transport.
+ */
+public final class SseDecoder {
+    SseParser parser;
+    String lastId;         // null until an event carries an id
+    int32 retryMs;         // -1 until a retry: field is seen
+
+    public SseDecoder() {
+        this.parser = heap SseParser();
+        this.lastId = null;
+        this.retryMs = -1;
+    }
+
+    /** Feed `n` bytes of decoded response body. */
+    public void feed(int8[] bytes, int32 n) {
+        this.parser.feed(bytes, n);
+    }
+
+    /** Whether a dispatched event is waiting. */
+    public boolean hasEvent() {
+        return this.parser.hasEvent();
+    }
+
+    /**
+     * Take the next event, folding its `id`/`retry` into the reconnection
+     * state first (so [`lastEventId`](#lastEventId)/[`retryMillis`](#retryMillis)
+     * reflect it even though ownership of the event transfers out).
+     */
+    public #SseEvent nextEvent() {
+        SseEvent e #= this.parser.nextEvent();
+        if (e.id != null) {
+            this.lastId #= e.id.substring(0, e.id.byteLength());
+        }
+        if (e.retry >= 0) {
+            this.retryMs = e.retry;
+        }
+        return #e;
+    }
+
+    /** The last event id seen (for `Last-Event-ID` replay), or null. */
+    public String lastEventId() {
+        return this.lastId;
+    }
+
+    /** The server-suggested reconnection time in ms, or `-1` if unset. */
+    public int32 retryMillis() {
+        return this.retryMs;
+    }
+
+    /** Seed the last id from a prior subscription (a resumed `SseClient`). */
+    public void seedLastId(String id) {
+        if (id == null) {
+            this.lastId = null;
+            return;
+        }
+        this.lastId #= id.substring(0, id.byteLength());
+    }
+}

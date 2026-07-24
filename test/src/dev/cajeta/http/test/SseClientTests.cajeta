@@ -1,0 +1,144 @@
+package dev.cajeta.http.test;
+
+import cajeta.lang.String;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.sse.SseClient;
+import dev.cajeta.http.sse.SseDecoder;
+import dev.cajeta.http.sse.SseEvent;
+
+/**
+ * http:4.4c — the **SSE client**, exercised socket-free: the
+ * [`SseDecoder`](../../../sse/SseDecoder.cajeta) folds `id`/`retry` into the
+ * reconnection state as events drain, and the [`SseClient`](../../../sse/SseClient.cajeta)
+ * policy — the resume request it builds, the response heads it accepts or
+ * rejects, and the reconnection delay it computes — is pinned without a
+ * transport. The live subscribe/reconnect loop rides these and is smoke-tested
+ * over loopback in `SseClientLoopbackTests`.
+ */
+public final class SseClientTests {
+
+    static void decoderTracksState(Check c) {
+        SseDecoder d = heap SseDecoder();
+        // Feed a two-event stream in two arbitrary byte splits.
+        String part1 = "retry: 4000\ndata: hello\nid: 7\n\ndata: wor";
+        String part2 = "ld\nid: 8\n\n";
+        int8[] b1 = part1.toBytes();
+        d.feed(b1, (int32) b1.count());
+        int8[] b2 = part2.toBytes();
+        d.feed(b2, (int32) b2.count());
+
+        c.that(d.hasEvent(), "decoder: first event dispatched across a split");
+        SseEvent e1 = d.nextEvent();
+        c.that(e1.data.equals("hello"), "decoder: event 1 data 'hello'");
+        String id1 = d.lastEventId();
+        c.that(id1 != null && id1.equals("7"), "decoder: lastEventId tracks '7'");
+        c.eqInt((int64) d.retryMillis(), (int64) 4000,
+                "decoder: retry: folds into retryMillis");
+
+        SseEvent e2 = d.nextEvent();
+        c.that(e2.data.equals("world"), "decoder: event 2 data 'world'");
+        String id2 = d.lastEventId();
+        c.that(id2 != null && id2.equals("8"), "decoder: lastEventId advances to '8'");
+    }
+
+    static void decoderSeed(Check c) {
+        SseDecoder d = heap SseDecoder();
+        c.that(d.lastEventId() == null, "decoder: no id before any event");
+        d.seedLastId("42");
+        String id = d.lastEventId();
+        c.that(id != null && id.equals("42"), "decoder: seedLastId sets the resume id");
+    }
+
+    static void buildRequest(Check c) {
+        SseClient sc = heap SseClient("http://events.test/stream");
+        HttpRequest req = sc.buildRequest();
+        c.that(req.getMethod().equals("GET"), "request: GET");
+        c.that(req.getTarget().equals("/stream"), "request: origin-form target");
+        String accept = req.getHeaders().get("Accept");
+        c.that(accept != null && accept.equals("text/event-stream"),
+               "request: Accept: text/event-stream");
+        String cc = req.getHeaders().get("Cache-Control");
+        c.that(cc != null && cc.equals("no-cache"), "request: Cache-Control: no-cache");
+        String host = req.getHeaders().get("Host");
+        c.that(host != null && host.equals("events.test"), "request: Host from URL");
+        String le = req.getHeaders().get("Last-Event-ID");
+        c.that(le == null, "request: no Last-Event-ID on the first connect");
+
+        // After resuming, the request replays the last id.
+        sc.resumeFrom("99");
+        HttpRequest req2 = sc.buildRequest();
+        String le2 = req2.getHeaders().get("Last-Event-ID");
+        c.that(le2 != null && le2.equals("99"), "request: Last-Event-ID replayed on resume");
+    }
+
+    static void checkHead(Check c) {
+        SseClient sc = heap SseClient("http://events.test/stream");
+
+        // A good head: 200 + text/event-stream — no throw.
+        HttpResponse ok = HttpResponse.ok();
+        ok.setHeader("Content-Type", "text/event-stream");
+        boolean threwOk = false;
+        try {
+            sc.checkHead(ok);
+        } catch (Exception e) {
+            threwOk = true;
+        }
+        c.that(!threwOk, "checkHead: 200 text/event-stream accepted");
+
+        // Wrong status.
+        HttpResponse notFound = HttpResponse.of(404);
+        notFound.setHeader("Content-Type", "text/event-stream");
+        boolean threw404 = false;
+        try {
+            sc.checkHead(notFound);
+        } catch (Exception e) {
+            threw404 = true;
+        }
+        c.that(threw404, "checkHead: non-200 is a terminal SseException");
+
+        // Wrong content type.
+        HttpResponse wrongType = HttpResponse.ok();
+        wrongType.setHeader("Content-Type", "text/plain");
+        boolean threwType = false;
+        try {
+            sc.checkHead(wrongType);
+        } catch (Exception e) {
+            threwType = true;
+        }
+        c.that(threwType, "checkHead: wrong content-type is a terminal SseException");
+
+        // Content-Type with a charset parameter still matches on essence.
+        HttpResponse withCharset = HttpResponse.ok();
+        withCharset.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+        boolean threwCharset = false;
+        try {
+            sc.checkHead(withCharset);
+        } catch (Exception e) {
+            threwCharset = true;
+        }
+        c.that(!threwCharset, "checkHead: essence match ignores the charset param");
+    }
+
+    static void reconnectDelay(Check c) {
+        SseClient sc = heap SseClient("http://events.test/stream");
+        c.eqInt((int64) sc.reconnectDelayMillis(), (int64) 3000,
+                "delay: WHATWG default 3000ms before any retry:");
+        sc.defaultRetryMillis(250);
+        c.eqInt((int64) sc.reconnectDelayMillis(), (int64) 250,
+                "delay: defaultRetryMillis override applies");
+    }
+
+    public static void run(Check c) {
+        System.stdout.println("-- sse client: decoder tracks id/retry --");
+        SseClientTests.decoderTracksState(c);
+        System.stdout.println("-- sse client: decoder seed --");
+        SseClientTests.decoderSeed(c);
+        System.stdout.println("-- sse client: request builder --");
+        SseClientTests.buildRequest(c);
+        System.stdout.println("-- sse client: head validation --");
+        SseClientTests.checkHead(c);
+        System.stdout.println("-- sse client: reconnect delay --");
+        SseClientTests.reconnectDelay(c);
+    }
+}
