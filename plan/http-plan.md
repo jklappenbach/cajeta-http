@@ -729,6 +729,19 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
       read-churn-read pattern); the @Native title-flag gap is recorded
       on cajeta's focus stack. **Suite now requires a compiler ≥
       `65588252`** — bump the CI pin alongside the 8db619a2 note.
+    - **PENDING — native codec backend adoption** *(gated on cajeta-codec
+      publish; tracked as `cajeta-codec agents/native-libz-plan.md` 7.5)*.
+      cajeta-codec grew a native zlib backend (drop-in, same API) that runs
+      DEFLATE/gzip/zlib at zlib speed; PR #2 is green, unmerged/unpublished.
+      When it ships: bump `dev.cajeta.codec` in `cajeta.json` (2 spots:
+      `dependencies` + the hard-coded olla test classpath), add the
+      extract-bridge (`cajeta archive extract <codec.cja>` →
+      `CAJETA_NATIVE_PATH`, likely via a new `run-tests.sh`) so the native
+      artifact links. **Scope note:** only the ONE-SHOT paths benefit —
+      `ContentCoding` (full-body gzip/zlib, here) goes native for free; the
+      STREAMING paths (`GzipCompressChannel` chunked, `PerMessageDeflate`
+      WebSocket) stay pure-cajeta until a native `z_stream` streaming backend
+      (codec spec §7.1) exists.
   - [x] **1.4f Builder + proxy.** `HttpClient.builder()` — default
     headers, version pin, pool sizes, redirect/retry/timeout policy,
     TLS trust, HTTP proxy (absolute-form for `http`, CONNECT tunnel
