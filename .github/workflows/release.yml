@@ -19,14 +19,16 @@ jobs:
       # Toolchain that can compile AND correctly run this repo. The reusable
       # workflow's default (v0.7.1) is far too old.
       #
-      # FLOOR IS v0.10.0 — not a preference, a correctness requirement. Every
-      # release through v0.9.5 predates cajeta `f74298c4` ("a borrowed
-      # function-typed local must not drop the closure record"), without which
-      # a function-typed local that merely ALIASES a stored handler registers a
-      # SECOND drop for the shared closure record — double-free. The suite
-      # aborts deterministically (10/10) with `free(): invalid pointer` in
-      # `middleware bundle: live server (2.2a)`; that commit's own message names
-      # this exact blocker ("wiring middleware into a live HttpServer,
-      # cajeta-http 2.1/2.2"). v0.10.0 is the first release carrying it.
-      cajeta-version: v0.10.0
+      # FLOOR IS v0.10.1 — not a preference, a correctness requirement, for two
+      # independent reasons:
+      #
+      # 1. Every release through v0.9.5 predates cajeta `f74298c4` ("a borrowed
+      #    function-typed local must not drop the closure record"), without which
+      #    a function-typed local that merely ALIASES a stored handler registers
+      #    a SECOND drop for the shared closure record — double-free. The suite
+      #    aborts deterministically (10/10) with `free(): invalid pointer` in
+      #    `middleware bundle: live server (2.2a)`. v0.10.0 first carried it.
+      # 2. These sources use bracket array literals `[1, 2, 3]`; v0.10.0 predates
+      #    the collection-literals work entirely and cannot parse them.
+      cajeta-version: v0.10.1
     secrets: inherit
