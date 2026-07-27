@@ -68,11 +68,6 @@
             "cajeta.testkit": "1.0.*"
         },
 
-        // The live Olla registry. `repo.cajeta.org` was carried here from the
-        // scaffold and has never resolved (NXDOMAIN) — dependency resolution
-        // only ever worked because ~/.olla was seeded by hand. CI publishes to
-        // olla.cajeta.dev (cajeta/.github/actions/olla-publish), so that is the
-        // name to fetch from.
         "repositories": [
             { "name": "central", "url": "https://olla.cajeta.dev",
               "priority": 0 }
