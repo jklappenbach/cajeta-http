@@ -88,7 +88,7 @@ public final class SseTests {
         c.that(d.data.equals("x"), "comment lines are ignored");
 
         // Leading UTF-8 BOM stripped.
-        int8[] bom = { (int8) 0xEF, (int8) 0xBB, (int8) 0xBF };
+        int8[] bom = [ (int8) 0xEF, (int8) 0xBB, (int8) 0xBF ];
         SseParser bp = heap SseParser();
         bp.feed(bom, 3);
         int8[] rest = "data: z\n\n".toBytes();

@@ -57,11 +57,11 @@ public final class HpackEncoderTests {
         l0.put(HpackEncoderTests.own(":path"), HpackEncoderTests.own("/"));
         l0.put(HpackEncoderTests.own(":authority"), HpackEncoderTests.own("www.example.com"));
         int8[] enc0 = e.encode(l0);
-        int8[] exp0 = {
+        int8[] exp0 = [
         (int8) 0x82, (int8) 0x86, (int8) 0x84, (int8) 0x41, (int8) 0x0f, (int8) 0x77, (int8) 0x77, (int8) 0x77,
         (int8) 0x2e, (int8) 0x65, (int8) 0x78, (int8) 0x61, (int8) 0x6d, (int8) 0x70, (int8) 0x6c, (int8) 0x65,
         (int8) 0x2e, (int8) 0x63, (int8) 0x6f, (int8) 0x6d,
-        };
+        ];
         c.that(HpackEncoderTests.sameBytes(enc0, (int32) enc0.count(), exp0, 20), "C.3.1 encode matches RFC bytes");
         c.eqInt((int64) e.dynamicTable().currentSize(), (int64) 57, "C.3.1 encoder table size");
 
@@ -73,10 +73,10 @@ public final class HpackEncoderTests {
         l1.put(HpackEncoderTests.own(":authority"), HpackEncoderTests.own("www.example.com"));
         l1.put(HpackEncoderTests.own("cache-control"), HpackEncoderTests.own("no-cache"));
         int8[] enc1 = e.encode(l1);
-        int8[] exp1 = {
+        int8[] exp1 = [
         (int8) 0x82, (int8) 0x86, (int8) 0x84, (int8) 0xbe, (int8) 0x58, (int8) 0x08, (int8) 0x6e, (int8) 0x6f,
         (int8) 0x2d, (int8) 0x63, (int8) 0x61, (int8) 0x63, (int8) 0x68, (int8) 0x65,
-        };
+        ];
         c.that(HpackEncoderTests.sameBytes(enc1, (int32) enc1.count(), exp1, 14), "C.3.2 encode matches RFC bytes");
         c.eqInt((int64) e.dynamicTable().currentSize(), (int64) 110, "C.3.2 encoder table size");
 
@@ -88,12 +88,12 @@ public final class HpackEncoderTests {
         l2.put(HpackEncoderTests.own(":authority"), HpackEncoderTests.own("www.example.com"));
         l2.put(HpackEncoderTests.own("custom-key"), HpackEncoderTests.own("custom-value"));
         int8[] enc2 = e.encode(l2);
-        int8[] exp2 = {
+        int8[] exp2 = [
         (int8) 0x82, (int8) 0x87, (int8) 0x85, (int8) 0xbf, (int8) 0x40, (int8) 0x0a, (int8) 0x63, (int8) 0x75,
         (int8) 0x73, (int8) 0x74, (int8) 0x6f, (int8) 0x6d, (int8) 0x2d, (int8) 0x6b, (int8) 0x65, (int8) 0x79,
         (int8) 0x0c, (int8) 0x63, (int8) 0x75, (int8) 0x73, (int8) 0x74, (int8) 0x6f, (int8) 0x6d, (int8) 0x2d,
         (int8) 0x76, (int8) 0x61, (int8) 0x6c, (int8) 0x75, (int8) 0x65,
-        };
+        ];
         c.that(HpackEncoderTests.sameBytes(enc2, (int32) enc2.count(), exp2, 29), "C.3.3 encode matches RFC bytes");
         c.eqInt((int64) e.dynamicTable().currentSize(), (int64) 164, "C.3.3 encoder table size");
 
@@ -108,11 +108,11 @@ public final class HpackEncoderTests {
         l0.put(HpackEncoderTests.own(":path"), HpackEncoderTests.own("/"));
         l0.put(HpackEncoderTests.own(":authority"), HpackEncoderTests.own("www.example.com"));
         int8[] enc0 = e.encode(l0);
-        int8[] exp0 = {
+        int8[] exp0 = [
         (int8) 0x82, (int8) 0x86, (int8) 0x84, (int8) 0x41, (int8) 0x8c, (int8) 0xf1, (int8) 0xe3, (int8) 0xc2,
         (int8) 0xe5, (int8) 0xf2, (int8) 0x3a, (int8) 0x6b, (int8) 0xa0, (int8) 0xab, (int8) 0x90, (int8) 0xf4,
         (int8) 0xff,
-        };
+        ];
         c.that(HpackEncoderTests.sameBytes(enc0, (int32) enc0.count(), exp0, 17), "C.4.1 encode matches RFC bytes");
         c.eqInt((int64) e.dynamicTable().currentSize(), (int64) 57, "C.4.1 encoder table size");
 
@@ -124,10 +124,10 @@ public final class HpackEncoderTests {
         l1.put(HpackEncoderTests.own(":authority"), HpackEncoderTests.own("www.example.com"));
         l1.put(HpackEncoderTests.own("cache-control"), HpackEncoderTests.own("no-cache"));
         int8[] enc1 = e.encode(l1);
-        int8[] exp1 = {
+        int8[] exp1 = [
         (int8) 0x82, (int8) 0x86, (int8) 0x84, (int8) 0xbe, (int8) 0x58, (int8) 0x86, (int8) 0xa8, (int8) 0xeb,
         (int8) 0x10, (int8) 0x64, (int8) 0x9c, (int8) 0xbf,
-        };
+        ];
         c.that(HpackEncoderTests.sameBytes(enc1, (int32) enc1.count(), exp1, 12), "C.4.2 encode matches RFC bytes");
         c.eqInt((int64) e.dynamicTable().currentSize(), (int64) 110, "C.4.2 encoder table size");
 
@@ -139,11 +139,11 @@ public final class HpackEncoderTests {
         l2.put(HpackEncoderTests.own(":authority"), HpackEncoderTests.own("www.example.com"));
         l2.put(HpackEncoderTests.own("custom-key"), HpackEncoderTests.own("custom-value"));
         int8[] enc2 = e.encode(l2);
-        int8[] exp2 = {
+        int8[] exp2 = [
         (int8) 0x82, (int8) 0x87, (int8) 0x85, (int8) 0xbf, (int8) 0x40, (int8) 0x88, (int8) 0x25, (int8) 0xa8,
         (int8) 0x49, (int8) 0xe9, (int8) 0x5b, (int8) 0xa9, (int8) 0x7d, (int8) 0x7f, (int8) 0x89, (int8) 0x25,
         (int8) 0xa8, (int8) 0x49, (int8) 0xe9, (int8) 0x5b, (int8) 0xb8, (int8) 0xe8, (int8) 0xb4, (int8) 0xbf,
-        };
+        ];
         c.that(HpackEncoderTests.sameBytes(enc2, (int32) enc2.count(), exp2, 24), "C.4.3 encode matches RFC bytes");
         c.eqInt((int64) e.dynamicTable().currentSize(), (int64) 164, "C.4.3 encoder table size");
 
@@ -158,7 +158,7 @@ public final class HpackEncoderTests {
         l0.put(HpackEncoderTests.own("date"), HpackEncoderTests.own("Mon, 21 Oct 2013 20:13:21 GMT"));
         l0.put(HpackEncoderTests.own("location"), HpackEncoderTests.own("https://www.example.com"));
         int8[] enc0 = e.encode(l0);
-        int8[] exp0 = {
+        int8[] exp0 = [
         (int8) 0x48, (int8) 0x03, (int8) 0x33, (int8) 0x30, (int8) 0x32, (int8) 0x58, (int8) 0x07, (int8) 0x70,
         (int8) 0x72, (int8) 0x69, (int8) 0x76, (int8) 0x61, (int8) 0x74, (int8) 0x65, (int8) 0x61, (int8) 0x1d,
         (int8) 0x4d, (int8) 0x6f, (int8) 0x6e, (int8) 0x2c, (int8) 0x20, (int8) 0x32, (int8) 0x31, (int8) 0x20,
@@ -168,7 +168,7 @@ public final class HpackEncoderTests {
         (int8) 0x74, (int8) 0x74, (int8) 0x70, (int8) 0x73, (int8) 0x3a, (int8) 0x2f, (int8) 0x2f, (int8) 0x77,
         (int8) 0x77, (int8) 0x77, (int8) 0x2e, (int8) 0x65, (int8) 0x78, (int8) 0x61, (int8) 0x6d, (int8) 0x70,
         (int8) 0x6c, (int8) 0x65, (int8) 0x2e, (int8) 0x63, (int8) 0x6f, (int8) 0x6d,
-        };
+        ];
         c.that(HpackEncoderTests.sameBytes(enc0, (int32) enc0.count(), exp0, 70), "C.5.1 encode matches RFC bytes");
         c.eqInt((int64) e.dynamicTable().currentSize(), (int64) 222, "C.5.1 encoder table size");
 
@@ -179,9 +179,9 @@ public final class HpackEncoderTests {
         l1.put(HpackEncoderTests.own("date"), HpackEncoderTests.own("Mon, 21 Oct 2013 20:13:21 GMT"));
         l1.put(HpackEncoderTests.own("location"), HpackEncoderTests.own("https://www.example.com"));
         int8[] enc1 = e.encode(l1);
-        int8[] exp1 = {
+        int8[] exp1 = [
         (int8) 0x48, (int8) 0x03, (int8) 0x33, (int8) 0x30, (int8) 0x37, (int8) 0xc1, (int8) 0xc0, (int8) 0xbf,
-        };
+        ];
         c.that(HpackEncoderTests.sameBytes(enc1, (int32) enc1.count(), exp1, 8), "C.5.2 encode matches RFC bytes");
         c.eqInt((int64) e.dynamicTable().currentSize(), (int64) 222, "C.5.2 encoder table size");
 
@@ -194,7 +194,7 @@ public final class HpackEncoderTests {
         l2.put(HpackEncoderTests.own("content-encoding"), HpackEncoderTests.own("gzip"));
         l2.put(HpackEncoderTests.own("set-cookie"), HpackEncoderTests.own("foo=ASDJKHQKBZXOQWEOPIUAXQWEOIU; max-age=3600; version=1"));
         int8[] enc2 = e.encode(l2);
-        int8[] exp2 = {
+        int8[] exp2 = [
         (int8) 0x88, (int8) 0xc1, (int8) 0x61, (int8) 0x1d, (int8) 0x4d, (int8) 0x6f, (int8) 0x6e, (int8) 0x2c,
         (int8) 0x20, (int8) 0x32, (int8) 0x31, (int8) 0x20, (int8) 0x4f, (int8) 0x63, (int8) 0x74, (int8) 0x20,
         (int8) 0x32, (int8) 0x30, (int8) 0x31, (int8) 0x33, (int8) 0x20, (int8) 0x32, (int8) 0x30, (int8) 0x3a,
@@ -208,7 +208,7 @@ public final class HpackEncoderTests {
         (int8) 0x67, (int8) 0x65, (int8) 0x3d, (int8) 0x33, (int8) 0x36, (int8) 0x30, (int8) 0x30, (int8) 0x3b,
         (int8) 0x20, (int8) 0x76, (int8) 0x65, (int8) 0x72, (int8) 0x73, (int8) 0x69, (int8) 0x6f, (int8) 0x6e,
         (int8) 0x3d, (int8) 0x31,
-        };
+        ];
         c.that(HpackEncoderTests.sameBytes(enc2, (int32) enc2.count(), exp2, 98), "C.5.3 encode matches RFC bytes");
         c.eqInt((int64) e.dynamicTable().currentSize(), (int64) 215, "C.5.3 encoder table size");
 
@@ -223,7 +223,7 @@ public final class HpackEncoderTests {
         l0.put(HpackEncoderTests.own("date"), HpackEncoderTests.own("Mon, 21 Oct 2013 20:13:21 GMT"));
         l0.put(HpackEncoderTests.own("location"), HpackEncoderTests.own("https://www.example.com"));
         int8[] enc0 = e.encode(l0);
-        int8[] exp0 = {
+        int8[] exp0 = [
         (int8) 0x48, (int8) 0x82, (int8) 0x64, (int8) 0x02, (int8) 0x58, (int8) 0x85, (int8) 0xae, (int8) 0xc3,
         (int8) 0x77, (int8) 0x1a, (int8) 0x4b, (int8) 0x61, (int8) 0x96, (int8) 0xd0, (int8) 0x7a, (int8) 0xbe,
         (int8) 0x94, (int8) 0x10, (int8) 0x54, (int8) 0xd4, (int8) 0x44, (int8) 0xa8, (int8) 0x20, (int8) 0x05,
@@ -231,7 +231,7 @@ public final class HpackEncoderTests {
         (int8) 0x2d, (int8) 0x1b, (int8) 0xff, (int8) 0x6e, (int8) 0x91, (int8) 0x9d, (int8) 0x29, (int8) 0xad,
         (int8) 0x17, (int8) 0x18, (int8) 0x63, (int8) 0xc7, (int8) 0x8f, (int8) 0x0b, (int8) 0x97, (int8) 0xc8,
         (int8) 0xe9, (int8) 0xae, (int8) 0x82, (int8) 0xae, (int8) 0x43, (int8) 0xd3,
-        };
+        ];
         c.that(HpackEncoderTests.sameBytes(enc0, (int32) enc0.count(), exp0, 54), "C.6.1 encode matches RFC bytes");
         c.eqInt((int64) e.dynamicTable().currentSize(), (int64) 222, "C.6.1 encoder table size");
 
@@ -242,9 +242,9 @@ public final class HpackEncoderTests {
         l1.put(HpackEncoderTests.own("date"), HpackEncoderTests.own("Mon, 21 Oct 2013 20:13:21 GMT"));
         l1.put(HpackEncoderTests.own("location"), HpackEncoderTests.own("https://www.example.com"));
         int8[] enc1 = e.encode(l1);
-        int8[] exp1 = {
+        int8[] exp1 = [
         (int8) 0x48, (int8) 0x83, (int8) 0x64, (int8) 0x0e, (int8) 0xff, (int8) 0xc1, (int8) 0xc0, (int8) 0xbf,
-        };
+        ];
         c.that(HpackEncoderTests.sameBytes(enc1, (int32) enc1.count(), exp1, 8), "C.6.2 encode matches RFC bytes");
         c.eqInt((int64) e.dynamicTable().currentSize(), (int64) 222, "C.6.2 encoder table size");
 
@@ -257,7 +257,7 @@ public final class HpackEncoderTests {
         l2.put(HpackEncoderTests.own("content-encoding"), HpackEncoderTests.own("gzip"));
         l2.put(HpackEncoderTests.own("set-cookie"), HpackEncoderTests.own("foo=ASDJKHQKBZXOQWEOPIUAXQWEOIU; max-age=3600; version=1"));
         int8[] enc2 = e.encode(l2);
-        int8[] exp2 = {
+        int8[] exp2 = [
         (int8) 0x88, (int8) 0xc1, (int8) 0x61, (int8) 0x96, (int8) 0xd0, (int8) 0x7a, (int8) 0xbe, (int8) 0x94,
         (int8) 0x10, (int8) 0x54, (int8) 0xd4, (int8) 0x44, (int8) 0xa8, (int8) 0x20, (int8) 0x05, (int8) 0x95,
         (int8) 0x04, (int8) 0x0b, (int8) 0x81, (int8) 0x66, (int8) 0xe0, (int8) 0x84, (int8) 0xa6, (int8) 0x2d,
@@ -268,7 +268,7 @@ public final class HpackEncoderTests {
         (int8) 0x72, (int8) 0xc1, (int8) 0xab, (int8) 0x27, (int8) 0x0f, (int8) 0xb5, (int8) 0x29, (int8) 0x1f,
         (int8) 0x95, (int8) 0x87, (int8) 0x31, (int8) 0x60, (int8) 0x65, (int8) 0xc0, (int8) 0x03, (int8) 0xed,
         (int8) 0x4e, (int8) 0xe5, (int8) 0xb1, (int8) 0x06, (int8) 0x3d, (int8) 0x50, (int8) 0x07,
-        };
+        ];
         c.that(HpackEncoderTests.sameBytes(enc2, (int32) enc2.count(), exp2, 79), "C.6.3 encode matches RFC bytes");
         c.eqInt((int64) e.dynamicTable().currentSize(), (int64) 215, "C.6.3 encoder table size");
 
@@ -280,14 +280,14 @@ public final class HpackEncoderTests {
         HpackFieldList a = heap HpackFieldList();
         a.put(HpackEncoderTests.own("custom-key"), HpackEncoderTests.own("custom-header"));
         int8[] r1 = e1.encode(a);
-        int8[] x1 = {
+        int8[] x1 = [
             (int8) 0x40, (int8) 0x0a, (int8) 0x63, (int8) 0x75, (int8) 0x73,
             (int8) 0x74, (int8) 0x6f, (int8) 0x6d, (int8) 0x2d, (int8) 0x6b,
             (int8) 0x65, (int8) 0x79, (int8) 0x0d, (int8) 0x63, (int8) 0x75,
             (int8) 0x73, (int8) 0x74, (int8) 0x6f, (int8) 0x6d, (int8) 0x2d,
             (int8) 0x68, (int8) 0x65, (int8) 0x61, (int8) 0x64, (int8) 0x65,
             (int8) 0x72
-        };
+        ];
         c.that(HpackEncoderTests.sameBytes(r1, (int32) r1.count(), x1, 26),
                "C.2.1 encode matches");
 
@@ -304,12 +304,12 @@ public final class HpackEncoderTests {
         HpackFieldList d = heap HpackFieldList();
         d.putSensitive(HpackEncoderTests.own("password"), HpackEncoderTests.own("secret"), true);
         int8[] r3 = e3.encode(d);
-        int8[] x3 = {
+        int8[] x3 = [
             (int8) 0x10, (int8) 0x08, (int8) 0x70, (int8) 0x61, (int8) 0x73,
             (int8) 0x73, (int8) 0x77, (int8) 0x6f, (int8) 0x72, (int8) 0x64,
             (int8) 0x06, (int8) 0x73, (int8) 0x65, (int8) 0x63, (int8) 0x72,
             (int8) 0x65, (int8) 0x74
-        };
+        ];
         c.that(HpackEncoderTests.sameBytes(r3, (int32) r3.count(), x3, 17),
                "C.2.3 never-indexed encode matches");
         c.eqInt((int64) e3.dynamicTable().count(), (int64) 0,

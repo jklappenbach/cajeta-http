@@ -61,8 +61,8 @@ public final class WsPerMessageDeflateTests {
 
     static void rsv1FrameCodec(Check c) {
         // A compressed data frame: RSV1 set, some payload.
-        int8[] pay = { (int8) 0xAB, (int8) 0xCD, (int8) 0xEF };
-        int8[] pcopy = { (int8) 0xAB, (int8) 0xCD, (int8) 0xEF };
+        int8[] pay = [ (int8) 0xAB, (int8) 0xCD, (int8) 0xEF ];
+        int8[] pcopy = [ (int8) 0xAB, (int8) 0xCD, (int8) 0xEF ];
         WsFrame f = WsFrame.of(true, WsOpcode.BINARY, false, #pcopy);
         f.rsv1 = true;
         int8[] wire = WsFrameEncoder.encodeUnmasked(f);
@@ -108,7 +108,7 @@ public final class WsPerMessageDeflateTests {
     static void rsv2Rejected(Check c) {
         // Hand-craft a server->client frame with RSV2 (0x20) set on byte 0.
         // 0x80 FIN | 0x20 RSV2 | 0x02 BINARY = 0xA2, then a 0-length byte1.
-        int8[] wire = { (int8) 0xA2, (int8) 0x00 };
+        int8[] wire = [ (int8) 0xA2, (int8) 0x00 ];
         WsFrameDecoder d = WsFrameDecoder.forClient().allowCompression();
         boolean threw = false;
         try {
@@ -127,8 +127,8 @@ public final class WsPerMessageDeflateTests {
         String hello = "Hello";
         int8[] hb = hello.toBytes();
         int8[] comp = pmd.compress(hb, hello.byteLength());
-        int8[] expect = { (int8) 0xf2, (int8) 0x48, (int8) 0xcd, (int8) 0xc9,
-                          (int8) 0xc9, (int8) 0x07, (int8) 0x00 };
+        int8[] expect = [ (int8) 0xf2, (int8) 0x48, (int8) 0xcd, (int8) 0xc9,
+                          (int8) 0xc9, (int8) 0x07, (int8) 0x00 ];
         c.that(WsPerMessageDeflateTests.bytesEq(comp, (int32) comp.count(),
                 expect, 7), "permessage-deflate 'Hello' matches RFC 7692 §7.2.1");
 
@@ -267,7 +267,7 @@ public final class WsPerMessageDeflateTests {
 
     static void messageCompression(Check c) {
         // A single compressed data frame -> a message flagged compressed.
-        int8[] p = { (int8) 1, (int8) 2, (int8) 3 };
+        int8[] p = [ (int8) 1, (int8) 2, (int8) 3 ];
         WsFrame f = WsFrame.of(true, WsOpcode.TEXT, false, #p);
         f.rsv1 = true;
         WsMessageAssembler a1 = WsMessageAssembler.create();
@@ -276,10 +276,10 @@ public final class WsPerMessageDeflateTests {
                "single compressed frame -> compressed message");
 
         // Fragmented compressed message: RSV1 only on the first frame.
-        int8[] q1 = { (int8) 1, (int8) 2 };
+        int8[] q1 = [ (int8) 1, (int8) 2 ];
         WsFrame g1 = WsFrame.of(false, WsOpcode.TEXT, false, #q1);
         g1.rsv1 = true;
-        int8[] q2 = { (int8) 3, (int8) 4 };
+        int8[] q2 = [ (int8) 3, (int8) 4 ];
         WsFrame g2 = WsFrame.of(true, WsOpcode.CONTINUATION, false, #q2);
         WsMessageAssembler a2 = WsMessageAssembler.create();
         WsMessage none = a2.accept(g1);
@@ -289,10 +289,10 @@ public final class WsPerMessageDeflateTests {
                "fragmented compressed message assembles and stays flagged");
 
         // RSV1 on a continuation frame is a protocol violation.
-        int8[] r1 = { (int8) 1, (int8) 2 };
+        int8[] r1 = [ (int8) 1, (int8) 2 ];
         WsFrame h1 = WsFrame.of(false, WsOpcode.TEXT, false, #r1);
         h1.rsv1 = true;
-        int8[] r2 = { (int8) 3, (int8) 4 };
+        int8[] r2 = [ (int8) 3, (int8) 4 ];
         WsFrame h2 = WsFrame.of(true, WsOpcode.CONTINUATION, false, #r2);
         h2.rsv1 = true;
         WsMessageAssembler a3 = WsMessageAssembler.create();
@@ -306,7 +306,7 @@ public final class WsPerMessageDeflateTests {
         c.that(threw, "RSV1 on a continuation frame is rejected (assembler)");
 
         // A plain message is not flagged compressed.
-        int8[] s = { (int8) 9 };
+        int8[] s = [ (int8) 9 ];
         WsFrame pf = WsFrame.of(true, WsOpcode.BINARY, false, #s);
         WsMessageAssembler a4 = WsMessageAssembler.create();
         WsMessage pm = a4.accept(pf);

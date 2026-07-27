@@ -70,10 +70,10 @@ public final class Http2FrameTests {
 
     static void roundTrip(Check c) {
         Http2FrameWriter w = heap Http2FrameWriter();
-        int8[] p1 = { (int8) 0xDE, (int8) 0xAD, (int8) 0xBE, (int8) 0xEF };
+        int8[] p1 = [ (int8) 0xDE, (int8) 0xAD, (int8) 0xBE, (int8) 0xEF ];
         w.writeFrame(Http2.FRAME_DATA, Http2.FLAG_END_STREAM, 3, p1, 4);
         w.writeEmptyFrame(Http2.FRAME_SETTINGS, Http2.FLAG_ACK, 0);
-        int8[] p3 = { (int8) 0x01, (int8) 0x02, (int8) 0x03 };
+        int8[] p3 = [ (int8) 0x01, (int8) 0x02, (int8) 0x03 ];
         w.writeFrame(Http2.FRAME_HEADERS,
                      Http2.FLAG_END_HEADERS | Http2.FLAG_END_STREAM, 5, p3, 3);
 
@@ -125,7 +125,7 @@ public final class Http2FrameTests {
         c.that(caught, "oversize frame -> FRAME_SIZE_ERROR");
 
         // Incomplete header (fewer than 9 bytes).
-        int8[] tiny = { (int8) 0x00, (int8) 0x00, (int8) 0x04 };
+        int8[] tiny = [ (int8) 0x00, (int8) 0x00, (int8) 0x04 ];
         boolean caught2 = false;
         Http2FrameReader r2 = heap Http2FrameReader(tiny, 3,
                                                     Http2.DEFAULT_MAX_FRAME_SIZE);
@@ -137,12 +137,12 @@ public final class Http2FrameTests {
         c.that(caught2, "incomplete header -> FRAME_SIZE_ERROR");
 
         // Truncated payload: header declares length 8, only 2 payload bytes.
-        int8[] trunc = {
+        int8[] trunc = [
             (int8) 0x00, (int8) 0x00, (int8) 0x08,   // length 8
             (int8) 0x06, (int8) 0x00,                // PING, no flags
             (int8) 0x00, (int8) 0x00, (int8) 0x00, (int8) 0x00,  // stream 0
             (int8) 0xAA, (int8) 0xBB                 // only 2 of 8 payload bytes
-        };
+        ];
         boolean caught3 = false;
         Http2FrameReader r3 = heap Http2FrameReader(trunc, 11,
                                                     Http2.DEFAULT_MAX_FRAME_SIZE);

@@ -85,7 +85,7 @@ public final class PerMessageDeflate {
             this.inflate = heap InflateStream();
         }
         this.inflate.feed(data, len);
-        int8[] marker = { (int8) 0x00, (int8) 0x00, (int8) 0xFF, (int8) 0xFF };
+        int8[] marker = [ (int8) 0x00, (int8) 0x00, (int8) 0xFF, (int8) 0xFF ];
         this.inflate.feed(marker, 4);
 
         int8[] acc = heap int8[256];

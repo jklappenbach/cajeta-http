@@ -50,14 +50,14 @@ public final class Http2FixedFrameTests {
 
         // Golden wire vector: header (len 12, type 0x04, flags 0, stream 0)
         // then 00 01 00 00 10 00  00 04 00 00 ff ff.
-        int8[] exp = {
+        int8[] exp = [
             (int8) 0x00, (int8) 0x00, (int8) 0x0c, (int8) 0x04, (int8) 0x00,
             (int8) 0x00, (int8) 0x00, (int8) 0x00, (int8) 0x00,
             (int8) 0x00, (int8) 0x01, (int8) 0x00, (int8) 0x00, (int8) 0x10,
             (int8) 0x00,
             (int8) 0x00, (int8) 0x04, (int8) 0x00, (int8) 0x00, (int8) 0xff,
             (int8) 0xff
-        };
+        ];
         c.that(Http2FixedFrameTests.sameBytes(bytes, (int32) bytes.count(),
                                               exp, 21),
                "SETTINGS golden wire bytes");
@@ -121,10 +121,10 @@ public final class Http2FixedFrameTests {
 
     static void pingRstWindow(Check c) {
         // PING round-trip.
-        int8[] opaque = {
+        int8[] opaque = [
             (int8) 0x01, (int8) 0x02, (int8) 0x03, (int8) 0x04,
             (int8) 0x05, (int8) 0x06, (int8) 0x07, (int8) 0x08
-        };
+        ];
         Http2FrameWriter w = heap Http2FrameWriter();
         Http2Frames.writePing(w, opaque, false);
         int8[] pb = w.toBytes();
@@ -204,7 +204,7 @@ public final class Http2FixedFrameTests {
 
     static void goawayPriority(Check c) {
         // GOAWAY round-trip with debug data.
-        int8[] dbg = { (int8) 0x62, (int8) 0x79, (int8) 0x65 };   // "bye"
+        int8[] dbg = [ (int8) 0x62, (int8) 0x79, (int8) 0x65 ];   // "bye"
         Http2FrameWriter w = heap Http2FrameWriter();
         Http2Frames.writeGoaway(w, 5, (int64) Http2.NO_ERROR, dbg, 3);
         int8[] gb = w.toBytes();

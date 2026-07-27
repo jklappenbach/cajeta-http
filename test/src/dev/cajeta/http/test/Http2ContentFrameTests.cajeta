@@ -46,8 +46,8 @@ public final class Http2ContentFrameTests {
     }
 
     static void data(Check c) {
-        int8[] payload = { (int8) 0x68, (int8) 0x65, (int8) 0x6c, (int8) 0x6c,
-                           (int8) 0x6f };   // "hello"
+        int8[] payload = [ (int8) 0x68, (int8) 0x65, (int8) 0x6c, (int8) 0x6c,
+                           (int8) 0x6f ];   // "hello"
 
         // Unpadded DATA with END_STREAM.
         Http2FrameWriter w = heap Http2FrameWriter();
@@ -84,7 +84,7 @@ public final class Http2ContentFrameTests {
     }
 
     static void headers(Check c) {
-        int8[] block = { (int8) 0x82, (int8) 0x86, (int8) 0x84 };   // HPACK-ish
+        int8[] block = [ (int8) 0x82, (int8) 0x86, (int8) 0x84 ];   // HPACK-ish
 
         // Plain HEADERS with END_HEADERS + END_STREAM.
         Http2FrameWriter w = heap Http2FrameWriter();
@@ -116,10 +116,10 @@ public final class Http2ContentFrameTests {
                "padded HEADERS block correct");
 
         // Crafted HEADERS with the PRIORITY flag: 5 priority octets then block.
-        int8[] withPrio = {
+        int8[] withPrio = [
             (int8) 0x00, (int8) 0x00, (int8) 0x00, (int8) 0x01, (int8) 0x10,
             (int8) 0x82, (int8) 0x86, (int8) 0x84
-        };
+        ];
         Http2Payload rp3 = Http2ContentFrames.parseHeaders(withPrio, 8,
                                                            Http2.FLAG_PRIORITY, 1);
         c.eqInt((int64) rp3.offset, (int64) 5, "priority prefix stripped");
@@ -128,12 +128,12 @@ public final class Http2ContentFrameTests {
                "priority-stripped block correct");
 
         // Padded + priority combined.
-        int8[] both = {
+        int8[] both = [
             (int8) 0x02,                                              // pad length 2
             (int8) 0x00, (int8) 0x00, (int8) 0x00, (int8) 0x01, (int8) 0x10,  // priority
             (int8) 0x82, (int8) 0x86, (int8) 0x84,                    // block
             (int8) 0x00, (int8) 0x00                                  // padding
-        };
+        ];
         Http2Payload rp4 = Http2ContentFrames.parseHeaders(both, 11,
             Http2.FLAG_PADDED | Http2.FLAG_PRIORITY, 1);
         c.eqInt((int64) rp4.offset, (int64) 6, "padded+priority block offset 6");
@@ -141,7 +141,7 @@ public final class Http2ContentFrameTests {
     }
 
     static void pushCont(Check c) {
-        int8[] block = { (int8) 0x82, (int8) 0x86, (int8) 0x84 };
+        int8[] block = [ (int8) 0x82, (int8) 0x86, (int8) 0x84 ];
 
         // PUSH_PROMISE with promised stream id 4.
         Http2FrameWriter w = heap Http2FrameWriter();
@@ -189,7 +189,7 @@ public final class Http2ContentFrameTests {
     }
 
     static void faults(Check c) {
-        int8[] p = { (int8) 0x0a, (int8) 0x68, (int8) 0x69 };   // pad len 10, "hi"
+        int8[] p = [ (int8) 0x0a, (int8) 0x68, (int8) 0x69 ];   // pad len 10, "hi"
 
         // pad length >= available payload -> PROTOCOL_ERROR.
         boolean e1 = false;
@@ -212,7 +212,7 @@ public final class Http2ContentFrameTests {
 
         // content frame on stream 0 -> PROTOCOL_ERROR.
         boolean e3 = false;
-        int8[] d = { (int8) 0x68 };
+        int8[] d = [ (int8) 0x68 ];
         try {
             Http2Payload x = Http2ContentFrames.parseData(d, 1, 0, 0);
         } catch (Http2Exception e) {
@@ -222,7 +222,7 @@ public final class Http2ContentFrameTests {
 
         // HEADERS PRIORITY flag but payload too short for the 5-octet prefix.
         boolean e4 = false;
-        int8[] shortp = { (int8) 0x00, (int8) 0x00 };
+        int8[] shortp = [ (int8) 0x00, (int8) 0x00 ];
         try {
             Http2Payload x = Http2ContentFrames.parseHeaders(shortp, 2,
                                                              Http2.FLAG_PRIORITY, 1);
@@ -233,7 +233,7 @@ public final class Http2ContentFrameTests {
 
         // PUSH_PROMISE too short for the promised stream id.
         boolean e5 = false;
-        int8[] shortpp = { (int8) 0x00, (int8) 0x00, (int8) 0x00 };
+        int8[] shortpp = [ (int8) 0x00, (int8) 0x00, (int8) 0x00 ];
         try {
             Http2Payload x = Http2ContentFrames.parsePushPromise(shortpp, 3, 0, 1);
         } catch (Http2Exception e) {

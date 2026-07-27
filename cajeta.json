@@ -61,7 +61,7 @@
         // auto-extract native/ from a classpath .cja); a plain `cajeta test`
         // still builds and falls back to the pure-cajeta DEFLATE path.
         "dependencies": {
-            "dev.cajeta.codec": "0.7.0"
+            "dev.cajeta.codec": "0.7.1"
         },
 
         "dev-dependencies": {

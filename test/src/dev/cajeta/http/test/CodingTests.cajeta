@@ -32,7 +32,7 @@ public final class CodingTests {
 
     /** python zlib.compress(text, 9) — 57 bytes. */
     static #int8[] zlibFixture() {
-        int8[] z = {
+        int8[] z = [
             (int8) 0x78, (int8) 0xDA, (int8) 0x2B, (int8) 0xC9, (int8) 0x48,
             (int8) 0x55, (int8) 0x28, (int8) 0x2C, (int8) 0xCD, (int8) 0x4C,
             (int8) 0xCE, (int8) 0x56, (int8) 0x48, (int8) 0x2A, (int8) 0xCA,
@@ -45,7 +45,7 @@ public final class CodingTests {
             (int8) 0x81, (int8) 0x79, (int8) 0xA3, (int8) 0x8A, (int8) 0xC9,
             (int8) 0x52, (int8) 0x0C, (int8) 0x00, (int8) 0x2F, (int8) 0xC0,
             (int8) 0x82, (int8) 0x39
-        };
+        ];
         int8[] out = heap int8[57];
         int32 i = 0;
         while (i < 57) { out[i] = z[i]; i = i + 1; }
@@ -54,7 +54,7 @@ public final class CodingTests {
 
     /** python zlib (wbits=31, level 9) — a 69-byte gzip member. */
     static #int8[] gzipFixture() {
-        int8[] g = {
+        int8[] g = [
             (int8) 0x1F, (int8) 0x8B, (int8) 0x08, (int8) 0x00, (int8) 0x00,
             (int8) 0x00, (int8) 0x00, (int8) 0x00, (int8) 0x02, (int8) 0x03,
             (int8) 0x2B, (int8) 0xC9, (int8) 0x48, (int8) 0x55, (int8) 0x28,
@@ -69,7 +69,7 @@ public final class CodingTests {
             (int8) 0xA3, (int8) 0x8A, (int8) 0xC9, (int8) 0x52, (int8) 0x0C,
             (int8) 0x00, (int8) 0x0F, (int8) 0x86, (int8) 0xD9, (int8) 0xB7,
             (int8) 0x68, (int8) 0x01, (int8) 0x00, (int8) 0x00
-        };
+        ];
         int8[] out = heap int8[69];
         int32 i = 0;
         while (i < 69) { out[i] = g[i]; i = i + 1; }

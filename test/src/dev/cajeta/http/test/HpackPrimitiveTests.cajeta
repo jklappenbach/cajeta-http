@@ -127,11 +127,11 @@ public final class HpackPrimitiveTests {
         // From C.4.1: Huffman("www.example.com") = f1e3c2e5f23a6ba0ab90f4ff.
         int8[] host = HpackPrimitiveTests.bytesOf("www.example.com");
         int8[] enc = h.encode(host, (int32) host.count());
-        int8[] expect = {
+        int8[] expect = [
             (int8) 0xf1, (int8) 0xe3, (int8) 0xc2, (int8) 0xe5, (int8) 0xf2,
             (int8) 0x3a, (int8) 0x6b, (int8) 0xa0, (int8) 0xab, (int8) 0x90,
             (int8) 0xf4, (int8) 0xff
-        };
+        ];
         c.eqInt((int64) enc.count(), (int64) 12, "Huffman www.example.com length");
         c.that(HpackPrimitiveTests.sameBytes(enc, (int32) enc.count(),
                                              expect, 12),

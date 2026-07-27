@@ -104,7 +104,7 @@ public final class Http2ClientTests {
         int8[] none = heap int8[0];
         Http2ClientTests.oneExchange(c, "GET", "/hello", none, 0, false, 200,
                                      "hello, h2");
-        int8[] ping = { (int8) 0x70, (int8) 0x69, (int8) 0x6e, (int8) 0x67 };
+        int8[] ping = [ (int8) 0x70, (int8) 0x69, (int8) 0x6e, (int8) 0x67 ];
         Http2ClientTests.oneExchange(c, "POST", "/echo", ping, 4, true, 200,
                                      "ping");
         Http2ClientTests.oneExchange(c, "GET", "/nope", none, 0, false, 404,

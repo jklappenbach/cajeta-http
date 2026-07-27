@@ -166,9 +166,9 @@ public final class Http2StreamTests {
     }
 
     static void continuation(Check c) {
-        int8[] fragA = { (int8) 0x82, (int8) 0x86 };
-        int8[] fragB = { (int8) 0x84, (int8) 0x41 };
-        int8[] fragC = { (int8) 0x8c, (int8) 0xf1, (int8) 0xe3 };
+        int8[] fragA = [ (int8) 0x82, (int8) 0x86 ];
+        int8[] fragB = [ (int8) 0x84, (int8) 0x41 ];
+        int8[] fragC = [ (int8) 0x8c, (int8) 0xf1, (int8) 0xe3 ];
 
         HeaderBlockAssembler h = heap HeaderBlockAssembler();
         c.that(!h.isOpen(), "assembler starts closed");

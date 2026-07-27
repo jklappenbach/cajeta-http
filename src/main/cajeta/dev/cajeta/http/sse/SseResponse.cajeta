@@ -16,7 +16,7 @@ import dev.cajeta.http.HttpResponse;
  *
  * ```cajeta
  * // Fixed sequence:
- * SseEvent[] evs = { SseEvent.of("hello"), SseEvent.typed("tick", "1") };
+ * SseEvent[] evs = [ SseEvent.of("hello"), SseEvent.typed("tick", "1") ];
  * return SseResponse.stream(#evs, 2);
  *
  * // Live producer (a fiber sends onto `ch`; closing it ends the stream):
