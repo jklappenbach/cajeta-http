@@ -25,14 +25,26 @@
         // `details.cajeta-lang-version` above: that pins the LANGUAGE/stdlib
         // API surface (major.minor, "will this source compile?"), this pins
         // the exact COMPILER BUILD ("will this produce the same bytes?").
-        // 0.9.3 is the first toolchain that is BOTH correct for this source
-        // (0.9.0's scoped bare-name resolution fix, which unit 0.2 of the
-        // extraction needed) and free of the per-thread frame-arena bug that
-        // made the loopback suite ~5%/run flaky (http:0.11 — fixed by
-        // per-fiber arenas, cajeta 84ebcec4). Tags <= v0.9.2 regress it.
+        // 0.10.0 is the FLOOR, and it is a correctness requirement, not a
+        // preference. Earlier milestones this pin used to record: 0.9.0's
+        // scoped bare-name resolution fix (extraction unit 0.2), and 0.9.3's
+        // per-fiber arenas that killed the ~5%/run loopback flake (http:0.11,
+        // cajeta 84ebcec4) — tags <= v0.9.2 regress that.
+        //
+        // What forces 0.10.0: every release through v0.9.5 predates cajeta
+        // `f74298c4` — "a borrowed function-typed local must not drop the
+        // closure record". Without it, a function-typed local that merely
+        // ALIASES an existing closure (`f = other`, `h = srv.handler`) gets a
+        // SECOND drop entry for the one shared heap record, so both fire and
+        // free it twice. Under v0.9.5 the suite aborts DETERMINISTICALLY
+        // (10/10) with `free(): invalid pointer` in `middleware bundle: live
+        // server (2.2a)`; the fix commit's own message names this blocker
+        // ("wiring middleware into a live HttpServer, cajeta-http 2.1/2.2").
+        // Proven not to be ours: an identical binary against the pre-native
+        // codec 0.6.0 aborts the same way (5/5), and both go green on 0.10.0.
         // `distribution` defaults to "official" and `fetch` to "auto".
         "toolchain": {
-            "version": "0.9.3"
+            "version": "0.10.0"
         },
 
         // Uses the network transport stack (sockets + TLS via cajeta.io.net).
@@ -42,17 +54,27 @@
         // cajeta.hash, …) is built into the toolchain — not declared, not
         // fetched — and only the parts used are linked (dead-code elimination).
         // dev.cajeta.codec (olla store) supplies DEFLATE/gzip/zlib for HTTP
-        // content-coding (http:1.6a); 0.5.1 is the hardened-inflate build.
+        // content-coding (http:1.6a). 0.7.0 is the first build carrying the
+        // NATIVE zlib backend (drop-in, same API, zlib-speed) — see
+        // ../cajeta-codec/agents/native-libz-plan.md unit 7. Linking it needs
+        // the extract-bridge in ./run-tests.sh (the toolchain does not yet
+        // auto-extract native/ from a classpath .cja); a plain `cajeta test`
+        // still builds and falls back to the pure-cajeta DEFLATE path.
         "dependencies": {
-            "dev.cajeta.codec": "0.6.0"
+            "dev.cajeta.codec": "0.7.0"
         },
 
         "dev-dependencies": {
             "cajeta.testkit": "1.0.*"
         },
 
+        // The live Olla registry. `repo.cajeta.org` was carried here from the
+        // scaffold and has never resolved (NXDOMAIN) — dependency resolution
+        // only ever worked because ~/.olla was seeded by hand. CI publishes to
+        // olla.cajeta.dev (cajeta/.github/actions/olla-publish), so that is the
+        // name to fetch from.
         "repositories": [
-            { "name": "central", "url": "https://repo.cajeta.org",
+            { "name": "central", "url": "https://olla.cajeta.dev",
               "priority": 0 }
         ],
 
@@ -84,7 +106,7 @@
                   "args": [ "dev.cajeta.http.test.TestMain::main",
                             "test/src", "build/test",
                             "--emit=exe",
-                            "--classpath=${art.path},/home/julian/.olla/dev.cajeta.codec/0.6.0/dev.cajeta.codec-0.6.0.cja",
+                            "--classpath=${art.path},/home/julian/.olla/dev.cajeta.codec/0.7.0/dev.cajeta.codec-0.7.0.cja",
                             "-o", "build/test/http-tests" ] },
                 { "action": "test", "input": "build/test/http-tests" }
             ]

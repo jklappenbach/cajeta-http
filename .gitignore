@@ -1,2 +1,5 @@
 build/
 .cajeta/
+# extract-bridge output: the codec's native/ tree exploded out of its .cja
+# (run-tests.sh). Regenerated every run; never edit, never commit.
+.cajeta-native/

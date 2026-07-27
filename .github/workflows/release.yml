@@ -16,8 +16,17 @@ jobs:
   release:
     uses: jklappenbach/cajeta/.github/workflows/lib-release.yml@main
     with:
-      # Toolchain that can compile this repo (0.9.x language + the scoped
-      # bare-name resolution fix). The reusable workflow's default (v0.7.1)
-      # predates both. Bump alongside future toolchain releases.
-      cajeta-version: v0.9.3
+      # Toolchain that can compile AND correctly run this repo. The reusable
+      # workflow's default (v0.7.1) is far too old.
+      #
+      # FLOOR IS v0.10.0 — not a preference, a correctness requirement. Every
+      # release through v0.9.5 predates cajeta `f74298c4` ("a borrowed
+      # function-typed local must not drop the closure record"), without which
+      # a function-typed local that merely ALIASES a stored handler registers a
+      # SECOND drop for the shared closure record — double-free. The suite
+      # aborts deterministically (10/10) with `free(): invalid pointer` in
+      # `middleware bundle: live server (2.2a)`; that commit's own message names
+      # this exact blocker ("wiring middleware into a live HttpServer,
+      # cajeta-http 2.1/2.2"). v0.10.0 is the first release carrying it.
+      cajeta-version: v0.10.0
     secrets: inherit

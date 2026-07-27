@@ -729,19 +729,56 @@ Tasks carry outline ids (`http:<id>`); each unit is worked test-first
       read-churn-read pattern); the @Native title-flag gap is recorded
       on cajeta's focus stack. **Suite now requires a compiler ≥
       `65588252`** — bump the CI pin alongside the 8db619a2 note.
-    - **PENDING — native codec backend adoption** *(gated on cajeta-codec
-      publish; tracked as `cajeta-codec agents/native-libz-plan.md` 7.5)*.
-      cajeta-codec grew a native zlib backend (drop-in, same API) that runs
-      DEFLATE/gzip/zlib at zlib speed; PR #2 is green, unmerged/unpublished.
-      When it ships: bump `dev.cajeta.codec` in `cajeta.json` (2 spots:
-      `dependencies` + the hard-coded olla test classpath), add the
-      extract-bridge (`cajeta archive extract <codec.cja>` →
-      `CAJETA_NATIVE_PATH`, likely via a new `run-tests.sh`) so the native
-      artifact links. **Scope note:** only the ONE-SHOT paths benefit —
-      `ContentCoding` (full-body gzip/zlib, here) goes native for free; the
-      STREAMING paths (`GzipCompressChannel` chunked, `PerMessageDeflate`
-      WebSocket) stay pure-cajeta until a native `z_stream` streaming backend
-      (codec spec §7.1) exists.
+    - **DONE (2026-07-27) — native codec backend adopted** *(was gated on the
+      cajeta-codec publish; `cajeta-codec agents/native-libz-plan.md` 7.5)*.
+      cajeta-codec **0.7.0** shipped the native zlib backend (drop-in, same
+      API) — PR #2 merged, tag `v0.7.0` released to GitHub + the Olla registry.
+      Adopted here by: bumping `dev.cajeta.codec` 0.6.0 → 0.7.0 in
+      `cajeta.json` (both spots — `dependencies` + the hard-coded olla test
+      classpath), and adding the **extract-bridge** as `run-tests.sh`
+      (`cajeta archive extract <codec.cja>` → `CAJETA_NATIVE_PATH`) because the
+      toolchain does not yet auto-extract `native/` from a classpath `.cja`
+      (codec spec §3.2.2 / plan 7.6). The script reads the codec version out of
+      `cajeta.json` so there is no third place to forget.
+      - **Also fixed here: the `repositories` URL had never resolved.**
+        `https://repo.cajeta.org` is NXDOMAIN (carried in from the scaffold —
+        cajeta-codec's manifest still has it too); dependency resolution only
+        ever worked because `~/.olla` was seeded by hand. The live registry
+        that CI publishes to is `https://olla.cajeta.dev`. Now pointed there,
+        and 0.7.0 resolved + downloaded from it cleanly.
+      - **Verified:** `DeflateBackend.useNative() = true` on the
+        `ContentCoding` path; 4 MiB gzip round-trip **byte-exact**; encode
+        **~800 MiB/s** native vs **17.8 MiB/s** on the forced pure-cajeta
+        fallback — **~45× faster**, and the native output is also ~2.5× smaller
+        (56,152 vs 139,327 bytes, real zlib matching vs the fixed-Huffman
+        encoder). Suite **1434/1434** green.
+      - **Scope note (unchanged):** only the ONE-SHOT paths benefit —
+        `ContentCoding` (full-body gzip/zlib, here) goes native for free; the
+        STREAMING paths (`GzipCompressChannel` chunked, `PerMessageDeflate`
+        WebSocket) stay pure-cajeta until a native `z_stream` streaming backend
+        (codec spec §7.1) exists. So the Autobahn 12.*/13.* large-payload
+        slowness (4.3's follow-up) is **NOT** fixed by this.
+      - **Toolchain floor moved: the suite now needs cajeta ≥ v0.10.0.** Under
+        the installed `0.9.5 (22df4e60)` the suite aborts **deterministically**
+        (10/10) in `middleware bundle: live server (2.2a)` with
+        `free(): invalid pointer`. **Not ours, and not the codec:** an
+        identically-built binary against the *pre-native* codec 0.6.0 aborts the
+        same way (5/5). **Root cause identified** — cajeta `f74298c4` (2026-07-22)
+        "a borrowed function-typed local must not drop the closure record": a
+        function-typed local that merely ALIASES an existing closure
+        (`f = other`, `h = srv.handler`) got a SECOND drop entry for the one
+        shared heap record, so both fired and freed it twice. That commit's own
+        message names this blocker ("wiring middleware into a live HttpServer,
+        cajeta-http 2.1/2.2"). The installed 0.9.5 build predates it by a day;
+        **v0.10.0 (`ba861921`) is the first RELEASE carrying it**, and also has
+        the other four fixes this repo needs (`65588252`, `8db619a2`,
+        `3ca4ac12`, `84ebcec4`).
+        - Verified with the **released** deb, not just a local build: 30 runs,
+          **zero** `free(): invalid pointer` (vs 10/10 on 0.9.5), and full clean
+          runs at **1434 passed, 0 failed**.
+        - `cajeta.json` `toolchain.version` and the CI pin are now both v0.10.0.
+          Until the deb is installed system-wide, build with
+          `CAJETA_BIN=<path to a ≥v0.10.0 cajeta>`.
   - [x] **1.4f Builder + proxy.** `HttpClient.builder()` — default
     headers, version pin, pool sizes, redirect/retry/timeout policy,
     TLS trust, HTTP proxy (absolute-form for `http`, CONNECT tunnel
