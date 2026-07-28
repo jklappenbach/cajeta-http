@@ -30,4 +30,16 @@ jobs:
       # 2. These sources use bracket array literals `[1, 2, 3]`; v0.10.0 predates
       #    the collection-literals work entirely and cannot parse them.
       cajeta-version: v0.10.1
+      # Runs the real suite. `./run-tests.sh` rather than `cajeta test` because
+      # the suite needs the codec's native zlib backend extracted out of its .cja
+      # with CAJETA_NATIVE_PATH pointed at it — the toolchain does not yet
+      # auto-extract native/ from a classpath archive. The manifest's `test` task
+      # delegates to the same script, so both entry points stay identical.
+      #
+      # Safe after the reusable workflow's own `cajeta build`: that step resolves
+      # dev.cajeta.codec into $OLLA_HOME, which is where the script looks.
+      #
+      # The floor above is what makes this runnable at all — note reason 1: the
+      # suite used to abort 10/10 in `middleware bundle: live server`.
+      test-command: ./run-tests.sh
     secrets: inherit

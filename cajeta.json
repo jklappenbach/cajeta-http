@@ -64,9 +64,11 @@
             "dev.cajeta.codec": "0.7.1"
         },
 
-        "dev-dependencies": {
-            "cajeta.testkit": "1.0.*"
-        },
+        // Empty: the suite is a self-checking binary under test/src, not a
+        // testkit consumer. `cajeta.testkit: 1.0.*` sat here unedited from the
+        // `cajeta init library` starter and names a package that exists in no
+        // repository.
+        "dev-dependencies": {},
 
         "repositories": [
             { "name": "central", "url": "https://olla.cajeta.dev",
@@ -90,20 +92,21 @@
         },
 
         "test": {
-            // The designed src/test/cajeta + cajeta.testkit pipeline is not
-            // in the toolchain yet (no test-source-root support; testkit
-            // unpublished), so the suite is an ordinary self-checking binary:
-            // test/src compiled against the built .cja via --classpath.
+            // Delegates to ./run-tests.sh rather than inlining the pipeline.
+            // The suite needs the codec's native zlib backend extracted out of
+            // its .cja and CAJETA_NATIVE_PATH pointed at it (the toolchain does
+            // not auto-extract native/ from a classpath archive yet), and that
+            // bridge is shell work this action list cannot express.
+            //
+            // It also used to inline `--classpath=...` with an ABSOLUTE path
+            // into one developer's home directory, pinned to codec 0.7.0 while
+            // settings.dependencies asked for 0.7.1 — so this task could only
+            // ever run on that one machine, and linked the wrong codec when it
+            // did. run-tests.sh reads the version from settings.dependencies and
+            // resolves it under $OLLA_HOME.
             "description": "Build + run the library's unit tests",
             "actions": [
-                { "action": "build", "flavor": "debug", "id": "art" },
-                { "action": "exec", "command": "cajeta",
-                  "args": [ "dev.cajeta.http.test.TestMain::main",
-                            "test/src", "build/test",
-                            "--emit=exe",
-                            "--classpath=${art.path},/home/julian/.olla/dev.cajeta.codec/0.7.0/dev.cajeta.codec-0.7.0.cja",
-                            "-o", "build/test/http-tests" ] },
-                { "action": "test", "input": "build/test/http-tests" }
+                { "action": "exec", "command": "./run-tests.sh" }
             ]
         },
 
