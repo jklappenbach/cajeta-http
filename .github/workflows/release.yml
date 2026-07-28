@@ -2,9 +2,8 @@ name: release
 
 on:
   push:
-    tags: ['v*']
-  pull_request:
     branches: [main]
+    tags: ['v*']
   workflow_dispatch:
 
 permissions:
