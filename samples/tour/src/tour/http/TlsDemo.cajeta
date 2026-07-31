@@ -1,0 +1,118 @@
+package tour.http;
+
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.client.HttpClient;
+import dev.cajeta.http.server.HttpServer;
+import dev.cajeta.http.server.HttpServerBuilder;
+import cajeta.io.net.TcpStream;
+
+// HTTPS — the same exchange, TLS-terminated. Two knobs and nothing else
+// changes: the server builder takes the PEM pair (b.tls(cert, key)), the
+// client pins the trust anchor (builder().trustAnchor(...)). Over TLS the
+// client also offers ALPN h2 + http/1.1 — against an h2-capable server the
+// SAME client.get() would ride HTTP/2 (see Http2Demo); this server speaks
+// h1, so ALPN lands on http/1.1.
+//
+// The cert is a self-signed P-256 test fixture, CN/SAN 127.0.0.1 —
+// generated once for the test suite and reused here. Real deployments
+// terminate with real chains; the API surface is identical.
+public class TlsDemo extends DemoClass {
+
+    // support: the PEM fixtures. The trailing substring self-copy is the
+    // owned-return idiom: a `#String` return must hand out an OWNED value,
+    // and the concatenated local is a borrow — substring(0, len) mints the
+    // owned copy. (Same idiom as DemoClass.own.)
+    static #String tourCertPem() {
+        String s = "-----BEGIN CERTIFICATE-----\n"
+            + "MIIBjjCCATSgAwIBAgIUG3tfsEcGGASfxB4YMpdd0NHD0xwwCgYIKoZIzj0EAwIw\n"
+            + "FDESMBAGA1UEAwwJMTI3LjAuMC4xMB4XDTI2MDcyMTE0MjU1MFoXDTM2MDcxODE0\n"
+            + "MjU1MFowFDESMBAGA1UEAwwJMTI3LjAuMC4xMFkwEwYHKoZIzj0CAQYIKoZIzj0D\n"
+            + "AQcDQgAEZLO33nsUaLPOrTdA1Qsugw7hJSvkPyBXYRDXrCCVp+UMRAaMA3po2ylC\n"
+            + "cSbipB2XqJZkNPFKfSU/HMFY8WmnIaNkMGIwHQYDVR0OBBYEFKWc9dLR6ZtiyziA\n"
+            + "6wi/WAS/LynCMB8GA1UdIwQYMBaAFKWc9dLR6ZtiyziA6wi/WAS/LynCMA8GA1Ud\n"
+            + "EwEB/wQFMAMBAf8wDwYDVR0RBAgwBocEfwAAATAKBggqhkjOPQQDAgNIADBFAiEA\n"
+            + "j38aD2Gc+SW19AjGNd8dYx9xB1ayoM7Sft14+vtFlvQCIDcawNickiIPu8OvLe3S\n"
+            + "9C1P6pu4xxUcLaIfZUv6Tb7F\n"
+            + "-----END CERTIFICATE-----\n";
+        return s.substring(0, s.byteLength());
+    }
+
+    static #String tourKeyPem() {
+        String s = "-----BEGIN PRIVATE KEY-----\n"
+            + "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgWi6Npf2wrpH2sHdS\n"
+            + "HFt2FAwbM7E7VJKm9a7HCFI/amqhRANCAARks7feexRos86tN0DVCy6DDuElK+Q/\n"
+            + "IFdhENesIJWn5QxEBowDemjbKUJxJuKkHZeolmQ08Up9JT8cwVjxaach\n"
+            + "-----END PRIVATE KEY-----\n";
+        return s.substring(0, s.byteLength());
+    }
+
+    // support: the handler — the orders health endpoint over TLS.
+    public static #HttpResponse handle(HttpRequest req) {
+        if (req.getTarget().equals("/health")) {
+            String up = "orders: all systems nominal";
+            return HttpResponse.ok().body(up.toBytes(), up.byteLength());
+        }
+        String nf = "not found";
+        return HttpResponse.of(404).body(nf.toBytes(), nf.byteLength());
+    }
+
+    // TLS accept is explicit in v1: take the next TLS connection and
+    // dispatch its handshake + exchange on this fiber.
+    public static async int32 acceptTlsOnce(HttpServer srv) {
+        TcpStream conn #= srv.acceptTlsNext();
+        srv.dispatchTls(#conn);
+        return 1;
+    }
+
+    // The client trusts exactly OUR cert — not the OS store. A client
+    // without the anchor would refuse this self-signed server.
+    public static async int32 clientGetTls(int32 port) {
+        String cp = TlsDemo.tourCertPem();
+        int8[] anchor = cp.toBytes();
+        HttpClient client = HttpClient.builder()
+            .trustAnchor(anchor, cp.byteLength())
+            .exchangeTimeout(15000)
+            .build();
+        String url = "https://127.0.0.1:" + port + "/health";
+        HttpResponse resp = client.get(url);
+        if (resp.statusCode() != 200) {
+            return 0 - 1;
+        }
+        return resp.bodyLength();
+    }
+
+    public void execute() {
+        System.stdout.println("");
+        System.stdout.println("-- HTTPS: the same server + client, TLS-terminated --");
+
+        scope {
+            String cp = TlsDemo.tourCertPem();
+            String kp = TlsDemo.tourKeyPem();
+            int8[] cert = cp.toBytes();
+            int8[] key = kp.toBytes();
+            HttpServerBuilder b = HttpServer.builder();
+            b.bind("127.0.0.1:0");
+            (HttpRequest) -> #HttpResponse h = (req) -> TlsDemo.handle(req);
+            b.handler(h);
+            b.tls(cert, cp.byteLength(), key, kp.byteLength());
+            HttpServer srv = b.build();
+            int32 port = srv.tlsListener.boundPort();
+            System.stdout.println("  TLS bound 127.0.0.1:{} (ephemeral)", port);
+            this.check(srv.isTls && port > 0, "TLS server bound an ephemeral port");
+
+            Task<int32> s1 = spawn acceptTlsOnce(srv);
+            Task<int32> tg = spawn clientGetTls(port);
+            int32 got = await tg;
+            int32 acc = await s1;
+            this.check(got == 27 && acc == 1,
+                "pinned-anchor HTTPS GET answered the 27-byte health body");
+
+            // Teardown: both fibers are joined above, so nothing is in
+            // flight by construction — closing the listener is the whole
+            // drain here (the plaintext demos' shutdown() covers the
+            // multi-connection case).
+            srv.tlsListener.close();
+        }
+    }
+}

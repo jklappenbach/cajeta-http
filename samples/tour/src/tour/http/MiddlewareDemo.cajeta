@@ -1,0 +1,287 @@
+package tour.http;
+
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.coding.ContentCoding;
+import dev.cajeta.http.middleware.Middleware;
+import dev.cajeta.http.middleware.MiddlewareChain;
+import dev.cajeta.http.middleware.Logging;
+import dev.cajeta.http.middleware.LogSink;
+import dev.cajeta.http.middleware.RequestId;
+import dev.cajeta.http.middleware.Recover;
+import dev.cajeta.http.middleware.Timeout;
+import dev.cajeta.http.middleware.Cors;
+import dev.cajeta.http.middleware.BasicAuth;
+import dev.cajeta.http.middleware.BearerAuth;
+import dev.cajeta.http.middleware.Credentials;
+import dev.cajeta.http.middleware.RateLimit;
+import dev.cajeta.http.middleware.TokenBucket;
+import dev.cajeta.http.middleware.Compression;
+import dev.cajeta.http.middleware.Decompression;
+import dev.cajeta.http.middleware.ETag;
+import dev.cajeta.http.middleware.StaticFile;
+import dev.cajeta.http.middleware.StaticPath;
+import dev.cajeta.http.middleware.ProxyHeaders;
+import cajeta.codec.Base64;
+import cajeta.concurrent.Tasks;
+import cajeta.io.file.File;
+import cajeta.io.file.Path;
+
+// The middleware stack — dev.cajeta.http.middleware. A middleware is a
+// function around a handler:
+//
+//   (req, next) -> #HttpResponse        // observe/modify req, call next,
+//                                       // observe/modify the response
+//
+// MiddlewareChain.use(...) stacks them (first use() = outermost) and
+// compose(terminal) returns an ordinary handler — so the whole stack plugs
+// into HttpServer.builder().handler(...) unchanged. Config objects (Cors,
+// BasicAuth, ...) are captured BY REFERENCE by their middleware: they must
+// live as long as the composed handler (build the chain in the scope that
+// serves it, not in a factory).
+//
+// Everything here runs in-process — a chain is just a function, no socket
+// required. ServerDemo then puts a chain behind a live server.
+//
+// The scenario: the orders API's production stack — recovery, request ids,
+// auth, rate limiting, timeouts, CORS, caching, compression, static files.
+public class MiddlewareDemo extends DemoClass {
+
+    // support: terminal handlers (static, capture-free).
+    public static #HttpResponse okJson(HttpRequest req) {
+        // Compression skips bodies under its 256-byte minSize (framing
+        // overhead would beat the savings), so this response is made
+        // comfortably larger than the threshold.
+        String body = "{\"status\":\"accepted\",\"queue\":\"orders-v2\",\"fills\":[";
+        int32 fi = 0;
+        while (fi < 12) {
+            body = body + "{\"seq\":" + fi + ",\"symbol\":\"ACME\",\"state\":\"filled\"},";
+            fi = fi + 1;
+        }
+        body = body + "{}]}";
+        return HttpResponse.ok()
+            .setHeader("Content-Type", "application/json")
+            .body(body.toBytes(), body.byteLength());
+    }
+
+    public static #HttpResponse boom(HttpRequest req) {
+        String msg = "orders db unreachable";
+        throw heap Exception(msg.substring(0, msg.byteLength()));
+    }
+
+    public static #HttpResponse slow(HttpRequest req) {
+        Tasks.sleepMillis((int64) 300);
+        return HttpResponse.of(200);
+    }
+
+    public static #HttpResponse echoIp(HttpRequest req) {
+        String ip = req.getHeaders().get("X-Real-IP");
+        if (ip == null) {
+            ip = "-";
+        }
+        return HttpResponse.ok().body(ip.toBytes(), ip.byteLength());
+    }
+
+    public void execute() {
+        System.stdout.println("");
+        System.stdout.println("-- Middleware: the chain and the production catalogue --");
+
+        // 1. The mechanics: Recover outermost, then RequestId, then Logging
+        //    into a capturing sink. One compose() -> one ordinary handler.
+        Middleware rec = Recover.middleware();
+        Middleware rid = RequestId.middleware();
+        LogSink sink = LogSink.capturing();
+        Middleware logm = Logging.middleware(sink);
+        MiddlewareChain chain = heap MiddlewareChain();
+        chain.use(#rec).use(#rid).use(#logm);
+        (HttpRequest) -> #HttpResponse term = (req) -> MiddlewareDemo.okJson(req);
+        (HttpRequest) -> #HttpResponse app = chain.compose(term);
+        HttpResponse r1 = app(HttpRequest.of("GET", "/orders"));
+        this.check(r1.statusCode() == 200
+            && r1.getHeaders().get(RequestId.HEADER) != null,
+            "the composed handler runs; RequestId stamps X-Request-Id");
+        this.check(sink.count() == 1 && sink.at(0).contains("GET /orders 200"),
+            "Logging wrote one access line into the capturing sink");
+        // Recover turns a handler throw into a 500 instead of a dead fiber.
+        MiddlewareChain crash = heap MiddlewareChain();
+        Middleware rec2 = Recover.middleware();
+        crash.use(#rec2);
+        (HttpRequest) -> #HttpResponse boomT = (req) -> MiddlewareDemo.boom(req);
+        (HttpRequest) -> #HttpResponse crashApp = crash.compose(boomT);
+        HttpResponse crashed = crashApp(HttpRequest.of("GET", "/orders"));
+        this.check(crashed.statusCode() == 500,
+            "Recover converts a handler throw into a 500");
+
+        // 2. Auth. BasicAuth splits on the FIRST colon (passwords may
+        //    contain colons) and compares in constant time; BearerAuth
+        //    checks a token. Both challenge with WWW-Authenticate on 401.
+        BasicAuth ba = BasicAuth.create("orders");
+        (String, String) -> boolean verify =
+            (u, pw) -> u.equals("ada") && Credentials.constantTimeEquals(pw, "s3cr:et");
+        ba.verifier(#verify);
+        Middleware bam = BasicAuth.middleware(ba);
+        MiddlewareChain auth = heap MiddlewareChain();
+        auth.use(#bam);
+        (HttpRequest) -> #HttpResponse authApp = auth.compose(term);
+        String creds = "ada:s3cr:et";
+        String good = Base64.encode(creds.toBytes(), (int64) creds.byteLength());
+        HttpRequest okReq = HttpRequest.of("GET", "/orders");
+        okReq.setHeader("Authorization", "Basic " + good);
+        HttpResponse admitted = authApp(okReq);
+        this.check(admitted.statusCode() == 200,
+            "BasicAuth admits valid credentials (colon in the password)");
+        HttpResponse denied = authApp(HttpRequest.of("GET", "/orders"));
+        String chal = denied.getHeaders().get("WWW-Authenticate");
+        this.check(denied.statusCode() == 401 && chal != null
+            && chal.startsWith("Basic realm="),
+            "missing credentials answer 401 with the realm challenge");
+        BearerAuth bt = BearerAuth.create("orders");
+        (String) -> boolean tok = (t) -> t.equals("tok-live-42");
+        bt.verifier(#tok);
+        Middleware btm = BearerAuth.middleware(bt);
+        MiddlewareChain bearer = heap MiddlewareChain();
+        bearer.use(#btm);
+        (HttpRequest) -> #HttpResponse bearerApp = bearer.compose(term);
+        HttpRequest bReq = HttpRequest.of("GET", "/orders");
+        bReq.setHeader("Authorization", "Bearer tok-live-42");
+        HttpResponse btOk = bearerApp(bReq);
+        HttpResponse btNo = bearerApp(HttpRequest.of("GET", "/orders"));
+        this.check(btOk.statusCode() == 200 && btNo.statusCode() == 401,
+            "BearerAuth: right token 200, missing token 401");
+
+        // 3. Rate limiting: a token bucket per client key (default
+        //    X-Forwarded-For). Burst 2, refill 1/s: the third rapid call
+        //    429s with Retry-After.
+        RateLimit rl = RateLimit.create((int64) 2, (int64) 1);
+        Middleware rlm = RateLimit.middleware(rl);
+        MiddlewareChain limited = heap MiddlewareChain();
+        limited.use(#rlm);
+        (HttpRequest) -> #HttpResponse limApp = limited.compose(term);
+        HttpRequest l1 = HttpRequest.of("GET", "/orders");
+        l1.setHeader("X-Forwarded-For", "10.0.0.9");
+        HttpRequest l2 = HttpRequest.of("GET", "/orders");
+        l2.setHeader("X-Forwarded-For", "10.0.0.9");
+        HttpRequest l3 = HttpRequest.of("GET", "/orders");
+        l3.setHeader("X-Forwarded-For", "10.0.0.9");
+        HttpResponse lim1 = limApp(l1);
+        HttpResponse lim2 = limApp(l2);
+        boolean firstTwo = lim1.statusCode() == 200
+            && lim2.statusCode() == 200;
+        HttpResponse throttled = limApp(l3);
+        this.check(firstTwo && throttled.statusCode() == 429
+            && throttled.getHeaders().get("Retry-After") != null,
+            "burst of 2 admitted; the third answers 429 + Retry-After");
+        // The bucket itself, directly: deterministic clock arithmetic.
+        TokenBucket bucket = heap TokenBucket((int64) 2, (int64) 1, (int64) 1000);
+        boolean t1 = bucket.tryAcquire((int64) 1000);
+        boolean t2 = bucket.tryAcquire((int64) 1000);
+        boolean t3 = bucket.tryAcquire((int64) 1000);
+        boolean t4 = bucket.tryAcquire((int64) 2100);   // 1.1s later: refilled 1
+        this.check(t1 && t2 && !t3 && t4,
+            "TokenBucket: capacity 2 drains, 1/s refill readmits");
+
+        // 4. Timeout: a handler over budget becomes 504 — the middleware
+        //    answer to a stuck downstream (compare ClientDemo's
+        //    exchangeTimeout, which is the CLIENT side of the same story).
+        Middleware tmo = Timeout.middleware((int64) 60);
+        MiddlewareChain slowChain = heap MiddlewareChain();
+        slowChain.use(#tmo);
+        (HttpRequest) -> #HttpResponse slowT = (req) -> MiddlewareDemo.slow(req);
+        (HttpRequest) -> #HttpResponse slowApp = slowChain.compose(slowT);
+        HttpResponse late = slowApp(HttpRequest.of("GET", "/orders"));
+        this.check(late.statusCode() == 504,
+            "a 300ms handler against a 60ms budget answers 504");
+
+        // 5. CORS: the browser's preflight OPTIONS answered from config.
+        Cors cors = Cors.create();
+        cors.allowOrigin("https://app.example").allowMethods("GET, POST");
+        Middleware cm = Cors.middleware(cors);
+        MiddlewareChain corsChain = heap MiddlewareChain();
+        corsChain.use(#cm);
+        (HttpRequest) -> #HttpResponse corsApp = corsChain.compose(term);
+        HttpRequest pre = HttpRequest.of("OPTIONS", "/orders");
+        pre.setHeader("Origin", "https://app.example");
+        pre.setHeader("Access-Control-Request-Method", "POST");
+        HttpResponse preResp = corsApp(pre);
+        this.check(preResp.statusCode() == 204
+            && preResp.getHeaders().get("Access-Control-Allow-Origin")
+                .equals("https://app.example"),
+            "preflight answers 204 with the allowed origin echoed");
+
+        // 6. Caching + bandwidth: ETag hashes the body and honors
+        //    If-None-Match with 304; Compression gzips when the client
+        //    accepts it, restamps Content-Length, and adds Vary.
+        Middleware em = ETag.middleware();
+        MiddlewareChain etagChain = heap MiddlewareChain();
+        etagChain.use(#em);
+        (HttpRequest) -> #HttpResponse etagApp = etagChain.compose(term);
+        HttpResponse first = etagApp(HttpRequest.of("GET", "/orders"));
+        String tag = first.getHeaders().get("ETag");
+        HttpRequest cond = HttpRequest.of("GET", "/orders");
+        cond.setHeader("If-None-Match", tag);
+        HttpResponse notMod = etagApp(cond);
+        this.check(tag != null && notMod.statusCode() == 304 && !notMod.hasBody,
+            "ETag: matching If-None-Match answers a bodyless 304");
+        Compression comp = Compression.create();
+        Middleware zm = Compression.middleware(comp);
+        MiddlewareChain zipChain = heap MiddlewareChain();
+        zipChain.use(#zm);
+        (HttpRequest) -> #HttpResponse zipApp = zipChain.compose(term);
+        HttpRequest zReq = HttpRequest.of("GET", "/orders");
+        zReq.setHeader("Accept-Encoding", "gzip");
+        HttpResponse zResp = zipApp(zReq);
+        HttpResponse plainResp = MiddlewareDemo.okJson(HttpRequest.of("GET", "/x"));
+        int8[] unzipped = ContentCoding.decode("gzip", zResp.body,
+            zResp.bodyLength(), (int64) 65536);
+        this.check(zResp.getHeaders().get("Content-Encoding").equals("gzip")
+            && zResp.getHeaders().get("Vary") != null
+            && this.sameBytes(unzipped, (int32) unzipped.count(),
+                plainResp.body, plainResp.bodyLength()),
+            "Compression gzips, adds Vary, and round-trips the body");
+        // Decompression is the inbound mirror: a gzip REQUEST body is
+        // inflated before the handler sees it (with a bomb cap).
+        Decompression dz = Decompression.create();
+        Middleware dzm = Decompression.middleware(dz);
+        this.check(dz != null && dzm != null,
+            "Decompression middleware constructed (loopback demo in ServerDemo)");
+
+        // 7. Static files, jailed. StaticPath.jail is the traversal guard
+        //    the file middleware applies to every URL path.
+        String root = "build/tour-static";
+        Path.of(root).mkdirs();
+        String page = "<h1>orders console</h1>";
+        File.writeAllBytes(root + "/index.html", page.toBytes(), page.byteLength());
+        StaticFile sf = StaticFile.create(root);
+        Middleware sfm = StaticFile.middleware(sf);
+        MiddlewareChain fileChain = heap MiddlewareChain();
+        fileChain.use(#sfm);
+        (HttpRequest) -> #HttpResponse notFound =
+            (req) -> HttpResponse.of(404);
+        (HttpRequest) -> #HttpResponse fileApp = fileChain.compose(notFound);
+        HttpResponse idx = fileApp(HttpRequest.of("GET", "/"));
+        this.check(idx.statusCode() == 200 && idx.bodyLength() == page.byteLength(),
+            "StaticFile serves index.html for the directory root");
+        this.check(StaticPath.jail("/../etc/passwd") == null
+            && StaticPath.jail("/css/site.css") != null,
+            "StaticPath.jail rejects traversal, admits normal paths");
+
+        // 8. ProxyHeaders: behind a TRUSTED load balancer, the first
+        //    X-Forwarded-For hop becomes X-Real-IP; in untrusted mode the
+        //    spoofable headers are stripped instead.
+        ProxyHeaders ph = ProxyHeaders.trusted();
+        Middleware phm = ProxyHeaders.middleware(ph);
+        MiddlewareChain proxied = heap MiddlewareChain();
+        proxied.use(#phm);
+        (HttpRequest) -> #HttpResponse ipT = (req) -> MiddlewareDemo.echoIp(req);
+        (HttpRequest) -> #HttpResponse ipApp = proxied.compose(ipT);
+        HttpRequest fwd = HttpRequest.of("GET", "/ip");
+        fwd.setHeader("X-Forwarded-For", "203.0.113.7, 10.1.1.1");
+        HttpResponse ipResp = ipApp(fwd);
+        this.check(DemoClass.bodyString(ipResp.body, ipResp.bodyLength())
+                .equals("203.0.113.7"),
+            "trusted ProxyHeaders resolves the client IP from hop 0");
+
+        // Cleanup: the static fixture is scratch, not a deliverable.
+        Path.of(root + "/index.html").delete();
+    }
+}

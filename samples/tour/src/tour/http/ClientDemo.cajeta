@@ -1,0 +1,303 @@
+package tour.http;
+
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.HttpException;
+import dev.cajeta.http.TooManyRedirectsException;
+import dev.cajeta.http.client.HttpClient;
+import dev.cajeta.http.client.HttpClientBuilder;
+import dev.cajeta.http.client.CookieJar;
+import dev.cajeta.http.client.Cookie;
+import dev.cajeta.http.client.ConnectionPool;
+import dev.cajeta.http.server.HttpServer;
+import dev.cajeta.http.server.HttpServerBuilder;
+import cajeta.codec.json.JsonValue;
+import cajeta.codec.json.JsonObject;
+import cajeta.concurrent.Tasks;
+import cajeta.hash.Sha256;
+import cajeta.io.file.File;
+import cajeta.io.file.Path;
+import cajeta.io.net.NetException;
+import cajeta.io.net.TimedOutException;
+import cajeta.io.net.SocketAddress;
+import cajeta.io.net.TcpListener;
+import cajeta.io.net.uri.Uri;
+import cajeta.time.Duration;
+
+// HttpClient — the operational surface a real caller configures on day one:
+//
+//   client.exchangeTimeout(ms)          the whole-exchange deadline
+//   client.retryPolicy(n, backoffMs)    transport-fault retries (idempotent
+//                                       methods only — POST never retries)
+//   client.redirectLimit(n)             the 3xx follow cap (loops included)
+//   HttpClient.builder().cookieJar()    RFC 6265 cookies, off by default
+//   client.poolLimits(perOrigin, idle)  the keep-alive connection pool
+//   client.getJson(url)                 GET + 2xx check + JSON parse
+//   client.downloadTo(url, path)        stream to disk, Sha256 receipt
+//
+// Failures are typed: refused/reset -> NetException, deadline ->
+// TimedOutException, over-cap redirects -> TooManyRedirectsException,
+// non-2xx on the convenience calls -> HttpException.
+//
+// The scenario: a deployment client talking to the orders service —
+// status JSON, a signed artifact download, a login cookie, flaky-network
+// handling.
+public class ClientDemo extends DemoClass {
+
+    // support: the server the client drives. /status serves JSON; /hop
+    // redirects to /status; /loop redirects forever; /artifact serves a
+    // known payload; /login sets a cookie; /whoami echoes it; /slow stalls.
+    public static #HttpResponse handle(HttpRequest req) {
+        String t = req.getTarget();
+        if (t.equals("/status")) {
+            String body = "{\"service\":\"orders\",\"healthy\":true,\"queue\":17}";
+            return HttpResponse.ok()
+                .setHeader("Content-Type", "application/json")
+                .body(body.toBytes(), body.byteLength());
+        }
+        if (t.equals("/hop")) {
+            String moved = "moved";
+            return HttpResponse.of(307)
+                .setHeader("Location", "/status")
+                .body(moved.toBytes(), moved.byteLength());
+        }
+        if (t.equals("/loop")) {
+            String moved = "moved";
+            return HttpResponse.of(302)
+                .setHeader("Location", "/loop")
+                .body(moved.toBytes(), moved.byteLength());
+        }
+        if (t.equals("/artifact")) {
+            String art = "orders-service-1.4.2 release artifact bytes";
+            return HttpResponse.ok().body(art.toBytes(), art.byteLength());
+        }
+        if (t.equals("/login")) {
+            String in = "welcome";
+            return HttpResponse.ok()
+                .setHeader("Set-Cookie", "session=tok-77; Path=/")
+                .body(in.toBytes(), in.byteLength());
+        }
+        if (t.equals("/whoami")) {
+            String ck = req.getHeaders().get("cookie");
+            String out = "-";
+            if (ck != null) {
+                out = ck;
+            }
+            return HttpResponse.ok().body(out.toBytes(), out.byteLength());
+        }
+        if (t.equals("/slow")) {
+            Tasks.sleepMillis((int64) 800);
+            return HttpResponse.of(200);
+        }
+        String nf = "not found";
+        return HttpResponse.of(404).body(nf.toBytes(), nf.byteLength());
+    }
+
+    public static async int32 serveLoop(HttpServer srv) {
+        srv.serve();
+        return 1;
+    }
+
+    // getJson: GET + 2xx gate + parse, one call. 1 = fields read.
+    public static async int32 statusJson(int32 port) {
+        HttpClient client = heap HttpClient();
+        client.exchangeTimeout(15000);
+        client.defaultHeader("Connection", "close");
+        JsonValue v = client.getJson("http://127.0.0.1:" + port + "/status");
+        JsonObject o = v.asObject();
+        if (!o.get("service").asString().equals("orders")) {
+            return 0 - 1;
+        }
+        if (!o.get("healthy").asBoolean()) {
+            return 0 - 2;
+        }
+        if (o.get("queue").asInt64() != (int64) 17) {
+            return 0 - 3;
+        }
+        // The convenience call REFUSES a non-2xx instead of handing you
+        // an error page as data.
+        boolean gated = false;
+        try {
+            JsonValue nope = client.getJson("http://127.0.0.1:" + port + "/nope");
+        } catch (HttpException he) {
+            gated = true;
+        }
+        if (!gated) {
+            return 0 - 4;
+        }
+        return 1;
+    }
+
+    // Redirects: 307 preserves the method; the cap turns a loop into a
+    // typed failure instead of a hang. 1 = both behaviors seen.
+    public static async int32 redirects(int32 port) {
+        HttpClient client = HttpClient.builder().redirectLimit(3)
+            .defaultHeader("Connection", "close").build();
+        HttpResponse ok = client.get("http://127.0.0.1:" + port + "/hop");
+        String body = DemoClass.bodyString(ok.body, ok.bodyLength());
+        if (ok.statusCode() != 200 || !body.contains("orders")) {
+            return 0 - 1;
+        }
+        boolean capped = false;
+        try {
+            HttpResponse never = client.get("http://127.0.0.1:" + port + "/loop");
+        } catch (TooManyRedirectsException re) {
+            capped = re.hops > 0;
+        }
+        if (!capped) {
+            return 0 - 2;
+        }
+        return 1;
+    }
+
+    // Cookies: builder().cookieJar() turns persistence on; the jar stores
+    // Set-Cookie and returns it on later requests. 1 = cookie came back.
+    public static async int32 loginFlow(int32 port) {
+        HttpClient client = HttpClient.builder().cookieJar()
+            .defaultHeader("Connection", "close").build();
+        client.exchangeTimeout(15000);
+        HttpResponse in = client.get("http://127.0.0.1:" + port + "/login");
+        if (in.statusCode() != 200) {
+            return 0 - 1;
+        }
+        HttpResponse who = client.get("http://127.0.0.1:" + port + "/whoami");
+        String echoed = DemoClass.bodyString(who.body, who.bodyLength());
+        if (!echoed.equals("session=tok-77")) {
+            return 0 - 2;
+        }
+        // Cookies are OFF by default — a plain client stays anonymous.
+        HttpClient bare = heap HttpClient();
+        bare.exchangeTimeout(15000);
+        bare.defaultHeader("Connection", "close");
+        HttpResponse anon = bare.get("http://127.0.0.1:" + port + "/whoami");
+        String none = DemoClass.bodyString(anon.body, anon.bodyLength());
+        if (!none.equals("-")) {
+            return 0 - 3;
+        }
+        return 1;
+    }
+
+    // downloadTo: stream to disk, get the Sha256 receipt, verify against
+    // a re-hash of what the server holds. 1 = hashes agree.
+    public static async int32 fetchArtifact(int32 port, String dest) {
+        HttpClient client = heap HttpClient();
+        client.exchangeTimeout(15000);
+        client.defaultHeader("Connection", "close");
+        Sha256 receipt = client.downloadTo(
+            "http://127.0.0.1:" + port + "/artifact", dest);
+        String art = "orders-service-1.4.2 release artifact bytes";
+        String want = Sha256.hashHex(art.toBytes(), (int64) art.byteLength());
+        if (!receipt.hex().equals(want)) {
+            return 0 - 1;
+        }
+        return 1;
+    }
+
+    // The deadline: /slow stalls 800ms against a 150ms budget.
+    // 1 = TimedOutException raised (and never a retry — timeouts don't).
+    public static async int32 deadline(int32 port) {
+        HttpClient client = heap HttpClient();
+        client.exchangeTimeout(150);
+        client.defaultHeader("Connection", "close");
+        Uri uri = Uri.builder()
+            .scheme("http").host("127.0.0.1").port(port).path("/slow")
+            .build();
+        HttpRequest req = HttpRequest.fromUri("GET", uri);
+        try {
+            HttpResponse resp = client.send(uri, req);
+            return 0 - 1;
+        } catch (TimedOutException te) {
+            return 1;
+        }
+    }
+
+    // A dead port: connection refused surfaces as NetException once the
+    // retry budget (0 here — fail fast) is spent.
+    public static async int32 refused(int32 deadPort) {
+        HttpClient client = heap HttpClient();
+        client.retryPolicy(0, 0);
+        Uri uri = Uri.builder()
+            .scheme("http").host("127.0.0.1").port(deadPort).path("/status")
+            .build();
+        HttpRequest req = HttpRequest.fromUri("GET", uri);
+        try {
+            HttpResponse resp = client.send(uri, req);
+            return 0 - 1;
+        } catch (NetException ne) {
+            return 1;
+        }
+    }
+
+    public void execute() {
+        System.stdout.println("");
+        System.stdout.println("-- HttpClient: timeouts, retries, redirects, cookies, JSON, download --");
+
+        scope {
+            HttpServerBuilder b = HttpServer.builder();
+            b.bind("127.0.0.1:0");
+            (HttpRequest) -> #HttpResponse h = (req) -> ClientDemo.handle(req);
+            b.handler(h);
+            HttpServer srv = b.build();
+            int32 port = srv.server.listener.boundPort();
+            Task<int32> sv = spawn serveLoop(srv);
+
+            Task<int32> js = spawn statusJson(port);
+            this.check(await js == 1,
+                "getJson parses the 2xx body and refuses the 404");
+
+            Task<int32> rd = spawn redirects(port);
+            this.check(await rd == 1,
+                "307 follows with the method kept; a loop trips TooManyRedirects");
+
+            Task<int32> lg = spawn loginFlow(port);
+            this.check(await lg == 1,
+                "cookieJar() persists the session; a bare client stays anonymous");
+
+            String dest = "build/tour-artifact.bin";
+            Task<int32> dl = spawn fetchArtifact(port, dest);
+            this.check(await dl == 1,
+                "downloadTo streams to disk; the Sha256 receipt verifies");
+            Path.of(dest).delete();
+
+            Task<int32> to = spawn deadline(port);
+            this.check(await to == 1,
+                "an 800ms stall against a 150ms budget raises TimedOutException");
+
+            boolean drained = srv.shutdown(Duration.ofSeconds(2));
+            int32 sret = await sv;
+            this.check(drained && sret == 1, "server drained; accept loop exited");
+        }
+
+        // Connection refused — no server involved: bind, note the port,
+        // close, then dial it.
+        SocketAddress probe = SocketAddress.parse("127.0.0.1:0");
+        TcpListener lst = TcpListener.bind(probe);
+        int32 dead = lst.boundPort();
+        lst.close();
+        scope {
+            Task<int32> rf = spawn refused(dead);
+            this.check(await rf == 1,
+                "a refused dial surfaces as NetException (retryPolicy 0 = fail fast)");
+        }
+
+        // The pool + jar as objects: poolLimits swaps the client's pool
+        // (ConnectionPool.withLimits underneath); a prepared CookieJar can
+        // be injected wholesale — the Cookie chain is inspectable state.
+        CookieJar jar = heap CookieJar();
+        jar.store("session=preset-9; Path=/", "127.0.0.1", "/", (int64) 0);
+        String header = jar.cookieHeaderFor("127.0.0.1", "/orders", false, (int64) 1);
+        this.check(header != null && header.equals("session=preset-9"),
+            "a prepared CookieJar answers cookieHeaderFor by host and path");
+        HttpClient tuned = heap HttpClient();
+        tuned.poolLimits(2, 30000);
+        tuned.cookieJar(#jar);
+        ConnectionPool pool = ConnectionPool.withLimits(2, 30000);
+        this.check(pool.idleCount("127.0.0.1", 80) == 0,
+            "a fresh pool holds no idle connections for an origin");
+        Cookie c = heap Cookie();
+        c.name = DemoClass.own("theme");
+        c.value = DemoClass.own("dark");
+        this.check(c.name.equals("theme") && c.next == null,
+            "Cookie is the jar's inspectable chain node");
+    }
+}

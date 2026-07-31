@@ -1,0 +1,293 @@
+package tour.http;
+
+import dev.cajeta.http.Http;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.Method;
+import dev.cajeta.http.Status;
+import dev.cajeta.http.Version;
+import dev.cajeta.http.MediaType;
+import dev.cajeta.http.HeaderValues;
+import dev.cajeta.http.HttpException;
+import dev.cajeta.http.MalformedMessageException;
+import dev.cajeta.http.HeadersTooLargeException;
+import dev.cajeta.http.InvalidChunkEncodingException;
+import dev.cajeta.http.UnexpectedEofException;
+import dev.cajeta.http.h1.HttpSerializer;
+import dev.cajeta.http.h1.HttpParser;
+import dev.cajeta.http.h1.HttpParserLimits;
+import dev.cajeta.http.h1.BodyReader;
+import dev.cajeta.http.h1.BodyFraming;
+import dev.cajeta.http.h1.ChunkedEncoder;
+import dev.cajeta.http.h1.KeepAlive;
+import dev.cajeta.http.coding.ContentCoding;
+import dev.cajeta.http.coding.AcceptEncoding;
+import dev.cajeta.http.coding.ContentCodingException;
+import dev.cajeta.http.coding.Crc32;
+import cajeta.io.net.Headers;
+
+// The message model and the HTTP/1.1 wire layer — the vocabulary everything
+// else in this tour is built from:
+//
+//   HttpRequest / HttpResponse   the protocol-neutral messages, with TYPED
+//                                views: Method, Status, Version, MediaType
+//   HttpSerializer / HttpParser  message <-> bytes; the parser owns the HEAD,
+//                                BodyReader owns the body per its framing
+//   BodyFraming / ChunkedEncoder content-length vs chunked vs close-delimited
+//   KeepAlive                    the connection-reuse decision table
+//   ContentCoding / AcceptEncoding   gzip/deflate bodies + the q-value pick
+//   HttpParserLimits             the caps that make parsing hostile-input safe
+//
+// Every malformed input raises a typed HttpException subclass carrying where
+// and what — never a crash. That exception family is demoed here once and
+// then relied on by every later chapter.
+public class WireDemo extends DemoClass {
+
+    public void execute() {
+        System.stdout.println("");
+        System.stdout.println("-- The message model + HTTP/1.1 wire layer (dev.cajeta.http v"
+            + Http.version() + ") --");
+
+        // 1. Build a request and read it back through the TYPED views —
+        //    Method/Status/Version are identity-comparable enums, MediaType
+        //    parses parameters; string compares are for the wire, not code.
+        String order = "{\"symbol\":\"ACME\",\"qty\":250}";
+        HttpRequest req = HttpRequest.post("/api/orders");
+        req.setHeader("Host", "orders.internal");
+        req.setHeader("Content-Type", "application/json; charset=utf-8");
+        req.body(order.toBytes(), order.byteLength());
+        this.check(req.methodType() == Method.POST
+            && req.methodType().allowsBody()
+            && !req.methodType().isIdempotent(),
+            "Method: POST allows a body, is not idempotent (no blind retry)");
+        this.check(req.versionType() == Version.HTTP_1_1
+            && req.versionType().supportsKeepAlive(),
+            "Version: 1.1 defaults to keep-alive");
+        MediaType mt = req.contentType();
+        this.check(mt != null && mt.is("application", "json")
+            && mt.parameter("charset").equals("utf-8"),
+            "MediaType parses the essence and its parameters");
+        // contentLength() reads the HEADER — body() stores bytes but the
+        // Content-Length header is stamped by the serializer at write
+        // time, so the typed read answers -1 until one is set.
+        this.check(req.contentLength() == (int64) 0 - (int64) 1,
+            "no Content-Length header yet: the typed read answers -1");
+        req.setHeader("Content-Length", "" + order.byteLength());
+        this.check(req.contentLength() == (int64) order.byteLength(),
+            "typed contentLength reads the stamped header");
+        this.check(Method.of("BREW") == Method.EXTENSION
+            && !Method.isRegistered("get"),
+            "unknown tokens map to EXTENSION; lookup is case-sensitive");
+
+        // 2. Serialize -> parse: the round trip every connection performs.
+        //    NOTE: toBytes() hands the buffer off AND resets the serializer,
+        //    so capture size() first.
+        HttpSerializer ser = heap HttpSerializer();
+        ser.writeRequest(req);
+        int32 wireLen = ser.size();
+        int8[] wire = ser.toBytes();
+        System.stdout.println("  POST /api/orders serialized to {} bytes", wireLen);
+        HttpParser p = HttpParser.forRequest();
+        boolean headDone = p.feed(wire, wireLen);
+        this.check(headDone && p.isComplete(),
+            "parser completes on the serialized head");
+        HttpRequest back = p.takeRequest();
+        this.check(back.getHeaders().get("HOST").equals("orders.internal"),
+            "header lookup is case-insensitive");
+        // The parser stops at the head; the BODY decodes via the framing it
+        // announced (content-length here), fed the parser's leftover bytes.
+        BodyFraming framing = p.getFraming();
+        this.check(framing.isContentLength()
+            && framing.length == (int64) order.byteLength(),
+            "framing: Content-Length with the declared size");
+        BodyReader body = BodyReader.forFraming(framing);
+        body.feed(p.leftover(), p.leftoverLength());
+        this.check(body.isComplete()
+            && body.decodedLength() == order.byteLength(),
+            "body decodes to exactly the payload bytes");
+
+        // 3. A parser survives arbitrary packet boundaries: feed a head
+        //    split mid-header-name and it completes on the second feed.
+        String partA = "GET /api/orders/7 HTTP/1.1\r\nHo";
+        String partB = "st: orders.internal\r\n\r\n";
+        HttpParser sp = HttpParser.forRequest();
+        boolean early = sp.feed(partA.toBytes(), partA.byteLength());
+        boolean late = sp.feed(partB.toBytes(), partB.byteLength());
+        HttpRequest sreq = sp.takeRequest();
+        this.check(!early && late
+            && sreq.getHeaders().get("host").equals("orders.internal"),
+            "a header spanning a feed boundary reassembles");
+
+        // 4. The response side, plus the Status registry and multi-value
+        //    headers: two Set-Cookie lines must NOT comma-fold (RFC 6265),
+        //    so getAll() is the correct read.
+        HttpResponse resp = HttpResponse.of(201)
+            .header("Set-Cookie", "sid=abc; Path=/")
+            .header("Set-Cookie", "theme=dark; Path=/");
+        String created = "{\"id\":9001}";
+        resp.body(created.toBytes(), created.byteLength());
+        this.check(resp.isSuccess() && resp.getReason().equals("Created"),
+            "Status registry supplies the canonical reason (201 Created)");
+        String[] cookies = resp.getHeaders().getAll("set-cookie");
+        this.check((int32) cookies.count() == 2
+            && cookies[1].startsWith("theme="),
+            "getAll returns each Set-Cookie separately (get() folds)");
+        this.check(Status.of(418).reason().equals("")
+            && Status.of(499, "Client Closed Request").reason()
+                .equals("Client Closed Request"),
+            "unregistered codes have no canonical reason; custom reasons stick");
+        // HeaderValues: the same typed reads as statics over any Headers.
+        resp.setHeader("Content-Length", "" + created.byteLength());
+        this.check(HeaderValues.contentLength(resp.getHeaders())
+                == (int64) created.byteLength(),
+            "HeaderValues.contentLength reads the stamped size");
+
+        // 5. Chunked transfer — the framing for unknown-length bodies. The
+        //    decoder handles the RFC's own worked example, and the encoder
+        //    emits the exact wire shape. Extensions and trailers are
+        //    consumed, never surfaced into the payload.
+        String chead = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n";
+        String chunks = "4\r\nWiki\r\n5\r\npedia\r\nE\r\n in\r\n\r\nchunks.\r\n0\r\n\r\n";
+        HttpParser cp = HttpParser.forResponse();
+        cp.feed(chead.toBytes(), chead.byteLength());
+        BodyFraming cf = cp.getFraming();
+        BodyReader cbody = BodyReader.forFraming(cf);
+        cbody.feed(chunks.toBytes(), chunks.byteLength());
+        int32 decLen = cbody.decodedLength();
+        int8[] dec = cbody.drain();
+        String wiki = "Wikipedia in\r\n\r\nchunks.";
+        this.check(cf.isChunked() && cbody.isComplete()
+            && this.sameBytes(dec, decLen, wiki.toBytes(), wiki.byteLength()),
+            "chunked decode matches the RFC 9112 worked example");
+        String hello = "hello";
+        int8[] chunk = ChunkedEncoder.encodeChunk(hello.toBytes(), hello.byteLength());
+        String expChunk = "5\r\nhello\r\n";
+        int8[] last = ChunkedEncoder.encodeLast();
+        String expLast = "0\r\n\r\n";
+        this.check(this.sameBytes(chunk, (int32) chunk.count(),
+                expChunk.toBytes(), expChunk.byteLength())
+            && this.sameBytes(last, (int32) last.count(),
+                expLast.toBytes(), expLast.byteLength()),
+            "encoder emits <hex>CRLF<data>CRLF and the 0-chunk terminator");
+        String trailered = "4\r\ndata\r\n0\r\nX-Checksum: abc\r\n\r\n";
+        BodyReader tb = BodyReader.forChunked();
+        tb.feed(trailered.toBytes(), trailered.byteLength());
+        int32 tlen = tb.decodedLength();
+        int8[] tdec = tb.drain();
+        String data = "data";
+        this.check(tb.isComplete()
+            && this.sameBytes(tdec, tlen, data.toBytes(), data.byteLength()),
+            "trailers are consumed, not decoded into the body");
+
+        // 6. KeepAlive — the reuse decision table the pool depends on.
+        Headers none = heap Headers();
+        Headers close = heap Headers();
+        close.add("Connection", "close");
+        Headers ka10 = heap Headers();
+        ka10.add("Connection", "keep-alive");
+        this.check(KeepAlive.messageAllowsReuse("HTTP/1.1", none)
+            && !KeepAlive.messageAllowsReuse("HTTP/1.1", close)
+            && !KeepAlive.messageAllowsReuse("HTTP/1.0", none)
+            && KeepAlive.messageAllowsReuse("HTTP/1.0", ka10),
+            "keep-alive: 1.1 opt-out via close, 1.0 opt-in via keep-alive");
+
+        // 7. Content coding: gzip a JSON response body and negotiate the
+        //    coding from Accept-Encoding q-values.
+        String big = "";
+        int32 i = 0;
+        while (i < 20) {
+            big = big + "{\"seq\":" + i + ",\"status\":\"filled\"},";
+            i = i + 1;
+        }
+        int8[] plain = big.toBytes();
+        int8[] gz = ContentCoding.encode("gzip", plain, big.byteLength());
+        System.stdout.println("  gzip content-coding: {} -> {} bytes",
+            big.byteLength(), gz.count());
+        int8[] inflated = ContentCoding.decode("gzip", gz, (int32) gz.count(),
+            (int64) 65536);
+        this.check((int32) gz.count() < big.byteLength()
+            && this.sameBytes(inflated, (int32) inflated.count(),
+                plain, big.byteLength()),
+            "gzip coding round-trips the response body");
+        this.check(AcceptEncoding.best("deflate, gzip;q=0.5").equals("deflate")
+            && AcceptEncoding.best("gzip;q=0, deflate;q=0").equals("identity")
+            && AcceptEncoding.best(null).equals("identity"),
+            "Accept-Encoding negotiation honors q-values, falls back to identity");
+        // Crc32 — the streaming checksum gzip members carry. Reference:
+        // crc32("hello world") == 0x0D4A1185 == 222957957.
+        Crc32 crc = heap Crc32();
+        String probe = "hello world";
+        crc.update(probe.toBytes(), probe.byteLength());
+        this.check(crc.value() == (int64) 222957957,
+            "Crc32 matches the reference value for \"hello world\"");
+
+        // 8. Hostile input fails LOUD, with a typed exception per failure
+        //    class. This is the contract every later demo leans on.
+        String garbage = "GARBAGE\r\n\r\n";
+        boolean malformed = false;
+        try {
+            HttpParser bad = HttpParser.forRequest();
+            bad.feed(garbage.toBytes(), garbage.byteLength());
+        } catch (MalformedMessageException me) {
+            malformed = true;
+        }
+        this.check(malformed, "a garbage start line raises MalformedMessageException");
+        // A hostile header line beyond the parser's line cap -> 431 material.
+        HttpParserLimits tight = HttpParserLimits.of(0, 64, 0);
+        String longLine = "GET / HTTP/1.1\r\nX-Padding: ";
+        int32 j = 0;
+        while (j < 30) {
+            longLine = longLine + "aaaaaaaaaa";
+            j = j + 1;
+        }
+        longLine = longLine + "\r\n\r\n";
+        boolean tooLarge = false;
+        try {
+            HttpParser lim = HttpParser.forRequestWithLimits(tight);
+            lim.feed(longLine.toBytes(), longLine.byteLength());
+        } catch (HeadersTooLargeException he) {
+            tooLarge = true;
+        }
+        this.check(tooLarge, "an over-cap header line raises HeadersTooLargeException");
+        // A connection dying mid-head is its own failure class.
+        boolean eof = false;
+        try {
+            HttpParser trunc = HttpParser.forRequest();
+            String half = "GET / HTTP/1.1\r\nHost: or";
+            trunc.feed(half.toBytes(), half.byteLength());
+            trunc.endInput();
+        } catch (UnexpectedEofException ue) {
+            eof = true;
+        }
+        this.check(eof, "EOF mid-head raises UnexpectedEofException");
+        // A chunk whose size line is not hex.
+        boolean badChunk = false;
+        try {
+            BodyReader cr = BodyReader.forChunked();
+            String zz = "zz\r\ndata\r\n";
+            cr.feed(zz.toBytes(), zz.byteLength());
+        } catch (InvalidChunkEncodingException ce) {
+            badChunk = true;
+        }
+        this.check(badChunk, "a non-hex chunk size raises InvalidChunkEncodingException");
+        // Truncated gzip.
+        boolean badCoding = false;
+        try {
+            int8[] cut = ContentCoding.decode("gzip", gz, 10, (int64) 65536);
+        } catch (ContentCodingException xe) {
+            badCoding = true;
+        }
+        this.check(badCoding, "a truncated gzip body raises ContentCodingException");
+        // All of these share one root: HttpException (which carries the
+        // suggested response status), itself a NetException — catch at
+        // whichever level your recovery operates.
+        boolean asRoot = false;
+        try {
+            HttpParser bad2 = HttpParser.forRequest();
+            bad2.feed(garbage.toBytes(), garbage.byteLength());
+        } catch (HttpException he2) {
+            asRoot = he2.httpStatus() == 400;
+        }
+        this.check(asRoot, "the family root HttpException maps to a 400");
+    }
+}

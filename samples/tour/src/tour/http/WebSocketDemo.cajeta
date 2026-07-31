@@ -1,0 +1,435 @@
+package tour.http;
+
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.ws.WebSocket;
+import dev.cajeta.http.ws.WsUpgrade;
+import dev.cajeta.http.ws.WsMessage;
+import dev.cajeta.http.ws.WsClientHandshake;
+import dev.cajeta.http.ws.WsServerHandshake;
+import dev.cajeta.http.ws.WebSocketHandler;
+import dev.cajeta.http.ws.WebSocketConnection;
+import dev.cajeta.http.ws.WsCloseCode;
+import dev.cajeta.http.ws.WsCloseReason;
+import dev.cajeta.http.ws.WsControlFrames;
+import dev.cajeta.http.ws.WsFrame;
+import dev.cajeta.http.ws.WsFrameEncoder;
+import dev.cajeta.http.ws.WsFrameDecoder;
+import dev.cajeta.http.ws.WsMessageAssembler;
+import dev.cajeta.http.ws.WsOpcode;
+import dev.cajeta.http.ws.WsProtocol;
+import dev.cajeta.http.ws.WsReadAction;
+import dev.cajeta.http.ws.Utf8Validator;
+import dev.cajeta.http.ws.PerMessageDeflate;
+import dev.cajeta.http.ws.PmdParams;
+import dev.cajeta.http.ws.WsCompression;
+import dev.cajeta.http.ws.WebSocketException;
+import dev.cajeta.http.ws.ProtocolViolationException;
+import dev.cajeta.http.ws.ConnectionClosedException;
+import dev.cajeta.http.ws.HandshakeRejectedException;
+import dev.cajeta.http.ws.MessageTooLargeException;
+import cajeta.io.net.AsyncReader;
+import cajeta.io.net.AsyncWriter;
+import cajeta.io.net.IpAddress;
+import cajeta.io.net.SocketAddress;
+import cajeta.io.net.TcpListener;
+import cajeta.io.net.TcpStream;
+import cajeta.io.net.uri.Uri;
+
+// WebSocket — dev.cajeta.http.ws, RFC 6455 end to end:
+//
+//   handshake   WsClientHandshake / WsServerHandshake — the key/accept
+//               math and the 101 upgrade (rejections are typed)
+//   socket      WebSocket.connect(url) or WsUpgrade.acceptServer/
+//               connectClient over your own reader/writer; send/receive/
+//               close(code, reason) — close is a HANDSHAKE, not a slam
+//   handler     WebSocketHandler + WsUpgrade.serve — the callback API
+//               (onConnect/onMessage/onClose) with fail-close semantics
+//   frames      WsFrame codec, control frames (ping/pong/close),
+//               fragmentation via WsMessageAssembler, WsProtocol's
+//               auto-pong, permessage-deflate compression
+//
+// SECURITY NOTE the demos repeat: the client key/mask seeds here
+// (placeholderKey(seed), connectClient(..., seed)) are DETERMINISTIC
+// placeholders — the library has no CSPRNG source yet and flags them
+// not-for-production. Real clients must vary the seed per connection and
+// treat RFC 6455 §5.3's unpredictable-mask requirement as unmet until a
+// random source lands. The server path never masks and is unaffected.
+//
+// The scenario: the orders console's live ticket channel.
+
+// support: the handler-API echo handler, recording its lifecycle so the
+// demo can assert the onConnect -> onMessage -> onClose order and the
+// close code the peer sent.
+final class TicketHandler implements WebSocketHandler {
+    int32 connects;
+    int32 messages;
+    int32 closes;
+    int32 lastCode;
+
+    TicketHandler() {
+        this.connects = 0;
+        this.messages = 0;
+        this.closes = 0;
+        this.lastCode = 0;
+    }
+
+    public void onConnect(WebSocketConnection conn) {
+        this.connects = this.connects + 1;
+    }
+
+    public void onMessage(WebSocketConnection conn, WsMessage message) {
+        this.messages = this.messages + 1;
+        String t = message.text();
+        conn.send("ack:" + t);
+    }
+
+    public void onClose(WebSocketConnection conn, int32 code) {
+        this.closes = this.closes + 1;
+        this.lastCode = code;
+    }
+}
+
+// support: a handler whose onMessage throws — the serve loop must
+// fail-close the connection with 1011 (INTERNAL_ERROR), never hang.
+final class FaultyHandler implements WebSocketHandler {
+    public void onConnect(WebSocketConnection conn) {
+    }
+
+    public void onMessage(WebSocketConnection conn, WsMessage message) {
+        String boom = "ticket store offline";
+        throw heap Exception(boom.substring(0, boom.byteLength()));
+    }
+
+    public void onClose(WebSocketConnection conn, int32 code) {
+    }
+}
+
+public class WebSocketDemo extends DemoClass {
+
+    // Raw-socket echo server: accept one connection, upgrade, echo one
+    // text and one binary message preserving type, then close.
+    public static async int32 echoServer(#TcpListener listener) {
+        TcpStream sock = listener.acceptAsync();
+        AsyncReader reader = heap AsyncReader(sock);
+        AsyncWriter writer = heap AsyncWriter(sock);
+        WebSocket ws = WsUpgrade.acceptServer(reader, writer);
+        WsMessage m1 = ws.receive();
+        String text = m1.text();
+        ws.send(text);
+        WsMessage m2 = ws.receive();
+        ws.sendBinary(m2.getPayload());
+        sock.close();
+        return m1.length() * 100 + m2.length();
+    }
+
+    // Handler-API server: serve() drives the callback until close.
+    public static async int32 handlerServer(#TcpListener listener,
+                                            TicketHandler h) {
+        TcpStream sock = listener.acceptAsync();
+        AsyncReader reader = heap AsyncReader(sock);
+        AsyncWriter writer = heap AsyncWriter(sock);
+        WsUpgrade.serve(reader, writer, h);
+        sock.close();
+        return 1;
+    }
+
+    public static async int32 faultyServer(#TcpListener listener,
+                                           FaultyHandler h) {
+        TcpStream sock = listener.acceptAsync();
+        AsyncReader reader = heap AsyncReader(sock);
+        AsyncWriter writer = heap AsyncWriter(sock);
+        WsUpgrade.serve(reader, writer, h);
+        sock.close();
+        return 1;
+    }
+
+    public void execute() {
+        System.stdout.println("");
+        System.stdout.println("-- WebSocket: handshake, echo, close handshake, frames, compression --");
+
+        // 1. The handshake math, socket-free. acceptKey is pinned against
+        //    RFC 6455's own worked example; then the full request/response
+        //    validates. placeholderKey(42) is the deterministic stand-in —
+        //    see the security note in the header.
+        String accept = WsServerHandshake.acceptKey("dGhlIHNhbXBsZSBub25jZQ==");
+        this.check(accept.equals("s3pPLMBiTxaQ9kYGzzhZRbK+xOo="),
+            "Sec-WebSocket-Accept matches the RFC 6455 example");
+        Uri huri = Uri.builder()
+            .scheme("ws").host("orders.internal").port(80).path("/tickets")
+            .build();
+        String key = WsClientHandshake.placeholderKey(42);
+        HttpRequest upgrade = WsClientHandshake.buildRequest(huri, key);
+        HttpResponse hresp = WsServerHandshake.accept(upgrade);
+        this.check(WsServerHandshake.isUpgradeRequest(upgrade)
+            && hresp.statusCode() == 101
+            && WsClientHandshake.validateAccept(hresp, key),
+            "Upgrade request -> 101 -> accept token validates");
+
+        // 2. A rejected handshake is a typed failure: a non-101 reply
+        //    raises HandshakeRejectedException at connect.
+        String bad = "HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n";
+        int8[] bb = bad.toBytes();
+        MemChannel rin = heap MemChannel();
+        AsyncReader rreader = heap AsyncReader(rin);
+        rreader.stage(bb, bad.byteLength());
+        rreader.markEof();
+        MemChannel rout = heap MemChannel();
+        AsyncWriter rwriter = heap AsyncWriter(rout);
+        boolean rejected = false;
+        try {
+            WebSocket nope = WsUpgrade.connectClient(rreader, rwriter, huri, 123);
+        } catch (HandshakeRejectedException hre) {
+            rejected = true;
+        }
+        this.check(rejected, "a non-101 reply raises HandshakeRejectedException");
+
+        // 3. Live echo — text AND binary, types preserved. The client here
+        //    is one line: WebSocket.connect owns its transport.
+        scope {
+            IpAddress laEcho = IpAddress.loopbackV4();
+            SocketAddress bindEcho = SocketAddress.of(#laEcho, 0);
+            TcpListener echoLst = TcpListener.bind(bindEcho);
+            int32 port = echoLst.boundPort();
+            Task<int32> t = spawn echoServer(#echoLst);
+
+            String url = "ws://127.0.0.1:" + port + "/tickets";
+            WebSocket ws = WebSocket.connect(url);
+            ws.send("open ticket 4417");
+            WsMessage e1 = ws.receive();
+            this.check(e1.isText() && e1.text().equals("open ticket 4417"),
+                "text message echoed intact");
+            int8[] blob = heap int8[3];
+            blob[0] = (int8) 0x01;
+            blob[1] = (int8) 0x7F;
+            blob[2] = (int8) 0x40;
+            ws.sendBinary(blob);
+            WsMessage e2 = ws.receive();
+            int8[] p2 = e2.getPayload();
+            this.check(e2.isBinary() && e2.length() == 3 && p2[1] == (int8) 0x7F,
+                "binary message echoed intact, still BINARY");
+            int32 sret = await t;
+            this.check(sret == 16 * 100 + 3,
+                "server saw the 16-byte text and 3-byte binary");
+        }
+
+        // 4. The handler API + the CLOSE HANDSHAKE. close(code, reason)
+        //    exchanges close frames; the server's onClose receives the
+        //    code — tearing down a socket without it is the abrupt-close
+        //    anti-pattern (code 1006 territory).
+        scope {
+            TicketHandler h = heap TicketHandler();
+            IpAddress laTick = IpAddress.loopbackV4();
+            SocketAddress bindTick = SocketAddress.of(#laTick, 0);
+            TcpListener tickLst = TcpListener.bind(bindTick);
+            int32 port = tickLst.boundPort();
+            Task<int32> sv = spawn handlerServer(#tickLst, h);
+
+            String url = "ws://127.0.0.1:" + port + "/tickets";
+            WebSocket client = WebSocket.connect(url);
+            client.send("close ticket 4417");
+            WsMessage reply = client.receive();
+            this.check(reply.text().equals("ack:close ticket 4417"),
+                "handler onMessage acked the ticket");
+            client.close(WsCloseCode.NORMAL, "done");
+            int32 r = await sv;
+            this.check(r == 1 && h.connects == 1 && h.messages == 1
+                && h.closes == 1,
+                "lifecycle ran onConnect -> onMessage -> onClose exactly once");
+            this.check(h.lastCode == WsCloseCode.NORMAL,
+                "the close handshake delivered code 1000 (NORMAL)");
+            this.check(client.isCloseSent(),
+                "the client knows its close frame is on the wire");
+        }
+
+        // 5. Fail-close: a throwing callback must close 1011, surfaced to
+        //    the peer as ConnectionClosedException with the code.
+        scope {
+            FaultyHandler h = heap FaultyHandler();
+            IpAddress laFault = IpAddress.loopbackV4();
+            SocketAddress bindFault = SocketAddress.of(#laFault, 0);
+            TcpListener faultLst = TcpListener.bind(bindFault);
+            int32 port = faultLst.boundPort();
+            Task<int32> sv = spawn faultyServer(#faultLst, h);
+
+            String url = "ws://127.0.0.1:" + port + "/tickets";
+            WebSocket client = WebSocket.connect(url);
+            client.send("boom");
+            int32 code = 0;
+            try {
+                WsMessage m = client.receive();
+            } catch (ConnectionClosedException cce) {
+                code = cce.closeCode;
+            }
+            int32 r = await sv;
+            this.check(r == 1 && code == WsCloseCode.INTERNAL_ERROR,
+                "a throwing callback fail-closes with 1011 (INTERNAL_ERROR)");
+        }
+
+        // 6. The frame layer. A frame is FIN/RSV/opcode/mask/payload;
+        //    clients mask, servers don't. Encode a masked client frame,
+        //    decode it server-side; then the control frames.
+        int8[] notice = heap int8[4];
+        notice[0] = (int8) 0x74;   // 't'
+        notice[1] = (int8) 0x69;   // 'i'
+        notice[2] = (int8) 0x63;   // 'c'
+        notice[3] = (int8) 0x6B;   // 'k'
+        WsFrame tf = WsFrame.of(true, WsOpcode.TEXT, true, #notice);
+        int8[] maskKey = heap int8[4];
+        maskKey[0] = (int8) 0x11;
+        maskKey[1] = (int8) 0x22;
+        maskKey[2] = (int8) 0x33;
+        maskKey[3] = (int8) 0x44;
+        int8[] fwire = WsFrameEncoder.encode(tf, maskKey);
+        WsFrameDecoder srvDec = WsFrameDecoder.forServer();
+        srvDec.feed(fwire, (int32) fwire.count());
+        this.check(srvDec.hasFrame(), "the masked client frame decodes");
+        WsFrame back = srvDec.nextFrame();
+        int8[] bp = back.getPayload();
+        this.check(back.isFin() && back.getOpcode() == WsOpcode.TEXT
+            && back.payloadLength() == 4 && bp[0] == (int8) 0x74,
+            "unmasking recovers the payload (FIN TEXT 'tick')");
+        this.check(Utf8Validator.isValid(bp, back.payloadLength()),
+            "TEXT payloads must be valid UTF-8 (the validator agrees)");
+
+        // 7. Control frames: ping/pong and the close pair, socket-free.
+        //    WsProtocol shows the auto-pong rule: feeding a PING yields a
+        //    SEND_FRAME action carrying the mirrored PONG.
+        int8[] probe = heap int8[2];
+        probe[0] = (int8) 0x68;    // 'h'
+        probe[1] = (int8) 0x69;    // 'i'
+        WsFrame ping = WsControlFrames.ping(#probe);
+        WsFrame pong = WsControlFrames.pongFor(ping);
+        int8[] pongPay = pong.getPayload();
+        this.check(pong.getOpcode() == WsOpcode.PONG
+            && pong.payloadLength() == 2 && pongPay[0] == (int8) 0x68,
+            "pongFor mirrors the ping payload (RFC 6455 5.5.3)");
+        WsProtocol proto = WsProtocol.create();
+        int8[] probe2 = heap int8[1];
+        probe2[0] = (int8) 0x21;
+        WsFrame ping2 = WsControlFrames.ping(#probe2);
+        WsReadAction act = proto.onFrame(ping2);
+        WsFrame auto = act.getFrame();
+        this.check(act.isSendFrame() && auto.getOpcode() == WsOpcode.PONG,
+            "WsProtocol answers a PING with an auto-PONG send action");
+        WsFrame closeF = WsControlFrames.close(WsCloseCode.GOING_AWAY, "redeploy");
+        WsCloseReason reason = WsControlFrames.parseClose(closeF);
+        this.check(reason.getCode() == WsCloseCode.GOING_AWAY
+            && reason.getReason().equals("redeploy"),
+            "a close frame carries (code, reason) both ways");
+        WsFrame echo = WsControlFrames.reciprocalClose(reason);
+        WsCloseReason echoed = WsControlFrames.parseClose(echo);
+        this.check(echoed.getCode() == WsCloseCode.GOING_AWAY
+            && echoed.getReason().equals(""),
+            "the reciprocal close echoes the code, never the reason");
+        this.check(WsCloseCode.isSendable(WsCloseCode.NORMAL)
+            && !WsCloseCode.isSendable(WsCloseCode.ABNORMAL),
+            "1006 ABNORMAL is a report-only code — never sendable");
+
+        // 8. Fragmentation: a message may arrive as TEXT + CONTINUATION
+        //    frames; the assembler joins them and enforces the size cap.
+        int8[] fragA = heap int8[2];
+        fragA[0] = (int8) 0x68;    // 'h'
+        fragA[1] = (int8) 0x61;    // 'a'
+        int8[] fragB = heap int8[2];
+        fragB[0] = (int8) 0x6C;    // 'l'
+        fragB[1] = (int8) 0x66;    // 'f'
+        WsFrame f1 = WsFrame.of(false, WsOpcode.TEXT, false, #fragA);
+        WsFrame f2 = WsFrame.of(true, WsOpcode.CONTINUATION, false, #fragB);
+        WsMessageAssembler asm = WsMessageAssembler.create();
+        WsMessage none = asm.accept(f1);
+        WsMessage joined = asm.accept(f2);
+        this.check(none == null && joined != null && joined.length() == 4
+            && joined.text().equals("half"),
+            "TEXT + CONTINUATION assemble into one 4-byte message");
+        WsMessageAssembler tiny = WsMessageAssembler.create()
+            .withMaxMessageLength((int64) 3);
+        int8[] big = heap int8[8];
+        WsFrame overF = WsFrame.of(true, WsOpcode.BINARY, false, #big);
+        boolean overCap = false;
+        try {
+            WsMessage over = tiny.accept(overF);
+        } catch (MessageTooLargeException mte) {
+            overCap = mte.limit == (int64) 3;
+        }
+        this.check(overCap,
+            "an 8-byte message against a 3-byte cap raises MessageTooLarge");
+        // A protocol violation is its own type: RSV1 without a negotiated
+        // extension is rejected at the decoder.
+        int8[] rsvPay = heap int8[1];
+        rsvPay[0] = (int8) 0x41;
+        WsFrame rsvF = WsFrame.of(true, WsOpcode.TEXT, false, #rsvPay);
+        rsvF.rsv1 = true;
+        int8[] rsvWire = WsFrameEncoder.encodeUnmasked(rsvF);
+        WsFrameDecoder plainDec = WsFrameDecoder.forClient();
+        boolean violated = false;
+        try {
+            plainDec.feed(rsvWire, (int32) rsvWire.count());
+        } catch (ProtocolViolationException pve) {
+            violated = true;
+        }
+        this.check(violated,
+            "RSV1 with no negotiated extension raises ProtocolViolation");
+        // Control frames cap at 125 payload bytes; the whole ws exception
+        // family shares the WebSocketException root when the failure mode
+        // doesn't matter to the caller.
+        int8[] fat = heap int8[126];
+        boolean fatPing = false;
+        try {
+            WsFrame nope = WsControlFrames.ping(#fat);
+        } catch (WebSocketException we) {
+            fatPing = true;
+        }
+        this.check(fatPing,
+            "a 126-byte ping payload is rejected (caught at the family root)");
+
+        // 9. permessage-deflate: offer -> negotiate -> compressed frames.
+        //    The negotiation is header algebra; the codec rides RSV1.
+        String offer = WsCompression.clientOffer();
+        PmdParams server = WsCompression.negotiateServer(offer);
+        PmdParams declined = WsCompression.negotiateServer("x-webkit-foo");
+        this.check(offer.contains("permessage-deflate") && server.enabled
+            && !declined.enabled,
+            "the server accepts a pmd offer, declines an unknown extension");
+        PmdParams strict = WsCompression.negotiateServer(
+            "permessage-deflate; client_no_context_takeover");
+        this.check(strict.peerNoContextTakeover
+            && strict.responseHeader.contains("client_no_context_takeover"),
+            "no-context-takeover is honored and echoed in the 101");
+        // The codec itself round-trips (this is CompressDemo's DEFLATE in
+        // RFC 7692 clothing).
+        PerMessageDeflate pmd = heap PerMessageDeflate(false, false);
+        String memo = "reconnecting clients replay the same order book "
+            + "snapshot over and over and over again";
+        int8[] mb = memo.toBytes();
+        int8[] squeezed = pmd.compress(mb, memo.byteLength());
+        int8[] restored = pmd.decompress(squeezed, (int32) squeezed.count());
+        this.check((int32) squeezed.count() < memo.byteLength()
+            && this.sameBytes(restored, (int32) restored.count(),
+                mb, memo.byteLength()),
+            "permessage-deflate compresses and round-trips the message");
+        // End to end over MemChannels: a compressed masked client frame,
+        // received and inflated by a server socket — no network involved.
+        PmdParams clientCfg = WsCompression.confirmClient("permessage-deflate");
+        PmdParams serverCfg = WsCompression.negotiateServer("permessage-deflate");
+        MemChannel wireCh = heap MemChannel();
+        MemChannel cDiscard = heap MemChannel();
+        AsyncReader cr = heap AsyncReader(cDiscard);
+        AsyncWriter cw = heap AsyncWriter(wireCh);
+        WebSocket wsClient = WebSocket.forClient(cr, cw);
+        wsClient.enableCompression(clientCfg);
+        wsClient.send(memo);
+        cw.flush();
+        MemChannel sDiscard = heap MemChannel();
+        AsyncReader sr = heap AsyncReader(sDiscard);
+        sr.stage(wireCh.captured(), wireCh.capturedLen());
+        sr.markEof();
+        AsyncWriter sw = heap AsyncWriter(sDiscard);
+        WebSocket wsServer = WebSocket.forServer(sr, sw);
+        wsServer.enableCompression(serverCfg);
+        WsMessage got = wsServer.receive();
+        this.check(wireCh.capturedLen() < memo.byteLength()
+            && got.text().equals(memo),
+            "compressed send -> receive round-trips smaller than plaintext");
+    }
+}

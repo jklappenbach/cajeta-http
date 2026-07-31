@@ -1,0 +1,311 @@
+package tour.http;
+
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.MediaType;
+import dev.cajeta.http.UnexpectedEofException;
+import dev.cajeta.http.PayloadTooLargeException;
+import dev.cajeta.http.body.Body;
+import dev.cajeta.http.body.BytesBody;
+import dev.cajeta.http.body.BytesChannel;
+import dev.cajeta.http.body.StringBody;
+import dev.cajeta.http.body.FormBody;
+import dev.cajeta.http.body.MultipartBody;
+import dev.cajeta.http.body.MultipartParser;
+import dev.cajeta.http.body.MultipartPart;
+import dev.cajeta.http.body.StreamBody;
+import dev.cajeta.http.body.GzipCompressBody;
+import dev.cajeta.http.body.GzipCompressChannel;
+import dev.cajeta.http.client.HttpClient;
+import dev.cajeta.http.server.HttpServer;
+import dev.cajeta.http.server.HttpServerBuilder;
+import cajeta.io.net.AsyncReader;
+import cajeta.io.net.uri.Uri;
+import cajeta.time.Duration;
+
+// The body model — dev.cajeta.http.body. `Body` is the base class every
+// typed body extends (contentLength / contentType / reader), and
+// `req.body(#b)` attaches one: the Content-Type is stamped from the body,
+// a known-length body is drained into the wire path immediately, and an
+// unknown-length body (contentLength() == -1) streams CHUNKED.
+//
+//   StringBody / BytesBody    the simple payloads
+//   FormBody                  application/x-www-form-urlencoded, both ways
+//   MultipartBody + Parser    multipart/form-data — the file-upload shape
+//   StreamBody                wrap any AsyncReader; unknown length = chunked
+//   GzipCompressBody/Channel  compress-on-read decorators
+//
+// The scenario: the orders console posting forms and uploading a settings
+// file to the service.
+public class BodiesDemo extends DemoClass {
+
+    // support: the echo server — replies with the request body and echoes
+    // the observed framing (content-length vs chunked) in a header.
+    public static #HttpResponse echoHandle(HttpRequest req) {
+        HttpResponse resp = HttpResponse.ok();
+        String ct = req.getHeaders().get("content-type");
+        if (ct != null) {
+            resp.setHeader("X-Echo-Type", ct);
+        }
+        String te = req.getHeaders().get("transfer-encoding");
+        if (te != null) {
+            resp.setHeader("X-Echo-Framing", te);
+        } else {
+            resp.setHeader("X-Echo-Framing", "content-length");
+        }
+        // body() returns a BORROW of `this`; mutate, then move the local
+        // out — returning the borrow directly would drop it at scope exit.
+        resp.body(req.body, req.bodyLength());
+        return #resp;
+    }
+
+    public static async int32 serveLoop(HttpServer srv) {
+        srv.serve();
+        return 1;
+    }
+
+    // POST a FormBody; expect the urlencoded wire back. 1 = round-trip.
+    public static async int32 postForm(int32 port) {
+        HttpClient client = heap HttpClient();
+        client.exchangeTimeout(15000);
+        client.defaultHeader("Connection", "close");   // one-shot client
+        Uri uri = Uri.builder()
+            .scheme("http").host("127.0.0.1").port(port).path("/echo")
+            .build();
+        HttpRequest req = HttpRequest.fromUri("POST", uri);
+        FormBody f = FormBody.of();
+        f.add("symbol", "ACME");
+        f.add("side", "buy limit");           // the space must encode as +
+        Body b = #f;
+        req.body(#b);
+        HttpResponse resp = client.send(uri, req);
+        if (resp.statusCode() != 200) {
+            return 0 - 1;
+        }
+        String wire = DemoClass.bodyString(resp.body, resp.bodyLength());
+        if (!wire.equals("symbol=ACME&side=buy+limit")) {
+            return 0 - 2;
+        }
+        String ct = resp.getHeaders().get("X-Echo-Type");
+        if (ct == null || !ct.equals("application/x-www-form-urlencoded")) {
+            return 0 - 3;
+        }
+        return 1;
+    }
+
+    // POST a MultipartBody (a field + a file part), re-parse the echo
+    // server-side style. 1 = both parts recovered.
+    public static async int32 postMultipart(int32 port) {
+        HttpClient client = heap HttpClient();
+        client.exchangeTimeout(15000);
+        client.defaultHeader("Connection", "close");
+        Uri uri = Uri.builder()
+            .scheme("http").host("127.0.0.1").port(port).path("/echo")
+            .build();
+        HttpRequest req = HttpRequest.fromUri("POST", uri);
+        MultipartBody mb = MultipartBody.withBoundary("TourBoundary");
+        mb.addField("env", "staging");
+        MediaType json = MediaType.applicationJson();
+        String doc = "{\"maxOrders\":500}";
+        int8[] docBytes = doc.toBytes();
+        mb.addFile("settings", "settings.json", #json, #docBytes, doc.byteLength());
+        Body b = #mb;
+        req.body(#b);
+        HttpResponse resp = client.send(uri, req);
+        if (resp.statusCode() != 200) {
+            return 0 - 1;
+        }
+        MultipartParser p = MultipartParser.forBoundary("TourBoundary");
+        p.feed(resp.body, resp.bodyLength());
+        if (!p.isComplete() || p.partCount() != 2) {
+            return 0 - 2;
+        }
+        MultipartPart file = p.part(1);
+        if (!file.name().equals("settings")
+            || !file.filename().equals("settings.json")
+            || !file.contentType().essence().equals("application/json")) {
+            return 0 - 3;
+        }
+        return 1;
+    }
+
+    // StreamBody: unknown length -> the client streams the request
+    // CHUNKED; the server sees transfer-encoding and the full bytes.
+    // 1 = chunked framing observed and payload intact.
+    public static async int32 postStreamed(int32 port) {
+        HttpClient client = heap HttpClient();
+        client.exchangeTimeout(15000);
+        client.defaultHeader("Connection", "close");
+        Uri uri = Uri.builder()
+            .scheme("http").host("127.0.0.1").port(port).path("/upload")
+            .build();
+        HttpRequest req = HttpRequest.fromUri("POST", uri);
+        String feed = "";
+        int32 i = 0;
+        while (i < 40) {
+            feed = feed + "tick," + i + ",filled\n";
+            i = i + 1;
+        }
+        int8[] data = feed.toBytes();
+        BytesChannel ch = heap BytesChannel(data, (int64) feed.byteLength());
+        AsyncReader r = heap AsyncReader(ch);
+        StreamBody sb = StreamBody.of(#r);
+        req.body(#sb);
+        HttpResponse resp = client.send(uri, req);
+        if (resp.statusCode() != 200) {
+            return 0 - 1;
+        }
+        String framing = resp.getHeaders().get("X-Echo-Framing");
+        if (framing == null || !framing.equals("chunked")) {
+            return 0 - 2;
+        }
+        String back = DemoClass.bodyString(resp.body, resp.bodyLength());
+        if (!back.equals(feed)) {
+            return 0 - 3;
+        }
+        return 1;
+    }
+
+    public void execute() {
+        System.stdout.println("");
+        System.stdout.println("-- The body model: string/bytes/form/multipart/stream/gzip --");
+
+        // 1. The simple bodies, and what attaching one does to a request.
+        StringBody note = StringBody.of("order accepted");
+        this.check(note.contentLength() == (int64) 14
+            && note.contentType().is("text", "plain"),
+            "StringBody: text/plain with the exact byte length");
+        HttpRequest req = HttpRequest.post("/orders");
+        Body nb = #note;
+        req.body(#nb);
+        this.check(req.getHeaders().get("content-type").startsWith("text/plain")
+            && req.bodyLength() == 14,
+            "attaching a body stamps Content-Type and drains the bytes");
+
+        // 2. FormBody both directions: build -> encoded wire; parse ->
+        //    typed reads. Encoding is real urlencoding (+, %XX, UTF-8).
+        FormBody form = FormBody.of();
+        form.add("q", "two words");
+        form.add("expr", "a=b&c");
+        String encoded = form.encoded();
+        this.check(encoded.equals("q=two+words&expr=a%3Db%26c"),
+            "FormBody encodes spaces as + and reserved bytes as %XX");
+        FormBody parsed = FormBody.parse("city=caf%C3%A9&q=two+words");
+        this.check(parsed.count() == 2 && parsed.value("city").equals("café")
+            && parsed.value("q").equals("two words"),
+            "FormBody.parse decodes UTF-8 percent escapes and +");
+
+        // 3. Multipart compose -> parse, in memory: the exact RFC 2046
+        //    wire shape, then the parser recovers named parts. This is
+        //    the upload format; the loopback POST below proves it over
+        //    a socket.
+        MultipartBody mb = MultipartBody.withBoundary("X");
+        mb.addField("a", "1");
+        int8[] w = mb.wire();
+        String wire = DemoClass.bodyString(w, (int32) w.count());
+        this.check(wire.startsWith("--X\r\nContent-Disposition: form-data; name=\"a\"")
+            && wire.endsWith("--X--\r\n"),
+            "multipart wire: delimiter, disposition, closing delimiter");
+        this.check(mb.contentType().parameter("boundary").equals("X"),
+            "the boundary rides the Content-Type parameter");
+        // A truncated upload (no closing delimiter) fails loud at EOF.
+        MultipartParser trunc = MultipartParser.forBoundary("X");
+        String half = "--X\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\n1\r\n";
+        trunc.feed(half.toBytes(), half.byteLength());
+        boolean eof = false;
+        try {
+            trunc.endInput();
+        } catch (UnexpectedEofException ue) {
+            eof = true;
+        }
+        this.check(eof, "a truncated multipart body raises UnexpectedEofException");
+        // Upload limits are enforced mid-parse: a part beyond the per-part
+        // byte cap raises PayloadTooLargeException (the 413 family).
+        MultipartParser capped = MultipartParser.forBoundaryWithLimits("X", 8, 4);
+        String fat = "--X\r\nContent-Disposition: form-data; name=\"f\"\r\n\r\n"
+            + "way more than four bytes\r\n--X--\r\n";
+        boolean overPart = false;
+        try {
+            capped.feed(fat.toBytes(), fat.byteLength());
+        } catch (PayloadTooLargeException pe) {
+            overPart = pe.limit == (int64) 4;
+        }
+        this.check(overPart,
+            "a part beyond the per-part cap raises PayloadTooLarge (limit 4)");
+
+        // 4. GzipCompressBody: wrap any body, read compressed bytes out —
+        //    the response-compression building block. Drained in small
+        //    reads to show it produces incrementally.
+        String logText = "";
+        int32 i = 0;
+        while (i < 30) {
+            logText = logText + "orders-svc INFO accepted seq=" + i + "\n";
+            i = i + 1;
+        }
+        BytesBody src = BytesBody.of(logText.toBytes(), logText.byteLength());
+        Body srcB = #src;
+        GzipCompressBody gz = GzipCompressBody.of(#srcB);
+        this.check(gz.contentLength() == (int64) 0 - (int64) 1,
+            "a compressing body cannot know its length up front (-1 = chunked)");
+        AsyncReader gr = gz.reader();
+        int8[] acc = heap int8[8192];
+        int32 accLen = 0;
+        int8[] piece = heap int8[7];
+        boolean going = true;
+        while (going) {
+            int32 got = gr.read(piece, 0, 7);
+            if (got <= 0) {
+                going = false;
+            } else {
+                int32 k = 0;
+                while (k < got) {
+                    acc[accLen] = piece[k];
+                    accLen = accLen + 1;
+                    k = k + 1;
+                }
+            }
+        }
+        this.check(accLen > 0 && accLen < logText.byteLength(),
+            "7-byte reads drain a complete, smaller gzip stream");
+        // GzipCompressChannel is the same decorator one layer down, over
+        // a raw channel instead of a Body.
+        BytesChannel rawCh = heap BytesChannel(logText.toBytes(),
+            (int64) logText.byteLength());
+        AsyncReader rawR = heap AsyncReader(rawCh);
+        GzipCompressChannel gzc = heap GzipCompressChannel(rawR);
+        int8[] probe = heap int8[64];
+        int64 first = gzc.readAsync(probe, (int64) 0, (int64) 64);
+        this.check(first > (int64) 0
+            && (((int32) probe[0]) & 0xFF) == 0x1F
+            && (((int32) probe[1]) & 0xFF) == 0x8B,
+            "the channel decorator emits a gzip magic header (1F 8B)");
+
+        // 5. Over the wire: form, multipart, and chunked-stream uploads
+        //    against a live echo server.
+        scope {
+            HttpServerBuilder b = HttpServer.builder();
+            b.bind("127.0.0.1:0");
+            (HttpRequest) -> #HttpResponse h = (req) -> BodiesDemo.echoHandle(req);
+            b.handler(h);
+            HttpServer srv = b.build();
+            int32 port = srv.server.listener.boundPort();
+            Task<int32> sv = spawn serveLoop(srv);
+
+            Task<int32> tf = spawn postForm(port);
+            this.check(await tf == 1,
+                "FormBody POST round-trips the urlencoded wire + Content-Type");
+
+            Task<int32> tm = spawn postMultipart(port);
+            this.check(await tm == 1,
+                "multipart upload round-trips; the parser recovers the file part");
+
+            Task<int32> ts = spawn postStreamed(port);
+            this.check(await ts == 1,
+                "StreamBody uploads CHUNKED; the server reassembles every byte");
+
+            boolean drained = srv.shutdown(Duration.ofSeconds(2));
+            int32 sret = await sv;
+            this.check(drained && sret == 1, "echo server drained clean");
+        }
+    }
+}

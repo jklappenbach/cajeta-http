@@ -1,0 +1,332 @@
+package tour.http;
+
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.client.HttpClient;
+import dev.cajeta.http.server.HttpServer;
+import dev.cajeta.http.server.HttpServerBuilder;
+import dev.cajeta.http.h2.Http2;
+import dev.cajeta.http.h2.Http2Client;
+import dev.cajeta.http.h2.Http2Connection;
+import dev.cajeta.http.h2.Http2Settings;
+import dev.cajeta.http.h2.Http2SettingsList;
+import dev.cajeta.http.h2.Http2Frames;
+import dev.cajeta.http.h2.Http2FrameWriter;
+import dev.cajeta.http.h2.Http2FrameReader;
+import dev.cajeta.http.h2.Http2FrameHeader;
+import dev.cajeta.http.h2.Http2GoawayInfo;
+import dev.cajeta.http.h2.Http2FlowWindow;
+import dev.cajeta.http.h2.Http2FlowController;
+import dev.cajeta.http.h2.Http2Exception;
+import dev.cajeta.http.h2.Http2ContentFrames;
+import dev.cajeta.http.h2.Http2Payload;
+import dev.cajeta.http.h2.Http2Requests;
+import dev.cajeta.http.h2.HpackEncoder;
+import dev.cajeta.http.h2.HpackDecoder;
+import dev.cajeta.http.h2.HpackField;
+import dev.cajeta.http.h2.HpackFieldList;
+import dev.cajeta.http.h2.HpackStaticTable;
+import dev.cajeta.http.h2.HpackDynamicTable;
+import dev.cajeta.http.h2.HpackException;
+import dev.cajeta.http.h2.Huffman;
+import dev.cajeta.http.PushEntry;
+import cajeta.io.net.AsyncReader;
+import cajeta.io.net.AsyncWriter;
+import cajeta.io.net.IpAddress;
+import cajeta.io.net.SocketAddress;
+import cajeta.io.net.TcpStream;
+import cajeta.time.Duration;
+
+// HTTP/2 — dev.cajeta.http.h2. The same request/response model as HTTP/1.1
+// carried on a binary framing layer: one TCP connection, HPACK-compressed
+// headers, flow-controlled DATA frames. The tour walks it top-down:
+//
+//   1-2  the whole protocol, working: one HttpServer with h2PriorKnowledge()
+//        serves h2 AND h1 on one port (preface sniff); Http2Client.exchange
+//        speaks h2 directly. Over TLS the same selection happens via ALPN,
+//        no flag needed (TlsDemo's client would pick h2 automatically).
+//   3    HPACK — why h2 headers are small: static/dynamic table indexing,
+//        Huffman strings, never-indexed sensitive fields (RFC 7541).
+//   4    the frame layer — 9-byte header + typed payloads, written and
+//        parsed with the fixed-frame helpers.
+//   5    SETTINGS as state: apply/toList round-trip, fail-loud validation.
+//   6    flow control arithmetic — the send-budget every DATA write obeys.
+//
+// Protocol violations raise Http2Exception carrying the RFC error code.
+//
+// The scenario: the same tiny status API the h1 demos serve, upgraded.
+public class Http2Demo extends DemoClass {
+
+    // support: the handler answers with the negotiated protocol version —
+    // the one response that PROVES which wire the request rode.
+    public static #HttpResponse handle(HttpRequest req) {
+        if (req.getTarget().equals("/proto")) {
+            String v = req.version;
+            return HttpResponse.ok().body(v.toBytes(), v.byteLength());
+        }
+        String nf = "not found";
+        return HttpResponse.of(404).body(nf.toBytes(), nf.byteLength());
+    }
+
+    public static async int32 serveLoop(HttpServer srv) {
+        srv.serve();
+        return 1;
+    }
+
+    // An h2 prior-knowledge client: raw TCP + Http2Client.exchange (preface,
+    // SETTINGS, HPACK HEADERS, DATA — all inside exchange()).
+    // 1 => 200 with body "HTTP/2.0".
+    public static async int32 h2Probe(int32 port) {
+        IpAddress ca = IpAddress.loopbackV4();
+        SocketAddress connAddr = SocketAddress.of(#ca, port);
+        TcpStream sock = TcpStream.connectAsync(#connAddr);
+        AsyncReader reader = heap AsyncReader(sock);
+        AsyncWriter writer = heap AsyncWriter(sock);
+        HttpRequest req = HttpRequest.of("GET", "/proto");
+        HttpResponse resp = Http2Client.exchange(reader, writer, req, "http",
+                                                 "127.0.0.1");
+        sock.close();
+        if (resp.statusCode() != 200) {
+            return 0 - 1;
+        }
+        String body = DemoClass.bodyString(resp.body, resp.bodyLength());
+        if (body.equals("HTTP/2.0")) {
+            return 1;
+        }
+        return 0 - 2;
+    }
+
+    // An ordinary h1 client hitting the SAME port: the server sniffs a
+    // non-preface first read and degrades to HTTP/1.1 keep-alive.
+    public static async int32 h1Probe(int32 port) {
+        HttpClient client = HttpClient.builder()
+            .defaultHeader("Connection", "close").build();
+        String url = "http://127.0.0.1:" + port + "/proto";
+        HttpResponse resp = client.get(url);
+        if (resp.statusCode() != 200) {
+            return 0 - 1;
+        }
+        String body = DemoClass.bodyString(resp.body, resp.bodyLength());
+        if (body.equals("HTTP/1.1")) {
+            return 1;
+        }
+        return 0 - 2;
+    }
+
+    public void execute() {
+        System.stdout.println("");
+        System.stdout.println("-- HTTP/2: prior-knowledge server, Http2Client, HPACK, frames --");
+
+        // 1-2. One server, both protocols. h2PriorKnowledge() makes the
+        //      plaintext port sniff the 24-byte client preface: preface ->
+        //      HTTP/2 connection, anything else -> HTTP/1.1. One handler
+        //      serves both — the message model is protocol-neutral.
+        scope {
+            HttpServerBuilder b = HttpServer.builder();
+            b.bind("127.0.0.1:0");
+            (HttpRequest) -> #HttpResponse h = (req) -> Http2Demo.handle(req);
+            b.handler(h);
+            b.h2PriorKnowledge();
+            HttpServer srv = b.build();
+            int32 port = srv.server.listener.boundPort();
+            Task<int32> sv = spawn serveLoop(srv);
+
+            Task<int32> th2 = spawn h2Probe(port);
+            this.check(await th2 == 1,
+                "h2 preface -> the request rode HTTP/2.0");
+            Task<int32> th1 = spawn h1Probe(port);
+            this.check(await th1 == 1,
+                "non-preface bytes -> same port degrades to HTTP/1.1");
+
+            boolean drained = srv.shutdown(Duration.ofSeconds(2));
+            int32 sret = await sv;
+            this.check(drained && sret == 1,
+                "shutdown() drained; serve() loop exited");
+        }
+
+        // 3. HPACK. Headers compress by table reference: the 61-entry static
+        //    table, a bounded per-connection dynamic table, Huffman-coded
+        //    strings. Round-trip a realistic request header list.
+        HpackEncoder enc = heap HpackEncoder(4096, true);
+        HpackDecoder dec = heap HpackDecoder(4096);
+        HpackFieldList req = heap HpackFieldList();
+        req.put(DemoClass.own(":method"), DemoClass.own("GET"));
+        req.put(DemoClass.own(":path"), DemoClass.own("/api/status"));
+        req.put(DemoClass.own(":scheme"), DemoClass.own("http"));
+        req.put(DemoClass.own("accept"), DemoClass.own("application/json"));
+        int8[] block = enc.encode(req);
+        System.stdout.println("  HPACK: 4 header fields -> {} bytes", block.count());
+        HpackFieldList back = dec.decode(block, (int32) block.count());
+        this.check(back.size() == 4
+            && back.nameAt(1).equals(":path")
+            && back.valueAt(1).equals("/api/status"),
+            "HPACK block decodes to the same field list");
+        // :method GET is static-table entry 2 — it encodes as ONE byte, 0x82.
+        HpackEncoder one = heap HpackEncoder(4096, false);
+        HpackFieldList onlyMethod = heap HpackFieldList();
+        onlyMethod.put(DemoClass.own(":method"), DemoClass.own("GET"));
+        int8[] mb = one.encode(onlyMethod);
+        this.check((int32) mb.count() == 1
+            && (((int32) mb[0]) & 0xFF) == 0x82,
+            ":method GET is one static-table byte (0x82, RFC 7541 C.2.4)");
+        // Sensitive fields opt out of compression contexts entirely:
+        // never-indexed, so a shared cache can't leak them.
+        HpackEncoder se = heap HpackEncoder(4096, false);
+        HpackFieldList sl = heap HpackFieldList();
+        sl.putSensitive(DemoClass.own("authorization"),
+            DemoClass.own("Bearer t0ps3cret"), true);
+        int8[] sb = se.encode(sl);
+        this.check(se.dynamicTable().count() == 0,
+            "a sensitive field never enters the dynamic table");
+        // The dynamic table is bounded; adding past the cap evicts oldest.
+        HpackDynamicTable dt = heap HpackDynamicTable(100);
+        HpackField f1 = heap HpackField(DemoClass.own("aaa"),
+            DemoClass.own("bbb"), false);           // 3+3+32 = 38 bytes
+        HpackField f2 = heap HpackField(DemoClass.own("ccc"),
+            DemoClass.own("ddd"), false);
+        HpackField f3 = heap HpackField(DemoClass.own("eee"),
+            DemoClass.own("fff"), false);           // 3rd add: 114 > 100
+        dt.add(#f1);
+        dt.add(#f2);
+        dt.add(#f3);
+        this.check(dt.count() == 2 && dt.findName("aaa") == 0,
+            "table cap 100 evicts the oldest entry (RFC 7541 4.4)");
+        // Huffman: the string coding under HPACK, usable alone.
+        Huffman huffman = heap Huffman();
+        String word = "www.example.com";
+        int8[] wb = word.toBytes();
+        int8[] huff = huffman.encode(wb, word.byteLength());
+        this.check((int32) huff.count() < word.byteLength()
+            && huffman.decode(huff, (int32) huff.count()).equals(word),
+            "Huffman coding shrinks and round-trips header text");
+
+        // 3b. The tables under HPACK: the RFC's fixed 61-entry static
+        //     table (":method: GET" is entry 2), and the typed decode
+        //     failure — a malformed block raises HpackException.
+        HpackStaticTable stat = heap HpackStaticTable();
+        this.check(stat.size() == HpackStaticTable.COUNT
+            && stat.findField(":method", "GET") == 2
+            && stat.nameAt(2).equals(":method"),
+            "the HPACK static table pins :method GET at index 2");
+        int8[] hpackJunk = [ (int8) 0x40, (int8) 0x7F ];   // literal, absurd len
+        boolean hpackBad = false;
+        try {
+            HpackDecoder badDec = heap HpackDecoder(4096);
+            HpackFieldList never = badDec.decode(hpackJunk, 2);
+        } catch (HpackException hpe) {
+            hpackBad = true;
+        }
+        this.check(hpackBad, "a truncated HPACK block raises HpackException");
+
+        // 3c. Http2Requests bridges messages <-> HPACK field lists — the
+        //     pseudo-header (:method/:path/:scheme/:authority) encoding.
+        HttpRequest bridged = HttpRequest.of("GET", "/api/status");
+        HpackFieldList fields = Http2Requests.requestFields(bridged, "http",
+            "orders.internal");
+        HttpRequest rebuilt = Http2Requests.fromFields(fields);
+        this.check(fields.nameAt(0).startsWith(":")
+            && rebuilt.getMethod().equals("GET")
+            && rebuilt.getTarget().equals("/api/status"),
+            "requestFields/fromFields round-trip via pseudo-headers");
+
+        // 4. The frame layer: every h2 byte after the preface is a frame —
+        //    9-byte big-endian header, then a typed payload.
+        Http2FrameWriter fw = heap Http2FrameWriter();
+        Http2SettingsList settings = heap Http2SettingsList();
+        settings.add(Http2.SETTINGS_INITIAL_WINDOW_SIZE, (int64) 131072);
+        Http2Frames.writeSettings(fw, settings);
+        int8[] pay = [ (int8) 0xDE, (int8) 0xAD, (int8) 0xBE, (int8) 0xEF ];
+        fw.writeFrame(Http2.FRAME_DATA, Http2.FLAG_END_STREAM, 1, pay, 4);
+        int8[] dbg = [ (int8) 0x62, (int8) 0x79, (int8) 0x65 ];   // "bye"
+        Http2Frames.writeGoaway(fw, 1, (int64) Http2.NO_ERROR, dbg, 3);
+        int8[] wire = fw.toBytes();
+        Http2FrameReader fr = heap Http2FrameReader(wire, (int32) wire.count(),
+            Http2.DEFAULT_MAX_FRAME_SIZE);
+        this.check(fr.next() && fr.type() == Http2.FRAME_SETTINGS,
+            "frame 1: SETTINGS");
+        int8[] spl = fr.copyPayload();
+        Http2SettingsList got = Http2Frames.parseSettings(spl, 0, fr.length(),
+            fr.flags(), fr.streamId());
+        this.check(got.get(Http2.SETTINGS_INITIAL_WINDOW_SIZE, (int64) 0 - (int64) 1)
+                == (int64) 131072,
+            "SETTINGS payload parses back (INITIAL_WINDOW_SIZE 131072)");
+        this.check(fr.next() && fr.type() == Http2.FRAME_DATA
+            && fr.hasFlag(Http2.FLAG_END_STREAM) && fr.streamId() == 1,
+            "frame 2: DATA on stream 1 with END_STREAM");
+        this.check(fr.next() && fr.type() == Http2.FRAME_GOAWAY,
+            "frame 3: GOAWAY");
+        int8[] gpl = fr.copyPayload();
+        Http2GoawayInfo gi = Http2Frames.parseGoaway(gpl, 0, fr.length(),
+            fr.streamId());
+        this.check(gi.lastStreamId == 1 && gi.errorCode == (int64) Http2.NO_ERROR
+            && gi.debugLength == 3,
+            "GOAWAY carries last-stream-id, error code, debug bytes");
+        this.check(!fr.next() && !fr.hasMore(), "reader exhausts cleanly");
+        // Http2ContentFrames handles the padded/prioritized payloads:
+        // parseData returns an Http2Payload REGION (offset, length) into
+        // the frame bytes with padding already stripped.
+        Http2FrameWriter dw = heap Http2FrameWriter();
+        int8[] tick = [ (int8) 0x74, (int8) 0x69, (int8) 0x63, (int8) 0x6B ];
+        Http2ContentFrames.writeData(dw, 1, tick, 4, true, 3);   // 3 pad bytes
+        int8[] dwire = dw.toBytes();
+        Http2FrameReader dr = heap Http2FrameReader(dwire, (int32) dwire.count(),
+            Http2.DEFAULT_MAX_FRAME_SIZE);
+        dr.next();
+        int8[] dpl = dr.copyPayload();
+        Http2Payload region = Http2ContentFrames.parseData(dpl, dr.length(),
+            dr.flags(), dr.streamId());
+        int8[] rb0 = heap int8[1];
+        rb0[0] = dpl[region.offset];
+        this.check(region.length == 4 && rb0[0] == (int8) 0x74,
+            "parseData strips padding to the (offset, length) region");
+        // Server push declares (path, response) pairs on the response;
+        // over h1 they are ignored, over h2 they become PUSH_PROMISE.
+        HttpResponse pushy = HttpResponse.ok();
+        String css = "body{}";
+        pushy.push("/style.css", 200, css.toBytes(), css.byteLength());
+        this.check(pushy.pushCount() == 1
+            && pushy.pushPathAt(0).equals("/style.css")
+            && pushy.pushes[0] != null,
+            "push() records a PushEntry the h2 connection can promise");
+
+        // 5. Settings as connection state. Only non-defaults serialize;
+        //    apply() validates fail-loud with the RFC error code.
+        Http2Settings s = heap Http2Settings();
+        s.maxConcurrentStreams = (int64) 250;
+        s.enablePush = 0;
+        Http2SettingsList l = s.toList();
+        Http2Settings back2 = heap Http2Settings();
+        back2.apply(l);
+        this.check(l.size() == 2 && back2.maxConcurrentStreams == (int64) 250
+            && back2.maxFrameSize == (int64) 16384,
+            "toList carries only non-defaults; apply restores; rest default");
+        boolean badPush = false;
+        Http2Settings v1 = heap Http2Settings();
+        Http2SettingsList bad = heap Http2SettingsList();
+        bad.add(Http2.SETTINGS_ENABLE_PUSH, (int64) 2);
+        try {
+            v1.apply(bad);
+        } catch (Http2Exception he) {
+            badPush = he.errorCode == Http2.PROTOCOL_ERROR;
+        }
+        this.check(badPush, "ENABLE_PUSH=2 raises Http2Exception(PROTOCOL_ERROR)");
+
+        // 6. Flow control: DATA spends the smaller of the stream and
+        //    connection windows, capped by the peer's max frame size —
+        //    WINDOW_UPDATE refills.
+        Http2FlowController fc = heap Http2FlowController(65535, 65535);
+        Http2FlowWindow stream = heap Http2FlowWindow(65535);
+        this.check(fc.sendable(stream) == 16384,
+            "send budget starts capped by max frame size 16384");
+        fc.connSend.consume(64535);
+        this.check(fc.sendable(stream) == 1000,
+            "the connection window becomes the binding constraint");
+        fc.afterSend(stream, 1000);
+        this.check(fc.connSend.available() == (int64) 0
+            && stream.available() == (int64) 64535,
+            "a send debits both windows");
+        stream.increase(2000, 1);
+        this.check(stream.available() == (int64) 66535,
+            "WINDOW_UPDATE refills the stream window");
+    }
+}

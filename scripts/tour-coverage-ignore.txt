@@ -1,0 +1,41 @@
+# Types exempt from the tour-coverage gate (scripts/check-library-tour-coverage.sh).
+# Each entry must justify itself: only genuine internals belong here — a public
+# type a USER would reach for must be toured instead.
+
+# Multipart's pure boundary-scanning kernel: no public members at all.
+dev.cajeta.http.body.MultipartScan
+
+# Connection-pool plumbing. Users drive the pool through
+# HttpClient.poolLimits(...) (toured); these are its internal records.
+dev.cajeta.http.client.PooledConnection
+dev.cajeta.http.client.OriginEntry
+
+# HPACK's internal codec pieces. The user surface is HpackEncoder/
+# HpackDecoder + the field/table types (all toured); these are the
+# string/integer primitives and block assembly under them.
+dev.cajeta.http.h2.HpackReader
+dev.cajeta.http.h2.HpackWriter
+dev.cajeta.http.h2.HpackString
+dev.cajeta.http.h2.HeaderBlockAssembler
+
+# HTTP/2 connection internals: per-stream state, the stream table, and the
+# serialized write side. Users reach them through Http2Client/Http2Connection
+# (toured); driving them directly is not a supported pattern.
+dev.cajeta.http.h2.Http2Stream
+dev.cajeta.http.h2.Http2StreamTable
+dev.cajeta.http.h2.Http2WriteSide
+dev.cajeta.http.h2.Http2SendGate
+
+# Cross-fiber handoff cells — workarounds for Channel's borrow semantics
+# (their own doc comments say so). Created and consumed inside the server
+# and the Timeout middleware; never held by user code.
+dev.cajeta.http.server.HandlerRun
+dev.cajeta.http.middleware.TimeoutRun
+
+# Server dispatch internals: the per-request record and the streaming
+# request-body plumbing behind ServerLimits.streamRequestBody. The toured
+# surface is the handler contract + ServerLimits; these run underneath.
+dev.cajeta.http.server.Exchange
+dev.cajeta.http.server.RequestBodyStream
+dev.cajeta.http.server.RequestBodyChannel
+dev.cajeta.http.server.ResponseBodyWriter

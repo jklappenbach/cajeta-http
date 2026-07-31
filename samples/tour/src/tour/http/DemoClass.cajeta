@@ -1,0 +1,64 @@
+package tour.http;
+
+import cajeta.lang.String;
+
+// Base class for every demo in the http tour. Each demo extends DemoClass and
+// overrides execute() to walk one layer of the library with worked,
+// self-checking examples. HttpTour.main() runs one instance of each and turns
+// any failed check() into a nonzero exit code — the tour doubles as a smoke
+// test and can't silently rot as the APIs evolve.
+//
+// (Cajeta has no `abstract` keyword yet, so execute() lands as an empty
+// concrete method that every subclass overrides.)
+public class DemoClass {
+
+    public static int32 checks = 0;
+    public static int32 failures = 0;
+
+    public void execute() {
+    }
+
+    // The tour's assertion: every expectation goes through here, loud and
+    // counted either way.
+    public void check(boolean cond, String what) {
+        DemoClass.checks = DemoClass.checks + 1;
+        if (cond) {
+            System.stdout.println("  ok   {}", what);
+        } else {
+            DemoClass.failures = DemoClass.failures + 1;
+            System.stdout.println("  FAIL {}", what);
+        }
+    }
+
+    // support: compare `an` bytes of a against `bn` bytes of b. Lengths travel
+    // beside buffers throughout this library (arrays are often over-allocated),
+    // so the compare takes both explicitly.
+    public boolean sameBytes(int8[] a, int32 an, int8[] b, int32 bn) {
+        if (an != bn) { return false; }
+        int32 i = 0;
+        while (i < an) {
+            if (a[i] != b[i]) { return false; }
+            i = i + 1;
+        }
+        return true;
+    }
+
+    // support: materialize a response/request body as a String. Body arrays
+    // are over-allocated; only the first `n` bytes are the body.
+    public static #String bodyString(int8[] body, int32 n) {
+        int8[] copy = heap int8[n];
+        int32 i = 0;
+        while (i < n) {
+            copy[i] = body[i];
+            i = i + 1;
+        }
+        return heap String(#copy, n);
+    }
+
+    // support: borrowed String -> owned String. APIs taking #String params
+    // (HpackFieldList.put, ...) consume ownership; a literal is a borrow, so
+    // the substring self-copy mints the owned value those params need.
+    public static #String own(String s) {
+        return s.substring(0, s.byteLength());
+    }
+}

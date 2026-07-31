@@ -1,0 +1,241 @@
+package tour.http;
+
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.client.HttpClient;
+import dev.cajeta.http.coding.ContentCoding;
+import dev.cajeta.http.routing.Router;
+import dev.cajeta.http.server.HttpServer;
+import dev.cajeta.http.server.HttpServerBuilder;
+import dev.cajeta.http.server.ServerLimits;
+import dev.cajeta.http.server.ExpectContinue;
+import dev.cajeta.http.middleware.Middleware;
+import dev.cajeta.http.middleware.MiddlewareChain;
+import dev.cajeta.http.middleware.Recover;
+import dev.cajeta.http.middleware.RequestId;
+import dev.cajeta.http.middleware.Decompression;
+import cajeta.io.net.AsyncReader;
+import cajeta.io.net.AsyncWriter;
+import cajeta.io.net.IpAddress;
+import cajeta.io.net.SocketAddress;
+import cajeta.io.net.TcpStream;
+import cajeta.io.net.uri.Uri;
+import cajeta.time.Duration;
+
+// A live HttpServer, assembled the way a production service is:
+//
+//   Router  ->  MiddlewareChain.compose(dispatch)  ->  HttpServer.builder()
+//               .bind(...).handler(app).serverLimits(...).build()
+//   scope { spawn serve; ... clients ...; srv.shutdown(deadline); }
+//
+// serve() runs the accept loop on a fiber; shutdown(deadline) stops
+// accepting and drains in-flight connections — the orderly teardown pair.
+// (The spawn wraps a local static because `spawn` takes a bare call to a
+// same-class static — the "bare-spawn rule" used by every fiber below.)
+//
+// ServerLimits is the hostile-input armor: body caps (413), head caps
+// (431), read timeouts — enforced BEFORE the handler runs.
+//
+// The scenario: the orders service from RoutingDemo, now on a real socket,
+// with recovery, request ids, and inbound-gzip decompression in front.
+public class ServerDemo extends DemoClass {
+
+    // support: the route handlers.
+    public static #HttpResponse getOrder(HttpRequest req) {
+        int64 id = req.pathParamInt64("id", (int64) 0 - (int64) 1);
+        String body = "order " + id;
+        return HttpResponse.ok().body(body.toBytes(), body.byteLength());
+    }
+
+    public static #HttpResponse createOrder(HttpRequest req) {
+        // Decompression already inflated a gzip body; echo what arrived.
+        String body = "stored " + req.bodyLength() + " bytes";
+        return HttpResponse.of(201).body(body.toBytes(), body.byteLength());
+    }
+
+    public static async int32 serveLoop(HttpServer srv) {
+        srv.serve();
+        return 1;
+    }
+
+    // One client drives the whole API surface over ONE connection —
+    // sequential keep-alive exchanges on a shared client, the shape real
+    // callers use (a client per request would defeat the pool).
+    // Return value = how many steps passed (expect 4).
+    public static async int32 driveApi(int32 port) {
+        HttpClient client = heap HttpClient();
+        client.exchangeTimeout(15000);
+        int32 passed = 0;
+
+        HttpResponse r1 = client.get("http://127.0.0.1:" + port + "/orders/7");
+        String b1 = DemoClass.bodyString(r1.body, r1.bodyLength());
+        if (r1.statusCode() == 200 && b1.equals("order 7")) {
+            passed = passed + 1;
+        }
+
+        Uri post = Uri.builder()
+            .scheme("http").host("127.0.0.1").port(port).path("/orders")
+            .build();
+        HttpRequest req = HttpRequest.fromUri("POST", post);
+        String order = "{\"symbol\":\"ACME\",\"qty\":250}";
+        req.body(order.toBytes(), order.byteLength());
+        HttpResponse r2 = client.send(post, req);
+        if (r2.statusCode() == 201) {
+            passed = passed + 1;
+        }
+
+        HttpResponse r3 = client.get("http://127.0.0.1:" + port + "/nope");
+        if (r3.statusCode() == 404) {
+            passed = passed + 1;
+        }
+
+        // Last request: close the keep-alive connection politely, so the
+        // server has no parked connection fiber when shutdown() drains.
+        client.defaultHeader("Connection", "close");
+        HttpResponse r4 = client.get("http://127.0.0.1:" + port + "/orders/7x");
+        if (r4.statusCode() == 404) {           // typed {id:int64} rejects "7x"
+            passed = passed + 1;
+        }
+        return passed;
+    }
+
+    // The armor: a Content-Length beyond ServerLimits' cap answers 413
+    // before the handler runs — and the server then closes, so this speaks
+    // raw bytes (one write, then read to EOF) rather than a full client
+    // exchange. 1 = saw the 413.
+    public static async int32 overCapPost(int32 port) {
+        IpAddress ca = IpAddress.loopbackV4();
+        SocketAddress addr = SocketAddress.of(#ca, port);
+        TcpStream sock = TcpStream.connectAsync(#addr);
+        AsyncWriter w = heap AsyncWriter(sock);
+        AsyncReader r = heap AsyncReader(sock);
+        String blob = "";
+        int32 i = 0;
+        while (i < 80) {
+            blob = blob + "0123456789";       // 800 bytes > the 512-byte cap
+            i = i + 1;
+        }
+        String wire = "POST /orders HTTP/1.1\r\nhost: orders\r\n"
+            + "connection: close\r\ncontent-length: " + blob.byteLength()
+            + "\r\n\r\n" + blob;
+        int8[] wb = wire.toBytes();
+        w.writeAll(wb, 0, wire.byteLength());
+        w.flush();
+        int8[] buf = heap int8[4096];
+        int32 total = 0;
+        boolean going = true;
+        while (going) {
+            int32 got = r.read(buf, total, 4096 - total);
+            if (got <= 0) {
+                going = false;
+            } else {
+                total = total + got;
+            }
+        }
+        sock.close();
+        String resp = DemoClass.bodyString(buf, total);
+        if (resp.contains("413")) {
+            return 1;
+        }
+        return 0 - 1;
+    }
+
+    // Inbound gzip: Content-Encoding: gzip + compressed body; the
+    // Decompression middleware inflates before the handler. 1 = the
+    // handler saw the PLAIN byte count.
+    public static async int32 gzipPost(int32 port) {
+        HttpClient client = heap HttpClient();
+        client.exchangeTimeout(15000);
+        client.defaultHeader("Connection", "close");
+        Uri uri = Uri.builder()
+            .scheme("http").host("127.0.0.1").port(port).path("/orders")
+            .build();
+        HttpRequest req = HttpRequest.fromUri("POST", uri);
+        String order = "{\"symbol\":\"GLOBEX\",\"qty\":75,\"note\":\"gzip inbound\"}";
+        int8[] gz = ContentCoding.encode("gzip", order.toBytes(), order.byteLength());
+        req.setHeader("Content-Encoding", "gzip");
+        req.body(gz, (int32) gz.count());
+        HttpResponse resp = client.send(uri, req);
+        if (resp.statusCode() != 201) {
+            return 0 - 1;
+        }
+        String body = DemoClass.bodyString(resp.body, resp.bodyLength());
+        String want = "stored " + order.byteLength() + " bytes";
+        if (body.equals(want)) {
+            return 1;
+        }
+        return 0 - 2;
+    }
+
+    public void execute() {
+        System.stdout.println("");
+        System.stdout.println("-- A live HttpServer: builder -> serve -> shutdown, limits enforced --");
+
+        scope {
+            // The route table (RoutingDemo's), dispatched behind middleware.
+            Router router = heap Router();
+            router.route("GET", "/orders/{id:int64}",
+                (req) -> ServerDemo.getOrder(req));
+            router.route("POST", "/orders",
+                (req) -> ServerDemo.createOrder(req));
+
+            Middleware rec = Recover.middleware();
+            Middleware rid = RequestId.middleware();
+            Decompression dz = Decompression.create();
+            Middleware dzm = Decompression.middleware(dz);
+            MiddlewareChain chain = heap MiddlewareChain();
+            chain.use(#rec).use(#rid).use(#dzm);
+            // The terminal is the router — the forwarding lambda is written
+            // here at the call site (escaping closures are pending).
+            (HttpRequest) -> #HttpResponse dispatch =
+                (req) -> router.dispatch(req);
+            (HttpRequest) -> #HttpResponse app = chain.compose(dispatch);
+
+            // ServerLimits: 5s read timeouts, 512-byte body cap.
+            ServerLimits limits = ServerLimits.of(5000, 5000, (int64) 512, true);
+
+            HttpServerBuilder b = HttpServer.builder();
+            b.bind("127.0.0.1:0");
+            b.handler(app);
+            b.serverLimits(#limits);
+            HttpServer srv = b.build();
+            int32 port = srv.server.listener.boundPort();
+            System.stdout.println("  serving 127.0.0.1:{} (ephemeral)", port);
+            Task<int32> sv = spawn serveLoop(srv);
+
+            Task<int32> api = spawn driveApi(port);
+            this.check(await api == 4,
+                "one client, one connection: typed GET, POST 201, 404, typed-miss");
+
+            Task<int32> cap = spawn overCapPost(port);
+            this.check(await cap == 1,
+                "an 800-byte body against the 512-byte cap answers 413 pre-handler");
+
+            Task<int32> gz = spawn gzipPost(port);
+            this.check(await gz == 1,
+                "Content-Encoding: gzip request is inflated before the handler");
+
+            // Expect: 100-continue — the server-side decision the limits
+            // feed: a polite client asks before sending a large body, and
+            // ServerLimits' cap can refuse it up front (417/413) instead
+            // of mid-stream. wantsContinue is the trigger predicate.
+            HttpRequest polite = HttpRequest.post("/orders");
+            polite.setHeader("Expect", "100-continue");
+            this.check(ExpectContinue.wantsContinue(polite)
+                && !ExpectContinue.wantsContinue(HttpRequest.post("/orders"))
+                && ExpectContinue.ACTION_SEND_CONTINUE == 1,
+                "Expect: 100-continue is detected; plain posts are not");
+
+            // Teardown: stop accepting, drain in-flight, join serve.
+            // Every client above closed its connection, so the drain is
+            // instant. (Known issue: under heavy CPU contention the
+            // runtime can lose a park/wake here and wedge — cajeta INDEX:
+            // runtime-lost-wakeup-under-load; idle machines and CI are
+            // unaffected in practice.)
+            boolean drained = srv.shutdown(Duration.ofSeconds(2));
+            int32 sret = await sv;
+            this.check(drained && sret == 1,
+                "shutdown(deadline) drained clean and the accept loop exited");
+        }
+    }
+}

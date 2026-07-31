@@ -1,0 +1,260 @@
+package tour.http;
+
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.client.HttpClient;
+import dev.cajeta.http.server.HttpServer;
+import dev.cajeta.http.server.HttpServerBuilder;
+import dev.cajeta.http.sse.SseEvent;
+import dev.cajeta.http.sse.SseResponse;
+import dev.cajeta.http.sse.SseChannel;
+import dev.cajeta.http.sse.SseByteChannel;
+import dev.cajeta.http.sse.SseBody;
+import dev.cajeta.http.sse.SseClient;
+import dev.cajeta.http.sse.SseParser;
+import dev.cajeta.http.sse.SseDecoder;
+import dev.cajeta.http.sse.SseException;
+import cajeta.io.net.Server;
+import cajeta.io.net.TcpStream;
+
+// Server-Sent Events — dev.cajeta.http.sse. One long-lived GET, a
+// text/event-stream body, events as "data:" lines — the push channel you
+// reach for before WebSocket when traffic is one-way (dashboards, feeds):
+//
+//   server:  SseResponse.stream(events, n)      a fixed batch
+//            SseResponse.channel(sseChannel)    a live producer fiber
+//   client:  SseClient.subscribe(onEvent)       auto-reconnect, sending
+//            Last-Event-ID so the server resumes where the client left off
+//   wire:    SseEvent / SseParser / SseDecoder  the format itself
+//
+// Reconnect-with-resume is THE load-bearing SSE feature: ids ride each
+// event, the client replays the last one on reconnect, the server serves
+// the tail. The scenario: the orders dashboard's fill feed.
+
+// support: the live producer's channel must outlive the handler frame
+// (the pump drains it after the handler returns), so it lives in a static
+// holder rather than a local.
+public final class FillFeed {
+    public SseChannel ch;
+
+    public FillFeed(int32 cap) {
+        SseChannel c = heap SseChannel(cap);
+        this.ch = #c;
+    }
+}
+
+// support: the subscriber's collection box — the callback lambda can't
+// capture locals by value, so state rides an object it borrows.
+public final class FillBox {
+    public String seq;
+    public SseClient client;
+
+    public FillBox() {
+        this.seq = "";
+        this.client = null;
+    }
+}
+
+public class SseDemo extends DemoClass {
+
+    static FillFeed feed = null;
+
+    // Resume-aware handler: first connect serves fills 1-2 and ends the
+    // stream (dropping the connection); the reconnect arrives carrying
+    // Last-Event-ID: 2 and gets fills 3-4.
+    public static #HttpResponse handleFills(HttpRequest req) {
+        String last = SseResponse.lastEventId(req);
+        SseEvent[] evs = heap SseEvent[2];
+        if (last == null) {
+            SseEvent a = SseEvent.typed("fill", "ACME 100@19.99");
+            a.id = "1".substring(0, 1);
+            a.retry = 20;                     // client reconnect delay hint
+            evs[0] = #a;
+            SseEvent b = SseEvent.typed("fill", "ACME 150@20.01");
+            b.id = "2".substring(0, 1);
+            evs[1] = #b;
+        } else {
+            SseEvent c = SseEvent.typed("fill", "GLOBEX 75@101.5");
+            c.id = "3".substring(0, 1);
+            evs[0] = #c;
+            SseEvent d = SseEvent.typed("fill", "GLOBEX 25@101.6");
+            d.id = "4".substring(0, 1);
+            evs[1] = #d;
+        }
+        return SseResponse.stream(#evs, 2);
+    }
+
+    // The live-channel handler: the response drains whatever the producer
+    // fiber pushes into the shared channel.
+    public static #HttpResponse handleLive(HttpRequest req) {
+        return SseResponse.channel(SseDemo.feed.ch);
+    }
+
+    public static async int32 acceptN(Server core, int32 n) {
+        int32 i = 0;
+        while (i < n) {
+            TcpStream conn #= core.acceptNext();
+            core.dispatch(#conn);
+            i = i + 1;
+        }
+        return 1;
+    }
+
+    // The producer: pushes three fills, then closes — closing ends the
+    // stream and the subscriber's connection.
+    public static async int32 produce(SseChannel ch) {
+        SseEvent e0 = SseEvent.of("fill 1");
+        ch.send(#e0);
+        SseEvent e1 = SseEvent.typed("fill", "fill 2");
+        ch.send(#e1);
+        SseEvent e2 = SseEvent.of("multi\nline note");
+        ch.send(#e2);
+        ch.close();
+        return 1;
+    }
+
+    // One-shot GET of the live stream, parsed with SseParser.
+    public static async int32 readLive(int32 port) {
+        HttpClient client = heap HttpClient();
+        client.exchangeTimeout(15000);
+        HttpResponse resp = client.get("http://127.0.0.1:" + port + "/live");
+        if (resp.statusCode() != 200) {
+            return 0 - 1;
+        }
+        String ct = resp.getHeaders().get("Content-Type");
+        if (ct == null || !ct.equals("text/event-stream")) {
+            return 0 - 2;
+        }
+        SseParser p = heap SseParser();
+        p.feed(resp.body, resp.bodyLength());
+        if (!p.hasEvent()) {
+            return 0 - 3;
+        }
+        SseEvent a = p.nextEvent();
+        SseEvent b = p.nextEvent();
+        SseEvent c = p.nextEvent();
+        if (!a.data.equals("fill 1")) {
+            return 0 - 4;
+        }
+        if (b.event == null || !b.event.equals("fill")) {
+            return 0 - 5;
+        }
+        if (!c.data.equals("multi\nline note")) {
+            return 0 - 6;
+        }
+        return 1;
+    }
+
+    // support: the subscriber callback — appends each fill's id, stops
+    // after the fourth (subscribe() otherwise reconnects forever).
+    static void collect(FillBox box, SseEvent e) {
+        box.seq #= box.seq + e.id;
+        if (box.seq.byteLength() >= 4) {
+            box.client.stop();
+        }
+    }
+
+    public static async int32 subscribeFills(int32 port, FillBox box) {
+        SseClient sc = heap SseClient("http://127.0.0.1:" + port + "/fills");
+        sc.defaultRetryMillis(20);
+        box.client = sc;
+        (SseEvent) -> void h = (e) -> SseDemo.collect(box, e);
+        sc.subscribe(h);
+        return 1;
+    }
+
+    public void execute() {
+        System.stdout.println("");
+        System.stdout.println("-- Server-Sent Events: stream, live channel, resume on reconnect --");
+
+        // 1. The wire format itself: an event serializes to field lines;
+        //    the decoder folds ids into its resume state as it reads.
+        SseEvent ev = SseEvent.typed("fill", "ACME 100@19.99");
+        ev.id = "41".substring(0, 2);
+        int8[] wire = ev.serialize();
+        String wireText = DemoClass.bodyString(wire, (int32) wire.count());
+        this.check(wireText.contains("event: fill")
+            && wireText.contains("data: ACME 100@19.99")
+            && wireText.contains("id: 41"),
+            "an event serializes to event:/data:/id: lines");
+        SseDecoder dec = heap SseDecoder();
+        dec.feed(wire, (int32) wire.count());
+        SseEvent back = dec.nextEvent();
+        this.check(back.data.equals("ACME 100@19.99")
+            && dec.lastEventId().equals("41"),
+            "the decoder replays the event and tracks Last-Event-ID");
+
+        // 2. Keep-alive comments: the ':' line a proxy-friendly stream
+        //    emits during quiet periods (SseByteChannel injects them).
+        int8[] ka = SseByteChannel.keepAliveBytes();
+        this.check((int32) ka.count() >= 2 && ka[0] == (int8) 58,
+            "the keep-alive ping is a ':' comment line, invisible to events");
+        // SseBody.abort() is the server's client-disconnected hook: it
+        // closes the backing channel so the producer stops.
+        SseChannel hangup = heap SseChannel(2);
+        SseByteChannel bc = SseByteChannel.overChannel(hangup);
+        SseBody sb = SseBody.of(#bc);
+        sb.abort();
+        this.check(hangup.isClosed(),
+            "abort() closes the channel — the producer sees the hangup");
+
+        // 3. A live channel-fed stream over loopback: producer fiber
+        //    pushes, handler streams, client parses all three events.
+        scope {
+            FillFeed holder = heap FillFeed(8);
+            SseDemo.feed #= holder;
+            HttpServerBuilder b = HttpServer.builder();
+            b.bind("127.0.0.1:0");
+            (HttpRequest) -> #HttpResponse h = (req) -> SseDemo.handleLive(req);
+            b.handler(h);
+            HttpServer srv = b.build();
+            Server core = srv.server;
+            int32 port = core.listener.boundPort();
+
+            Task<int32> pr = spawn produce(SseDemo.feed.ch);
+            Task<int32> ac = spawn acceptN(core, 1);
+            Task<int32> rd = spawn readLive(port);
+            this.check(await rd == 1,
+                "channel-pushed fills round-trip (typed, multi-line included)");
+            this.check(await ac == 1 && await pr == 1,
+                "one connection served; the producer completed");
+            core.listener.close();
+        }
+
+        // 4. The headline: subscribe() with resume. The server ends the
+        //    stream after two fills; the client reconnects with
+        //    Last-Event-ID: 2 and receives 3,4 — no gap, no replay.
+        scope {
+            HttpServerBuilder b = HttpServer.builder();
+            b.bind("127.0.0.1:0");
+            (HttpRequest) -> #HttpResponse h = (req) -> SseDemo.handleFills(req);
+            b.handler(h);
+            HttpServer srv = b.build();
+            Server core = srv.server;
+            int32 port = core.listener.boundPort();
+
+            FillBox box = heap FillBox();
+            Task<int32> ac = spawn acceptN(core, 2);
+            Task<int32> sub = spawn subscribeFills(port, box);
+            this.check(await sub == 1 && await ac == 1,
+                "subscribe survived the drop and the server saw 2 connections");
+            this.check(box.seq.equals("1234"),
+                "fills 1,2 then — after reconnect with Last-Event-ID — 3,4");
+            core.listener.close();
+        }
+
+        // 5. checkHead is the client's own gate: a non-SSE response is a
+        //    terminal SseException (don't reconnect into a 404 forever).
+        SseClient gate = heap SseClient("http://127.0.0.1:1/x");
+        HttpResponse wrong = HttpResponse.ok();
+        wrong.setHeader("Content-Type", "text/html");
+        boolean rejected = false;
+        try {
+            gate.checkHead(wrong);
+        } catch (SseException se) {
+            rejected = true;
+        }
+        this.check(rejected,
+            "a text/html reply to an SSE subscribe raises SseException");
+    }
+}

@@ -1,8 +1,9 @@
 # cajeta-http
 
-HTTP/1.1 · HTTP/2 · HTTP/3, WebSocket, and Server-Sent Events — client and
-server — for [Cajeta](https://github.com/jklappenbach/cajeta), built **on** the
-stdlib transport layer `cajeta.io.net`.
+HTTP/1.1 · HTTP/2, WebSocket, and Server-Sent Events — client and server —
+for [Cajeta](https://github.com/jklappenbach/cajeta), built **on** the stdlib
+transport layer `cajeta.io.net`. (HTTP/3 is out of scope until the stdlib
+ships QUIC — see Status.)
 
 > **Why a library, not stdlib?** HTTP is an *application* protocol, not transport.
 > HTTP/1.1 and HTTP/2 ride TCP; **HTTP/3 rides QUIC over UDP** — so HTTP sits
@@ -16,7 +17,7 @@ stdlib transport layer `cajeta.io.net`.
 
 ```
 primavera          — REST/web policy: @Rest endpoints, routing-by-annotation, auto-serde
-   └─ cajeta-http  — HTTP/1.1·2·3, WebSocket, SSE; client + server   ← this repo
+   └─ cajeta-http  — HTTP/1.1·2, WebSocket, SSE; client + server     ← this repo
         └─ cajeta.io.net (stdlib)  — sockets, TCP/UDP/multicast, reactor, TLS, URI
 ```
 
@@ -24,16 +25,16 @@ cajeta-http provides the **imperative HTTP engine** (`HttpClient`, `HttpServer`,
 `Router`, `WebSocket`). Annotation-driven endpoints and automatic
 serialization-to-object-model are **primavera's** job, layered on top.
 
-## Status — v0.1.1 (early)
+## Status — v0.1.2
 
 | Capability | State |
 |---|---|
-| HTTP/1.1 message model, wire codec, client, server, router | ✓ extracted from the stdlib (`dev.cajeta.http`), loopback-tested |
-| WebSocket (RFC 6455) client + server | ✓ extracted (`dev.cajeta.http.ws`), loopback echo tested |
-| HTTP/2 (HPACK, multiplexing, flow control) | ▢ planned |
-| Middleware (logging, CORS, auth, compression, rate-limit, …) | ▢ planned |
-| Server-Sent Events | ▢ planned |
-| HTTP/3 over QUIC (UDP) | ▢ deferred (needs QUIC) |
+| HTTP/1.1 message model, wire codec, client, server, router | ✓ (`dev.cajeta.http`), loopback-tested |
+| WebSocket (RFC 6455) client + server | ✓ (`dev.cajeta.http.ws`): close handshake, ping/pong, permessage-deflate |
+| HTTP/2 (HPACK, multiplexing, flow control) | ✓ (`dev.cajeta.http.h2`), prior-knowledge client + server |
+| Middleware (logging, CORS, auth, compression, rate-limit, …) | ✓ (`dev.cajeta.http.middleware`) |
+| Server-Sent Events | ✓ (`dev.cajeta.http.sse`) client + server |
+| HTTP/3 over QUIC (UDP) | not planned for this line — requires QUIC in `cajeta.io.net`; intentionally not advertised |
 
 See [`docs/http-spec.md`](docs/http-spec.md) for the design,
 [`plan/http-plan.md`](plan/http-plan.md) for the build order, and
