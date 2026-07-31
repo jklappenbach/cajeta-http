@@ -10,7 +10,7 @@ public final class TestMain {
         Check c = heap Check();
 
         String v = Http.version();
-        c.eqStr(v, "0.1.1", "Http.version()");
+        c.eqStr(v, "0.1.2", "Http.version()");   // keep in lockstep with cajeta.json details.version
 
         CoreTypeTests.run(c);
         BodyTests.run(c);
