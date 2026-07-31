@@ -40,12 +40,17 @@ stated reason). CI runs suite + tour + gate via `scripts/ci-checks.sh`.
 
 ## Known issue
 
-Under heavy CPU contention (another workload saturating the machine) the
-runtime can lose a fiber wakeup during a server teardown and wedge the
-process — see the cajeta repo's `runtime-lost-wakeup-under-load` spec. Idle
-machines and CI runners have not shown it; if the tour freezes right after an
-"Expect: 100-continue" or "StreamBody uploads" line on a busy box, that is
-the known defect, not your change.
+**This tour frequently hangs when run locally.** The runtime can lose a fiber
+wakeup during a server shutdown-and-await teardown, leaving the process
+blocked forever — see the cajeta repo's `runtime-lost-wakeup-under-load`
+spec. Measured 2026-07-31 on an idle machine: 6 of 6 runs wedged, with
+binaries from both cajeta 0.12.0 and 0.13.0. It stops right after an
+"Expect: 100-continue" or "StreamBody uploads" line, always at a teardown,
+never mid-request.
+
+CI passes the same tour, so the gate is meaningful — but do not read a green
+CI badge as evidence the bug is rare. If the tour freezes for you, that is
+the known defect, not your change; kill it and re-run, or wait for the fix.
 
 ## Adding a demo
 
