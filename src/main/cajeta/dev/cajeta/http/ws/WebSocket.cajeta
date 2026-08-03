@@ -414,7 +414,7 @@ public class WebSocket {
             pay[i] = text.byteAt(i);
             i = i + 1;
         }
-        this.writeData(WsOpcode.TEXT, pay, n);
+        this.writeData(WsOpcode.TEXT, #pay, n);
     }
 
     /**
@@ -435,7 +435,7 @@ public class WebSocket {
             pay[i] = data[i];
             i = i + 1;
         }
-        this.writeData(WsOpcode.BINARY, pay, n);
+        this.writeData(WsOpcode.BINARY, #pay, n);
     }
 
     // Emit one unfragmented data message, compressing it (RSV1) when

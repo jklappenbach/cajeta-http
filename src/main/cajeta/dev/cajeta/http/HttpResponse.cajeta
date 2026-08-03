@@ -186,7 +186,7 @@ public class HttpResponse {
         PushEntry[] ne = heap PushEntry[nc];
         int32 i = 0;
         while (i < this.pushLen) {
-            ne[i] #= #this.pushes[i];
+            ne[i] #= this.pushes[i];
             i = i + 1;
         }
         this.pushes #= ne;

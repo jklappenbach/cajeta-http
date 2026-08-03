@@ -83,7 +83,7 @@ public final class SseByteChannel implements ByteChannel {
      */
     public static #SseByteChannel overEvents(#SseEvent[] events, int32 n) {
         SseByteChannel c = heap SseByteChannel();
-        c.events #= #events;
+        c.events #= events;
         c.evTotal = n;
         return #c;
     }

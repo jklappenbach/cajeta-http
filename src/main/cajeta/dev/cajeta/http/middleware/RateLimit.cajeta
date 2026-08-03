@@ -127,8 +127,8 @@ public class RateLimit {
             // Move (not copy) — a plain copy leaves the old arrays owning the
             // entries, so their drop would free keys/buckets the grown arrays
             // still hold. Idiom: stdlib ArrayList.grow.
-            gk[j] #= #this.keys[j];
-            gb[j] #= #this.buckets[j];
+            gk[j] #= this.keys[j];
+            gb[j] #= this.buckets[j];
             j = j + 1;
         }
         this.keys #= gk;

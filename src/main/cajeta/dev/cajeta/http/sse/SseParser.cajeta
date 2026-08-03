@@ -216,7 +216,7 @@ public final class SseParser {
         int32 i = 0;
         while (i < this.qCount) {
             int32 idx = (this.qHead + i) % this.qCap;
-            nq[i] #= #this.q[idx];
+            nq[i] #= this.q[idx];
             i = i + 1;
         }
         this.q #= nq;

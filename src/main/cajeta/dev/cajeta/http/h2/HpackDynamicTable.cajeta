@@ -71,7 +71,7 @@ public final class HpackDynamicTable {
             this.evictOldest();
         }
         if (fsize > this.maxSize) {
-            HpackField dead #= #field;   // does not fit; drop it
+            HpackField dead #= field;   // does not fit; drop it
             return;
         }
         if (this.count == this.cap) {
@@ -79,7 +79,7 @@ public final class HpackDynamicTable {
         }
         int32 k = this.count;
         while (k > 0) {
-            this.entries[k] #= #this.entries[k - 1];
+            this.entries[k] #= this.entries[k - 1];
             k = k - 1;
         }
         this.entries[0] = #field;
@@ -100,7 +100,7 @@ public final class HpackDynamicTable {
 
     void evictOldest() {
         int32 last = this.count - 1;
-        HpackField dead #= #this.entries[last];
+        HpackField dead #= this.entries[last];
         this.curSize = this.curSize - dead.entrySize();
         this.count = this.count - 1;
     }
@@ -110,7 +110,7 @@ public final class HpackDynamicTable {
         HpackField[] ne = heap HpackField[nc];
         int32 i = 0;
         while (i < this.count) {
-            ne[i] #= #this.entries[i];
+            ne[i] #= this.entries[i];
             i = i + 1;
         }
         this.entries #= ne;

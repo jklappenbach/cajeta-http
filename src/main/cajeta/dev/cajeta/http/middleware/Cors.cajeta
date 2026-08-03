@@ -82,7 +82,7 @@ public class Cors {
             while (j < this.originCount) {
                 // Move (not copy) — else the old array's drop frees strings the
                 // grown array still holds. Idiom: stdlib ArrayList.grow.
-                grown[j] #= #this.origins[j];
+                grown[j] #= this.origins[j];
                 j = j + 1;
             }
             this.origins #= grown;

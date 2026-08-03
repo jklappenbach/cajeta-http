@@ -58,7 +58,7 @@ public class MiddlewareChain {
                 // the old array owning them, so its drop would free entries the
                 // grown array still points at — a use-after-free the moment the
                 // chain has >4 middlewares). Same idiom as stdlib ArrayList.grow.
-                grown[j] #= #this.mws[j];
+                grown[j] #= this.mws[j];
                 j = j + 1;
             }
             this.mws #= grown;

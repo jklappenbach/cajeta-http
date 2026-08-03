@@ -72,7 +72,7 @@ public final class SseChannel {
             Cajeta.lockRelease(this.handle);
             throw 1;
         }
-        this.buf[this.tail] #= #e;
+        this.buf[this.tail] #= e;
         this.tail = (this.tail + 1) % this.capacity;
         this.size = this.size + 1;
         Cajeta.condvarNotifyAll(this.cond);

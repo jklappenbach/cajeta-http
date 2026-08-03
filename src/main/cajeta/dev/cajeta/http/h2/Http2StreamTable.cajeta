@@ -144,7 +144,7 @@ public final class Http2StreamTable {
         Http2Stream[] ne = heap Http2Stream[nc];
         int32 i = 0;
         while (i < this.count) {
-            ne[i] #= #this.streams[i];
+            ne[i] #= this.streams[i];
             i = i + 1;
         }
         this.streams #= ne;

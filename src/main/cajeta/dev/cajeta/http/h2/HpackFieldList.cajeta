@@ -71,7 +71,7 @@ public final class HpackFieldList {
         HpackField[] ne = heap HpackField[nc];
         int32 i = 0;
         while (i < this.count) {
-            ne[i] #= #this.items[i];
+            ne[i] #= this.items[i];
             i = i + 1;
         }
         this.items #= ne;
