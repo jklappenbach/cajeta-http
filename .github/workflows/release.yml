@@ -32,7 +32,7 @@ jobs:
       #
       # Raised to v0.12.1 with the unit-5 tour rewrite: the expanded tour is
       # authored and verified against the 0.12 line.
-      cajeta-version: v0.12.1
+      cajeta-version: v0.15.0
       # Suite + tour + tour-coverage gate, chained in scripts/ci-checks.sh.
       # (`./run-tests.sh` rather than `cajeta test` because the suite needs the
       # codec's native zlib backend extracted out of its .cja with
