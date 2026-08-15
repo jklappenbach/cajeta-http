@@ -35,7 +35,9 @@ public final class Http2WriteSide {
     int32 promisedId;   // last server-initiated (even) stream id handed out
 
     public Http2WriteSide(AsyncWriter writer) {
-        this.writer = writer;
+        // `#=` (ownership 3.3.3): record the caller's mode — a lent writer
+        // stays lent, `#writer` at the call site transfers it.
+        this.writer #= writer;
         this.henc = heap HpackEncoder(Http2.DEFAULT_HEADER_TABLE_SIZE, true);
         this.lock = heap Lock();
         this.promisedId = 0;

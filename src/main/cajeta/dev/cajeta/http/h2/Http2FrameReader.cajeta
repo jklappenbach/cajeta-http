@@ -28,7 +28,9 @@ public final class Http2FrameReader {
     int32 curPayloadOffset;
 
     public Http2FrameReader(int8[] buf, int32 limit, int32 maxFrameSize) {
-        this.buf = buf;
+        // `#=` (ownership 3.3.3): record the caller's mode — a lent buffer
+        // stays lent, `#buf` at the call site transfers it.
+        this.buf #= buf;
         this.pos = 0;
         this.limit = limit;
         this.maxFrameSize = maxFrameSize;

@@ -98,7 +98,9 @@ public final class RequestBodyStream {
      */
     RequestBodyStream(#BodyReader body, AsyncReader reader) {
         this.body = #body;
-        this.reader = reader;
+        // `#=` (ownership 3.3.3): record the caller's mode — a lent reader
+        // stays lent, `#reader` at the call site transfers it.
+        this.reader #= reader;
         this.pull = heap int8[RequestBodyStream.PULL];
         this.complete = this.body.isComplete();
         this.drained = false;

@@ -69,7 +69,9 @@ public final class ResponseBodyWriter {
 
     /** Private ctor; construct through [`begin`](#begin). */
     ResponseBodyWriter(AsyncWriter writer) {
-        this.writer = writer;
+        // `#=` (ownership 3.3.3): record the caller's mode — a lent writer
+        // stays lent, `#writer` at the call site transfers it.
+        this.writer #= writer;
         this.finished = false;
     }
 

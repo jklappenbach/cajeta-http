@@ -67,7 +67,9 @@ public final class Http2Connection {
 
     public Http2Connection(AsyncReader reader, AsyncWriter writer,
                            (HttpRequest) -> #HttpResponse handler) {
-        this.reader = reader;
+        // `#=` (ownership 3.3.3): record the caller's mode — a lent reader
+        // stays lent, `#reader` at the call site transfers it.
+        this.reader #= reader;
         this.handler = handler;
         this.ws = heap Http2WriteSide(writer);
         this.gate = heap Http2SendGate(Http2.DEFAULT_INITIAL_WINDOW_SIZE);

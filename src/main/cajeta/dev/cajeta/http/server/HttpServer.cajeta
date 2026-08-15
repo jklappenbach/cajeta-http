@@ -1745,7 +1745,12 @@ public class HttpServerBuilder {
      * Returns `this` to chain.
      */
     public HttpServerBuilder model(ServerModel model) {
-        this.model = model;
+        // `#=` (ownership 3.3.3): the builder holds this past the call, so the
+        // store records the caller's mode rather than silently keeping a
+        // borrow. It also matters for the usual call shape — `.model(
+        // ServerModel.fiberPerConnection())` hands over a fresh value, and a
+        // plain store kept no title over it.
+        this.model #= model;
         return this;
     }
 

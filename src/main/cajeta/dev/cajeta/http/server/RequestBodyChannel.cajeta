@@ -26,7 +26,9 @@ public final class RequestBodyChannel implements ByteChannel {
     boolean eof;
 
     public RequestBodyChannel(RequestBodyStream stream) {
-        this.stream = stream;
+        // `#=` (ownership 3.3.3): record the caller's mode — a lent stream
+        // stays lent, `#stream` at the call site transfers it.
+        this.stream #= stream;
         int8[] e = heap int8[0];
         this.stash = #e;
         this.stashLen = 0;

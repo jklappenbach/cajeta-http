@@ -24,7 +24,9 @@ public final class BytesChannel implements ByteChannel {
     boolean closed;
 
     public BytesChannel(int8[] data, int64 len) {
-        this.data = data;
+        // `#=` (ownership 3.3.3): record the caller's mode — a lent buffer
+        // stays lent, `#data` at the call site transfers it.
+        this.data #= data;
         this.len = len;
         this.pos = (int64) 0;
         this.closed = false;

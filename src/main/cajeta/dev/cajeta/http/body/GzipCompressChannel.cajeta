@@ -41,7 +41,9 @@ public final class GzipCompressChannel implements ByteChannel {
 
     /** Gzip `src` at the server default compression level (1). */
     public GzipCompressChannel(AsyncReader src) {
-        this.src = src;
+        // `#=` (ownership 3.3.3): record the caller's mode — a lent reader
+        // stays lent, `#src` at the call site transfers it.
+        this.src #= src;
         this.def = heap DeflateStream(1);
         this.crc = heap Crc32();
         this.isize = (int64) 0;
@@ -55,7 +57,9 @@ public final class GzipCompressChannel implements ByteChannel {
 
     /** Gzip `src` at an explicit DEFLATE `level` (1 = fastest .. 9 = max ratio). */
     public GzipCompressChannel(AsyncReader src, int32 level) {
-        this.src = src;
+        // `#=` (ownership 3.3.3): record the caller's mode — a lent reader
+        // stays lent, `#src` at the call site transfers it.
+        this.src #= src;
         this.def = heap DeflateStream(level);
         this.crc = heap Crc32();
         this.isize = (int64) 0;
