@@ -132,7 +132,7 @@ public class HttpClient {
      * @EntryPoint
      */
     public HttpClient() {
-        ConnectionPool cp = ConnectionPool.of();
+        ConnectionPool cp #= ConnectionPool.of();
         this.pool = #cp;
         int8[] e = heap int8[0];
         this.trustPem = #e;
@@ -229,7 +229,7 @@ public class HttpClient {
      * alone. Returns `this`.
      */
     public HttpClient version(String v) {
-        String vp = v.substring(0, v.byteLength());
+        String vp #= v.substring(0, v.byteLength());
         this.versionPin = #vp;
         return this;
     }
@@ -254,7 +254,7 @@ public class HttpClient {
      * rides the same keep-alive proxy connections. Returns `this`.
      */
     public HttpClient proxy(String host, int32 port) {
-        String ph = host.substring(0, host.byteLength());
+        String ph #= host.substring(0, host.byteLength());
         this.proxyHost = #ph;
         this.proxyPort = port;
         this.hasProxy = true;
@@ -284,7 +284,7 @@ public class HttpClient {
      * leased ones.
      */
     public HttpClient poolLimits(int32 maxPerOrigin, int32 idleMaxMs) {
-        ConnectionPool cp = ConnectionPool.withLimits(maxPerOrigin, idleMaxMs);
+        ConnectionPool cp #= ConnectionPool.withLimits(maxPerOrigin, idleMaxMs);
         this.pool #= cp;
         return this;
     }
@@ -335,7 +335,7 @@ public class HttpClient {
         HttpClient.ensureAcceptEncoding(req);
         if (this.jar != null && !req.getHeaders().contains("Cookie")) {
             Instant tc = Clock.now();
-            String ck = this.jar.cookieHeaderFor(
+            String ck #= this.jar.cookieHeaderFor(
                 uri.getHost(), uri.getPath(),
                 HttpClient.isHttps(uri.getScheme()), tc.toEpochMilli());
             if (ck != null) {
@@ -345,7 +345,7 @@ public class HttpClient {
         int32 attempt = 0;
         while (true) {
             try {
-                HttpResponse r = this.sendOnce(uri, req, deadline);
+                HttpResponse r #= this.sendOnce(uri, req, deadline);
                 if (this.jar != null) {
                     this.storeCookies(uri, r);
                 }
@@ -384,13 +384,13 @@ public class HttpClient {
             // exchange budget does NOT bound this path yet: TlsStream has
             // no readWithin (stdlib gap, noted in the plan).
             req.setHeader("Connection", "close");
-            TcpStream sock = this.dialSecure(host, port);
-            int8[] hostBytes = host.toBytes();
+            TcpStream sock #= this.dialSecure(host, port);
+            int8[] hostBytes #= host.toBytes();
             int32 hostLen = host.byteLength();
-            TlsStream tls = HttpClient.wrapTls(#sock, hostBytes, hostLen,
+            TlsStream tls #= HttpClient.wrapTls(#sock, hostBytes, hostLen,
                                                this.trustPem, this.trustLen,
                                                this.hasTrustAnchor);
-            int8[] alpn = HttpClient.alpnH2Http11();
+            int8[] alpn #= HttpClient.alpnH2Http11();
             tls.offerAlpn(alpn, 12);
             tls.handshake();
             // ALPN picks the wire protocol: `h2` runs the HTTP/2 exchange over
@@ -398,12 +398,12 @@ public class HttpClient {
             if (HttpClient.alpnIsH2(tls)) {
                 AsyncReader h2r = heap AsyncReader(tls);
                 AsyncWriter h2w = heap AsyncWriter(tls);
-                HttpResponse rh2 = Http2Client.exchange(h2r, h2w, req, "https",
+                HttpResponse rh2 #= Http2Client.exchange(h2r, h2w, req, "https",
                                                         host);
                 tls.close();
                 return #rh2;
             }
-            HttpResponse rtls = HttpClient.exchange(tls, req);
+            HttpResponse rtls #= HttpClient.exchange(tls, req);
             tls.close();
             return #rtls;
         }
@@ -424,9 +424,9 @@ public class HttpClient {
             dialHost = this.proxyHost;
             dialPort = this.proxyPort;
         }
-        PooledConnection pc = this.leaseFor(dialHost, dialPort);
+        PooledConnection pc #= this.leaseFor(dialHost, dialPort);
         try {
-            HttpResponse rplain = HttpClient.exchangeTimed(pc.stream, req, deadline);
+            HttpResponse rplain #= HttpClient.exchangeTimed(pc.stream, req, deadline);
             boolean reuse = HttpClient.exchangeAllowsReuse(req, rplain);
             this.pool.release(#pc, reuse);
             return #rplain;
@@ -444,12 +444,12 @@ public class HttpClient {
      * failed dial and eventually parks every caller forever.
      */
     #PooledConnection leaseFor(String host, int32 port) {
-        PooledConnection idle = this.pool.acquire(host, port);
+        PooledConnection idle #= this.pool.acquire(host, port);
         if (idle != null) {
             return #idle;
         }
         try {
-            TcpStream sock = HttpClient.connectAny(host, port);
+            TcpStream sock #= HttpClient.connectAny(host, port);
             return this.pool.adopt(#sock, host, port);
         } catch (NetException e) {
             this.pool.releaseFailed(host, port);
@@ -500,11 +500,11 @@ public class HttpClient {
             return true;                        // definitionally bodyless
         }
         Headers h = resp.getHeaders();
-        String te = h.get("transfer-encoding");
+        String te #= h.get("transfer-encoding");
         if (te != null) {
             return true;                        // chunked self-terminates
         }
-        String cl = h.get("content-length");
+        String cl #= h.get("content-length");
         return cl != null;
     }
 
@@ -518,9 +518,9 @@ public class HttpClient {
      * @EntryPoint
      */
     public #HttpResponse get(String url) {
-        Uri uri = Uri.parse(url);
-        HttpRequest req = HttpRequest.fromUri("GET", uri);
-        HttpResponse resp = this.sendFollowing(uri, req);
+        Uri uri #= Uri.parse(url);
+        HttpRequest req #= HttpRequest.fromUri("GET", uri);
+        HttpResponse resp #= this.sendFollowing(uri, req);
         return #resp;
     }
 
@@ -537,14 +537,14 @@ public class HttpClient {
      * @EntryPoint
      */
     public #JsonValue getJson(String url) {
-        HttpResponse resp = this.get(url);
+        HttpResponse resp #= this.get(url);
         if (!resp.isSuccess()) {
             throw heap HttpException("getJson: HTTP " + resp.statusCode());
         }
         if (!resp.hasBody) {
             throw heap HttpException("getJson: bodyless response");
         }
-        JsonValue v = Json.parse(resp.body, (int64) resp.bodyLength());
+        JsonValue v #= Json.parse(resp.body, (int64) resp.bodyLength());
         return #v;
     }
 
@@ -575,10 +575,10 @@ public class HttpClient {
      * a 200 (the next bytes on the wire are our ClientHello).
      */
     #TcpStream connectTunnel(String host, int32 port) {
-        TcpStream sock = HttpClient.connectAny(this.proxyHost, this.proxyPort);
+        TcpStream sock #= HttpClient.connectAny(this.proxyHost, this.proxyPort);
         String hp = host + ":" + port;
         String head = "CONNECT " + hp + " HTTP/1.1\r\nhost: " + hp + "\r\n\r\n";
-        int8[] hb = head.toBytes();
+        int8[] hb #= head.toBytes();
         sock.writeAllAsync(hb, (int64) 0, (int64) head.byteLength());
         int32 status = HttpClient.readTunnelStatus(sock);
         if (status < 200 || status >= 300) {
@@ -651,7 +651,7 @@ public class HttpClient {
 
     /** Admit every `Set-Cookie` on `resp` into the jar (1.4g). */
     void storeCookies(Uri uri, HttpResponse resp) {
-        String[] all = resp.getHeaders().getAll("set-cookie");
+        String[] all #= resp.getHeaders().getAll("set-cookie");
         int32 n = (int32) all.count();
         if (n == 0) {
             return;
@@ -711,12 +711,12 @@ public class HttpClient {
             return;
         }
         Headers h = resp.getHeaders();
-        String ce = h.get("content-encoding");
+        String ce #= h.get("content-encoding");
         if (ce == null) {
             return;
         }
-        String trimmed = ce.trim();
-        String token = trimmed.toLowerCase();
+        String trimmed #= ce.trim();
+        String token #= trimmed.toLowerCase();
         if (token.contains(",")) {
             return;                     // multi-coding chain: v1 passes through
         }
@@ -727,7 +727,7 @@ public class HttpClient {
             h.remove("content-encoding");
             return;
         }
-        int8[] decoded = ContentCoding.decode(token, resp.body,
+        int8[] decoded #= ContentCoding.decode(token, resp.body,
                                               resp.bodyLength(),
                                               this.maxDecodedBytes);
         int32 n = (int32) decoded.count();
@@ -767,8 +767,8 @@ public class HttpClient {
      * @EntryPoint
      */
     public #HttpResponse sendFollowing(Uri uri, HttpRequest req) {
-        HttpResponse first = this.send(uri, req);
-        String loc = HttpClient.locationOf(first);
+        HttpResponse first #= this.send(uri, req);
+        String loc #= HttpClient.locationOf(first);
         if (loc == null) {
             return #first;
         }
@@ -783,35 +783,35 @@ public class HttpClient {
 
         // Loop state is owned (or scalar) so reassignment is a plain move.
         String m0 = req.getMethod();
-        String method = m0.substring(0, m0.byteLength());
+        String method #= m0.substring(0, m0.byteLength());
         boolean keepBody = req.hasBody;
-        String baseUrl = uri.toString();
+        String baseUrl #= uri.toString();
         int32 lastStatus = first.statusCode();
         int32 hops = 0;
         while (true) {
             if (hops >= this.redirectMax) {
                 throw heap TooManyRedirectsException("too many redirects", hops);
             }
-            String m2 = HttpClient.redirectMethod(lastStatus, method);
+            String m2 #= HttpClient.redirectMethod(lastStatus, method);
             method = #m2;
             keepBody = keepBody && HttpClient.redirectKeepsBody(lastStatus);
 
-            Uri base = Uri.parse(baseUrl);
-            Uri next = Uri.resolve(base, loc);
+            Uri base #= Uri.parse(baseUrl);
+            Uri next #= Uri.resolve(base, loc);
             boolean sameOrig = HttpClient.originMatches(next, origHttps,
                                                         origHost, origPort);
-            HttpRequest hopReq = HttpClient.redirectedRequest(
+            HttpRequest hopReq #= HttpClient.redirectedRequest(
                 req, method, keepBody, next, sameOrig);
-            HttpResponse resp = this.send(next, hopReq);
+            HttpResponse resp #= this.send(next, hopReq);
             hops = hops + 1;
 
-            String loc2 = HttpClient.locationOf(resp);
+            String loc2 #= HttpClient.locationOf(resp);
             if (loc2 == null) {
                 return #resp;
             }
             loc = #loc2;
             lastStatus = resp.statusCode();
-            String nb = next.toString();
+            String nb #= next.toString();
             baseUrl = #nb;
         }
     }
@@ -890,7 +890,7 @@ public class HttpClient {
     static #HttpRequest redirectedRequest(HttpRequest original, String method,
                                           boolean keepBody, Uri target,
                                           boolean sameOrigin) {
-        HttpRequest r = HttpRequest.fromUri(method, target);
+        HttpRequest r #= HttpRequest.fromUri(method, target);
         Headers src = original.getHeaders();
         Headers dst = r.getHeaders();
         int32 n = src.count();
@@ -952,13 +952,13 @@ public class HttpClient {
      * @EntryPoint
      */
     public #Sha256 downloadTo(String url, String destPath) {
-        Uri uri = Uri.parse(url);
-        HttpRequest req = HttpRequest.fromUri("GET", uri);
+        Uri uri #= Uri.parse(url);
+        HttpRequest req #= HttpRequest.fromUri("GET", uri);
         FileWriter out = File.openWrite(destPath, OpenMode.WRITE);
         Sha256 hasher = heap Sha256();
 
-        HttpResponse first = this.sendDownload(uri, req, out, hasher);
-        String loc = HttpClient.locationOf(first);
+        HttpResponse first #= this.sendDownload(uri, req, out, hasher);
+        String loc #= HttpClient.locationOf(first);
         if (loc == null) {
             out.flush();
             out.close();
@@ -972,25 +972,25 @@ public class HttpClient {
         if (origPort < 0) {
             origPort = origHttps ? 443 : 80;
         }
-        String baseUrl = uri.toString();
+        String baseUrl #= uri.toString();
         int32 hops = 0;
         while (true) {
             if (hops >= this.redirectMax) {
                 out.close();
                 throw heap TooManyRedirectsException("too many redirects", hops);
             }
-            Uri base = Uri.parse(baseUrl);
-            Uri next = Uri.resolve(base, loc);
+            Uri base #= Uri.parse(baseUrl);
+            Uri next #= Uri.resolve(base, loc);
             boolean sameOrig = HttpClient.originMatches(next, origHttps,
                                                         origHost, origPort);
             // A download is always a bodyless GET, so the rewrite table
             // degenerates: method GET, no body forwarded.
-            HttpRequest hopReq = HttpClient.redirectedRequest(
+            HttpRequest hopReq #= HttpClient.redirectedRequest(
                 req, "GET", false, next, sameOrig);
-            HttpResponse resp = this.sendDownload(next, hopReq, out, hasher);
+            HttpResponse resp #= this.sendDownload(next, hopReq, out, hasher);
             hops = hops + 1;
 
-            String loc2 = HttpClient.locationOf(resp);
+            String loc2 #= HttpClient.locationOf(resp);
             if (loc2 == null) {
                 out.flush();
                 out.close();
@@ -998,7 +998,7 @@ public class HttpClient {
                 return #hasher;
             }
             loc = #loc2;
-            String nb = next.toString();
+            String nb #= next.toString();
             baseUrl = #nb;
         }
     }
@@ -1036,16 +1036,16 @@ public class HttpClient {
 
         if (https) {
             req.setHeader("Connection", "close");
-            TcpStream sock = this.dialSecure(host, port);
-            int8[] hostBytes = host.toBytes();
+            TcpStream sock #= this.dialSecure(host, port);
+            int8[] hostBytes #= host.toBytes();
             int32 hostLen = host.byteLength();
-            TlsStream tls = HttpClient.wrapTls(#sock, hostBytes, hostLen,
+            TlsStream tls #= HttpClient.wrapTls(#sock, hostBytes, hostLen,
                                                this.trustPem, this.trustLen,
                                                this.hasTrustAnchor);
-            int8[] alpn = HttpClient.alpnHttp11();
+            int8[] alpn #= HttpClient.alpnHttp11();
             tls.offerAlpn(alpn, 9);
             tls.handshake();
-            HttpResponse rtls = HttpClient.downloadExchange(
+            HttpResponse rtls #= HttpClient.downloadExchange(
                 tls, null, req, (int64) 0, out, hasher);
             tls.close();
             return #rtls;
@@ -1060,9 +1060,9 @@ public class HttpClient {
             dialHost = this.proxyHost;
             dialPort = this.proxyPort;
         }
-        PooledConnection pc = this.leaseFor(dialHost, dialPort);
+        PooledConnection pc #= this.leaseFor(dialHost, dialPort);
         try {
-            HttpResponse rplain = HttpClient.downloadExchange(
+            HttpResponse rplain #= HttpClient.downloadExchange(
                 pc.stream, pc.stream, req, deadline, out, hasher);
             boolean reuse = HttpClient.exchangeAllowsReuse(req, rplain);
             this.pool.release(#pc, reuse);
@@ -1087,7 +1087,7 @@ public class HttpClient {
                                           FileWriter out, Sha256 hasher) {
         HttpClient.writeRequest(ch, req);
 
-        HttpParser parser = HttpParser.forResponse();
+        HttpParser parser #= HttpParser.forResponse();
         int8[] scratch = heap int8[8192];
         while (!parser.isComplete()) {
             int64 n = HttpClient.readMaybeBudgeted(ch, timed, scratch, deadline);
@@ -1099,10 +1099,10 @@ public class HttpClient {
             parser.feed(scratch, got);
         }
 
-        HttpResponse response = parser.takeResponse();
+        HttpResponse response #= parser.takeResponse();
         BodyFraming framing = parser.getFraming();
-        BodyReader body = BodyReader.forFraming(framing);
-        int8[] leftover = parser.leftover();
+        BodyReader body #= BodyReader.forFraming(framing);
+        int8[] leftover #= parser.leftover();
         int32 leftoverLen = parser.leftoverLength();
         if (leftoverLen > 0) {
             body.feed(leftover, leftoverLen);
@@ -1114,7 +1114,7 @@ public class HttpClient {
             // premature close either completes a close-delimited body or
             // raises UnexpectedEof — which propagates to the lease
             // cleanup in sendDownload.
-            int8[] first = body.drain();
+            int8[] first #= body.drain();
             int32 fl = (int32) first.count();
             if (fl > 0) {
                 out.write(first, fl);
@@ -1128,7 +1128,7 @@ public class HttpClient {
                 } else {
                     body.feed(scratch, got);
                 }
-                int8[] piece = body.drain();
+                int8[] piece #= body.drain();
                 int32 pl = (int32) piece.count();
                 if (pl > 0) {
                     out.write(piece, pl);
@@ -1148,7 +1148,7 @@ public class HttpClient {
             }
             body.feed(scratch, got);
         }
-        int8[] decoded = body.drain();
+        int8[] decoded #= body.drain();
         int32 decodedLen = decoded.count();
         if (decodedLen > 0) {
             response.body(decoded, decodedLen);
@@ -1215,7 +1215,7 @@ public class HttpClient {
     static void writeRequest(ByteChannel ch, HttpRequest req) {
         Body b = req.getBody();
         if (b != null && !req.hasBody) {
-            int8[] head = HttpSerializer.requestChunkedHead(req);
+            int8[] head #= HttpSerializer.requestChunkedHead(req);
             int32 headLen = (int32) head.count();
             ch.writeAllAsync(head, (int64) 0, (int64) headLen);
             AsyncReader r = b.reader();
@@ -1226,17 +1226,17 @@ public class HttpClient {
                 if (got <= 0) {
                     going = false;
                 } else {
-                    int8[] wire = ChunkedEncoder.encodeChunk(scratch, got);
+                    int8[] wire #= ChunkedEncoder.encodeChunk(scratch, got);
                     int32 wlen = (int32) wire.count();
                     ch.writeAllAsync(wire, (int64) 0, (int64) wlen);
                 }
             }
-            int8[] last = ChunkedEncoder.encodeLast();
+            int8[] last #= ChunkedEncoder.encodeLast();
             int32 llen = (int32) last.count();
             ch.writeAllAsync(last, (int64) 0, (int64) llen);
             return;
         }
-        int8[] reqBytes = HttpSerializer.request(req);
+        int8[] reqBytes #= HttpSerializer.request(req);
         int32 reqLen = reqBytes.count();
         ch.writeAllAsync(reqBytes, (int64) 0, (int64) reqLen);
     }
@@ -1267,7 +1267,7 @@ public class HttpClient {
      * closes. The decoded body is attached to the detached response.
      */
     static #HttpResponse readResponse(ByteChannel ch) {
-        HttpParser parser = HttpParser.forResponse();
+        HttpParser parser #= HttpParser.forResponse();
         int8[] scratch = heap int8[8192];
         while (!parser.isComplete()) {
             int64 n = ch.readAsync(scratch, (int64) 0, (int64) 8192);
@@ -1279,11 +1279,11 @@ public class HttpClient {
             parser.feed(scratch, got);
         }
 
-        HttpResponse response = parser.takeResponse();
+        HttpResponse response #= parser.takeResponse();
         BodyFraming framing = parser.getFraming();
 
-        BodyReader body = BodyReader.forFraming(framing);
-        int8[] leftover = parser.leftover();
+        BodyReader body #= BodyReader.forFraming(framing);
+        int8[] leftover #= parser.leftover();
         int32 leftoverLen = parser.leftoverLength();
         if (leftoverLen > 0) {
             body.feed(leftover, leftoverLen);
@@ -1297,7 +1297,7 @@ public class HttpClient {
             }
             body.feed(scratch, got);
         }
-        int8[] decoded = body.drain();
+        int8[] decoded #= body.drain();
         int32 decodedLen = decoded.count();
         if (decodedLen > 0) {
             response.body(decoded, decodedLen);
@@ -1313,7 +1313,7 @@ public class HttpClient {
      * open double-free wrinkle, and the duplication is two small loops.
      */
     static #HttpResponse readResponseTimed(TcpStream s, int64 deadline) {
-        HttpParser parser = HttpParser.forResponse();
+        HttpParser parser #= HttpParser.forResponse();
         int8[] scratch = heap int8[8192];
         while (!parser.isComplete()) {
             int64 n = HttpClient.readBudgeted(s, scratch, deadline);
@@ -1325,11 +1325,11 @@ public class HttpClient {
             parser.feed(scratch, got);
         }
 
-        HttpResponse response = parser.takeResponse();
+        HttpResponse response #= parser.takeResponse();
         BodyFraming framing = parser.getFraming();
 
-        BodyReader body = BodyReader.forFraming(framing);
-        int8[] leftover = parser.leftover();
+        BodyReader body #= BodyReader.forFraming(framing);
+        int8[] leftover #= parser.leftover();
         int32 leftoverLen = parser.leftoverLength();
         if (leftoverLen > 0) {
             body.feed(leftover, leftoverLen);
@@ -1343,7 +1343,7 @@ public class HttpClient {
             }
             body.feed(scratch, got);
         }
-        int8[] decoded = body.drain();
+        int8[] decoded #= body.drain();
         int32 decodedLen = decoded.count();
         if (decodedLen > 0) {
             response.body(decoded, decodedLen);
@@ -1390,7 +1390,7 @@ public class HttpClient {
         // `connectAsync` is deferred — exception unwinding across a fiber park
         // is fragile in the current JIT; a non-throwing connect-result probe is
         // the right primitive for happy-eyeballs and is a follow-up.)
-        SocketAddress[] addrs = Dns.resolve(host, port, ResolveFamily.V4_ONLY);
+        SocketAddress[] addrs #= Dns.resolve(host, port, ResolveFamily.V4_ONLY);
         SocketAddress a0 = addrs[0];
         IpAddress ip = a0.getIp();
         // `getOctets` returns the raw 16-byte backing buffer regardless of
@@ -1403,8 +1403,8 @@ public class HttpClient {
         if (ip.isV4()) {
             olen = 4;
         }
-        IpAddress ipCopy = IpAddress.fromOctets(oct, olen);
-        SocketAddress connAddr = SocketAddress.of(#ipCopy, port);
+        IpAddress ipCopy #= IpAddress.fromOctets(oct, olen);
+        SocketAddress connAddr #= SocketAddress.of(#ipCopy, port);
         return TcpStream.connectAsync(#connAddr);
     }
 
@@ -1430,7 +1430,7 @@ public class HttpClient {
         if (scheme.byteLength() != 5) {
             return false;
         }
-        int8[] b = scheme.toBytes();
+        int8[] b #= scheme.toBytes();
         return b[0] == (int8) 104    // 'h'
             && b[1] == (int8) 116    // 't'
             && b[2] == (int8) 116    // 't'

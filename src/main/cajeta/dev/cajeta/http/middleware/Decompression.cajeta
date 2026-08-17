@@ -59,11 +59,11 @@ public class Decompression {
 
     static #HttpResponse apply(Decompression cfg, HttpRequest req,
                                (HttpRequest) -> #HttpResponse next) {
-        String ce = req.getHeaders().get("Content-Encoding");
+        String ce #= req.getHeaders().get("Content-Encoding");
         if (ce == null || !req.hasBody) {
             return next(req);
         }
-        String coding = ce.trim().toLowerCase();
+        String coding #= ce.trim().toLowerCase();
         if (coding.equals("identity")) {
             return next(req);
         }
@@ -71,7 +71,7 @@ public class Decompression {
             return HttpResponse.of(415);
         }
         try {
-            int8[] decoded = ContentCoding.decode(coding, req.body,
+            int8[] decoded #= ContentCoding.decode(coding, req.body,
                                                   req.bodyLength(), cfg.maxBytes);
             int32 dn = decoded.count();
             req.body = #decoded;

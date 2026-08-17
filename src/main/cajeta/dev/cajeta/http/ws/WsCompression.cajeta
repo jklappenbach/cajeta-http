@@ -43,7 +43,7 @@ public final class WsCompression {
         p.enabled = true;
         p.localNoContextTakeover = serverNoCtx;   // our (server) compressor
         p.peerNoContextTakeover = clientNoCtx;     // client's compressor
-        p.responseHeader = WsCompression.buildResponse(serverNoCtx, clientNoCtx);
+        p.responseHeader #= WsCompression.buildResponse(serverNoCtx, clientNoCtx);
         return #p;
     }
 

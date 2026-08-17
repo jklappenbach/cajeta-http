@@ -215,7 +215,7 @@ public final class Http2Connection {
         if ((flags & Http2.FLAG_ACK) != 0) {
             return;
         }
-        Http2SettingsList list = Http2Frames.parseSettings(payload, 0, len,
+        Http2SettingsList list #= Http2Frames.parseSettings(payload, 0, len,
                                                            flags, sid);
         this.remote.apply(list);
         this.flow.setPeerMaxFrame((int32) this.remote.maxFrameSize);
@@ -228,10 +228,10 @@ public final class Http2Connection {
         this.streams.openIfAbsent(sid);
         this.gate.openStream(sid, (int32) this.remote.initialWindowSize);
         this.streams.recvHeaders(sid, endStream);
-        Http2Payload reg = Http2ContentFrames.parseHeaders(payload, len, flags,
+        Http2Payload reg #= Http2ContentFrames.parseHeaders(payload, len, flags,
                                                            sid);
         if (endHeaders) {
-            int8[] block = Http2Connection.slice(payload, reg.offset, reg.length);
+            int8[] block #= Http2Connection.slice(payload, reg.offset, reg.length);
             this.completeRequest(sid, block, reg.length, endStream);
         } else {
             this.assembler.begin(sid, payload, reg.offset, reg.length);
@@ -243,7 +243,7 @@ public final class Http2Connection {
         boolean endHeaders = (flags & Http2.FLAG_END_HEADERS) != 0;
         this.assembler.continueOn(sid, payload, 0, len);
         if (endHeaders) {
-            int8[] block = this.assembler.complete();
+            int8[] block #= this.assembler.complete();
             this.completeRequest(sid, block, (int32) block.count(),
                                  this.hdrEndStream);
         }
@@ -251,8 +251,8 @@ public final class Http2Connection {
 
     void completeRequest(int32 sid, int8[] block, int32 blockLen,
                          boolean endStream) {
-        HpackFieldList fields = this.hdec.decode(block, blockLen);
-        HttpRequest req = Http2Requests.fromFields(fields);
+        HpackFieldList fields #= this.hdec.decode(block, blockLen);
+        HttpRequest req #= Http2Requests.fromFields(fields);
         if (endStream) {
             this.markReady(sid, #req);
         } else {
@@ -271,7 +271,7 @@ public final class Http2Connection {
         }
         this.streams.recvData(sid, endStream);
         this.flow.afterReceive(len);
-        Http2Payload reg = Http2ContentFrames.parseData(payload, len, flags, sid);
+        Http2Payload reg #= Http2ContentFrames.parseData(payload, len, flags, sid);
         this.appendBody(payload, reg.offset, reg.length);
         if (endStream) {
             HttpRequest req #= this.curRequest;
@@ -343,16 +343,16 @@ public final class Http2Connection {
         // emit each PUSH_PROMISE on this stream + its pushed response on a
         // fresh reserved (even) stream, before the main response.
         if (pushEnabled && resp.pushCount() > 0) {
-            String authority = Http2Connection.authorityOf(r);
+            String authority #= Http2Connection.authorityOf(r);
             int32 pc = resp.pushCount();
             int32 pi = 0;
             while (pi < pc) {
                 int32 promId = ws.nextPromisedId();
-                HpackFieldList prom = Http2Requests.promisedRequestFields(
+                HpackFieldList prom #= Http2Requests.promisedRequestFields(
                     resp.pushPathAt(pi), authority);
                 ws.writePushPromise(sid, promId, prom);
                 gate.openStream(promId, initWin);
-                HpackFieldList pf = Http2Requests.statusOnlyFields(
+                HpackFieldList pf #= Http2Requests.statusOnlyFields(
                     resp.pushStatusAt(pi));
                 int32 plen = resp.pushBodyLenAt(pi);
                 boolean pHasBody = plen > 0;
@@ -366,7 +366,7 @@ public final class Http2Connection {
             }
         }
 
-        HpackFieldList fields = Http2Requests.responseFields(resp);
+        HpackFieldList fields #= Http2Requests.responseFields(resp);
         boolean hasBody = resp.hasBody && resp.bodyLength() > 0;
         ws.writeHeaders(sid, fields, !hasBody);
         if (hasBody) {
@@ -413,7 +413,7 @@ public final class Http2Connection {
 
     void sendOurSettings() {
         Http2FrameWriter fw = heap Http2FrameWriter();
-        Http2SettingsList l = this.local.toList();
+        Http2SettingsList l #= this.local.toList();
         Http2Frames.writeSettings(fw, l);
         this.ws.writeControl(fw);
     }

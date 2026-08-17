@@ -33,7 +33,7 @@ public final class StaticPath {
 
     /** Safe root-relative path for `urlPath`, or null if it must be rejected. */
     public static #String jail(String urlPath) {
-        String decoded = StaticPath.percentDecode(urlPath);
+        String decoded #= StaticPath.percentDecode(urlPath);
         if (decoded == null) {
             return null;
         }
@@ -58,7 +58,7 @@ public final class StaticPath {
             boolean atSep = i == n || decoded.byteAt(i) == (int8) 47;
             if (atSep) {
                 if (i > start) {
-                    String seg = decoded.substring(start, i);
+                    String seg #= decoded.substring(start, i);
                     if (seg.equals(".")) {
                         // current dir — drop
                     } else if (seg.equals("..")) {
@@ -83,7 +83,7 @@ public final class StaticPath {
             String e = "";
             return e.substring(0, 0);
         }
-        String out = segs[0].substring(0, segs[0].byteLength());
+        String out #= segs[0].substring(0, segs[0].byteLength());
         int32 j = 1;
         while (j < segCount) {
             out = out + "/" + segs[j];

@@ -288,7 +288,7 @@ public final class HttpSerializer {
         boolean hasTe = headers.contains("Transfer-Encoding");
         if (hasBody) {
             if (!hasLen && !hasTe) {
-                String lenValue = HttpSerializer.decimalString(bodyLen);
+                String lenValue #= HttpSerializer.decimalString(bodyLen);
                 // The Headers map lowercases stored names, and the golden
                 // wire vectors are all-lowercase; emit the auto-supplied
                 // framing header lowercased to match (field names are
@@ -297,7 +297,7 @@ public final class HttpSerializer {
             }
         } else {
             if (stampEmpty && !hasLen && !hasTe) {
-                String zero = HttpSerializer.decimalString(0);
+                String zero #= HttpSerializer.decimalString(0);
                 this.writeHeaderLine("content-length", zero);
             }
         }
@@ -312,7 +312,7 @@ public final class HttpSerializer {
     void writeChunkedHead(Headers headers) {
         this.writeHeaderLines(headers);
         if (!headers.contains("Transfer-Encoding")) {
-            String teValue = HttpSerializer.lit("chunked");
+            String teValue #= HttpSerializer.lit("chunked");
             this.writeHeaderLine("transfer-encoding", teValue);
         }
         this.appendCrlf();
@@ -408,7 +408,7 @@ public final class HttpSerializer {
 
     /** Append a String's bytes verbatim. */
     void appendString(String s) {
-        int8[] b = s.toBytes();
+        int8[] b #= s.toBytes();
         this.appendBytes(b, s.byteLength());
     }
 

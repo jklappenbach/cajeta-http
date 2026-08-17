@@ -79,11 +79,11 @@ public class MiddlewareChain {
      */
     public #((HttpRequest) -> #HttpResponse) compose(
             (HttpRequest) -> #HttpResponse terminal) {
-        (HttpRequest) -> #HttpResponse h =
+        (HttpRequest) -> #HttpResponse h #=
             Middleware.wrapOne(Middleware.identity(), terminal);
         int32 i = this.count - 1;
         while (i >= 0) {
-            h = Middleware.wrapOne(this.mws[i], h);
+            h #= Middleware.wrapOne(this.mws[i], h);
             i = i - 1;
         }
         return #h;

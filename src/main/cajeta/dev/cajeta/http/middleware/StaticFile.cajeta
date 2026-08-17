@@ -42,7 +42,7 @@ public class StaticFile {
     String index;
 
     public StaticFile(String root) {
-        this.rootStr = root.substring(0, root.byteLength());
+        this.rootStr #= root.substring(0, root.byteLength());
         this.rootCanon = null;
         this.canonReady = false;
         this.index = "index.html";
@@ -55,7 +55,7 @@ public class StaticFile {
 
     /** Set the directory index filename (default `index.html`). */
     public StaticFile indexFile(String name) {
-        this.index = name.substring(0, name.byteLength());
+        this.index #= name.substring(0, name.byteLength());
         return this;
     }
 
@@ -74,17 +74,17 @@ public class StaticFile {
             return next(req);
         }
 
-        String pathOnly = StaticFile.stripQuery(req.getTarget());
-        String rel = StaticPath.jail(pathOnly);
+        String pathOnly #= StaticFile.stripQuery(req.getTarget());
+        String rel #= StaticPath.jail(pathOnly);
         if (rel == null) {
             return HttpResponse.of(403);
         }
 
-        String serveFull = StaticFile.joinRoot(cfg.rootStr, rel);
-        Path p = Path.of(serveFull);
+        String serveFull #= StaticFile.joinRoot(cfg.rootStr, rel);
+        Path p #= Path.of(serveFull);
         if (p.isDir()) {
             serveFull = serveFull + "/" + cfg.index;
-            p = Path.of(serveFull);
+            p #= Path.of(serveFull);
         }
         if (!p.exists() || !p.isFile()) {
             return HttpResponse.of(404);
@@ -94,14 +94,14 @@ public class StaticFile {
         if (canonRoot == null) {
             return HttpResponse.of(404);
         }
-        String canonFile = StaticFile.canonStr(serveFull);
+        String canonFile #= StaticFile.canonStr(serveFull);
         if (canonFile == null || !StaticFile.underRoot(canonFile, canonRoot)) {
             return HttpResponse.of(403);
         }
 
         int8[] bytes = File.readAllBytes(serveFull);
         int32 blen = bytes.count();
-        HttpResponse resp = HttpResponse.ok();
+        HttpResponse resp #= HttpResponse.ok();
         resp.setHeader("Content-Type", StaticFile.contentTypeFor(serveFull));
         if (head) {
             resp.setHeader("Content-Length", "" + blen);
@@ -131,9 +131,9 @@ public class StaticFile {
     /** Canonical root (realpath), computed once; null if the root is missing. */
     String canonRoot() {
         if (!this.canonReady) {
-            Path rp = Path.of(this.rootStr);
+            Path rp #= Path.of(this.rootStr);
             if (rp.exists()) {
-                this.rootCanon = StaticFile.canonStr(this.rootStr);
+                this.rootCanon #= StaticFile.canonStr(this.rootStr);
             }
             this.canonReady = true;
         }
@@ -172,9 +172,9 @@ public class StaticFile {
 
     /** Media type for the file's extension, or `application/octet-stream`. */
     static String contentTypeFor(String path) {
-        Path p = Path.of(path);
-        String ext = p.extension();
-        String e = ext.toLowerCase();
+        Path p #= Path.of(path);
+        String ext #= p.extension();
+        String e #= ext.toLowerCase();
         if (e.equals("html") || e.equals("htm")) {
             return "text/html; charset=utf-8";
         }

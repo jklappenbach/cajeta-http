@@ -205,8 +205,8 @@ public class WebSocket {
         WebSocket ws = heap WebSocket();
         ws.reader = reader;
         ws.writer = writer;
-        ws.decoder = WsFrameDecoder.forServer();
-        ws.protocol = WsProtocol.create();
+        ws.decoder #= WsFrameDecoder.forServer();
+        ws.protocol #= WsProtocol.create();
         ws.writeLock = heap Lock();
         ws.isClient = false;
         return #ws;
@@ -224,8 +224,8 @@ public class WebSocket {
         WebSocket ws = heap WebSocket();
         ws.reader = reader;
         ws.writer = writer;
-        ws.decoder = WsFrameDecoder.forClient();
-        ws.protocol = WsProtocol.create();
+        ws.decoder #= WsFrameDecoder.forClient();
+        ws.protocol #= WsProtocol.create();
         ws.writeLock = heap Lock();
         ws.isClient = true;
         return #ws;
@@ -265,7 +265,7 @@ public class WebSocket {
 
     static #WebSocket connectImpl(String url, boolean pinned, int8[] trustPem,
                                   int32 trustLen) {
-        Uri uri = Uri.parse(url);
+        Uri uri #= Uri.parse(url);
         boolean secure = uri.getScheme().equals("wss");
         String host = uri.getHost();
         int32 port = uri.getPort();
@@ -275,24 +275,24 @@ public class WebSocket {
                 port = 443;
             }
         }
-        TcpStream sock = WebSocket.dial(host, port);
+        TcpStream sock #= WebSocket.dial(host, port);
 
         WebSocket ws = heap WebSocket();
-        ws.decoder = WsFrameDecoder.forClient();
-        ws.protocol = WsProtocol.create();
+        ws.decoder #= WsFrameDecoder.forClient();
+        ws.protocol #= WsProtocol.create();
         ws.writeLock = heap Lock();
         ws.isClient = true;
 
         if (secure) {
-            int8[] hostBytes = host.toBytes();
+            int8[] hostBytes #= host.toBytes();
             int32 hostLen = host.byteLength();
             if (pinned) {
-                TlsStream tls = TlsStream.client(#sock, hostBytes, hostLen,
+                TlsStream tls #= TlsStream.client(#sock, hostBytes, hostLen,
                                                  trustPem, trustLen);
                 tls.handshake();
                 ws.heldTls = #tls;
             } else {
-                TlsStream tls = TlsStream.clientSystemTrust(#sock, hostBytes,
+                TlsStream tls #= TlsStream.clientSystemTrust(#sock, hostBytes,
                                                             hostLen);
                 tls.handshake();
                 ws.heldTls = #tls;
@@ -308,16 +308,16 @@ public class WebSocket {
         ws.writer = ws.heldWriter;
 
         // Client opening handshake over the owned transport.
-        String key = WsClientHandshake.placeholderKey(WebSocket.seedOf(url));
-        HttpRequest request = WsClientHandshake.buildRequest(uri, key);
-        int8[] bytes = HttpSerializer.request(request);
+        String key #= WsClientHandshake.placeholderKey(WebSocket.seedOf(url));
+        HttpRequest request #= WsClientHandshake.buildRequest(uri, key);
+        int8[] bytes #= HttpSerializer.request(request);
         ws.writer.writeAll(bytes, 0, bytes.count());
         ws.writer.flush();
-        HttpResponse response = WsUpgrade.readResponse(ws.reader);
+        HttpResponse response #= WsUpgrade.readResponse(ws.reader);
         WsClientHandshake.requireAccept(response, key);
-        String sp = response.getHeaders().get("Sec-WebSocket-Protocol");
+        String sp #= response.getHeaders().get("Sec-WebSocket-Protocol");
         if (sp != null) {
-            ws.subprotocol = sp.substring(0, sp.byteLength());
+            ws.subprotocol #= sp.substring(0, sp.byteLength());
         }
         return #ws;
     }
@@ -325,7 +325,7 @@ public class WebSocket {
     // Resolve `host` (IPv4) and open a TCP connection (mirrors the client's
     // connectAny; the try-all-addresses fallback is a follow-up).
     static #TcpStream dial(String host, int32 port) {
-        SocketAddress[] addrs = Dns.resolve(host, port, ResolveFamily.V4_ONLY);
+        SocketAddress[] addrs #= Dns.resolve(host, port, ResolveFamily.V4_ONLY);
         SocketAddress a0 = addrs[0];
         IpAddress ip = a0.getIp();
         int8[] oct = ip.getOctets();
@@ -333,8 +333,8 @@ public class WebSocket {
         if (ip.isV4()) {
             olen = 4;
         }
-        IpAddress ipCopy = IpAddress.fromOctets(oct, olen);
-        SocketAddress connAddr = SocketAddress.of(#ipCopy, port);
+        IpAddress ipCopy #= IpAddress.fromOctets(oct, olen);
+        SocketAddress connAddr #= SocketAddress.of(#ipCopy, port);
         return TcpStream.connectAsync(#connAddr);
     }
 
@@ -377,7 +377,7 @@ public class WebSocket {
      */
     public WebSocket enableCompression(PmdParams params) {
         if (params != null && params.enabled) {
-            this.codec = params.codec();
+            this.codec #= params.codec();
             this.compress = true;
             this.decoder.allowCompression();
         }
@@ -443,12 +443,12 @@ public class WebSocket {
     void writeData(int32 opcode, #int8[] pay, int32 n) {
         int8[] body #= pay;
         if (this.compress) {
-            int8[] cpay = this.codec.compress(body, n);
-            WsFrame f = WsFrame.of(true, opcode, false, #cpay);
+            int8[] cpay #= this.codec.compress(body, n);
+            WsFrame f #= WsFrame.of(true, opcode, false, #cpay);
             f.rsv1 = true;
             this.writeFrame(f);
         } else {
-            WsFrame f = WsFrame.of(true, opcode, false, #body);
+            WsFrame f #= WsFrame.of(true, opcode, false, #body);
             this.writeFrame(f);
         }
     }
@@ -485,8 +485,8 @@ public class WebSocket {
             // Drain any frames the decoder already has buffered before
             // touching the socket again.
             while (this.decoder.hasFrame()) {
-                WsFrame f = this.decoder.nextFrame();
-                WsMessage m = this.dispatch(f);
+                WsFrame f #= this.decoder.nextFrame();
+                WsMessage m #= this.dispatch(f);
                 if (m != null) {
                     return this.decodeMessage(#m);
                 }
@@ -523,7 +523,7 @@ public class WebSocket {
         if (this.compress && m.isCompressed()) {
             int8[] p = m.getPayload();
             int32 n = (int32) p.count();
-            int8[] plain = this.codec.decompress(p, n);
+            int8[] plain #= this.codec.decompress(p, n);
             m.payload = #plain;
             m.compressed = false;
         }
@@ -531,7 +531,7 @@ public class WebSocket {
     }
 
     #WsMessage dispatch(WsFrame frame) {
-        WsReadAction act = this.protocol.onFrame(frame);
+        WsReadAction act #= this.protocol.onFrame(frame);
         int32 kind = act.getKind();
 
         if (kind == WsReadAction.MESSAGE) {
@@ -540,7 +540,7 @@ public class WebSocket {
             // return treats `m` as a borrow, so the local's scope-exit drop
             // array-drops `m.payload` and the caller reads a freed (count()==0)
             // payload. That is the WS live-echo 0-length-message bug.
-            WsMessage m = act.takeMessage();
+            WsMessage m #= act.takeMessage();
             return #m;
         }
 
@@ -611,7 +611,7 @@ public class WebSocket {
         if (this.closeSent) {
             return;                 // already closing — idempotent
         }
-        WsFrame f = WsControlFrames.close(code, reason);
+        WsFrame f #= WsControlFrames.close(code, reason);
         this.writeFrame(f);
         this.closeSent = true;
         // Tell the engine the local side initiated, so the peer's reciprocal
@@ -658,15 +658,15 @@ public class WebSocket {
      * applies the policy.
      */
     void writeFrame(WsFrame frame) {
-        LockGuard g = this.writeLock.acquire();
+        LockGuard g #= this.writeLock.acquire();
         if (this.isClient) {
             // Client: mask with a fresh per-frame key (see the scope note).
-            int8[] key = this.nextMaskKey();
-            int8[] wire = WsFrameEncoder.encode(frame, key);
+            int8[] key #= this.nextMaskKey();
+            int8[] wire #= WsFrameEncoder.encode(frame, key);
             this.writer.writeAll(wire, 0, wire.count());
         } else {
             // Server: frames MUST NOT be masked (RFC 6455 §5.1).
-            int8[] wire = WsFrameEncoder.encodeUnmasked(frame);
+            int8[] wire #= WsFrameEncoder.encodeUnmasked(frame);
             this.writer.writeAll(wire, 0, wire.count());
         }
         this.writer.flush();

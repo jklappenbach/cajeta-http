@@ -51,11 +51,11 @@ public final class MultipartPart {
      */
     public static #MultipartPart field(String name, String value) {
         Headers h = heap Headers();
-        String disp = MultipartPart.disposition(name, null);
+        String disp #= MultipartPart.disposition(name, null);
         h.add("Content-Disposition", disp);
-        StringBody sb = StringBody.of(value);
+        StringBody sb #= StringBody.of(value);
         Body b = #sb;
-        String n2 = MultipartPart.copyOf(name);
+        String n2 #= MultipartPart.copyOf(name);
         return MultipartPart.of(#h, #n2, null, #b);
     }
 
@@ -66,21 +66,21 @@ public final class MultipartPart {
     public static #MultipartPart file(String name, String filename,
                                       #MediaType type, #int8[] data, int32 len) {
         Headers h = heap Headers();
-        String disp = MultipartPart.disposition(name, filename);
+        String disp #= MultipartPart.disposition(name, filename);
         h.add("Content-Disposition", disp);
-        String tv = type.essence();
+        String tv #= type.essence();
         h.add("Content-Type", tv);
-        BytesBody bb = BytesBody.of(#data, len, #type);
+        BytesBody bb #= BytesBody.of(#data, len, #type);
         Body b = #bb;
-        String n2 = MultipartPart.copyOf(name);
-        String f2 = MultipartPart.copyOf(filename);
+        String n2 #= MultipartPart.copyOf(name);
+        String f2 #= MultipartPart.copyOf(filename);
         return MultipartPart.of(#h, #n2, #f2, #b);
     }
 
     /** Copy `s` into a fresh owned String. */
     static #String copyOf(String s) {
         int32 n = s.byteLength();
-        int8[] b = s.toBytes();
+        int8[] b #= s.toBytes();
         String out = heap String(#b, n);
         return #out;
     }
@@ -96,7 +96,7 @@ public final class MultipartPart {
         if (filename != null) {
             out = out + "; filename=\"" + MultipartPart.escapeQuoted(filename) + "\"";
         }
-        String owned = MultipartPart.copyOf(out);
+        String owned #= MultipartPart.copyOf(out);
         return #owned;
     }
 

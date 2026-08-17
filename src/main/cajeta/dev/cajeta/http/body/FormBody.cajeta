@@ -51,7 +51,7 @@ public final class FormBody extends Body {
         String[] vs = heap String[8];
         f.names = #ns;
         f.values = #vs;
-        MediaType t = MediaType.applicationFormUrlencoded();
+        MediaType t #= MediaType.applicationFormUrlencoded();
         f.type = #t;
         return #f;
     }
@@ -59,7 +59,7 @@ public final class FormBody extends Body {
     /** Copy `s` into a fresh owned String. */
     static #String copyOf(String s) {
         int32 n = s.byteLength();
-        int8[] b = s.toBytes();
+        int8[] b #= s.toBytes();
         String out = heap String(#b, n);
         return #out;
     }
@@ -80,8 +80,8 @@ public final class FormBody extends Body {
             this.values #= vs;
             this.cap = newCap;
         }
-        String n2 = FormBody.copyOf(name);
-        String v2 = FormBody.copyOf(value);
+        String n2 #= FormBody.copyOf(name);
+        String v2 #= FormBody.copyOf(value);
         this.names[this.pairs] = #n2;
         this.values[this.pairs] = #v2;
         this.pairs = this.pairs + 1;
@@ -259,7 +259,7 @@ public final class FormBody extends Body {
 
     /** Decode an urlencoded string into a FormBody. */
     public static #FormBody parse(String s) {
-        FormBody f = FormBody.of();
+        FormBody f #= FormBody.of();
         int32 n = s.byteLength();
         int32 start = 0;
         while (start < n) {
@@ -271,7 +271,7 @@ public final class FormBody extends Body {
             while (eq < end && ((((int32) s.byteAt(eq)) & 0xFF) != 61)) {  // '='
                 eq = eq + 1;
             }
-            String name = FormBody.decodeSlice(s, start, eq);
+            String name #= FormBody.decodeSlice(s, start, eq);
             // Value slice start: past the '=' when present, else the empty
             // slice [end, end). A single adopting init-decl — assigning an
             // owned return inside a branch would borrow a dying temp.
@@ -279,7 +279,7 @@ public final class FormBody extends Body {
             if (eq < end) {
                 vFrom = eq + 1;
             }
-            String value = FormBody.decodeSlice(s, vFrom, end);
+            String value #= FormBody.decodeSlice(s, vFrom, end);
             f.add(name, value);
             start = end + 1;
         }

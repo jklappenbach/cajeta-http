@@ -88,7 +88,7 @@ public final class SseParser {
 
     void appendLine(int8 b) {
         if (this.lineLen >= this.lineBuf.count()) {
-            this.lineBuf = SseParser.grow(this.lineBuf, this.lineLen);
+            this.lineBuf #= SseParser.grow(this.lineBuf, this.lineLen);
         }
         this.lineBuf[this.lineLen] = b;
         this.lineLen = this.lineLen + 1;
@@ -97,7 +97,7 @@ public final class SseParser {
     void appendData(int8[] src, int32 start, int32 end) {
         int32 need = this.dataLen + (end - start) + 1;
         while (need > this.dataBuf.count()) {
-            this.dataBuf = SseParser.grow(this.dataBuf, this.dataBuf.count());
+            this.dataBuf #= SseParser.grow(this.dataBuf, this.dataBuf.count());
         }
         int32 k = start;
         while (k < end) {
@@ -139,15 +139,15 @@ public final class SseParser {
                 valStart = valStart + 1;   // strip one leading space
             }
         }
-        String field = SseParser.sliceStr(this.lineBuf, 0, fieldEnd);
+        String field #= SseParser.sliceStr(this.lineBuf, 0, fieldEnd);
         if (field.equals("data")) {
             this.appendData(this.lineBuf, valStart, len);
         } else if (field.equals("event")) {
-            this.curEvent = SseParser.sliceStr(this.lineBuf, valStart, len);
+            this.curEvent #= SseParser.sliceStr(this.lineBuf, valStart, len);
         } else if (field.equals("id")) {
             // Ignore an id containing NUL (spec); otherwise it's the new last id.
             if (!SseParser.hasNul(this.lineBuf, valStart, len)) {
-                this.curId = SseParser.sliceStr(this.lineBuf, valStart, len);
+                this.curId #= SseParser.sliceStr(this.lineBuf, valStart, len);
             }
         } else if (field.equals("retry")) {
             int32 r = SseParser.parseDigits(this.lineBuf, valStart, len);
@@ -170,12 +170,12 @@ public final class SseParser {
             dl = dl - 1;
         }
         SseEvent e = heap SseEvent();
-        e.data = SseParser.bytesToStr(this.dataBuf, dl);
+        e.data #= SseParser.bytesToStr(this.dataBuf, dl);
         if (this.curEvent != null) {
-            e.event = this.curEvent.substring(0, this.curEvent.byteLength());
+            e.event #= this.curEvent.substring(0, this.curEvent.byteLength());
         }
         if (this.curId != null) {
-            e.id = this.curId.substring(0, this.curId.byteLength());
+            e.id #= this.curId.substring(0, this.curId.byteLength());
         }
         e.retry = this.curRetry;
         this.enqueue(#e);

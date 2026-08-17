@@ -90,8 +90,8 @@ public final class HpackDecoder {
         String nm = this.nameForIndex(index);
         String vl = this.valueForIndex(index);
         int32 nt = this.charge(total, nm.byteLength() + vl.byteLength());
-        String nc = nm.substring(0, nm.byteLength());
-        String vc = vl.substring(0, vl.byteLength());
+        String nc #= nm.substring(0, nm.byteLength());
+        String vc #= vl.substring(0, vl.byteLength());
         out.put(#nc, #vc);
         return nt;
     }
@@ -103,19 +103,19 @@ public final class HpackDecoder {
         int32 nameIdx = (int32) nameIdxL;
         String name;
         if (nameIdx == 0) {
-            String lit = HpackString.decode(r, this.huffman, this.maxStringLen);
+            String lit #= HpackString.decode(r, this.huffman, this.maxStringLen);
             name = #lit;
         } else {
             String borrowed = this.nameForIndex(nameIdx);
-            name = borrowed.substring(0, borrowed.byteLength());
+            name #= borrowed.substring(0, borrowed.byteLength());
         }
-        String value = HpackString.decode(r, this.huffman, this.maxStringLen);
+        String value #= HpackString.decode(r, this.huffman, this.maxStringLen);
         int32 nt = this.charge(total, name.byteLength() + value.byteLength());
 
         if (index) {
             // Add a copy to the dynamic table, then emit.
-            String tn = name.substring(0, name.byteLength());
-            String tv = value.substring(0, value.byteLength());
+            String tn #= name.substring(0, name.byteLength());
+            String tv #= value.substring(0, value.byteLength());
             HpackField entry = heap HpackField(#tn, #tv, false);
             this.dyn.add(#entry);
             out.put(#name, #value);

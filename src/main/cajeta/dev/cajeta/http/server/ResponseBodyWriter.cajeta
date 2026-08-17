@@ -92,7 +92,7 @@ public final class ResponseBodyWriter {
                                             boolean keepAlive) {
         KeepAlive.applyConnectionHeader(response.getHeaders(),
                                         response.getVersion(), keepAlive);
-        int8[] head = HttpSerializer.responseChunkedHead(response);
+        int8[] head #= HttpSerializer.responseChunkedHead(response);
         writer.writeAll(head, 0, head.count());
         writer.flush();
         return heap ResponseBodyWriter(writer);
@@ -116,7 +116,7 @@ public final class ResponseBodyWriter {
         if (length <= 0) {
             return;
         }
-        int8[] chunk = ChunkedEncoder.encodeChunk(data, length);
+        int8[] chunk #= ChunkedEncoder.encodeChunk(data, length);
         this.writer.writeAll(chunk, 0, chunk.count());
         this.writer.flush();
     }
@@ -131,7 +131,7 @@ public final class ResponseBodyWriter {
         if (this.finished) {
             return;
         }
-        int8[] last = ChunkedEncoder.encodeLast();
+        int8[] last #= ChunkedEncoder.encodeLast();
         this.writer.writeAll(last, 0, last.count());
         this.writer.flush();
         this.finished = true;

@@ -62,7 +62,7 @@ public class ProxyHeaders {
     static #HttpResponse apply(ProxyHeaders cfg, HttpRequest req,
                                (HttpRequest) -> #HttpResponse next) {
         if (cfg.trust) {
-            String xff = req.getHeaders().get("X-Forwarded-For");
+            String xff #= req.getHeaders().get("X-Forwarded-For");
             if (xff != null) {
                 req.setHeader("X-Real-IP", ProxyHeaders.firstHop(xff));
             }

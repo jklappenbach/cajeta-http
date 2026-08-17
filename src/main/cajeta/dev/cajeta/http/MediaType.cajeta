@@ -86,7 +86,7 @@ public final class MediaType {
         if (input == null) {
             return null;
         }
-        String s = input.trim();
+        String s #= input.trim();
         int32 n = s.byteLength();
         if (n == 0) {
             return null;
@@ -117,15 +117,15 @@ public final class MediaType {
             return null;                 // no '/', empty type, or empty subtype
         }
         MediaType mt = heap MediaType();
-        String rawType = s.substring(0, slash);
-        String rawSub = s.substring(slash + 1, essEnd);
-        String trimmedType = rawType.trim();
-        String trimmedSub = rawSub.trim();
+        String rawType #= s.substring(0, slash);
+        String rawSub #= s.substring(slash + 1, essEnd);
+        String trimmedType #= rawType.trim();
+        String trimmedSub #= rawSub.trim();
         if (trimmedType.byteLength() == 0 || trimmedSub.byteLength() == 0) {
             return null;
         }
-        mt.typeName = trimmedType.toLowerCase();
-        mt.subtypeName = trimmedSub.toLowerCase();
+        mt.typeName #= trimmedType.toLowerCase();
+        mt.subtypeName #= trimmedSub.toLowerCase();
 
         // Parameters: ';'-separated name=value pairs after the essence.
         int32 pos = essEnd + 1;
@@ -155,14 +155,14 @@ public final class MediaType {
         if (eq < 0) {
             return;                       // no '=': skip the malformed param
         }
-        String name = s.substring(start, eq).trim().toLowerCase();
-        String value = s.substring(eq + 1, end).trim();
+        String name #= s.substring(start, eq).trim().toLowerCase();
+        String value #= s.substring(eq + 1, end).trim();
         int32 vlen = value.byteLength();
         // Strip one layer of surrounding double-quotes.
         if (vlen >= 2
                 && (((int32) value.byteAt(0)) & 0xff) == 34
                 && (((int32) value.byteAt(vlen - 1)) & 0xff) == 34) {
-            value = value.substring(1, vlen - 1);
+            value #= value.substring(1, vlen - 1);
         }
         if (name.byteLength() == 0) {
             return;
@@ -230,7 +230,7 @@ public final class MediaType {
         if (name == null) {
             return null;
         }
-        String want = name.toLowerCase();
+        String want #= name.toLowerCase();
         int32 i = 0;
         while (i < this.paramCount) {
             if (this.paramNames[i].equals(want)) {
@@ -276,7 +276,7 @@ public final class MediaType {
             i = i + 1;
         }
         int32 n = out.byteLength();
-        int8[] b = out.toBytes();
+        int8[] b #= out.toBytes();
         String owned = heap String(#b, n);
         return #owned;
     }

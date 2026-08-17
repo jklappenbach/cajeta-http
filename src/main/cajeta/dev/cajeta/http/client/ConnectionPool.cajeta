@@ -120,16 +120,16 @@ public final class ConnectionPool {
      * exactly one [`release`](#release).
      */
     public #PooledConnection acquire(String host, int32 port) {
-        String key = ConnectionPool.keyOf(host, port);
+        String key #= ConnectionPool.keyOf(host, port);
         OriginEntry e = this.lockedEntryFor(key);
         e.sem.acquire();                 // parks the over-cap fiber (no lock held)
-        PooledConnection idle = this.lockedTakeIdle(e);
+        PooledConnection idle #= this.lockedTakeIdle(e);
         return #idle;
     }
 
     /** Wrap a freshly-dialed stream under an already-held lease. */
     public #PooledConnection adopt(#TcpStream stream, String host, int32 port) {
-        String key = ConnectionPool.keyOf(host, port);
+        String key #= ConnectionPool.keyOf(host, port);
         return PooledConnection.of(#stream, #key);
     }
 
@@ -158,33 +158,33 @@ public final class ConnectionPool {
      * argument cannot express "nothing" distinctly on every call path.
      */
     public void releaseFailed(String host, int32 port) {
-        String key = ConnectionPool.keyOf(host, port);
+        String key #= ConnectionPool.keyOf(host, port);
         OriginEntry e = this.lockedEntryFor(key);
         e.sem.release();
     }
 
     /** Idle connections currently parked for `host:port` (test/introspection). */
     public int32 idleCount(String host, int32 port) {
-        String key = ConnectionPool.keyOf(host, port);
+        String key #= ConnectionPool.keyOf(host, port);
         OriginEntry e = this.lockedEntryFor(key);
         return e.idleCount;
     }
 
     /** [`entryFor`](#entryFor) under the pool lock. */
     OriginEntry lockedEntryFor(String key) {
-        LockGuard g = this.lock.acquire();
+        LockGuard g #= this.lock.acquire();
         return this.entryFor(key);
     }
 
     /** [`takeIdle`](#takeIdle) under the pool lock. */
     #PooledConnection lockedTakeIdle(OriginEntry e) {
-        LockGuard g = this.lock.acquire();
+        LockGuard g #= this.lock.acquire();
         return this.takeIdle(e);
     }
 
     /** Timestamp + park `pc` idle, under the pool lock. */
     void lockedPark(OriginEntry e, #PooledConnection pc) {
-        LockGuard g = this.lock.acquire();
+        LockGuard g #= this.lock.acquire();
         Instant now = Clock.now();
         pc.idleSince = now.toEpochMilli();
         e.pushIdle(#pc);
@@ -199,7 +199,7 @@ public final class ConnectionPool {
         Instant nowI = Clock.now();
         int64 now = nowI.toEpochMilli();
         while (true) {
-            PooledConnection cand = e.popIdle();
+            PooledConnection cand #= e.popIdle();
             if (cand == null) {
                 return null;
             }
@@ -243,7 +243,7 @@ public final class ConnectionPool {
             this.entries #= es;
             this.entryCap = newCap;
         }
-        OriginEntry e = OriginEntry.of(key, this.maxPerOrigin);
+        OriginEntry e #= OriginEntry.of(key, this.maxPerOrigin);
         this.entries[this.entryCount] = #e;
         this.entryCount = this.entryCount + 1;
         return this.entries[this.entryCount - 1];
@@ -253,7 +253,7 @@ public final class ConnectionPool {
     static #String keyOf(String host, int32 port) {
         String k = host + ":" + port;
         int32 n = k.byteLength();
-        int8[] b = k.toBytes();
+        int8[] b #= k.toBytes();
         String owned = heap String(#b, n);
         return #owned;
     }

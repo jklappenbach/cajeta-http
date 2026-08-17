@@ -254,7 +254,7 @@ public class HttpServer {
         this.server = null;
         this.limits = heap HttpParserLimits();
         this.serverLimits = heap ServerLimits();
-        this.model = ServerModel.fiberPerConnection();
+        this.model #= ServerModel.fiberPerConnection();
         this.tlsListener = null;
         int8[] e = heap int8[0];
         this.tlsCert = #e;
@@ -368,7 +368,7 @@ public class HttpServer {
             // http:1.5b — the ServerLimits-surfaced head caps become the
             // parser's ceilings, BEFORE the accept closure captures
             // `srv.limits` by value below.
-            HttpParserLimits pl = srv.serverLimits.toParserLimits();
+            HttpParserLimits pl #= srv.serverLimits.toParserLimits();
             srv.limits #= pl;
         }
         (HttpRequest) -> #HttpResponse h = srv.handler;
@@ -387,11 +387,11 @@ public class HttpServer {
             // accept closure outlives this frame.
             ConnectionLimits cls #= climits;
             int32 backlog = cls.listenBacklog;
-            ConnectionLimiter climiter = ConnectionLimiter.fromLimits(cls);
+            ConnectionLimiter climiter #= ConnectionLimiter.fromLimits(cls);
             srv.limiter #= climiter;
             srv.connLimits #= cls;
             ConnectionLimiter lm = srv.limiter;
-            Server score = model.bindServerWithBacklog(#addr, backlog,
+            Server score #= model.bindServerWithBacklog(#addr, backlog,
                 (conn) -> HttpServer.serveConnectionAdmitted(h, lim, slim,
                                                              lm, conn));
             srv.server = #score;
@@ -399,12 +399,12 @@ public class HttpServer {
         }
         if (h2Prior) {
             // RFC 9113 prior knowledge: sniff the preface, serve h2 on a match.
-            Server h2core = model.bindServer(#addr,
+            Server h2core #= model.bindServer(#addr,
                 (conn) -> HttpServer.serveConnectionSniffH2(h, lim, slim, conn));
             srv.server = #h2core;
             return #srv;
         }
-        Server core = model.bindServer(#addr,
+        Server core #= model.bindServer(#addr,
             (conn) -> HttpServer.serveConnectionWithLimits(h, lim, slim, conn));
         srv.server = #core;
         return #srv;
@@ -451,7 +451,7 @@ public class HttpServer {
         if (limits != null) {
             ServerLimits l #= limits;
             srv.serverLimits #= l;
-            HttpParserLimits pl = srv.serverLimits.toParserLimits();
+            HttpParserLimits pl #= srv.serverLimits.toParserLimits();
             srv.limits #= pl;
         }
         int8[] certCopy = heap int8[certLen];
@@ -516,8 +516,8 @@ public class HttpServer {
                                  int8[] cert, int32 certLen,
                                  int8[] key, int32 keyLen,
                                  #TcpStream conn) {
-        TlsStream tls = TlsStream.server(#conn, cert, certLen, key, keyLen);
-        int8[] alpn = HttpServer.alpnH2Http11();
+        TlsStream tls #= TlsStream.server(#conn, cert, certLen, key, keyLen);
+        int8[] alpn #= HttpServer.alpnH2Http11();
         tls.supportAlpn(alpn, 12);
         try {
             tls.handshake();
@@ -718,7 +718,7 @@ public class HttpServer {
                                  AsyncReader reader, AsyncWriter writer) {
         boolean keepAlive = true;
         while (keepAlive) {
-            Exchange ex = HttpServer.readExchange(handler, limits, reader);
+            Exchange ex #= HttpServer.readExchange(handler, limits, reader);
             if (ex == null) {
                 return;                 // clean EOF between requests
             }
@@ -735,7 +735,7 @@ public class HttpServer {
      */
     static #Exchange readExchange((HttpRequest) -> #HttpResponse handler,
                                   HttpParserLimits limits, AsyncReader reader) {
-        HttpParser parser = HttpParser.forRequestWithLimits(limits);
+        HttpParser parser #= HttpParser.forRequestWithLimits(limits);
         boolean sawAnyByte = false;
         int8[] one = heap int8[1];
 
@@ -755,7 +755,7 @@ public class HttpServer {
             }
         } catch (HttpException e) {
             // A malformed / oversized head: respond + close.
-            HttpResponse resp = HttpServer.errorResponse(e);
+            HttpResponse resp #= HttpServer.errorResponse(e);
             return heap Exchange(#resp, false);
         }
 
@@ -766,12 +766,12 @@ public class HttpServer {
         try {
             HttpServer.readBody(request, parser, framing, reader);
         } catch (HttpException e) {
-            HttpResponse resp = HttpServer.errorResponse(e);
+            HttpResponse resp #= HttpServer.errorResponse(e);
             return heap Exchange(#resp, false);
         }
 
         // --- dispatch; a handler throw maps to 500 but keeps the conn.
-        HttpResponse response = HttpServer.dispatch(handler, request);
+        HttpResponse response #= HttpServer.dispatch(handler, request);
 
         boolean keepAlive = HttpServer.decideReuse(request, response);
         return heap Exchange(#response, keepAlive);
@@ -794,8 +794,8 @@ public class HttpServer {
      */
     static void readBody(HttpRequest request, HttpParser parser,
                          BodyFraming framing, AsyncReader reader) {
-        BodyReader body = BodyReader.forFraming(framing);
-        int8[] leftover = parser.leftover();
+        BodyReader body #= BodyReader.forFraming(framing);
+        int8[] leftover #= parser.leftover();
         int32 leftoverLen = parser.leftoverLength();
         if (leftoverLen > 0) {
             body.feed(leftover, leftoverLen);
@@ -809,7 +809,7 @@ public class HttpServer {
             }
             body.feed(chunk, n);
         }
-        int8[] decoded = body.drain();
+        int8[] decoded #= body.drain();
         int32 decodedLen = decoded.count();
         if (decodedLen > 0) {
             request.body(decoded, decodedLen);
@@ -817,7 +817,7 @@ public class HttpServer {
         // Re-stage any post-body bytes (the next pipelined request).
         int32 tailLen = body.leftoverLength();
         if (tailLen > 0) {
-            int8[] tail = body.leftover();
+            int8[] tail #= body.leftover();
             reader.stage(tail, tailLen);
         }
     }
@@ -880,7 +880,7 @@ public class HttpServer {
     // first byte that diverges (or EOF). Returns the count read; `== 24` iff the
     // full preface matched. Reads raw (pre-buffer) so nothing is over-consumed.
     static int32 sniffPreface(TcpStream conn, int8[] got) {
-        int8[] pf = Http2.preface();
+        int8[] pf #= Http2.preface();
         int32 n = 0;
         boolean matching = true;
         while (n < 24 && matching) {
@@ -954,7 +954,7 @@ public class HttpServer {
         while (keepAlive) {
             Exchange ex = null;
             try {
-                ex = HttpServer.readExchangeWithLimits(handler, parseLimits, limits,
+                ex #= HttpServer.readExchangeWithLimits(handler, parseLimits, limits,
                                                        reader, writer);
             } catch (TimedOutException t) {
                 // Slowloris / stalled peer: a response is still possible
@@ -962,7 +962,7 @@ public class HttpServer {
                 // closing — 408 Request Timeout, best-effort (the peer may
                 // already be gone; the close happens regardless).
                 try {
-                    HttpResponse rto = HttpServer.statusResponse(408);
+                    HttpResponse rto #= HttpServer.statusResponse(408);
                     HttpServer.writeExchange(writer, rto, false);
                 } catch (Exception we) {
                 }
@@ -1000,7 +1000,7 @@ public class HttpServer {
                                             HttpParserLimits parseLimits,
                                             ServerLimits limits,
                                             AsyncReader reader, AsyncWriter writer) {
-        HttpParser parser = HttpParser.forRequestWithLimits(parseLimits);
+        HttpParser parser #= HttpParser.forRequestWithLimits(parseLimits);
         boolean sawAnyByte = false;
         int8[] one = heap int8[1];
         int32 headMs = limits.headReadTimeoutMs;
@@ -1069,7 +1069,7 @@ public class HttpServer {
             return HttpServer.rejectExchange(HttpServer.statusResponse(413));
         }
         if (action == ExpectContinue.ACTION_SEND_CONTINUE) {
-            int8[] cont = HttpServer.continueResponse();
+            int8[] cont #= HttpServer.continueResponse();
             writer.writeAll(cont, 0, cont.count());
             writer.flush();
         }
@@ -1079,7 +1079,7 @@ public class HttpServer {
         // the keep-alive framing survives. Inline dispatch only (see
         // ServerLimits.streamRequestBody's doc for the budget note).
         if (limits.streamRequestBody) {
-            RequestBodyStream rbs = RequestBodyStream.forRequest(parser, reader);
+            RequestBodyStream rbs #= RequestBodyStream.forRequest(parser, reader);
             // The handler-facing Body: the stdlib AsyncReader over the
             // RequestBodyChannel bridge, wrapped by the body package's
             // own StreamBody (a server-package Body SUBCLASS sends the
@@ -1089,9 +1089,9 @@ public class HttpServer {
             // outlives the inline dispatch below.
             RequestBodyChannel chan = heap RequestBodyChannel(rbs);
             AsyncReader ar = heap AsyncReader(chan);
-            StreamBody sb = StreamBody.of(#ar);
+            StreamBody sb #= StreamBody.of(#ar);
             request.bodyModel #= sb;
-            HttpResponse response = HttpServer.dispatch(handler, request);
+            HttpResponse response #= HttpServer.dispatch(handler, request);
             try {
                 HttpServer.drainRequestStream(rbs);
             } catch (HttpException e) {
@@ -1116,7 +1116,7 @@ public class HttpServer {
             return HttpServer.dispatchBudgeted(handler, request, reqDeadline,
                                                writer);
         }
-        HttpResponse response = HttpServer.dispatch(handler, request);
+        HttpResponse response #= HttpServer.dispatch(handler, request);
         boolean keepAlive = HttpServer.decideReuse(request, response);
         return heap Exchange(#response, keepAlive);
     }
@@ -1128,7 +1128,7 @@ public class HttpServer {
      */
     static void drainRequestStream(RequestBodyStream rbs) {
         while (!rbs.isComplete()) {
-            int8[] junk = rbs.read();
+            int8[] junk #= rbs.read();
             if (junk.count() == (int64) 0) {
                 return;
             }
@@ -1184,8 +1184,8 @@ public class HttpServer {
     static void readBodyWithLimits(HttpRequest request, HttpParser parser,
                                    BodyFraming framing, ServerLimits limits,
                                    AsyncReader reader, int64 reqDeadline) {
-        BodyReader body = BodyReader.forFraming(framing);
-        int8[] leftover = parser.leftover();
+        BodyReader body #= BodyReader.forFraming(framing);
+        int8[] leftover #= parser.leftover();
         int32 leftoverLen = parser.leftoverLength();
         if (leftoverLen > 0) {
             body.feed(leftover, leftoverLen);
@@ -1225,14 +1225,14 @@ public class HttpServer {
                     limits.maxBodyBytes, total);
             }
         }
-        int8[] decoded = body.drain();
+        int8[] decoded #= body.drain();
         int32 decodedLen = decoded.count();
         if (decodedLen > 0) {
             request.body(decoded, decodedLen);
         }
         int32 tailLen = body.leftoverLength();
         if (tailLen > 0) {
-            int8[] tail = body.leftover();
+            int8[] tail #= body.leftover();
             reader.stage(tail, tailLen);
         }
     }
@@ -1259,7 +1259,7 @@ public class HttpServer {
     /** The handler fiber of a budgeted dispatch: run, deposit, done. */
     static async int32 runHandler((HttpRequest) -> #HttpResponse handler,
                                   HttpRequest request, HandlerRun run) {
-        HttpResponse r = HttpServer.dispatch(handler, request);
+        HttpResponse r #= HttpServer.dispatch(handler, request);
         run.put(#r);
         return 1;
     }
@@ -1285,7 +1285,7 @@ public class HttpServer {
         while (run.pending()) {
             int64 left = HttpServer.remainingMs((int64) 0, reqDeadline);
             if (left == (int64) 0) {
-                HttpResponse cut = HttpServer.statusResponse(503);
+                HttpResponse cut #= HttpServer.statusResponse(503);
                 HttpServer.writeExchange(writer, cut, false);
                 int32 drained = await t;
                 Exchange ex = heap Exchange(#cut, false);
@@ -1295,7 +1295,7 @@ public class HttpServer {
             Tasks.sleepMillis((int64) 5);
         }
         int32 done = await t;
-        HttpResponse response = run.take();
+        HttpResponse response #= run.take();
         boolean keepAlive = HttpServer.decideReuse(request, response);
         return heap Exchange(#response, keepAlive);
     }
@@ -1318,7 +1318,7 @@ public class HttpServer {
         // handler frame — this pump runs AFTER the handler returned.
         Body b = response.bodyModel;
         if (b != null && !response.hasBody) {
-            ResponseBodyWriter w = ResponseBodyWriter.begin(writer, response,
+            ResponseBodyWriter w #= ResponseBodyWriter.begin(writer, response,
                                                             keepAlive);
             AsyncReader r = b.reader();
             int8[] scratch = heap int8[8192];
@@ -1344,7 +1344,7 @@ public class HttpServer {
         }
         KeepAlive.applyConnectionHeader(response.getHeaders(),
                                         response.getVersion(), keepAlive);
-        int8[] bytes = HttpSerializer.response(response);
+        int8[] bytes #= HttpSerializer.response(response);
         writer.writeAll(bytes, 0, bytes.count());
         writer.flush();
     }
@@ -1368,9 +1368,9 @@ public class HttpServer {
      */
     public static #int8[] handleRequestBytes((HttpRequest) -> #HttpResponse handler,
                                              int8[] requestBytes, int32 length) {
-        Exchange ex = HttpServer.handleRequest(heap HttpParserLimits(),
+        Exchange ex #= HttpServer.handleRequest(heap HttpParserLimits(),
                                                handler, requestBytes, length);
-        int8[] bytes = HttpSerializer.response(ex.response);
+        int8[] bytes #= HttpSerializer.response(ex.response);
         return #bytes;
     }
 
@@ -1386,14 +1386,14 @@ public class HttpServer {
     public static #Exchange handleRequest(HttpParserLimits limits,
                                           (HttpRequest) -> #HttpResponse handler,
                                           int8[] requestBytes, int32 length) {
-        HttpParser parser = HttpParser.forRequestWithLimits(limits);
+        HttpParser parser #= HttpParser.forRequestWithLimits(limits);
         try {
             parser.feed(requestBytes, length);
             if (!parser.isComplete()) {
                 parser.endInput();      // truncated head -> UnexpectedEof
             }
         } catch (HttpException e) {
-            HttpResponse resp = HttpServer.errorResponse(e);
+            HttpResponse resp #= HttpServer.errorResponse(e);
             KeepAlive.applyConnectionHeader(resp.getHeaders(),
                                             resp.getVersion(), false);
             return heap Exchange(#resp, false);
@@ -1405,8 +1405,8 @@ public class HttpServer {
         // Body bytes for the byte path are entirely in the parser leftover
         // (the whole request was fed in one buffer); drive the reader off
         // that, asserting EOF so a truncated Content-Length body is caught.
-        BodyReader body = BodyReader.forFraming(framing);
-        int8[] leftover = parser.leftover();
+        BodyReader body #= BodyReader.forFraming(framing);
+        int8[] leftover #= parser.leftover();
         int32 leftoverLen = parser.leftoverLength();
         try {
             if (leftoverLen > 0) {
@@ -1416,18 +1416,18 @@ public class HttpServer {
                 body.endInput();        // KIND_CLOSE completes; others throw
             }
         } catch (HttpException e) {
-            HttpResponse resp = HttpServer.errorResponse(e);
+            HttpResponse resp #= HttpServer.errorResponse(e);
             KeepAlive.applyConnectionHeader(resp.getHeaders(),
                                             resp.getVersion(), false);
             return heap Exchange(#resp, false);
         }
-        int8[] decoded = body.drain();
+        int8[] decoded #= body.drain();
         int32 decodedLen = decoded.count();
         if (decodedLen > 0) {
             request.body(decoded, decodedLen);
         }
 
-        HttpResponse response = HttpServer.dispatch(handler, request);
+        HttpResponse response #= HttpServer.dispatch(handler, request);
         boolean keepAlive = HttpServer.decideReuse(request, response);
         KeepAlive.applyConnectionHeader(response.getHeaders(),
                                         response.getVersion(), keepAlive);
@@ -1456,7 +1456,7 @@ public class HttpServer {
                                                     ServerLimits limits,
                                                     (HttpRequest) -> #HttpResponse handler,
                                                     int8[] requestBytes, int32 length) {
-        HttpParser parser = HttpParser.forRequestWithLimits(parseLimits);
+        HttpParser parser #= HttpParser.forRequestWithLimits(parseLimits);
         try {
             parser.feed(requestBytes, length);
             if (!parser.isComplete()) {
@@ -1484,8 +1484,8 @@ public class HttpServer {
         }
 
         // --- read the body, enforcing the cap on a streaming/chunked total. ---
-        BodyReader body = BodyReader.forFraming(framing);
-        int8[] leftover = parser.leftover();
+        BodyReader body #= BodyReader.forFraming(framing);
+        int8[] leftover #= parser.leftover();
         int32 leftoverLen = parser.leftoverLength();
         try {
             if (leftoverLen > 0) {
@@ -1497,7 +1497,7 @@ public class HttpServer {
         } catch (HttpException e) {
             return HttpServer.rejectExchange(HttpServer.errorResponse(e));
         }
-        int8[] decoded = body.drain();
+        int8[] decoded #= body.drain();
         int32 decodedLen = decoded.count();
         if (!limits.bodyWithinCap((int64) decodedLen)) {
             return HttpServer.rejectExchange(HttpServer.statusResponse(413));
@@ -1506,7 +1506,7 @@ public class HttpServer {
             request.body(decoded, decodedLen);
         }
 
-        HttpResponse response = HttpServer.dispatch(handler, request);
+        HttpResponse response #= HttpServer.dispatch(handler, request);
         boolean keepAlive = HttpServer.decideReuse(request, response);
         KeepAlive.applyConnectionHeader(response.getHeaders(),
                                         response.getVersion(), keepAlive);
@@ -1539,7 +1539,7 @@ public class HttpServer {
     public static int32 expectAction(HttpParserLimits parseLimits,
                                      ServerLimits limits,
                                      int8[] requestBytes, int32 length) {
-        HttpParser parser = HttpParser.forRequestWithLimits(parseLimits);
+        HttpParser parser #= HttpParser.forRequestWithLimits(parseLimits);
         parser.feed(requestBytes, length);
         if (!parser.isComplete()) {
             parser.endInput();
@@ -1560,8 +1560,8 @@ public class HttpServer {
      * sends the **final** response after.
      */
     public static #int8[] continueResponse() {
-        HttpResponse r = HttpResponse.of(100);
-        int8[] bytes = HttpSerializer.response(r);
+        HttpResponse r #= HttpResponse.of(100);
+        int8[] bytes #= HttpSerializer.response(r);
         return #bytes;
     }
 
@@ -1612,7 +1612,7 @@ public class HttpServer {
      * table.
      */
     static #HttpResponse statusResponse(int32 status) {
-        HttpResponse r = HttpResponse.of(status);
+        HttpResponse r #= HttpResponse.of(status);
         if (status == 431 && r.getReason().byteLength() == 0) {
             r.reason("Request Header Fields Too Large");
         }
@@ -1697,7 +1697,7 @@ public class HttpServerBuilder {
      */
     public HttpServerBuilder() {
         this.addr = null;
-        this.model = ServerModel.fiberPerConnection();
+        this.model #= ServerModel.fiberPerConnection();
         this.handler = null;
         this.slim = null;
         int8[] e = heap int8[0];
@@ -1734,7 +1734,7 @@ public class HttpServerBuilder {
         // caller's argument (bare assignment is a borrow in this model — the
         // UriBuilder discipline), so a builder outliving the call site stays
         // valid.
-        this.addr = addr.substring(0, addr.byteLength());
+        this.addr #= addr.substring(0, addr.byteLength());
         return this;
     }
 
@@ -1759,7 +1759,7 @@ public class HttpServerBuilder {
      * the default Model A. Returns `this` to chain.
      */
     public HttpServerBuilder fiberPerConnection() {
-        this.model = ServerModel.fiberPerConnection();
+        this.model #= ServerModel.fiberPerConnection();
         return this;
     }
 
@@ -1768,7 +1768,7 @@ public class HttpServerBuilder {
      * Model B with `poolSize` worker fibers. Returns `this` to chain.
      */
     public HttpServerBuilder sharedPool(int32 poolSize) {
-        this.model = ServerModel.sharedPool(poolSize);
+        this.model #= ServerModel.sharedPool(poolSize);
         return this;
     }
 
@@ -1884,7 +1884,7 @@ public class HttpServerBuilder {
      * calling fiber until the server is shut down.
      */
     public void serve() {
-        HttpServer srv = this.build();
+        HttpServer srv #= this.build();
         srv.serve();
     }
 }

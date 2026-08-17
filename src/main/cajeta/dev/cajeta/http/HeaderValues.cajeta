@@ -28,7 +28,7 @@ public final class HeaderValues {
         if (headers == null) {
             return (int64) -1;
         }
-        String v = headers.get("Content-Length");
+        String v #= headers.get("Content-Length");
         if (v == null) {
             return (int64) -1;
         }
@@ -57,7 +57,7 @@ public final class HeaderValues {
         if (headers == null) {
             return null;
         }
-        String v = headers.get("Content-Type");
+        String v #= headers.get("Content-Type");
         if (v == null) {
             return null;
         }

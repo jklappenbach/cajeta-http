@@ -33,7 +33,7 @@ public final class SseBody extends Body {
         AsyncReader r = heap AsyncReader(chan);
         b.chan = #chan;
         b.rdr = #r;
-        b.type = MediaType.parse("text/event-stream");
+        b.type #= MediaType.parse("text/event-stream");
         return #b;
     }
 

@@ -48,9 +48,9 @@ public class ETag {
         String tag = "\"" + Sha256.hashHex(resp.body, (int64) resp.bodyLength()) + "\"";
         resp.setHeader("ETag", tag);
 
-        String inm = req.getHeaders().get("If-None-Match");
+        String inm #= req.getHeaders().get("If-None-Match");
         if (inm != null && ETag.matches(inm, tag)) {
-            HttpResponse notMod = HttpResponse.of(304);
+            HttpResponse notMod #= HttpResponse.of(304);
             notMod.setHeader("ETag", tag);
             return #notMod;
         }
@@ -59,7 +59,7 @@ public class ETag {
 
     /** Whether `If-None-Match` value `inm` satisfies `tag` (`*` or a member). */
     static boolean matches(String inm, String tag) {
-        String t = inm.trim();
+        String t #= inm.trim();
         if (t.equals("*")) {
             return true;
         }

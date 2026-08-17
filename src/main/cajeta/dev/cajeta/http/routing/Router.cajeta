@@ -113,7 +113,7 @@ public class Router {
      */
     public Router route(String method, String pattern,
                         (HttpRequest) -> #HttpResponse handler) {
-        String err = Router.patternError(pattern);
+        String err #= Router.patternError(pattern);
         if (err != null) {
             throw heap UnrecoverableException(#err);
         }
@@ -134,7 +134,7 @@ public class Router {
     public Router routeLimited(String method, String pattern,
                                int64 maxBodyBytes,
                                (HttpRequest) -> #HttpResponse handler) {
-        String err = Router.patternError(pattern);
+        String err #= Router.patternError(pattern);
         if (err != null) {
             throw heap UnrecoverableException(#err);
         }
@@ -155,7 +155,7 @@ public class Router {
     public Router routeMw(String method, String pattern,
                           #MiddlewareChain chain,
                           (HttpRequest) -> #HttpResponse handler) {
-        String err = Router.patternError(pattern);
+        String err #= Router.patternError(pattern);
         if (err != null) {
             throw heap UnrecoverableException(#err);
         }
@@ -182,7 +182,7 @@ public class Router {
      * `bool`, …). An untyped `{name}` (implicitly `string`) is always valid.
      */
     public static #String patternError(String pattern) {
-        String[] segs = Router.splitPath(pattern);
+        String[] segs #= Router.splitPath(pattern);
         int32 n = segs.count();
         int32 i = 0;
         while (i < n) {
@@ -192,7 +192,7 @@ public class Router {
                 && ((((int32) seg.byteAt(0)) & 0xff) == 123)          // '{'
                 && ((((int32) seg.byteAt(len - 1)) & 0xff) == 125);   // '}'
             if (isParam) {
-                String type = Router.paramTypeOf(seg);
+                String type #= Router.paramTypeOf(seg);
                 if (type.equals("**")) {
                     if (i != n - 1) {
                         return "router: '**' catch-all must be the last "
@@ -275,7 +275,7 @@ public class Router {
         int32 i = 0;
         while (i < sub.routeCount) {
             Route r = sub.routes[i];
-            String combined = Router.joinPattern(prefix, r.pattern);
+            String combined #= Router.joinPattern(prefix, r.pattern);
             this.routeLimited(r.method, combined, r.maxBodyBytes, r.handler);
             i = i + 1;
         }
@@ -291,8 +291,8 @@ public class Router {
      * empty combination yields the root `"/"`.
      */
     static #String joinPattern(String prefix, String subPattern) {
-        String[] pa = Router.splitPath(prefix);
-        String[] sb = Router.splitPath(subPattern);
+        String[] pa #= Router.splitPath(prefix);
+        String[] sb #= Router.splitPath(subPattern);
         int32 pn = pa.count();
         int32 bn = sb.count();
         if (pn + bn == 0) {
@@ -349,7 +349,7 @@ public class Router {
      */
     public #HttpResponse dispatch(HttpRequest request) {
         String method = request.getMethod();
-        String[] segs = Router.splitPath(request.getTarget());
+        String[] segs #= Router.splitPath(request.getTarget());
         int32 segCount = segs.count();
 
         // Pass 1 — among routes whose path matches AND method matches, pick
@@ -394,7 +394,7 @@ public class Router {
             // handler to capture; the composition is built and invoked within
             // this dispatch (non-escaping).
             if (chosen.mw != null) {
-                (HttpRequest) -> #HttpResponse composed =
+                (HttpRequest) -> #HttpResponse composed #=
                     chosen.mw.compose(chosen.handler);
                 return composed(request);
             }
@@ -436,8 +436,8 @@ public class Router {
      */
     static #HttpResponse methodNotAllowed(Route[] routes, int32 routeCount,
                                           String[] pathSegs, int32 segCount) {
-        HttpResponse resp = HttpResponse.of(405);
-        String allow = Router.allowHeader(routes, routeCount, pathSegs, segCount);
+        HttpResponse resp #= HttpResponse.of(405);
+        String allow #= Router.allowHeader(routes, routeCount, pathSegs, segCount);
         if (allow.byteLength() > 0) {
             resp.setHeader("Allow", allow);
         }
@@ -453,7 +453,7 @@ public class Router {
      */
     static #String allowHeader(Route[] routes, int32 routeCount,
                                String[] pathSegs, int32 segCount) {
-        String acc = Router.emptyString();
+        String acc #= Router.emptyString();
         int32 i = 0;
         while (i < routeCount) {
             Route r = routes[i];
@@ -461,7 +461,7 @@ public class Router {
             if (r.tryMatch(pathSegs, segCount, throwaway)) {
                 String m = r.method;
                 if (!Router.csvContains(acc, m)) {
-                    acc = Router.csvAppend(acc, m);
+                    acc #= Router.csvAppend(acc, m);
                 }
             }
             i = i + 1;
@@ -513,7 +513,7 @@ public class Router {
             boolean slash = (!atEnd) && ((((int32) target.byteAt(i)) & 0xff) == 47);
             if (atEnd || slash) {
                 if (i > segStart) {
-                    out[idx] = target.substring(segStart, i);
+                    out[idx] #= target.substring(segStart, i);
                     idx = idx + 1;
                 }
                 segStart = i + 1;
@@ -601,7 +601,7 @@ public class Router {
                 if (s < i && ((((int32) csv.byteAt(s)) & 0xff) == 32)) {
                     s = s + 1;
                 }
-                String seg = csv.substring(s, i);
+                String seg #= csv.substring(s, i);
                 if (seg.equals(token)) {
                     return true;
                 }

@@ -52,15 +52,15 @@ public class CookieJar {
     public void store(String setCookie, String host, String reqPath,
                       int64 nowMs) {
         // First `;`-segment: name=value. No `=` or empty name → ignore.
-        String pair = CookieJar.segment(setCookie, 0);
+        String pair #= CookieJar.segment(setCookie, 0);
         int64 eq = pair.indexOf("=");
         if (eq <= (int64) 0) {
             return;
         }
-        String rawName = pair.substring(0, (int32) eq);
-        String name = rawName.trim();
-        String rawVal = pair.substring((int32) eq + 1, pair.byteLength());
-        String value = rawVal.trim();
+        String rawName #= pair.substring(0, (int32) eq);
+        String name #= rawName.trim();
+        String rawVal #= pair.substring((int32) eq + 1, pair.byteLength());
+        String value #= rawVal.trim();
         if (name.byteLength() == 0) {
             return;
         }
@@ -75,12 +75,12 @@ public class CookieJar {
         boolean deleteNow = false;
         int32 seg = 1;
         while (true) {
-            String s = CookieJar.segment(setCookie, seg);
+            String s #= CookieJar.segment(setCookie, seg);
             if (s == null) {
                 break;
             }
             seg = seg + 1;
-            String a = s.trim();
+            String a #= s.trim();
             if (a.byteLength() == 0) {
                 continue;
             }
@@ -88,22 +88,22 @@ public class CookieJar {
             String val = null;
             int64 aeq = a.indexOf("=");
             if (aeq >= (int64) 0) {
-                String rk = a.substring(0, (int32) aeq);
-                key = rk.trim();
-                String rv = a.substring((int32) aeq + 1, a.byteLength());
-                val = rv.trim();
+                String rk #= a.substring(0, (int32) aeq);
+                key #= rk.trim();
+                String rv #= a.substring((int32) aeq + 1, a.byteLength());
+                val #= rv.trim();
             }
-            String lk = key.toLowerCase();
+            String lk #= key.toLowerCase();
             if (lk.equals("secure")) {
                 secure = true;
             } else if (lk.equals("httponly")) {
                 httpOnly = true;
             } else if (lk.equals("domain") && val != null) {
-                String d = CookieJar.canonicalDomain(val);
+                String d #= CookieJar.canonicalDomain(val);
                 domain = #d;
             } else if (lk.equals("path") && val != null) {
                 if (val.startsWith("/")) {
-                    String p = val.substring(0, val.byteLength());
+                    String p #= val.substring(0, val.byteLength());
                     path = #p;
                 }
             } else if (lk.equals("max-age") && val != null) {
@@ -129,8 +129,8 @@ public class CookieJar {
         // Domain admission (§5.3 step 6): a Domain the request host
         // does not domain-match rejects the whole cookie.
         boolean hostOnly = true;
-        String lhost = host.toLowerCase();
-        String matchDomain = lhost.substring(0, lhost.byteLength());
+        String lhost #= host.toLowerCase();
+        String matchDomain #= lhost.substring(0, lhost.byteLength());
         if (domain != null) {
             if (!CookieJar.domainMatch(lhost, domain)) {
                 return;
@@ -138,7 +138,7 @@ public class CookieJar {
             hostOnly = false;
             matchDomain = #domain;
         }
-        String matchPath = CookieJar.defaultPath(reqPath);
+        String matchPath #= CookieJar.defaultPath(reqPath);
         if (path != null) {
             matchPath = #path;
         }
@@ -149,13 +149,13 @@ public class CookieJar {
         }
 
         Cookie ck = heap Cookie();
-        String n2 = name.substring(0, name.byteLength());
+        String n2 #= name.substring(0, name.byteLength());
         ck.name = #n2;
-        String v2 = value.substring(0, value.byteLength());
+        String v2 #= value.substring(0, value.byteLength());
         ck.value = #v2;
-        String d2 = matchDomain.substring(0, matchDomain.byteLength());
+        String d2 #= matchDomain.substring(0, matchDomain.byteLength());
         ck.domain = #d2;
-        String p2 = matchPath.substring(0, matchPath.byteLength());
+        String p2 #= matchPath.substring(0, matchPath.byteLength());
         ck.path = #p2;
         ck.expiresAtMs = expiresAt;
         ck.secure = secure;
@@ -175,7 +175,7 @@ public class CookieJar {
     public #String cookieHeaderFor(String host, String path, boolean https,
                                    int64 nowMs) {
         this.evictExpired(nowMs);
-        String lhost = host.toLowerCase();
+        String lhost #= host.toLowerCase();
         String out = null;
         Cookie c = this.head;
         while (c != null) {
@@ -309,7 +309,7 @@ public class CookieJar {
 
     /** Lowercased `Domain` attribute with any leading `.` stripped. */
     static #String canonicalDomain(String v) {
-        String low = v.toLowerCase();
+        String low #= v.toLowerCase();
         if (low.startsWith(".")) {
             return low.substring(1, low.byteLength());
         }
@@ -329,7 +329,7 @@ public class CookieJar {
         if (host.byteAt(hn - dn - 1) != (int8) 46) {       // '.'
             return false;
         }
-        String tail = host.substring(hn - dn, hn);
+        String tail #= host.substring(hn - dn, hn);
         return tail.equals(domain);
     }
 
@@ -398,7 +398,7 @@ public class CookieJar {
      * calendar identity (proleptic Gregorian).
      */
     static int64 parseRfc1123(String v) {
-        String s = v.trim();
+        String s #= v.trim();
         int64 comma = s.indexOf(",");
         if (comma != (int64) 3 || s.byteLength() != 29) {
             return 0;
@@ -411,7 +411,7 @@ public class CookieJar {
         int64 hh = CookieJar.digits2(s, 17);
         int64 mm = CookieJar.digits2(s, 20);
         int64 ss = CookieJar.digits2(s, 23);
-        String tz = s.substring(26, 29);
+        String tz #= s.substring(26, 29);
         if (day < 0 || mon < 0 || year < 0 || hh < 0 || mm < 0 || ss < 0) {
             return 0;
         }

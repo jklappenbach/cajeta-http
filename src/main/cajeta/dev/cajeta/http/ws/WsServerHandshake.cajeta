@@ -103,13 +103,13 @@ public class WsServerHandshake {
      * the 28-char (`"...="`) accept string.
      */
     public static #String acceptKey(String key) {
-        String g = WsServerHandshake.guid();
+        String g #= WsServerHandshake.guid();
         Sha1 h = heap Sha1();
-        int8[] kb = key.toBytes();
-        int8[] gb = g.toBytes();
+        int8[] kb #= key.toBytes();
+        int8[] gb #= g.toBytes();
         h.update(kb, (int64) key.byteLength());
         h.update(gb, (int64) g.byteLength());
-        int8[] digest = h.digest();                 // 20 bytes
+        int8[] digest #= h.digest();                 // 20 bytes
         return Base64.encode(digest, (int64) digest.count());
     }
 
@@ -126,8 +126,8 @@ public class WsServerHandshake {
      */
     public static #HttpResponse accept(HttpRequest request) {
         WsServerHandshake.validate(request);
-        String key = request.getHeaders().get("Sec-WebSocket-Key");
-        String acceptValue = WsServerHandshake.acceptKey(key);
+        String key #= request.getHeaders().get("Sec-WebSocket-Key");
+        String acceptValue #= WsServerHandshake.acceptKey(key);
         return WsServerHandshake.switchingResponse(acceptValue);
     }
 
@@ -199,7 +199,7 @@ public class WsServerHandshake {
      * other rejections are a bare status response.
      */
     public static #HttpResponse reject(HandshakeRejectedException e) {
-        HttpResponse r = HttpResponse.of(e.httpStatus);
+        HttpResponse r #= HttpResponse.of(e.httpStatus);
         if (e.httpStatus == 426) {
             r.setHeader("Sec-WebSocket-Version", "13");
         }
@@ -216,7 +216,7 @@ public class WsServerHandshake {
      * moot once switched).
      */
     static #HttpResponse switchingResponse(String acceptValue) {
-        HttpResponse r = HttpResponse.of(101);
+        HttpResponse r #= HttpResponse.of(101);
         r.setHeader("Upgrade", "websocket");
         r.setHeader("Connection", "Upgrade");
         r.setHeader("Sec-WebSocket-Accept", acceptValue);
@@ -239,17 +239,17 @@ public class WsServerHandshake {
      * (`token` must be supplied lowercase.)
      */
     static boolean headerHasToken(Headers h, String name, String token) {
-        String v = h.get(name);
+        String v #= h.get(name);
         if (v == null) {
             return false;
         }
-        String lower = v.toLowerCase();
+        String lower #= v.toLowerCase();
         return lower.contains(token);
     }
 
     /** True iff header `name` is present with a non-empty value. */
     static boolean hasNonEmpty(Headers h, String name) {
-        String v = h.get(name);
+        String v #= h.get(name);
         if (v == null) {
             return false;
         }
@@ -263,7 +263,7 @@ public class WsServerHandshake {
      * suffices.
      */
     static boolean versionIs13(Headers h) {
-        String v = h.get("Sec-WebSocket-Version");
+        String v #= h.get("Sec-WebSocket-Version");
         if (v == null) {
             return false;
         }

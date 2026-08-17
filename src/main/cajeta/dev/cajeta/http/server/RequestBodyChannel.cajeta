@@ -41,7 +41,7 @@ public final class RequestBodyChannel implements ByteChannel {
             if (this.eof) {
                 return (int64) 0;
             }
-            int8[] next = this.stream.read();
+            int8[] next #= this.stream.read();
             int32 n = (int32) next.count();
             if (n == 0) {
                 this.eof = true;

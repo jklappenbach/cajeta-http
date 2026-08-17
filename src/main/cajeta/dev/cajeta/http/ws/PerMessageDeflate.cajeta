@@ -59,7 +59,7 @@ public final class PerMessageDeflate {
             this.deflate = heap DeflateStream(this.level);
         }
         this.deflate.write(data, len);
-        int8[] out = this.deflate.syncFlush();
+        int8[] out #= this.deflate.syncFlush();
         int32 n = (int32) out.count();
         int32 keep = n;
         if (n >= 4
@@ -93,7 +93,7 @@ public final class PerMessageDeflate {
         int32 accCap = 256;
         boolean draining = true;
         while (draining) {
-            int8[] got = this.inflate.drain();
+            int8[] got #= this.inflate.drain();
             int32 gn = (int32) got.count();
             if (gn == 0) {
                 draining = false;

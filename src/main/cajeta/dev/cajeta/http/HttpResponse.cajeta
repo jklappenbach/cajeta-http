@@ -144,7 +144,7 @@ public class HttpResponse {
         } else if (this.pushLen == this.pushCap) {
             this.growPushes();
         }
-        String p = path.substring(0, path.byteLength());
+        String p #= path.substring(0, path.byteLength());
         int8[] b = heap int8[bodyLen];
         int32 i = 0;
         while (i < bodyLen) {
@@ -203,7 +203,7 @@ public class HttpResponse {
     public static #HttpResponse of(int32 status) {
         HttpResponse r = heap HttpResponse();
         r.status = status;
-        r.reason = HttpResponse.reasonFor(status);
+        r.reason #= HttpResponse.reasonFor(status);
         return #r;
     }
 
@@ -266,13 +266,13 @@ public class HttpResponse {
 
     /** Override the reason phrase and return `this`. */
     public HttpResponse reason(String phrase) {
-        this.reason = phrase.substring(0, phrase.byteLength());
+        this.reason #= phrase.substring(0, phrase.byteLength());
         return this;
     }
 
     /** Override the HTTP-version string and return `this`. */
     public HttpResponse version(String v) {
-        this.version = v.substring(0, v.byteLength());
+        this.version #= v.substring(0, v.byteLength());
         return this;
     }
 
@@ -378,12 +378,12 @@ public class HttpResponse {
     public HttpResponse body(#Body b) {
         MediaType t = b.contentType();
         if (t != null && !this.headers.contains("content-type")) {
-            String tv = t.format();
+            String tv #= t.format();
             this.headers.set("Content-Type", tv);
         }
         int64 n = b.contentLength();
         if (n >= (int64) 0) {
-            int8[] drained = HttpResponse.drainBody(b, (int32) n);
+            int8[] drained #= HttpResponse.drainBody(b, (int32) n);
             this.body = #drained;
             this.hasBody = true;
         }
@@ -417,8 +417,8 @@ public class HttpResponse {
             copy[i] = this.body[i];
             i = i + 1;
         }
-        MediaType t = this.contentType();
-        BytesBody bb = BytesBody.of(#copy, n, #t);
+        MediaType t #= this.contentType();
+        BytesBody bb #= BytesBody.of(#copy, n, #t);
         Body out = #bb;
         return #out;
     }

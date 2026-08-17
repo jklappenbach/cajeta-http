@@ -397,7 +397,7 @@ public class WsFrameDecoder {
             int32 op = this.curOpcode;
             boolean masked = this.curMasked;
             boolean rsv1 = this.curRsv1;
-            WsFrame f = WsFrame.of(fin, op, masked, #pay);
+            WsFrame f #= WsFrame.of(fin, op, masked, #pay);
             f.rsv1 = rsv1;
             // TRANSFER the frame into the queue (`#f`) — without it the local
             // `f` is still an active owner and its scope-exit drop reclaims the

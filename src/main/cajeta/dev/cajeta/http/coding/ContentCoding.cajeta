@@ -84,12 +84,12 @@ public final class ContentCoding {
     public static #int8[] decode(String token, int8[] data, int32 len,
                                  int64 maxOut) {
         if (token.equals("gzip") || token.equals("x-gzip")) {
-            int8[] out = ContentCoding.decodeGzip(data, len);
+            int8[] out #= ContentCoding.decodeGzip(data, len);
             ContentCoding.enforceCap(out, maxOut);
             return #out;
         }
         if (token.equals("deflate")) {
-            int8[] out = ContentCoding.decodeZlib(data, len);
+            int8[] out #= ContentCoding.decodeZlib(data, len);
             ContentCoding.enforceCap(out, maxOut);
             return #out;
         }

@@ -72,16 +72,16 @@ public class WsUpgrade {
      */
     public static #WebSocket acceptServer(AsyncReader reader, AsyncWriter writer,
                                           boolean allowCompression) {
-        HttpRequest request = WsUpgrade.readRequest(reader);
-        HttpResponse response = WsServerHandshake.accept(request);
-        PmdParams params = WsUpgrade.serverParams(request, allowCompression);
+        HttpRequest request #= WsUpgrade.readRequest(reader);
+        HttpResponse response #= WsServerHandshake.accept(request);
+        PmdParams params #= WsUpgrade.serverParams(request, allowCompression);
         if (params.enabled) {
             response.setHeader("Sec-WebSocket-Extensions", params.responseHeader);
         }
-        int8[] bytes = HttpSerializer.response(response);
+        int8[] bytes #= HttpSerializer.response(response);
         writer.writeAll(bytes, 0, bytes.count());
         writer.flush();
-        WebSocket ws = WebSocket.forServer(reader, writer);
+        WebSocket ws #= WebSocket.forServer(reader, writer);
         ws.enableCompression(params);
         return #ws;
     }
@@ -90,7 +90,7 @@ public class WsUpgrade {
         if (!allow) {
             return heap PmdParams();
         }
-        String offered = request.getHeaders().get("Sec-WebSocket-Extensions");
+        String offered #= request.getHeaders().get("Sec-WebSocket-Extensions");
         return WsCompression.negotiateServer(offered);
     }
 
@@ -112,14 +112,14 @@ public class WsUpgrade {
     /** [`serve`](#serve) with optional `permessage-deflate` negotiation. */
     public static void serve(AsyncReader reader, AsyncWriter writer,
                              WebSocketHandler handler, boolean allowCompression) {
-        WebSocket ws = WsUpgrade.acceptServer(reader, writer, allowCompression);
+        WebSocket ws #= WsUpgrade.acceptServer(reader, writer, allowCompression);
         WebSocketConnection conn = heap WebSocketConnection(ws);
         int32 code = WsCloseCode.NORMAL;
         try {
             handler.onConnect(conn);
             boolean running = true;
             while (running) {
-                WsMessage m = ws.receive();
+                WsMessage m #= ws.receive();
                 handler.onMessage(conn, m);
             }
         } catch (ConnectionClosedException e) {
@@ -169,19 +169,19 @@ public class WsUpgrade {
     public static #WebSocket connectClient(AsyncReader reader, AsyncWriter writer,
                                            Uri uri, int32 keySeed,
                                            boolean offerCompression) {
-        String key = WsClientHandshake.placeholderKey(keySeed);
-        HttpRequest request = WsClientHandshake.buildRequest(uri, key);
+        String key #= WsClientHandshake.placeholderKey(keySeed);
+        HttpRequest request #= WsClientHandshake.buildRequest(uri, key);
         if (offerCompression) {
-            String offer = WsCompression.clientOffer();
+            String offer #= WsCompression.clientOffer();
             request.setHeader("Sec-WebSocket-Extensions", offer);
         }
-        int8[] bytes = HttpSerializer.request(request);
+        int8[] bytes #= HttpSerializer.request(request);
         writer.writeAll(bytes, 0, bytes.count());
         writer.flush();
-        HttpResponse response = WsUpgrade.readResponse(reader);
+        HttpResponse response #= WsUpgrade.readResponse(reader);
         WsClientHandshake.requireAccept(response, key);
-        PmdParams params = WsUpgrade.clientParams(response, offerCompression);
-        WebSocket ws = WebSocket.forClient(reader, writer);
+        PmdParams params #= WsUpgrade.clientParams(response, offerCompression);
+        WebSocket ws #= WebSocket.forClient(reader, writer);
         ws.enableCompression(params);
         return #ws;
     }
@@ -190,7 +190,7 @@ public class WsUpgrade {
         if (!offered) {
             return heap PmdParams();
         }
-        String ext = response.getHeaders().get("Sec-WebSocket-Extensions");
+        String ext #= response.getHeaders().get("Sec-WebSocket-Extensions");
         return WsCompression.confirmClient(ext);
     }
 
@@ -204,7 +204,7 @@ public class WsUpgrade {
      * reader picks them up. (A WS upgrade request carries no body.)
      */
     static #HttpRequest readRequest(AsyncReader reader) {
-        HttpParser parser = HttpParser.forRequest();
+        HttpParser parser #= HttpParser.forRequest();
         int8[] one = heap int8[1];
         while (!parser.isComplete()) {
             int32 n = reader.read(one, 0, 1);
@@ -214,8 +214,8 @@ public class WsUpgrade {
             }
             parser.feed(one, 1);
         }
-        HttpRequest request = parser.takeRequest();
-        int8[] leftover = parser.leftover();
+        HttpRequest request #= parser.takeRequest();
+        int8[] leftover #= parser.leftover();
         int32 llen = parser.leftoverLength();
         if (llen > 0) {
             reader.stage(leftover, llen);
@@ -230,7 +230,7 @@ public class WsUpgrade {
      * [`WebSocket`](WebSocket.cajeta).
      */
     static #HttpResponse readResponse(AsyncReader reader) {
-        HttpParser parser = HttpParser.forResponse();
+        HttpParser parser #= HttpParser.forResponse();
         int8[] one = heap int8[1];
         while (!parser.isComplete()) {
             int32 n = reader.read(one, 0, 1);
@@ -240,8 +240,8 @@ public class WsUpgrade {
             }
             parser.feed(one, 1);
         }
-        HttpResponse response = parser.takeResponse();
-        int8[] leftover = parser.leftover();
+        HttpResponse response #= parser.takeResponse();
+        int8[] leftover #= parser.leftover();
         int32 llen = parser.leftoverLength();
         if (llen > 0) {
             reader.stage(leftover, llen);

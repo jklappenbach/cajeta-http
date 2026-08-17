@@ -91,14 +91,14 @@ public final class HpackEncoder {
             this.encodeString(w, name);
         }
         this.encodeString(w, value);
-        String tn = name.substring(0, name.byteLength());
-        String tv = value.substring(0, value.byteLength());
+        String tn #= name.substring(0, name.byteLength());
+        String tv #= value.substring(0, value.byteLength());
         HpackField entry = heap HpackField(#tn, #tv, false);
         this.dyn.add(#entry);
     }
 
     void encodeString(HpackWriter w, String s) {
-        int8[] b = s.toBytes();
+        int8[] b #= s.toBytes();
         if (this.useHuffman) {
             HpackString.encode(w, b, s.byteLength(), this.huffman);
         } else {

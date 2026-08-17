@@ -41,7 +41,7 @@ public final class SseResponse {
      * and hand it off). EOF after the last event.
      */
     public static #HttpResponse stream(#SseEvent[] events, int32 n) {
-        SseByteChannel bc = SseByteChannel.overEvents(#events, n);
+        SseByteChannel bc #= SseByteChannel.overEvents(#events, n);
         return SseResponse.build(#bc);
     }
 
@@ -52,7 +52,7 @@ public final class SseResponse {
      * its own chunk; closing the channel ends the stream.
      */
     public static #HttpResponse channel(SseChannel ch) {
-        SseByteChannel bc = SseByteChannel.overChannel(ch);
+        SseByteChannel bc #= SseByteChannel.overChannel(ch);
         return SseResponse.build(#bc);
     }
 
@@ -62,13 +62,13 @@ public final class SseResponse {
      */
     public static #HttpResponse channel(SseChannel ch,
                                         int32 keepAliveMillis) {
-        SseByteChannel bc = SseByteChannel.overChannel(ch, keepAliveMillis);
+        SseByteChannel bc #= SseByteChannel.overChannel(ch, keepAliveMillis);
         return SseResponse.build(#bc);
     }
 
     static #HttpResponse build(#SseByteChannel bc) {
-        SseBody body = SseBody.of(#bc);
-        HttpResponse resp = HttpResponse.ok();
+        SseBody body #= SseBody.of(#bc);
+        HttpResponse resp #= HttpResponse.ok();
         resp.setHeader("Content-Type", "text/event-stream");
         resp.setHeader("Cache-Control", "no-cache");
         resp.setHeader("Connection", "keep-alive");
@@ -84,7 +84,7 @@ public final class SseResponse {
      * this to the producer so it can replay from that point.
      */
     public static #String lastEventId(HttpRequest req) {
-        String v = req.getHeaders().get("Last-Event-ID");
+        String v #= req.getHeaders().get("Last-Event-ID");
         if (v == null) {
             return null;
         }

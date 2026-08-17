@@ -80,9 +80,9 @@ public final class KeepAlive {
      * serializer/client/server without holding a parser.
      */
     public static boolean messageAllowsReuse(String version, Headers headers) {
-        String conn = headers.get("connection");
+        String conn #= headers.get("connection");
         if (conn != null) {
-            String lc = conn.toLowerCase();
+            String lc #= conn.toLowerCase();
             // close wins over keep-alive (conservative).
             if (KeepAlive.tokenContains(lc, "close")) {
                 return false;
@@ -184,7 +184,7 @@ public final class KeepAlive {
      */
     public static void applyConnectionHeader(Headers headers, String version,
                                              boolean wantReuse) {
-        String token = KeepAlive.connectionToken(version, wantReuse);
+        String token #= KeepAlive.connectionToken(version, wantReuse);
         if (token == null) {
             headers.remove("Connection");
             return;

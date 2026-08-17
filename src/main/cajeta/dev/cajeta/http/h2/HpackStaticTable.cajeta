@@ -24,8 +24,8 @@ public final class HpackStaticTable {
         String[] n = heap String[62];
         String[] v = heap String[62];
         String empty = "";
-        n[0] = empty.substring(0, 0);
-        v[0] = empty.substring(0, 0);
+        n[0] #= empty.substring(0, 0);
+        v[0] #= empty.substring(0, 0);
         HpackStaticTable.set(n, v, 1, ":authority", "");
         HpackStaticTable.set(n, v, 2, ":method", "GET");
         HpackStaticTable.set(n, v, 3, ":method", "POST");
@@ -93,9 +93,9 @@ public final class HpackStaticTable {
 
     // Store owned copies of the literal name/value into slot `i`.
     static void set(String[] n, String[] v, int32 i, String nm, String vl) {
-        String nc = nm.substring(0, nm.byteLength());
+        String nc #= nm.substring(0, nm.byteLength());
         n[i] = #nc;
-        String vc = vl.substring(0, vl.byteLength());
+        String vc #= vl.substring(0, vl.byteLength());
         v[i] = #vc;
     }
 

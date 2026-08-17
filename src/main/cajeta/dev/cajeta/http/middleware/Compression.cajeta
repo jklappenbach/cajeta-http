@@ -110,7 +110,7 @@ public class Compression {
             if (blen < cfg.minBytes) {
                 return #resp;
             }
-            int8[] encoded =
+            int8[] encoded #=
                 ContentCoding.encode(coding, resp.body, blen, cfg.compLevel);
             int32 en = encoded.count();
             resp.body = #encoded;
@@ -132,7 +132,7 @@ public class Compression {
     static #HttpResponse compressStreamed(HttpResponse resp, int32 level) {
         Body src #= resp.bodyModel;
         resp.bodyModel = null;
-        GzipCompressBody cb = GzipCompressBody.of(#src, level);
+        GzipCompressBody cb #= GzipCompressBody.of(#src, level);
         resp.bodyModel = #cb;
         resp.setHeader("Content-Encoding", "gzip");
         return #resp;
@@ -143,7 +143,7 @@ public class Compression {
         if (ct == null) {
             return false;
         }
-        String c = ct.toLowerCase();
+        String c #= ct.toLowerCase();
         if (c.startsWith("text/")) {
             return true;
         }
@@ -170,7 +170,7 @@ public class Compression {
 
     /** Add `Accept-Encoding` to `Vary` (idempotent; `Vary: *` left as is). */
     static void addVary(HttpResponse resp) {
-        String v = resp.getHeaders().get("Vary");
+        String v #= resp.getHeaders().get("Vary");
         if (v == null) {
             resp.setHeader("Vary", "Accept-Encoding");
             return;

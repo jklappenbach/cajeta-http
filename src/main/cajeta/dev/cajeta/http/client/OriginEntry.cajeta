@@ -34,7 +34,7 @@ public final class OriginEntry {
     public static #OriginEntry of(String key, int32 maxPerOrigin) {
         OriginEntry e = heap OriginEntry();
         int32 n = key.byteLength();
-        int8[] kb = key.toBytes();
+        int8[] kb #= key.toBytes();
         String k = heap String(#kb, n);
         e.key = #k;
         Semaphore s = heap Semaphore(maxPerOrigin);

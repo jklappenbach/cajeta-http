@@ -95,8 +95,8 @@ public class Route {
      */
     public Route(String method, String pattern,
                  (HttpRequest) -> #HttpResponse handler) {
-        this.method = method.substring(0, method.byteLength());
-        this.pattern = pattern.substring(0, pattern.byteLength());
+        this.method #= method.substring(0, method.byteLength());
+        this.pattern #= pattern.substring(0, pattern.byteLength());
         this.handler = handler;
         this.maxBodyBytes = 0;
         this.mw = null;
@@ -118,7 +118,7 @@ public class Route {
         if (!this.isParam(last)) {
             return false;
         }
-        String t = this.paramType(last);
+        String t #= this.paramType(last);
         return t.equals("**");
     }
 
@@ -307,12 +307,12 @@ public class Route {
                 if (reqSeg.byteLength() == 0) {
                     return (int64) -1;
                 }
-                String type = this.paramType(i);
+                String type #= this.paramType(i);
                 if (type.equals("*")) {
                     // Single wildcard: binds any one (decoded) segment.
-                    String wName = this.paramName(i);
+                    String wName #= this.paramName(i);
                     try {
-                        String wDecoded = PercentCodec.decode(reqSeg);
+                        String wDecoded #= PercentCodec.decode(reqSeg);
                         out.put(#wName, #wDecoded);
                     } catch (MalformedUriException e) {
                         return (int64) -1;
@@ -320,9 +320,9 @@ public class Route {
                     cls = 3;
                 } else {
                     // Typed / string param: value must satisfy the type.
-                    String pName = this.paramName(i);
+                    String pName #= this.paramName(i);
                     try {
-                        String pDecoded = PercentCodec.decode(reqSeg);
+                        String pDecoded #= PercentCodec.decode(reqSeg);
                         if (!PathParams.matchesType(type, pDecoded)) {
                             return (int64) -1;       // type mismatch -> 404
                         }
@@ -344,8 +344,8 @@ public class Route {
         }
 
         if (this.hasDoubleStar) {
-            String restName = this.paramName(this.segmentCount - 1);
-            String rest = Route.joinRest(pathSegs, fixed, pathLen);
+            String restName #= this.paramName(this.segmentCount - 1);
+            String rest #= Route.joinRest(pathSegs, fixed, pathLen);
             out.put(#restName, #rest);
             int32 p = fixed;
             while (p < pathLen) {

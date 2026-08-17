@@ -26,7 +26,7 @@ public final class Status {
 
     Status(int32 code, String reason) {
         this.statusCode = code;
-        this.reasonPhrase = reason.substring(0, reason.byteLength());
+        this.reasonPhrase #= reason.substring(0, reason.byteLength());
     }
 
     /** A status with the registry's canonical reason (empty if unregistered). */

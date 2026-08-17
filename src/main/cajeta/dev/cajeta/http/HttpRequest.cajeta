@@ -152,8 +152,8 @@ public class HttpRequest {
      */
     public static #HttpRequest of(String method, String target) {
         HttpRequest r = heap HttpRequest();
-        r.method = method.substring(0, method.byteLength());
-        r.target = target.substring(0, target.byteLength());
+        r.method #= method.substring(0, method.byteLength());
+        r.target #= target.substring(0, target.byteLength());
         return #r;
     }
 
@@ -179,10 +179,10 @@ public class HttpRequest {
      */
     public static #HttpRequest fromUri(String method, Uri uri) {
         HttpRequest r = heap HttpRequest();
-        r.method = method.substring(0, method.byteLength());
-        r.target = HttpRequest.originForm(uri);
+        r.method #= method.substring(0, method.byteLength());
+        r.target #= HttpRequest.originForm(uri);
         if (uri.hasAuthority) {
-            String hostValue = HttpRequest.hostHeader(uri);
+            String hostValue #= HttpRequest.hostHeader(uri);
             r.headers.set("Host", hostValue);
         }
         return #r;
@@ -245,7 +245,7 @@ public class HttpRequest {
             return host.substring(0, hLen);
         }
         // host ":" decimal-port
-        String portStr = HttpRequest.decimal(uri.getPort());
+        String portStr #= HttpRequest.decimal(uri.getPort());
         int32 pLen = portStr.byteLength();
         int32 total = hLen + 1 + pLen;
         int8[] out = heap int8[total];
@@ -339,7 +339,7 @@ public class HttpRequest {
 
     /** Override the HTTP-version string and return `this`. */
     public HttpRequest version(String v) {
-        this.version = v.substring(0, v.byteLength());
+        this.version #= v.substring(0, v.byteLength());
         return this;
     }
 
@@ -349,7 +349,7 @@ public class HttpRequest {
      * (http:1.4f).
      */
     public HttpRequest target(String t) {
-        this.target = t.substring(0, t.byteLength());
+        this.target #= t.substring(0, t.byteLength());
         return this;
     }
 
@@ -506,12 +506,12 @@ public class HttpRequest {
     public HttpRequest body(#Body b) {
         MediaType t = b.contentType();
         if (t != null && !this.headers.contains("content-type")) {
-            String tv = t.format();
+            String tv #= t.format();
             this.headers.set("Content-Type", tv);
         }
         int64 n = b.contentLength();
         if (n >= (int64) 0) {
-            int8[] drained = HttpRequest.drainBody(b, (int32) n);
+            int8[] drained #= HttpRequest.drainBody(b, (int32) n);
             this.body = #drained;
             this.hasBody = true;
         }
@@ -546,8 +546,8 @@ public class HttpRequest {
             copy[i] = this.body[i];
             i = i + 1;
         }
-        MediaType t = this.contentType();
-        BytesBody bb = BytesBody.of(#copy, n, #t);
+        MediaType t #= this.contentType();
+        BytesBody bb #= BytesBody.of(#copy, n, #t);
         Body out = #bb;
         return #out;
     }

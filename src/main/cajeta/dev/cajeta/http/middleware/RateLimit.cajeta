@@ -62,7 +62,7 @@ public class RateLimit {
 
     /** Key buckets by request header `h` (default `X-Forwarded-For`). */
     public RateLimit keyByHeader(String h) {
-        this.keyHeader = h.substring(0, h.byteLength());
+        this.keyHeader #= h.substring(0, h.byteLength());
         return this;
     }
 
@@ -75,7 +75,7 @@ public class RateLimit {
 
     static #HttpResponse apply(RateLimit cfg, HttpRequest req,
                                (HttpRequest) -> #HttpResponse next) {
-        String key = RateLimit.keyOf(req, cfg.keyHeader);
+        String key #= RateLimit.keyOf(req, cfg.keyHeader);
         Instant t = Clock.now();
         int64 now = t.toEpochMilli();
         TokenBucket b = cfg.bucketFor(key, now);
@@ -83,14 +83,14 @@ public class RateLimit {
             return next(req);
         }
         int64 ra = b.retryAfterSecs(now);
-        HttpResponse resp = HttpResponse.of(429);
+        HttpResponse resp #= HttpResponse.of(429);
         resp.setHeader("Retry-After", "" + ra);
         return #resp;
     }
 
     /** The `keyHeader` value, or `*` when absent (owned). */
     static #String keyOf(HttpRequest req, String header) {
-        String v = req.getHeaders().get(header);
+        String v #= req.getHeaders().get(header);
         if (v == null) {
             String star = "*";
             return star.substring(0, star.byteLength());
@@ -110,7 +110,7 @@ public class RateLimit {
         if (this.count >= this.keys.count()) {
             this.grow();
         }
-        this.keys[this.count] = key.substring(0, key.byteLength());
+        this.keys[this.count] #= key.substring(0, key.byteLength());
         TokenBucket b = heap TokenBucket(this.capacity, this.refillPerSec, now);
         this.buckets[this.count] = #b;
         this.count = this.count + 1;

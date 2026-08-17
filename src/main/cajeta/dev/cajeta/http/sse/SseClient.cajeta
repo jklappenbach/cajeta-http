@@ -50,10 +50,10 @@ public final class SseClient {
 
     /** Subscribe to `url` (an `http://…` event-stream endpoint). */
     public SseClient(String url) {
-        Uri u = Uri.parse(url);
+        Uri u #= Uri.parse(url);
         this.uri = #u;
         String h = this.uri.getHost();
-        this.host = h.substring(0, h.byteLength());
+        this.host #= h.substring(0, h.byteLength());
         int32 p = this.uri.getPort();
         if (p <= 0) {
             p = 80;
@@ -84,7 +84,7 @@ public final class SseClient {
      * when resuming — `Last-Event-ID` set to the last seen event id.
      */
     public #HttpRequest buildRequest() {
-        HttpRequest req = HttpRequest.fromUri("GET", this.uri);
+        HttpRequest req #= HttpRequest.fromUri("GET", this.uri);
         req.setHeader("Accept", "text/event-stream");
         req.setHeader("Cache-Control", "no-cache");
         String last = this.decoder.lastEventId();
@@ -104,7 +104,7 @@ public final class SseClient {
             throw heap SseException("SSE: non-200 response ("
                 + resp.statusCode() + ")");
         }
-        MediaType ct = resp.contentType();
+        MediaType ct #= resp.contentType();
         if (ct == null || !ct.is("text", "event-stream")) {
             throw heap SseException(
                 "SSE: response is not text/event-stream");
@@ -172,10 +172,10 @@ public final class SseClient {
     void runOnce((SseEvent) -> void onEvent) {
         TcpStream conn #= SseClient.connect(this.host, this.port);
         try {
-            int8[] reqBytes = HttpSerializer.request(this.buildRequest());
+            int8[] reqBytes #= HttpSerializer.request(this.buildRequest());
             conn.writeAllAsync(reqBytes, (int64) 0, (int64) reqBytes.count());
 
-            HttpParser parser = HttpParser.forResponse();
+            HttpParser parser #= HttpParser.forResponse();
             int8[] scratch = heap int8[8192];
             boolean heading = true;
             while (heading) {
@@ -192,11 +192,11 @@ public final class SseClient {
                 }
             }
 
-            HttpResponse resp = parser.takeResponse();
+            HttpResponse resp #= parser.takeResponse();
             this.checkHead(resp);
 
             BodyFraming framing = parser.getFraming();
-            BodyReader body = BodyReader.forFraming(framing);
+            BodyReader body #= BodyReader.forFraming(framing);
             int32 lo = parser.leftoverLength();
             if (lo > 0) {
                 body.feed(parser.leftover(), lo);
@@ -227,20 +227,20 @@ public final class SseClient {
     }
 
     void drainToEvents(BodyReader body, (SseEvent) -> void onEvent) {
-        int8[] piece = body.drain();
+        int8[] piece #= body.drain();
         int32 pl = piece.count();
         if (pl > 0) {
             this.decoder.feed(piece, pl);
         }
         while (this.decoder.hasEvent()) {
-            SseEvent e = this.decoder.nextEvent();
+            SseEvent e #= this.decoder.nextEvent();
             onEvent(e);
         }
     }
 
     // Resolve `host` (IPv4) and open a blocking-friendly connection to `port`.
     static #TcpStream connect(String host, int32 port) {
-        SocketAddress[] addrs = Dns.resolve(host, port, ResolveFamily.V4_ONLY);
+        SocketAddress[] addrs #= Dns.resolve(host, port, ResolveFamily.V4_ONLY);
         SocketAddress a0 = addrs[0];
         IpAddress ip = a0.getIp();
         int8[] oct = ip.getOctets();
@@ -248,8 +248,8 @@ public final class SseClient {
         if (ip.isV4()) {
             olen = 4;
         }
-        IpAddress ipCopy = IpAddress.fromOctets(oct, olen);
-        SocketAddress connAddr = SocketAddress.of(#ipCopy, port);
+        IpAddress ipCopy #= IpAddress.fromOctets(oct, olen);
+        SocketAddress connAddr #= SocketAddress.of(#ipCopy, port);
         return TcpStream.connectAsync(#connAddr);
     }
 }

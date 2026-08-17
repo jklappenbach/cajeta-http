@@ -36,7 +36,7 @@ public final class AcceptEncoding {
         if (header == null) {
             return "identity";
         }
-        String h = header.toLowerCase();
+        String h #= header.toLowerCase();
         int32 starQ = AcceptEncoding.milliQ(h, "*");
 
         int32 gzipQ = AcceptEncoding.milliQ(h, "gzip");
@@ -72,7 +72,7 @@ public final class AcceptEncoding {
             if (c >= (int64) 0) {
                 end = (int32) c;
             }
-            String seg = h.substring(start, end).trim();
+            String seg #= h.substring(start, end).trim();
             int32 q = AcceptEncoding.segMatch(seg, token);
             if (q >= 0) {
                 return q;
@@ -91,7 +91,7 @@ public final class AcceptEncoding {
         int64 sc = seg.indexOf(";");
         String name = seg;
         if (sc >= (int64) 0) {
-            name = seg.substring(0, (int32) sc).trim();
+            name #= seg.substring(0, (int32) sc).trim();
         }
         if (!name.equals(token)) {
             return -1;
@@ -99,12 +99,12 @@ public final class AcceptEncoding {
         if (sc < (int64) 0) {
             return 1000;
         }
-        String params = seg.substring((int32) sc + 1, seg.byteLength());
+        String params #= seg.substring((int32) sc + 1, seg.byteLength());
         int64 qi = params.indexOf("q=");
         if (qi < (int64) 0) {
             return 1000;
         }
-        String qv = params.substring((int32) qi + 2, params.byteLength()).trim();
+        String qv #= params.substring((int32) qi + 2, params.byteLength()).trim();
         return AcceptEncoding.parseMilli(qv);
     }
 
@@ -114,7 +114,7 @@ public final class AcceptEncoding {
         if (n == 0) {
             return 0;
         }
-        int8[] b = qv.toBytes();
+        int8[] b #= qv.toBytes();
         int32 intPart = 0;
         int32 i = 0;
         while (i < n && b[i] != (int8) 46) {

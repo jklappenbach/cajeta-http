@@ -87,7 +87,7 @@ public class Cors {
             }
             this.origins #= grown;
         }
-        this.origins[this.originCount] = o.substring(0, o.byteLength());
+        this.origins[this.originCount] #= o.substring(0, o.byteLength());
         this.originCount = this.originCount + 1;
         return this;
     }
@@ -100,19 +100,19 @@ public class Cors {
 
     /** Set the `Access-Control-Allow-Methods` value. */
     public Cors allowMethods(String m) {
-        this.methods = m.substring(0, m.byteLength());
+        this.methods #= m.substring(0, m.byteLength());
         return this;
     }
 
     /** Set an explicit `Access-Control-Allow-Headers` (else the request's set is echoed). */
     public Cors allowHeaders(String h) {
-        this.allowHeaders = h.substring(0, h.byteLength());
+        this.allowHeaders #= h.substring(0, h.byteLength());
         return this;
     }
 
     /** Set `Access-Control-Expose-Headers` for actual responses. */
     public Cors exposeHeaders(String h) {
-        this.exposeHeaders = h.substring(0, h.byteLength());
+        this.exposeHeaders #= h.substring(0, h.byteLength());
         return this;
     }
 
@@ -188,20 +188,20 @@ public class Cors {
     /** The request/response logic — preflight short-circuit or actual-request stamping. */
     static #HttpResponse apply(Cors cfg, HttpRequest req,
                                (HttpRequest) -> #HttpResponse next) {
-        String origin = req.getHeaders().get("Origin");
+        String origin #= req.getHeaders().get("Origin");
         String method = req.getMethod();
-        String acrm = req.getHeaders().get("Access-Control-Request-Method");
+        String acrm #= req.getHeaders().get("Access-Control-Request-Method");
         boolean preflight = method.equals("OPTIONS") && acrm != null;
 
         if (preflight) {
-            HttpResponse resp = HttpResponse.of(204);
+            HttpResponse resp #= HttpResponse.of(204);
             if (origin != null) {
-                String acao = cfg.resolveOrigin(origin);
+                String acao #= cfg.resolveOrigin(origin);
                 if (acao != null) {
                     resp.setHeader("Access-Control-Allow-Origin", acao);
                     resp.setHeader("Access-Control-Allow-Methods", cfg.methods);
-                    String acrh = req.getHeaders().get("Access-Control-Request-Headers");
-                    String ah = cfg.allowHeadersFor(acrh);
+                    String acrh #= req.getHeaders().get("Access-Control-Request-Headers");
+                    String ah #= cfg.allowHeadersFor(acrh);
                     if (ah != null) {
                         resp.setHeader("Access-Control-Allow-Headers", ah);
                     }
@@ -221,7 +221,7 @@ public class Cors {
 
         HttpResponse resp = next(req);
         if (origin != null) {
-            String acao = cfg.resolveOrigin(origin);
+            String acao #= cfg.resolveOrigin(origin);
             if (acao != null) {
                 resp.setHeader("Access-Control-Allow-Origin", acao);
                 if (cfg.credentials) {

@@ -86,7 +86,7 @@ public class HttpClientBuilder {
 
     /** Pin the HTTP-version string every request goes out with. */
     public HttpClientBuilder version(String v) {
-        String p = v.substring(0, v.byteLength());
+        String p #= v.substring(0, v.byteLength());
         this.pin = #p;
         return this;
     }
@@ -151,7 +151,7 @@ public class HttpClientBuilder {
 
     /** Route every exchange through the HTTP proxy at `host:port`. */
     public HttpClientBuilder proxy(String host, int32 port) {
-        String ph = host.substring(0, host.byteLength());
+        String ph #= host.substring(0, host.byteLength());
         this.proxyHost = #ph;
         this.proxyPort = port;
         this.hasProxy = true;

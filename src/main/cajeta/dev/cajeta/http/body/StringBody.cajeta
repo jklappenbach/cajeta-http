@@ -31,10 +31,10 @@ public final class StringBody extends Body {
     /** A `text/plain; charset=utf-8` body over `s`'s UTF-8 bytes. */
     public static #StringBody of(String s) {
         StringBody b = heap StringBody();
-        int8[] d = s.toBytes();
+        int8[] d #= s.toBytes();
         b.data = #d;
         b.len = s.byteLength();
-        MediaType t = MediaType.parse("text/plain; charset=utf-8");
+        MediaType t #= MediaType.parse("text/plain; charset=utf-8");
         b.type = #t;
         StringBody.wire(b);
         return #b;
@@ -43,7 +43,7 @@ public final class StringBody extends Body {
     /** A body over `s`'s UTF-8 bytes with an explicit media type. */
     public static #StringBody of(String s, #MediaType type) {
         StringBody b = heap StringBody();
-        int8[] d = s.toBytes();
+        int8[] d #= s.toBytes();
         b.data = #d;
         b.len = s.byteLength();
         b.type = #type;

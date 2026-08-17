@@ -64,7 +64,7 @@ public final class ChunkedEncoder {
         if (length <= 0) {
             return heap int8[0];
         }
-        int8[] sizeLine = ChunkedEncoder.hexBytes(length);
+        int8[] sizeLine #= ChunkedEncoder.hexBytes(length);
         int32 sizeLen = sizeLine.count();
         // size-line + CRLF + data + CRLF
         int32 total = sizeLen + 2 + length + 2;

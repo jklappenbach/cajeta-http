@@ -439,7 +439,7 @@ public class HttpParser {
             pos = hEnd + 2;
         }
 
-        this.framing = this.decideFraming(headers);
+        this.framing #= this.decideFraming(headers);
     }
 
     /**
@@ -480,9 +480,9 @@ public class HttpParser {
                 "request-line missing target/version separator",
                 (int64) (sp1 + 1));
         }
-        String method = this.slice(start, sp1);
-        String target = this.slice(sp1 + 1, sp2);
-        String version = this.slice(sp2 + 1, end);
+        String method #= this.slice(start, sp1);
+        String target #= this.slice(sp1 + 1, sp2);
+        String version #= this.slice(sp2 + 1, end);
         if (method.byteLength() == 0 || target.byteLength() == 0
             || version.byteLength() == 0) {
             throw heap MalformedMessageException(
@@ -512,7 +512,7 @@ public class HttpParser {
         // A status line may omit the trailing space + reason; if there
         // is no second space, the code runs to end and the reason is "".
         int32 codeEnd = sp2 < 0 ? end : sp2;
-        String version = this.slice(start, sp1);
+        String version #= this.slice(start, sp1);
         int32 code = this.parseStatusCode(codeStart, codeEnd);
         String reason = sp2 < 0
             ? this.emptyString()
@@ -563,13 +563,13 @@ public class HttpParser {
             throw heap MalformedMessageException(
                 "header line has no ':' separator", (int64) start);
         }
-        String name = this.slice(start, colon);
+        String name #= this.slice(start, colon);
         if (name.byteLength() == 0) {
             throw heap MalformedMessageException(
                 "header line has an empty field name", (int64) start);
         }
         // Value is everything after the colon; Headers.add OWS-trims it.
-        String value = this.slice(colon + 1, end);
+        String value #= this.slice(colon + 1, end);
         headers.add(name, value);
     }
 
@@ -594,14 +594,14 @@ public class HttpParser {
         }
 
         // Transfer-Encoding: chunked wins over Content-Length.
-        String te = headers.get("transfer-encoding");
+        String te #= headers.get("transfer-encoding");
         if (te != null) {
             if (this.containsChunkedToken(te)) {
                 return BodyFraming.chunked(keepAlive);
             }
         }
 
-        String cl = headers.get("content-length");
+        String cl #= headers.get("content-length");
         if (cl != null) {
             int64 n = this.parseContentLength(cl);
             return BodyFraming.contentLength(n, keepAlive);
@@ -622,9 +622,9 @@ public class HttpParser {
      */
     boolean decideKeepAlive(Headers headers) {
         boolean isHttp10 = this.versionIsHttp10();
-        String conn = headers.get("connection");
+        String conn #= headers.get("connection");
         if (conn != null) {
-            String lc = conn.toLowerCase();
+            String lc #= conn.toLowerCase();
             if (this.tokenContains(lc, "close")) {
                 return false;
             }

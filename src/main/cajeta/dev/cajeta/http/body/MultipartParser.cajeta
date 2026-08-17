@@ -201,7 +201,7 @@ public final class MultipartParser {
         }
         // The delimiter line's own CRLF opens the block; the match's
         // first CRLF closes the last header line.
-        Headers hb = this.parseHeaderBlock(this.headerStart + 2, m + 2);
+        Headers hb #= this.parseHeaderBlock(this.headerStart + 2, m + 2);
         this.pendingHeaders #= hb;
         this.contentStart = m + 4;
         this.scanFrom = this.contentStart;
@@ -261,14 +261,14 @@ public final class MultipartParser {
         }
         Headers h #= this.pendingHeaders;
         this.pendingHeaders = null;
-        String disp = h.get("content-disposition");
-        String name = MultipartScan.dispositionParam(disp, "name");
-        String filename = MultipartScan.dispositionParam(disp, "filename");
-        String ctype = h.get("content-type");
-        MediaType mt = MediaType.parse(ctype);
-        BytesBody bb = BytesBody.of(#content, n, #mt);
+        String disp #= h.get("content-disposition");
+        String name #= MultipartScan.dispositionParam(disp, "name");
+        String filename #= MultipartScan.dispositionParam(disp, "filename");
+        String ctype #= h.get("content-type");
+        MediaType mt #= MediaType.parse(ctype);
+        BytesBody bb #= BytesBody.of(#content, n, #mt);
         Body body = #bb;
-        MultipartPart p = MultipartPart.of(#h, #name, #filename, #body);
+        MultipartPart p #= MultipartPart.of(#h, #name, #filename, #body);
         this.addPart(#p);
     }
 
@@ -291,8 +291,8 @@ public final class MultipartParser {
                         "multipart part header line has no ':' separator",
                         (int64) pos);
                 }
-                String name = this.sliceString(pos, colon);
-                String value = this.sliceString(colon + 1, end);
+                String name #= this.sliceString(pos, colon);
+                String value #= this.sliceString(colon + 1, end);
                 h.add(name, value);
             }
             pos = end + 2;
@@ -421,7 +421,7 @@ public final class MultipartParser {
                                                          int32 maxParts,
                                                          int32 maxPartBytes) {
         MultipartParser p = heap MultipartParser();
-        String b = MultipartPart.copyOf(boundary);
+        String b #= MultipartPart.copyOf(boundary);
         p.bound = #b;
         p.boundLen = boundary.byteLength();
         p.cap = 1024;
@@ -445,7 +445,7 @@ public final class MultipartParser {
         if (type == null) {
             return null;
         }
-        String v = type.parameter("boundary");
+        String v #= type.parameter("boundary");
         return #v;
     }
 }

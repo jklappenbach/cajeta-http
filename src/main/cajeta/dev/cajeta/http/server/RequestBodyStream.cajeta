@@ -116,10 +116,10 @@ public final class RequestBodyStream {
      * [`read`](#read) returns empty.
      */
     public static #RequestBodyStream forRequest(HttpParser parser, AsyncReader reader) {
-        BodyReader br = BodyReader.forFraming(parser.getFraming());
+        BodyReader br #= BodyReader.forFraming(parser.getFraming());
         int32 leftoverLen = parser.leftoverLength();
         if (leftoverLen > 0) {
-            int8[] leftover = parser.leftover();
+            int8[] leftover #= parser.leftover();
             br.feed(leftover, leftoverLen);
         }
         RequestBodyStream s = heap RequestBodyStream(#br, reader);
@@ -154,7 +154,7 @@ public final class RequestBodyStream {
     public #int8[] read() {
         // Already-decoded bytes buffered by a prior feed (incl. the seed).
         if (this.body.decodedLength() > 0) {
-            int8[] ready = this.body.drain();
+            int8[] ready #= this.body.drain();
             this.afterFeed();
             return #ready;
         }
@@ -167,7 +167,7 @@ public final class RequestBodyStream {
         if (n == 0) {
             this.body.endInput();           // KIND_CLOSE completes; others throw
             this.complete = true;
-            int8[] tail = this.body.drain();
+            int8[] tail #= this.body.drain();
             this.afterFeed();
             return #tail;
         }
@@ -175,7 +175,7 @@ public final class RequestBodyStream {
         if (this.body.isComplete()) {
             this.complete = true;
         }
-        int8[] decoded = this.body.drain();
+        int8[] decoded #= this.body.drain();
         this.afterFeed();
         return #decoded;
     }
@@ -191,7 +191,7 @@ public final class RequestBodyStream {
         }
         int32 tailLen = this.body.leftoverLength();
         if (tailLen > 0) {
-            int8[] tail = this.body.leftover();
+            int8[] tail #= this.body.leftover();
             this.reader.stage(tail, tailLen);
         }
         this.drained = true;

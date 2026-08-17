@@ -98,7 +98,7 @@ public final class GzipCompressChannel implements ByteChannel {
     /** Refill `pending` with the next stage; false only when fully drained. */
     boolean produce() {
         if (this.phase == 0) {
-            int8[] h = GzipCompressChannel.header();
+            int8[] h #= GzipCompressChannel.header();
             this.pendLen = h.count();
             this.pending = #h;
             this.pendPos = 0;
@@ -111,15 +111,15 @@ public final class GzipCompressChannel implements ByteChannel {
                 this.crc.update(this.inbuf, got);
                 this.isize = this.isize + (int64) got;
                 this.def.write(this.inbuf, got);
-                int8[] out = this.def.syncFlush();
+                int8[] out #= this.def.syncFlush();
                 this.pendLen = out.count();
                 this.pending = #out;
                 this.pendPos = 0;
                 return true;
             }
-            int8[] tail = this.def.finish();
-            int8[] trailer = this.trailer();
-            int8[] merged = GzipCompressChannel.concat(tail, trailer);
+            int8[] tail #= this.def.finish();
+            int8[] trailer #= this.trailer();
+            int8[] merged #= GzipCompressChannel.concat(tail, trailer);
             this.pendLen = merged.count();
             this.pending = #merged;
             this.pendPos = 0;

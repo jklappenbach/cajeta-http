@@ -186,7 +186,7 @@ public final class SseByteChannel implements ByteChannel {
             this.done = true;
             return false;
         }
-        int8[] wire = this.events[this.evIdx].serialize();
+        int8[] wire #= this.events[this.evIdx].serialize();
         this.evIdx = this.evIdx + 1;
         this.stash(#wire);
         return true;
@@ -197,12 +197,12 @@ public final class SseByteChannel implements ByteChannel {
             return this.refillPolling();
         }
         // Blocking: park until the producer sends, or the channel drains.
-        SseEvent e = this.ch.receive();
+        SseEvent e #= this.ch.receive();
         if (e == null) {
             this.done = true;
             return false;
         }
-        int8[] wire = e.serialize();
+        int8[] wire #= e.serialize();
         this.stash(#wire);
         return true;
     }
@@ -218,9 +218,9 @@ public final class SseByteChannel implements ByteChannel {
                 this.done = true;
                 return false;
             }
-            SseEvent e = this.ch.tryReceive();
+            SseEvent e #= this.ch.tryReceive();
             if (e != null) {
-                int8[] wire = e.serialize();
+                int8[] wire #= e.serialize();
                 this.stash(#wire);
                 return true;
             }
@@ -230,7 +230,7 @@ public final class SseByteChannel implements ByteChannel {
             }
             int64 now = Clock.now().toEpochMilli();
             if (now >= deadline) {
-                int8[] ka = SseByteChannel.keepAliveBytes();
+                int8[] ka #= SseByteChannel.keepAliveBytes();
                 this.stash(#ka);
                 return true;
             }

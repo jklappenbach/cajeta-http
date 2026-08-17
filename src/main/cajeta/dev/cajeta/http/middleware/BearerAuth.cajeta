@@ -30,7 +30,7 @@ public class BearerAuth {
     (String) -> boolean verify;
 
     public BearerAuth(String realm) {
-        this.realm = realm.substring(0, realm.byteLength());
+        this.realm #= realm.substring(0, realm.byteLength());
         this.verify = null;
     }
 
@@ -54,11 +54,11 @@ public class BearerAuth {
 
     static #HttpResponse apply(BearerAuth cfg, HttpRequest req,
                                (HttpRequest) -> #HttpResponse next) {
-        String h = req.getHeaders().get("Authorization");
+        String h #= req.getHeaders().get("Authorization");
         if (h == null || !h.startsWith("Bearer ")) {
             return BearerAuth.challenge(cfg);
         }
-        String token = h.substring(7, h.byteLength()).trim();
+        String token #= h.substring(7, h.byteLength()).trim();
         if (token.byteLength() == 0) {
             return BearerAuth.challenge(cfg);
         }
@@ -72,7 +72,7 @@ public class BearerAuth {
 
     /** `401` with the `Bearer` challenge for this realm. */
     static #HttpResponse challenge(BearerAuth cfg) {
-        HttpResponse resp = HttpResponse.of(401);
+        HttpResponse resp #= HttpResponse.of(401);
         resp.setHeader("WWW-Authenticate", "Bearer realm=\"" + cfg.realm + "\"");
         return #resp;
     }

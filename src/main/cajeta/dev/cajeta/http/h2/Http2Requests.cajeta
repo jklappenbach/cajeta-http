@@ -74,7 +74,7 @@ public final class Http2Requests {
             throw heap Http2Exception("missing required pseudo-header",
                                       Http2.PROTOCOL_ERROR);
         }
-        HttpRequest req = HttpRequest.of(method, path);
+        HttpRequest req #= HttpRequest.of(method, path);
         req.version("HTTP/2.0");
         i = 0;
         while (i < fields.size()) {
@@ -136,7 +136,7 @@ public final class Http2Requests {
             }
             i = i + 1;
         }
-        HttpResponse resp = HttpResponse.of(status);
+        HttpResponse resp #= HttpResponse.of(status);
         i = 0;
         while (i < fields.size()) {
             String n = fields.nameAt(i);
@@ -166,7 +166,7 @@ public final class Http2Requests {
     /** Build a `:status`-only response header list (a pushed response, v1). */
     public static #HpackFieldList statusOnlyFields(int32 status) {
         HpackFieldList fl = heap HpackFieldList();
-        String s = Http2Requests.statusString(status);
+        String s #= Http2Requests.statusString(status);
         fl.put(Http2Requests.own(":status"), #s);
         return #fl;
     }
@@ -174,7 +174,7 @@ public final class Http2Requests {
     /** Build the HPACK header list for a response (`:status` first). */
     public static #HpackFieldList responseFields(HttpResponse resp) {
         HpackFieldList fl = heap HpackFieldList();
-        String status = Http2Requests.statusString(resp.status);
+        String status #= Http2Requests.statusString(resp.status);
         String sname = ":status";
         fl.put(Http2Requests.own(sname), #status);
         Headers h = resp.getHeaders();

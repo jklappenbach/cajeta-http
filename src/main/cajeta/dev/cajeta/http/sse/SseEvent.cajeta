@@ -30,15 +30,15 @@ public final class SseEvent {
     /** A `message` event carrying `data` (copied). */
     public static #SseEvent of(String data) {
         SseEvent e = heap SseEvent();
-        e.data = data.substring(0, data.byteLength());
+        e.data #= data.substring(0, data.byteLength());
         return #e;
     }
 
     /** A typed event (`event:` field = `type`) carrying `data`. */
     public static #SseEvent typed(String type, String data) {
         SseEvent e = heap SseEvent();
-        e.event = type.substring(0, type.byteLength());
-        e.data = data.substring(0, data.byteLength());
+        e.event #= type.substring(0, type.byteLength());
+        e.data #= data.substring(0, data.byteLength());
         return #e;
     }
 
@@ -65,7 +65,7 @@ public final class SseEvent {
         int32 i = 0;
         while (i <= n) {
             if (i == n || this.data.byteAt(i) == (int8) 10) {
-                String line = this.data.substring(start, i);
+                String line #= this.data.substring(start, i);
                 out = out + "data: " + line + "\n";
                 start = i + 1;
             }

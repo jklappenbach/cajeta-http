@@ -61,7 +61,7 @@ public class WsClientHandshake {
      * handshake headers are added on top.
      */
     public static #HttpRequest buildRequest(Uri uri, String key) {
-        HttpRequest r = HttpRequest.fromUri("GET", uri);
+        HttpRequest r #= HttpRequest.fromUri("GET", uri);
         r.setHeader("Upgrade", "websocket");
         r.setHeader("Connection", "Upgrade");
         r.setHeader("Sec-WebSocket-Key", key);
@@ -81,11 +81,11 @@ public class WsClientHandshake {
             return false;
         }
         Headers h = response.getHeaders();
-        String got = h.get("Sec-WebSocket-Accept");
+        String got #= h.get("Sec-WebSocket-Accept");
         if (got == null) {
             return false;
         }
-        String expect = WsServerHandshake.acceptKey(key);
+        String expect #= WsServerHandshake.acceptKey(key);
         return got.equals(expect);
     }
 

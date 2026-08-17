@@ -35,9 +35,9 @@ public class RequestId {
     public static #Middleware middleware() {
         (HttpRequest, (HttpRequest) -> #HttpResponse) -> #HttpResponse f =
             (req, next) -> {
-                String id = req.getHeaders().get("X-Request-Id");
+                String id #= req.getHeaders().get("X-Request-Id");
                 if (id == null) {
-                    id = RequestId.generate();
+                    id #= RequestId.generate();
                 }
                 req.setHeader("X-Request-Id", id);
                 HttpResponse resp = next(req);

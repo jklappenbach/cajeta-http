@@ -49,7 +49,7 @@ public final class Http2WriteSide {
      * collide (RFC 9113 §5.1.1).
      */
     public int32 nextPromisedId() {
-        LockGuard g = this.lock.acquire();
+        LockGuard g #= this.lock.acquire();
         this.promisedId = this.promisedId + 2;
         return this.promisedId;
     }
@@ -60,13 +60,13 @@ public final class Http2WriteSide {
      */
     public void writePushPromise(int32 streamId, int32 promisedId,
                                  HpackFieldList fields) {
-        LockGuard g = this.lock.acquire();
-        int8[] block = this.henc.encode(fields);
+        LockGuard g #= this.lock.acquire();
+        int8[] block #= this.henc.encode(fields);
         int32 blockLen = (int32) block.count();
         Http2FrameWriter fw = heap Http2FrameWriter();
         Http2ContentFrames.writePushPromise(fw, streamId, promisedId, block,
                                             blockLen, true, 0);
-        int8[] bytes = fw.toBytes();
+        int8[] bytes #= fw.toBytes();
         this.writer.writeAll(bytes, 0, (int32) bytes.count());
         this.writer.flush();
     }
@@ -76,9 +76,9 @@ public final class Http2WriteSide {
      * RST_STREAM, GOAWAY, WINDOW_UPDATE) as one atomic socket write.
      */
     public void writeControl(Http2FrameWriter fw) {
-        int8[] bytes = fw.toBytes();
+        int8[] bytes #= fw.toBytes();
         int32 n = (int32) bytes.count();
-        LockGuard g = this.lock.acquire();
+        LockGuard g #= this.lock.acquire();
         this.writer.writeAll(bytes, 0, n);
         this.writer.flush();
     }
@@ -89,13 +89,13 @@ public final class Http2WriteSide {
      * on the wire stay consistent with the peer's decode order.
      */
     public void writeHeaders(int32 sid, HpackFieldList fields, boolean endStream) {
-        LockGuard g = this.lock.acquire();
-        int8[] block = this.henc.encode(fields);
+        LockGuard g #= this.lock.acquire();
+        int8[] block #= this.henc.encode(fields);
         int32 blockLen = (int32) block.count();
         Http2FrameWriter fw = heap Http2FrameWriter();
         Http2ContentFrames.writeHeaders(fw, sid, block, blockLen, endStream,
                                         true, 0);
-        int8[] bytes = fw.toBytes();
+        int8[] bytes #= fw.toBytes();
         this.writer.writeAll(bytes, 0, (int32) bytes.count());
         this.writer.flush();
     }
@@ -103,11 +103,11 @@ public final class Http2WriteSide {
     /** Write one DATA frame carrying `body[off .. off+len)`. */
     public void writeData(int32 sid, int8[] body, int32 off, int32 len,
                           boolean last) {
-        int8[] slice = Http2WriteSide.slice(body, off, len);
-        LockGuard g = this.lock.acquire();
+        int8[] slice #= Http2WriteSide.slice(body, off, len);
+        LockGuard g #= this.lock.acquire();
         Http2FrameWriter fw = heap Http2FrameWriter();
         Http2ContentFrames.writeData(fw, sid, slice, len, last, 0);
-        int8[] bytes = fw.toBytes();
+        int8[] bytes #= fw.toBytes();
         this.writer.writeAll(bytes, 0, (int32) bytes.count());
         this.writer.flush();
     }

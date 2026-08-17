@@ -72,7 +72,7 @@ public final class MultipartBody extends Body {
 
     /** An empty body with a generated boundary. */
     public static #MultipartBody of() {
-        String b = MultipartBody.generateBoundary();
+        String b #= MultipartBody.generateBoundary();
         return MultipartBody.withBoundary(b);
     }
 
@@ -82,9 +82,9 @@ public final class MultipartBody extends Body {
         m.cap = 8;
         MultipartPart[] ps = heap MultipartPart[8];
         m.parts = #ps;
-        String b = MultipartPart.copyOf(boundary);
+        String b #= MultipartPart.copyOf(boundary);
         m.bound = #b;
-        MediaType t = MultipartBody.typeFor(boundary);
+        MediaType t #= MultipartBody.typeFor(boundary);
         m.type = #t;
         return #m;
     }
@@ -106,7 +106,7 @@ public final class MultipartBody extends Body {
         MultipartBody.boundarySeq = MultipartBody.boundarySeq + (int64) 1;
         String s = "----cajeta-" + MultipartBody.hex(ms)
                  + MultipartBody.hex(MultipartBody.boundarySeq);
-        String owned = MultipartPart.copyOf(s);
+        String owned #= MultipartPart.copyOf(s);
         return #owned;
     }
 
@@ -163,14 +163,14 @@ public final class MultipartBody extends Body {
 
     /** Append a simple `name=value` form field. */
     public MultipartBody addField(String name, String value) {
-        MultipartPart p = MultipartPart.field(name, value);
+        MultipartPart p #= MultipartPart.field(name, value);
         return this.addPart(#p);
     }
 
     /** Append a file part over the adopted `data[0..len)`. */
     public MultipartBody addFile(String name, String filename,
                                  #MediaType type, #int8[] data, int32 len) {
-        MultipartPart p = MultipartPart.file(name, filename, #type, #data, len);
+        MultipartPart p #= MultipartPart.file(name, filename, #type, #data, len);
         return this.addPart(#p);
     }
 

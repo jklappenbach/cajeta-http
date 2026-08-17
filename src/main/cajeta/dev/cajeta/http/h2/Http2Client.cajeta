@@ -30,7 +30,7 @@ public final class Http2Client {
                                          HttpRequest req, String scheme,
                                          String authority) {
         // -- send: preface + SETTINGS + request HEADERS(+DATA) ---------------
-        int8[] pf = Http2.preface();
+        int8[] pf #= Http2.preface();
         writer.writeAll(pf, 0, 24);
 
         Http2FrameWriter fw = heap Http2FrameWriter();
@@ -41,8 +41,8 @@ public final class Http2Client {
         Http2Frames.writeSettings(fw, st);
 
         HpackEncoder enc = heap HpackEncoder(Http2.DEFAULT_HEADER_TABLE_SIZE, true);
-        HpackFieldList fl = Http2Requests.requestFields(req, scheme, authority);
-        int8[] block = enc.encode(fl);
+        HpackFieldList fl #= Http2Requests.requestFields(req, scheme, authority);
+        int8[] block #= enc.encode(fl);
         boolean hasBody = req.hasBody && req.bodyLength() > 0;
         Http2ContentFrames.writeHeaders(fw, 1, block, (int32) block.count(),
                                         !hasBody, true, 0);
@@ -50,7 +50,7 @@ public final class Http2Client {
             Http2ContentFrames.writeData(fw, 1, req.body, req.bodyLength(),
                                          true, 0);
         }
-        int8[] out = fw.toBytes();
+        int8[] out #= fw.toBytes();
         writer.writeAll(out, 0, (int32) out.count());
         writer.flush();
 
@@ -84,16 +84,16 @@ public final class Http2Client {
                         Http2Client.sendSettingsAck(writer);
                     }
                 } else if (type == Http2.FRAME_HEADERS) {
-                    Http2Payload reg = Http2ContentFrames.parseHeaders(pl, len,
+                    Http2Payload reg #= Http2ContentFrames.parseHeaders(pl, len,
                                                                       flags, sid);
-                    int8[] blk = Http2Client.slice(pl, reg.offset, reg.length);
-                    respFields = dec.decode(blk, reg.length);
+                    int8[] blk #= Http2Client.slice(pl, reg.offset, reg.length);
+                    respFields #= dec.decode(blk, reg.length);
                     sawHeaders = true;
                     if ((flags & Http2.FLAG_END_STREAM) != 0) {
                         done = true;
                     }
                 } else if (type == Http2.FRAME_DATA) {
-                    Http2Payload reg = Http2ContentFrames.parseData(pl, len,
+                    Http2Payload reg #= Http2ContentFrames.parseData(pl, len,
                                                                    flags, sid);
                     int32 j = 0;
                     while (j < reg.length) {
@@ -139,7 +139,7 @@ public final class Http2Client {
             throw heap Http2Exception("no response HEADERS received",
                                       Http2.PROTOCOL_ERROR);
         }
-        HttpResponse resp = Http2Requests.responseFromFields(respFields);
+        HttpResponse resp #= Http2Requests.responseFromFields(respFields);
         if (bodyLen > 0) {
             resp.body(body, bodyLen);
         }
@@ -149,7 +149,7 @@ public final class Http2Client {
     static void sendSettingsAck(AsyncWriter writer) {
         Http2FrameWriter fw = heap Http2FrameWriter();
         Http2Frames.writeSettingsAck(fw);
-        int8[] b = fw.toBytes();
+        int8[] b #= fw.toBytes();
         writer.writeAll(b, 0, (int32) b.count());
         writer.flush();
     }
