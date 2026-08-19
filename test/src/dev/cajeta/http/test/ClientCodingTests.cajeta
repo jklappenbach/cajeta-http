@@ -247,12 +247,12 @@ public final class ClientCodingTests {
         HttpClient client = heap HttpClient();
         String url = "http://127.0.0.1:" + port + "/json";
         JsonValue v = client.getJson(url);
-        JsonObject o = v.asObject();
+        JsonObject o = v.object();
         String name = o.get("name").asString();
         if (!name.equals("cajeta")) { return -1; }
         if (o.get("n").asInt64() != (int64) 42) { return -2; }
         if (!o.get("ok").asBoolean()) { return -3; }
-        JsonArray tags = o.get("tags").asArray();
+        JsonArray tags = o.get("tags").array();
         if (tags.count() != 2) { return -4; }
         String t0 = tags.get(0).asString();
         if (!t0.equals("a")) { return -5; }

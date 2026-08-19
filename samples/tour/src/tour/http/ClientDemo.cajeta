@@ -104,7 +104,7 @@ public class ClientDemo extends DemoClass {
         client.exchangeTimeout(15000);
         client.defaultHeader("Connection", "close");
         JsonValue v = client.getJson("http://127.0.0.1:" + port + "/status");
-        JsonObject o = v.asObject();
+        JsonObject o = v.object();
         if (!o.get("service").asString().equals("orders")) {
             return 0 - 1;
         }
