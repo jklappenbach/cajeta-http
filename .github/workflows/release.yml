@@ -32,7 +32,18 @@ jobs:
       #
       # Raised to v0.12.1 with the unit-5 tour rewrite: the expanded tour is
       # authored and verified against the 0.12 line.
-      cajeta-version: v0.15.0
+      #
+      # Raised to v0.22.2, and again a correctness requirement. Commit f02c1f6
+      # migrated this tree onto the cajeta v0.22 stdlib rename
+      # `JsonValue.asArray()/asObject()` -> `array()/object()`, so the sources
+      # now call `array()`/`object()`. Checked, not assumed:
+      # `git show v0.15.0:runtime/src/cajeta/codec/json/JsonValue.cajeta` still
+      # declares `asArray`/`asObject`. The old pin therefore could not compile
+      # the sources it was aimed at, and every tagged run would have died in
+      # `cajeta build` -- before reaching the Publish-to-Olla step the tag exists
+      # to trigger. v0.22.2 is the build this tree is verified green against;
+      # v0.23.0 and v0.24.0 are released but unverified here.
+      cajeta-version: v0.22.2
       # Suite + tour + tour-coverage gate, chained in scripts/ci-checks.sh.
       # (`./run-tests.sh` rather than `cajeta test` because the suite needs the
       # codec's native zlib backend extracted out of its .cja with
