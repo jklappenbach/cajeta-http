@@ -31,7 +31,7 @@ public final class MiddlewareTests {
     static void perRouteInsideGlobal(Check c) {
         Trace t = heap Trace();
 
-        Middleware cc = Middleware.of((req, next) -> {
+        Middleware cc #= Middleware.of((req, next) -> {
             t.mark((int8) 67);                 // 'C' (per-route)
             HttpResponse r = next(req);
             t.mark((int8) 99);                 // 'c'
@@ -46,13 +46,13 @@ public final class MiddlewareTests {
         Router router = heap Router();
         router.routeMw("GET", "/x", #routeChain, handler);
 
-        Middleware a = Middleware.of((req, next) -> {
+        Middleware a #= Middleware.of((req, next) -> {
             t.mark((int8) 65);                 // 'A' (global)
             HttpResponse r = next(req);
             t.mark((int8) 97);                 // 'a'
             return r;
         });
-        Middleware b = Middleware.of((req, next) -> {
+        Middleware b #= Middleware.of((req, next) -> {
             t.mark((int8) 66);                 // 'B' (global)
             HttpResponse r = next(req);
             t.mark((int8) 98);                 // 'b'
@@ -61,9 +61,9 @@ public final class MiddlewareTests {
         MiddlewareChain global = heap MiddlewareChain();
         global.use(#a).use(#b);
         (HttpRequest) -> #HttpResponse dispatchH = (req) -> router.dispatch(req);
-        (HttpRequest) -> #HttpResponse app = global.compose(dispatchH);
+        (HttpRequest) -> #HttpResponse app #= global.compose(dispatchH);
 
-        HttpResponse resp = app(HttpRequest.of("GET", "/x"));
+        HttpResponse resp #= app(HttpRequest.of("GET", "/x"));
         c.eqInt((int64) resp.statusCode(), 200,
                 "per-route-inside-global reaches the handler");
         c.eqStr(t.str(), "ABCHcba",
@@ -73,19 +73,19 @@ public final class MiddlewareTests {
     // A tag-order trace: middlewares append a byte on the way in and out.
     static void order(Check c) {
         Trace t = heap Trace();
-        Middleware a = Middleware.of((req, next) -> {
+        Middleware a #= Middleware.of((req, next) -> {
             t.mark((int8) 65);                 // 'A' in
             HttpResponse r = next(req);
             t.mark((int8) 97);                 // 'a' out
             return r;
         });
-        Middleware b = Middleware.of((req, next) -> {
+        Middleware b #= Middleware.of((req, next) -> {
             t.mark((int8) 66);                 // 'B'
             HttpResponse r = next(req);
             t.mark((int8) 98);                 // 'b'
             return r;
         });
-        Middleware cc = Middleware.of((req, next) -> {
+        Middleware cc #= Middleware.of((req, next) -> {
             t.mark((int8) 67);                 // 'C'
             HttpResponse r = next(req);
             t.mark((int8) 99);                 // 'c'
@@ -98,9 +98,9 @@ public final class MiddlewareTests {
 
         MiddlewareChain chain = heap MiddlewareChain();
         chain.use(#a).use(#b).use(#cc);
-        (HttpRequest) -> #HttpResponse app = chain.compose(h);
+        (HttpRequest) -> #HttpResponse app #= chain.compose(h);
 
-        HttpResponse resp = app(HttpRequest.of("GET", "/x"));
+        HttpResponse resp #= app(HttpRequest.of("GET", "/x"));
         c.eqInt((int64) resp.statusCode(), 200, "composed chain reaches the handler");
         c.eqStr(t.str(), "ABCHcba",
                 "first-registered outermost; response bubbles back out");
@@ -110,17 +110,17 @@ public final class MiddlewareTests {
     // middleware and the handler never run.
     static void shortCircuit(Check c) {
         Trace t = heap Trace();
-        Middleware a = Middleware.of((req, next) -> {
+        Middleware a #= Middleware.of((req, next) -> {
             t.mark((int8) 65);                 // 'A'
             HttpResponse r = next(req);
             t.mark((int8) 97);                 // 'a'
             return r;
         });
-        Middleware deny = Middleware.of((req, next) -> {
+        Middleware deny #= Middleware.of((req, next) -> {
             t.mark((int8) 68);                 // 'D' — deny, no next
             return HttpResponse.of(403);
         });
-        Middleware cc = Middleware.of((req, next) -> {
+        Middleware cc #= Middleware.of((req, next) -> {
             t.mark((int8) 67);                 // 'C' (should never run)
             return next(req);
         });
@@ -131,9 +131,9 @@ public final class MiddlewareTests {
 
         MiddlewareChain chain = heap MiddlewareChain();
         chain.use(#a).use(#deny).use(#cc);
-        (HttpRequest) -> #HttpResponse app = chain.compose(h);
+        (HttpRequest) -> #HttpResponse app #= chain.compose(h);
 
-        HttpResponse resp = app(HttpRequest.of("GET", "/x"));
+        HttpResponse resp #= app(HttpRequest.of("GET", "/x"));
         c.eqInt((int64) resp.statusCode(), 403, "short-circuit returns the deny response");
         // 'A' in, 'D' deny; inner 'C'/'H' skipped, and 'a' still runs on the
         // way out (A wrapped deny's returned response).
@@ -144,7 +144,7 @@ public final class MiddlewareTests {
     // (catching it is Recover's job in 2.2a).
     static void exceptionCrossing(Check c) {
         Trace t = heap Trace();
-        Middleware a = Middleware.of((req, next) -> {
+        Middleware a #= Middleware.of((req, next) -> {
             t.mark((int8) 65);                 // 'A'
             HttpResponse r = next(req);
             t.mark((int8) 97);                 // 'a' — must NOT run (throw crosses)
@@ -157,11 +157,11 @@ public final class MiddlewareTests {
 
         MiddlewareChain chain = heap MiddlewareChain();
         chain.use(#a);
-        (HttpRequest) -> #HttpResponse app = chain.compose(h);
+        (HttpRequest) -> #HttpResponse app #= chain.compose(h);
 
         boolean caught = false;
         try {
-            HttpResponse resp = app(HttpRequest.of("GET", "/x"));
+            HttpResponse resp #= app(HttpRequest.of("GET", "/x"));
         } catch (HttpException e) {
             caught = true;
         }

@@ -63,28 +63,28 @@ public class ServerDemo extends DemoClass {
     // callers use (a client per request would defeat the pool).
     // Return value = how many steps passed (expect 4).
     public static async int32 driveApi(int32 port) {
-        HttpClient client = heap HttpClient();
+        HttpClient client #= heap HttpClient();
         client.exchangeTimeout(15000);
         int32 passed = 0;
 
-        HttpResponse r1 = client.get("http://127.0.0.1:" + port + "/orders/7");
-        String b1 = DemoClass.bodyString(r1.body, r1.bodyLength());
+        HttpResponse r1 #= client.get("http://127.0.0.1:" + port + "/orders/7");
+        String b1 #= DemoClass.bodyString(r1.body, r1.bodyLength());
         if (r1.statusCode() == 200 && b1.equals("order 7")) {
             passed = passed + 1;
         }
 
-        Uri post = Uri.builder()
+        Uri post #= Uri.builder()
             .scheme("http").host("127.0.0.1").port(port).path("/orders")
             .build();
-        HttpRequest req = HttpRequest.fromUri("POST", post);
+        HttpRequest req #= HttpRequest.fromUri("POST", post);
         String order = "{\"symbol\":\"ACME\",\"qty\":250}";
         req.body(order.toBytes(), order.byteLength());
-        HttpResponse r2 = client.send(post, req);
+        HttpResponse r2 #= client.send(post, req);
         if (r2.statusCode() == 201) {
             passed = passed + 1;
         }
 
-        HttpResponse r3 = client.get("http://127.0.0.1:" + port + "/nope");
+        HttpResponse r3 #= client.get("http://127.0.0.1:" + port + "/nope");
         if (r3.statusCode() == 404) {
             passed = passed + 1;
         }
@@ -92,7 +92,7 @@ public class ServerDemo extends DemoClass {
         // Last request: close the keep-alive connection politely, so the
         // server has no parked connection fiber when shutdown() drains.
         client.defaultHeader("Connection", "close");
-        HttpResponse r4 = client.get("http://127.0.0.1:" + port + "/orders/7x");
+        HttpResponse r4 #= client.get("http://127.0.0.1:" + port + "/orders/7x");
         if (r4.statusCode() == 404) {           // typed {id:int64} rejects "7x"
             passed = passed + 1;
         }
@@ -104,9 +104,9 @@ public class ServerDemo extends DemoClass {
     // raw bytes (one write, then read to EOF) rather than a full client
     // exchange. 1 = saw the 413.
     public static async int32 overCapPost(int32 port) {
-        IpAddress ca = IpAddress.loopbackV4();
-        SocketAddress addr = SocketAddress.of(#ca, port);
-        TcpStream sock = TcpStream.connectAsync(#addr);
+        IpAddress ca #= IpAddress.loopbackV4();
+        SocketAddress addr #= SocketAddress.of(#ca, port);
+        TcpStream sock #= TcpStream.connectAsync(#addr);
         AsyncWriter w = heap AsyncWriter(sock);
         AsyncReader r = heap AsyncReader(sock);
         String blob = "";
@@ -118,7 +118,7 @@ public class ServerDemo extends DemoClass {
         String wire = "POST /orders HTTP/1.1\r\nhost: orders\r\n"
             + "connection: close\r\ncontent-length: " + blob.byteLength()
             + "\r\n\r\n" + blob;
-        int8[] wb = wire.toBytes();
+        int8[] wb #= wire.toBytes();
         w.writeAll(wb, 0, wire.byteLength());
         w.flush();
         int8[] buf = heap int8[4096];
@@ -133,7 +133,7 @@ public class ServerDemo extends DemoClass {
             }
         }
         sock.close();
-        String resp = DemoClass.bodyString(buf, total);
+        String resp #= DemoClass.bodyString(buf, total);
         if (resp.contains("413")) {
             return 1;
         }
@@ -144,22 +144,22 @@ public class ServerDemo extends DemoClass {
     // Decompression middleware inflates before the handler. 1 = the
     // handler saw the PLAIN byte count.
     public static async int32 gzipPost(int32 port) {
-        HttpClient client = heap HttpClient();
+        HttpClient client #= heap HttpClient();
         client.exchangeTimeout(15000);
         client.defaultHeader("Connection", "close");
-        Uri uri = Uri.builder()
+        Uri uri #= Uri.builder()
             .scheme("http").host("127.0.0.1").port(port).path("/orders")
             .build();
-        HttpRequest req = HttpRequest.fromUri("POST", uri);
+        HttpRequest req #= HttpRequest.fromUri("POST", uri);
         String order = "{\"symbol\":\"GLOBEX\",\"qty\":75,\"note\":\"gzip inbound\"}";
-        int8[] gz = ContentCoding.encode("gzip", order.toBytes(), order.byteLength());
+        int8[] gz #= ContentCoding.encode("gzip", order.toBytes(), order.byteLength());
         req.setHeader("Content-Encoding", "gzip");
         req.body(gz, (int32) gz.count());
-        HttpResponse resp = client.send(uri, req);
+        HttpResponse resp #= client.send(uri, req);
         if (resp.statusCode() != 201) {
             return 0 - 1;
         }
-        String body = DemoClass.bodyString(resp.body, resp.bodyLength());
+        String body #= DemoClass.bodyString(resp.body, resp.bodyLength());
         String want = "stored " + order.byteLength() + " bytes";
         if (body.equals(want)) {
             return 1;
@@ -179,26 +179,26 @@ public class ServerDemo extends DemoClass {
             router.route("POST", "/orders",
                 (req) -> ServerDemo.createOrder(req));
 
-            Middleware rec = Recover.middleware();
-            Middleware rid = RequestId.middleware();
-            Decompression dz = Decompression.create();
-            Middleware dzm = Decompression.middleware(dz);
+            Middleware rec #= Recover.middleware();
+            Middleware rid #= RequestId.middleware();
+            Decompression dz #= Decompression.create();
+            Middleware dzm #= Decompression.middleware(dz);
             MiddlewareChain chain = heap MiddlewareChain();
             chain.use(#rec).use(#rid).use(#dzm);
             // The terminal is the router — the forwarding lambda is written
             // here at the call site (escaping closures are pending).
             (HttpRequest) -> #HttpResponse dispatch =
                 (req) -> router.dispatch(req);
-            (HttpRequest) -> #HttpResponse app = chain.compose(dispatch);
+            (HttpRequest) -> #HttpResponse app #= chain.compose(dispatch);
 
             // ServerLimits: 5s read timeouts, 512-byte body cap.
-            ServerLimits limits = ServerLimits.of(5000, 5000, (int64) 512, true);
+            ServerLimits limits #= ServerLimits.of(5000, 5000, (int64) 512, true);
 
-            HttpServerBuilder b = HttpServer.builder();
+            HttpServerBuilder b #= HttpServer.builder();
             b.bind("127.0.0.1:0");
             b.handler(app);
             b.serverLimits(#limits);
-            HttpServer srv = b.build();
+            HttpServer srv #= b.build();
             int32 port = srv.server.listener.boundPort();
             System.stdout.println("  serving 127.0.0.1:{} (ephemeral)", port);
             Task<int32> sv = spawn serveLoop(srv);
@@ -219,7 +219,7 @@ public class ServerDemo extends DemoClass {
             // feed: a polite client asks before sending a large body, and
             // ServerLimits' cap can refuse it up front (417/413) instead
             // of mid-stream. wantsContinue is the trigger predicate.
-            HttpRequest polite = HttpRequest.post("/orders");
+            HttpRequest polite #= HttpRequest.post("/orders");
             polite.setHeader("Expect", "100-continue");
             this.check(ExpectContinue.wantsContinue(polite)
                 && !ExpectContinue.wantsContinue(HttpRequest.post("/orders"))
@@ -232,7 +232,7 @@ public class ServerDemo extends DemoClass {
             // runtime can lose a park/wake here and wedge — cajeta INDEX:
             // runtime-lost-wakeup-under-load; idle machines and CI are
             // unaffected in practice.)
-            boolean drained = srv.shutdown(Duration.ofSeconds(2));
+            boolean drained #= srv.shutdown(Duration.ofSeconds(2));
             int32 sret = await sv;
             this.check(drained && sret == 1,
                 "shutdown(deadline) drained clean and the accept loop exited");

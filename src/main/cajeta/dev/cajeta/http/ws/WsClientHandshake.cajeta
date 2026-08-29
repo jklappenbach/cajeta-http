@@ -80,7 +80,7 @@ public class WsClientHandshake {
         if (response.statusCode() != 101) {
             return false;
         }
-        Headers h = response.getHeaders();
+        Headers h #= response.getHeaders();
         String got #= h.get("Sec-WebSocket-Accept");
         if (got == null) {
             return false;

@@ -52,15 +52,15 @@ public final class Http2ContentFrameTests {
         // Unpadded DATA with END_STREAM.
         Http2FrameWriter w = heap Http2FrameWriter();
         Http2ContentFrames.writeData(w, 1, payload, 5, true, 0);
-        int8[] b = w.toBytes();
+        int8[] b #= w.toBytes();
         Http2FrameReader r = heap Http2FrameReader(b, (int32) b.count(),
                                                    Http2.DEFAULT_MAX_FRAME_SIZE);
         r.next();
         c.eqInt((int64) r.type(), (int64) Http2.FRAME_DATA, "DATA type");
         c.that(r.hasFlag(Http2.FLAG_END_STREAM), "DATA END_STREAM");
         c.that(!r.hasFlag(Http2.FLAG_PADDED), "DATA not padded");
-        int8[] pl = r.copyPayload();
-        Http2Payload reg = Http2ContentFrames.parseData(pl, r.length(),
+        int8[] pl #= r.copyPayload();
+        Http2Payload reg #= Http2ContentFrames.parseData(pl, r.length(),
                                                         r.flags(), r.streamId());
         c.eqInt((int64) reg.offset, (int64) 0, "DATA data offset 0");
         c.that(Http2ContentFrameTests.regionEq(pl, reg, payload, 5),
@@ -69,14 +69,14 @@ public final class Http2ContentFrameTests {
         // Padded DATA: 4 padding octets.
         Http2FrameWriter wp = heap Http2FrameWriter();
         Http2ContentFrames.writeData(wp, 3, payload, 5, false, 4);
-        int8[] bp = wp.toBytes();
+        int8[] bp #= wp.toBytes();
         Http2FrameReader rp = heap Http2FrameReader(bp, (int32) bp.count(),
                                                     Http2.DEFAULT_MAX_FRAME_SIZE);
         rp.next();
         c.that(rp.hasFlag(Http2.FLAG_PADDED), "padded DATA flag");
         c.eqInt((int64) rp.length(), (int64) 10, "padded DATA payload len 10");
-        int8[] pl2 = rp.copyPayload();
-        Http2Payload reg2 = Http2ContentFrames.parseData(pl2, rp.length(),
+        int8[] pl2 #= rp.copyPayload();
+        Http2Payload reg2 #= Http2ContentFrames.parseData(pl2, rp.length(),
                                                          rp.flags(), rp.streamId());
         c.eqInt((int64) reg2.offset, (int64) 1, "padded DATA content offset 1");
         c.that(Http2ContentFrameTests.regionEq(pl2, reg2, payload, 5),
@@ -89,14 +89,14 @@ public final class Http2ContentFrameTests {
         // Plain HEADERS with END_HEADERS + END_STREAM.
         Http2FrameWriter w = heap Http2FrameWriter();
         Http2ContentFrames.writeHeaders(w, 1, block, 3, true, true, 0);
-        int8[] b = w.toBytes();
+        int8[] b #= w.toBytes();
         Http2FrameReader r = heap Http2FrameReader(b, (int32) b.count(),
                                                    Http2.DEFAULT_MAX_FRAME_SIZE);
         r.next();
         c.that(r.hasFlag(Http2.FLAG_END_HEADERS), "HEADERS END_HEADERS");
         c.that(r.hasFlag(Http2.FLAG_END_STREAM), "HEADERS END_STREAM");
-        int8[] pl = r.copyPayload();
-        Http2Payload reg = Http2ContentFrames.parseHeaders(pl, r.length(),
+        int8[] pl #= r.copyPayload();
+        Http2Payload reg #= Http2ContentFrames.parseHeaders(pl, r.length(),
                                                            r.flags(), r.streamId());
         c.that(Http2ContentFrameTests.regionEq(pl, reg, block, 3),
                "HEADERS block round-trip");
@@ -104,12 +104,12 @@ public final class Http2ContentFrameTests {
         // Padded HEADERS.
         Http2FrameWriter wp = heap Http2FrameWriter();
         Http2ContentFrames.writeHeaders(wp, 1, block, 3, false, true, 3);
-        int8[] bp = wp.toBytes();
+        int8[] bp #= wp.toBytes();
         Http2FrameReader rp = heap Http2FrameReader(bp, (int32) bp.count(),
                                                     Http2.DEFAULT_MAX_FRAME_SIZE);
         rp.next();
-        int8[] pl2 = rp.copyPayload();
-        Http2Payload reg2 = Http2ContentFrames.parseHeaders(pl2, rp.length(),
+        int8[] pl2 #= rp.copyPayload();
+        Http2Payload reg2 #= Http2ContentFrames.parseHeaders(pl2, rp.length(),
                                                             rp.flags(), rp.streamId());
         c.eqInt((int64) reg2.offset, (int64) 1, "padded HEADERS block offset 1");
         c.that(Http2ContentFrameTests.regionEq(pl2, reg2, block, 3),
@@ -120,7 +120,7 @@ public final class Http2ContentFrameTests {
             (int8) 0x00, (int8) 0x00, (int8) 0x00, (int8) 0x01, (int8) 0x10,
             (int8) 0x82, (int8) 0x86, (int8) 0x84
         ];
-        Http2Payload rp3 = Http2ContentFrames.parseHeaders(withPrio, 8,
+        Http2Payload rp3 #= Http2ContentFrames.parseHeaders(withPrio, 8,
                                                            Http2.FLAG_PRIORITY, 1);
         c.eqInt((int64) rp3.offset, (int64) 5, "priority prefix stripped");
         c.eqInt((int64) rp3.length, (int64) 3, "HEADERS block after priority");
@@ -134,7 +134,7 @@ public final class Http2ContentFrameTests {
             (int8) 0x82, (int8) 0x86, (int8) 0x84,                    // block
             (int8) 0x00, (int8) 0x00                                  // padding
         ];
-        Http2Payload rp4 = Http2ContentFrames.parseHeaders(both, 11,
+        Http2Payload rp4 #= Http2ContentFrames.parseHeaders(both, 11,
             Http2.FLAG_PADDED | Http2.FLAG_PRIORITY, 1);
         c.eqInt((int64) rp4.offset, (int64) 6, "padded+priority block offset 6");
         c.eqInt((int64) rp4.length, (int64) 3, "padded+priority block length 3");
@@ -146,13 +146,13 @@ public final class Http2ContentFrameTests {
         // PUSH_PROMISE with promised stream id 4.
         Http2FrameWriter w = heap Http2FrameWriter();
         Http2ContentFrames.writePushPromise(w, 1, 4, block, 3, true, 0);
-        int8[] b = w.toBytes();
+        int8[] b #= w.toBytes();
         Http2FrameReader r = heap Http2FrameReader(b, (int32) b.count(),
                                                    Http2.DEFAULT_MAX_FRAME_SIZE);
         r.next();
         c.eqInt((int64) r.type(), (int64) Http2.FRAME_PUSH_PROMISE, "PP type");
-        int8[] pl = r.copyPayload();
-        Http2Payload reg = Http2ContentFrames.parsePushPromise(pl, r.length(),
+        int8[] pl #= r.copyPayload();
+        Http2Payload reg #= Http2ContentFrames.parsePushPromise(pl, r.length(),
                                                                r.flags(), r.streamId());
         c.eqInt((int64) reg.promisedStreamId, (int64) 4, "PP promised stream 4");
         c.that(Http2ContentFrameTests.regionEq(pl, reg, block, 3),
@@ -161,12 +161,12 @@ public final class Http2ContentFrameTests {
         // PUSH_PROMISE padded.
         Http2FrameWriter wp = heap Http2FrameWriter();
         Http2ContentFrames.writePushPromise(wp, 1, 6, block, 3, true, 2);
-        int8[] bp = wp.toBytes();
+        int8[] bp #= wp.toBytes();
         Http2FrameReader rp = heap Http2FrameReader(bp, (int32) bp.count(),
                                                     Http2.DEFAULT_MAX_FRAME_SIZE);
         rp.next();
-        int8[] pl2 = rp.copyPayload();
-        Http2Payload reg2 = Http2ContentFrames.parsePushPromise(pl2, rp.length(),
+        int8[] pl2 #= rp.copyPayload();
+        Http2Payload reg2 #= Http2ContentFrames.parsePushPromise(pl2, rp.length(),
                                                                 rp.flags(), rp.streamId());
         c.eqInt((int64) reg2.promisedStreamId, (int64) 6, "padded PP promised 6");
         c.that(Http2ContentFrameTests.regionEq(pl2, reg2, block, 3),
@@ -175,14 +175,14 @@ public final class Http2ContentFrameTests {
         // CONTINUATION.
         Http2FrameWriter wc = heap Http2FrameWriter();
         Http2ContentFrames.writeContinuation(wc, 1, block, 3, true);
-        int8[] bc = wc.toBytes();
+        int8[] bc #= wc.toBytes();
         Http2FrameReader rc = heap Http2FrameReader(bc, (int32) bc.count(),
                                                     Http2.DEFAULT_MAX_FRAME_SIZE);
         rc.next();
         c.eqInt((int64) rc.type(), (int64) Http2.FRAME_CONTINUATION, "CONT type");
         c.that(rc.hasFlag(Http2.FLAG_END_HEADERS), "CONT END_HEADERS");
-        int8[] pl3 = rc.copyPayload();
-        Http2Payload reg3 = Http2ContentFrames.parseContinuation(rc.length(),
+        int8[] pl3 #= rc.copyPayload();
+        Http2Payload reg3 #= Http2ContentFrames.parseContinuation(rc.length(),
                                                                  rc.streamId());
         c.that(Http2ContentFrameTests.regionEq(pl3, reg3, block, 3),
                "CONT block round-trip");
@@ -194,7 +194,7 @@ public final class Http2ContentFrameTests {
         // pad length >= available payload -> PROTOCOL_ERROR.
         boolean e1 = false;
         try {
-            Http2Payload x = Http2ContentFrames.parseData(p, 3, Http2.FLAG_PADDED, 1);
+            Http2Payload x #= Http2ContentFrames.parseData(p, 3, Http2.FLAG_PADDED, 1);
         } catch (Http2Exception e) {
             e1 = e.errorCode == Http2.PROTOCOL_ERROR;
         }
@@ -204,7 +204,7 @@ public final class Http2ContentFrameTests {
         boolean e2 = false;
         int8[] empty = heap int8[0];
         try {
-            Http2Payload x = Http2ContentFrames.parseData(empty, 0, Http2.FLAG_PADDED, 1);
+            Http2Payload x #= Http2ContentFrames.parseData(empty, 0, Http2.FLAG_PADDED, 1);
         } catch (Http2Exception e) {
             e2 = e.errorCode == Http2.FRAME_SIZE_ERROR;
         }
@@ -214,7 +214,7 @@ public final class Http2ContentFrameTests {
         boolean e3 = false;
         int8[] d = [ (int8) 0x68 ];
         try {
-            Http2Payload x = Http2ContentFrames.parseData(d, 1, 0, 0);
+            Http2Payload x #= Http2ContentFrames.parseData(d, 1, 0, 0);
         } catch (Http2Exception e) {
             e3 = e.errorCode == Http2.PROTOCOL_ERROR;
         }
@@ -224,7 +224,7 @@ public final class Http2ContentFrameTests {
         boolean e4 = false;
         int8[] shortp = [ (int8) 0x00, (int8) 0x00 ];
         try {
-            Http2Payload x = Http2ContentFrames.parseHeaders(shortp, 2,
+            Http2Payload x #= Http2ContentFrames.parseHeaders(shortp, 2,
                                                              Http2.FLAG_PRIORITY, 1);
         } catch (Http2Exception e) {
             e4 = e.errorCode == Http2.FRAME_SIZE_ERROR;
@@ -235,7 +235,7 @@ public final class Http2ContentFrameTests {
         boolean e5 = false;
         int8[] shortpp = [ (int8) 0x00, (int8) 0x00, (int8) 0x00 ];
         try {
-            Http2Payload x = Http2ContentFrames.parsePushPromise(shortpp, 3, 0, 1);
+            Http2Payload x #= Http2ContentFrames.parsePushPromise(shortpp, 3, 0, 1);
         } catch (Http2Exception e) {
             e5 = e.errorCode == Http2.FRAME_SIZE_ERROR;
         }

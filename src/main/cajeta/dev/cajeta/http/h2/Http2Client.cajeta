@@ -70,7 +70,7 @@ public final class Http2Client {
             if (!Http2Client.readFully(reader, hdr, 9)) {
                 done = true;
             } else {
-                Http2FrameHeader h = Http2FrameHeader(hdr);
+                Http2FrameHeader h #= Http2FrameHeader(hdr);
                 int32 type = h.typeCode();
                 int32 flags = h.flags();
                 int32 len = h.length();

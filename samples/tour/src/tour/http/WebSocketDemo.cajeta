@@ -80,7 +80,7 @@ final class TicketHandler implements WebSocketHandler {
 
     public void onMessage(WebSocketConnection conn, WsMessage message) {
         this.messages = this.messages + 1;
-        String t = message.text();
+        String t #= message.text();
         conn.send("ack:" + t);
     }
 
@@ -110,14 +110,14 @@ public class WebSocketDemo extends DemoClass {
     // Raw-socket echo server: accept one connection, upgrade, echo one
     // text and one binary message preserving type, then close.
     public static async int32 echoServer(#TcpListener listener) {
-        TcpStream sock = listener.acceptAsync();
+        TcpStream sock #= listener.acceptAsync();
         AsyncReader reader = heap AsyncReader(sock);
         AsyncWriter writer = heap AsyncWriter(sock);
-        WebSocket ws = WsUpgrade.acceptServer(reader, writer);
-        WsMessage m1 = ws.receive();
-        String text = m1.text();
+        WebSocket ws #= WsUpgrade.acceptServer(reader, writer);
+        WsMessage m1 #= ws.receive();
+        String text #= m1.text();
         ws.send(text);
-        WsMessage m2 = ws.receive();
+        WsMessage m2 #= ws.receive();
         ws.sendBinary(m2.getPayload());
         sock.close();
         return m1.length() * 100 + m2.length();
@@ -126,7 +126,7 @@ public class WebSocketDemo extends DemoClass {
     // Handler-API server: serve() drives the callback until close.
     public static async int32 handlerServer(#TcpListener listener,
                                             TicketHandler h) {
-        TcpStream sock = listener.acceptAsync();
+        TcpStream sock #= listener.acceptAsync();
         AsyncReader reader = heap AsyncReader(sock);
         AsyncWriter writer = heap AsyncWriter(sock);
         WsUpgrade.serve(reader, writer, h);
@@ -136,7 +136,7 @@ public class WebSocketDemo extends DemoClass {
 
     public static async int32 faultyServer(#TcpListener listener,
                                            FaultyHandler h) {
-        TcpStream sock = listener.acceptAsync();
+        TcpStream sock #= listener.acceptAsync();
         AsyncReader reader = heap AsyncReader(sock);
         AsyncWriter writer = heap AsyncWriter(sock);
         WsUpgrade.serve(reader, writer, h);
@@ -152,15 +152,15 @@ public class WebSocketDemo extends DemoClass {
         //    RFC 6455's own worked example; then the full request/response
         //    validates. placeholderKey(42) is the deterministic stand-in —
         //    see the security note in the header.
-        String accept = WsServerHandshake.acceptKey("dGhlIHNhbXBsZSBub25jZQ==");
+        String accept #= WsServerHandshake.acceptKey("dGhlIHNhbXBsZSBub25jZQ==");
         this.check(accept.equals("s3pPLMBiTxaQ9kYGzzhZRbK+xOo="),
             "Sec-WebSocket-Accept matches the RFC 6455 example");
-        Uri huri = Uri.builder()
+        Uri huri #= Uri.builder()
             .scheme("ws").host("orders.internal").port(80).path("/tickets")
             .build();
-        String key = WsClientHandshake.placeholderKey(42);
-        HttpRequest upgrade = WsClientHandshake.buildRequest(huri, key);
-        HttpResponse hresp = WsServerHandshake.accept(upgrade);
+        String key #= WsClientHandshake.placeholderKey(42);
+        HttpRequest upgrade #= WsClientHandshake.buildRequest(huri, key);
+        HttpResponse hresp #= WsServerHandshake.accept(upgrade);
         this.check(WsServerHandshake.isUpgradeRequest(upgrade)
             && hresp.statusCode() == 101
             && WsClientHandshake.validateAccept(hresp, key),
@@ -169,7 +169,7 @@ public class WebSocketDemo extends DemoClass {
         // 2. A rejected handshake is a typed failure: a non-101 reply
         //    raises HandshakeRejectedException at connect.
         String bad = "HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n";
-        int8[] bb = bad.toBytes();
+        int8[] bb #= bad.toBytes();
         MemChannel rin = heap MemChannel();
         AsyncReader rreader = heap AsyncReader(rin);
         rreader.stage(bb, bad.byteLength());
@@ -178,7 +178,7 @@ public class WebSocketDemo extends DemoClass {
         AsyncWriter rwriter = heap AsyncWriter(rout);
         boolean rejected = false;
         try {
-            WebSocket nope = WsUpgrade.connectClient(rreader, rwriter, huri, 123);
+            WebSocket nope #= WsUpgrade.connectClient(rreader, rwriter, huri, 123);
         } catch (HandshakeRejectedException hre) {
             rejected = true;
         }
@@ -187,16 +187,16 @@ public class WebSocketDemo extends DemoClass {
         // 3. Live echo — text AND binary, types preserved. The client here
         //    is one line: WebSocket.connect owns its transport.
         scope {
-            IpAddress laEcho = IpAddress.loopbackV4();
-            SocketAddress bindEcho = SocketAddress.of(#laEcho, 0);
+            IpAddress laEcho #= IpAddress.loopbackV4();
+            SocketAddress bindEcho #= SocketAddress.of(#laEcho, 0);
             TcpListener echoLst = TcpListener.bind(bindEcho);
             int32 port = echoLst.boundPort();
-            Task<int32> t = spawn echoServer(#echoLst);
+            Task<int32> t #= spawn echoServer(#echoLst);
 
             String url = "ws://127.0.0.1:" + port + "/tickets";
             WebSocket ws = WebSocket.connect(url);
             ws.send("open ticket 4417");
-            WsMessage e1 = ws.receive();
+            WsMessage e1 #= ws.receive();
             this.check(e1.isText() && e1.text().equals("open ticket 4417"),
                 "text message echoed intact");
             int8[] blob = heap int8[3];
@@ -204,7 +204,7 @@ public class WebSocketDemo extends DemoClass {
             blob[1] = (int8) 0x7F;
             blob[2] = (int8) 0x40;
             ws.sendBinary(blob);
-            WsMessage e2 = ws.receive();
+            WsMessage e2 #= ws.receive();
             int8[] p2 = e2.getPayload();
             this.check(e2.isBinary() && e2.length() == 3 && p2[1] == (int8) 0x7F,
                 "binary message echoed intact, still BINARY");
@@ -218,17 +218,17 @@ public class WebSocketDemo extends DemoClass {
         //    code — tearing down a socket without it is the abrupt-close
         //    anti-pattern (code 1006 territory).
         scope {
-            TicketHandler h = heap TicketHandler();
-            IpAddress laTick = IpAddress.loopbackV4();
-            SocketAddress bindTick = SocketAddress.of(#laTick, 0);
+            TicketHandler h #= heap TicketHandler();
+            IpAddress laTick #= IpAddress.loopbackV4();
+            SocketAddress bindTick #= SocketAddress.of(#laTick, 0);
             TcpListener tickLst = TcpListener.bind(bindTick);
             int32 port = tickLst.boundPort();
             Task<int32> sv = spawn handlerServer(#tickLst, h);
 
             String url = "ws://127.0.0.1:" + port + "/tickets";
-            WebSocket client = WebSocket.connect(url);
+            WebSocket client #= WebSocket.connect(url);
             client.send("close ticket 4417");
-            WsMessage reply = client.receive();
+            WsMessage reply #= client.receive();
             this.check(reply.text().equals("ack:close ticket 4417"),
                 "handler onMessage acked the ticket");
             client.close(WsCloseCode.NORMAL, "done");
@@ -245,19 +245,19 @@ public class WebSocketDemo extends DemoClass {
         // 5. Fail-close: a throwing callback must close 1011, surfaced to
         //    the peer as ConnectionClosedException with the code.
         scope {
-            FaultyHandler h = heap FaultyHandler();
-            IpAddress laFault = IpAddress.loopbackV4();
-            SocketAddress bindFault = SocketAddress.of(#laFault, 0);
+            FaultyHandler h #= heap FaultyHandler();
+            IpAddress laFault #= IpAddress.loopbackV4();
+            SocketAddress bindFault #= SocketAddress.of(#laFault, 0);
             TcpListener faultLst = TcpListener.bind(bindFault);
             int32 port = faultLst.boundPort();
             Task<int32> sv = spawn faultyServer(#faultLst, h);
 
             String url = "ws://127.0.0.1:" + port + "/tickets";
-            WebSocket client = WebSocket.connect(url);
+            WebSocket client #= WebSocket.connect(url);
             client.send("boom");
             int32 code = 0;
             try {
-                WsMessage m = client.receive();
+                WsMessage m #= client.receive();
             } catch (ConnectionClosedException cce) {
                 code = cce.closeCode;
             }
@@ -274,17 +274,17 @@ public class WebSocketDemo extends DemoClass {
         notice[1] = (int8) 0x69;   // 'i'
         notice[2] = (int8) 0x63;   // 'c'
         notice[3] = (int8) 0x6B;   // 'k'
-        WsFrame tf = WsFrame.of(true, WsOpcode.TEXT, true, #notice);
+        WsFrame tf #= WsFrame.of(true, WsOpcode.TEXT, true, #notice);
         int8[] maskKey = heap int8[4];
         maskKey[0] = (int8) 0x11;
         maskKey[1] = (int8) 0x22;
         maskKey[2] = (int8) 0x33;
         maskKey[3] = (int8) 0x44;
-        int8[] fwire = WsFrameEncoder.encode(tf, maskKey);
-        WsFrameDecoder srvDec = WsFrameDecoder.forServer();
+        int8[] fwire #= WsFrameEncoder.encode(tf, maskKey);
+        WsFrameDecoder srvDec #= WsFrameDecoder.forServer();
         srvDec.feed(fwire, (int32) fwire.count());
         this.check(srvDec.hasFrame(), "the masked client frame decodes");
-        WsFrame back = srvDec.nextFrame();
+        WsFrame back #= srvDec.nextFrame();
         int8[] bp = back.getPayload();
         this.check(back.isFin() && back.getOpcode() == WsOpcode.TEXT
             && back.payloadLength() == 4 && bp[0] == (int8) 0x74,
@@ -304,7 +304,7 @@ public class WebSocketDemo extends DemoClass {
         this.check(pong.getOpcode() == WsOpcode.PONG
             && pong.payloadLength() == 2 && pongPay[0] == (int8) 0x68,
             "pongFor mirrors the ping payload (RFC 6455 5.5.3)");
-        WsProtocol proto = WsProtocol.create();
+        WsProtocol proto #= WsProtocol.create();
         int8[] probe2 = heap int8[1];
         probe2[0] = (int8) 0x21;
         WsFrame ping2 = WsControlFrames.ping(#probe2);
@@ -334,21 +334,21 @@ public class WebSocketDemo extends DemoClass {
         int8[] fragB = heap int8[2];
         fragB[0] = (int8) 0x6C;    // 'l'
         fragB[1] = (int8) 0x66;    // 'f'
-        WsFrame f1 = WsFrame.of(false, WsOpcode.TEXT, false, #fragA);
-        WsFrame f2 = WsFrame.of(true, WsOpcode.CONTINUATION, false, #fragB);
-        WsMessageAssembler asm = WsMessageAssembler.create();
-        WsMessage none = asm.accept(f1);
-        WsMessage joined = asm.accept(f2);
+        WsFrame f1 #= WsFrame.of(false, WsOpcode.TEXT, false, #fragA);
+        WsFrame f2 #= WsFrame.of(true, WsOpcode.CONTINUATION, false, #fragB);
+        WsMessageAssembler asm #= WsMessageAssembler.create();
+        WsMessage none #= asm.accept(f1);
+        WsMessage joined #= asm.accept(f2);
         this.check(none == null && joined != null && joined.length() == 4
             && joined.text().equals("half"),
             "TEXT + CONTINUATION assemble into one 4-byte message");
-        WsMessageAssembler tiny = WsMessageAssembler.create()
+        WsMessageAssembler tiny #= WsMessageAssembler.create()
             .withMaxMessageLength((int64) 3);
         int8[] big = heap int8[8];
-        WsFrame overF = WsFrame.of(true, WsOpcode.BINARY, false, #big);
+        WsFrame overF #= WsFrame.of(true, WsOpcode.BINARY, false, #big);
         boolean overCap = false;
         try {
-            WsMessage over = tiny.accept(overF);
+            WsMessage over #= tiny.accept(overF);
         } catch (MessageTooLargeException mte) {
             overCap = mte.limit == (int64) 3;
         }
@@ -358,10 +358,10 @@ public class WebSocketDemo extends DemoClass {
         // extension is rejected at the decoder.
         int8[] rsvPay = heap int8[1];
         rsvPay[0] = (int8) 0x41;
-        WsFrame rsvF = WsFrame.of(true, WsOpcode.TEXT, false, #rsvPay);
+        WsFrame rsvF #= WsFrame.of(true, WsOpcode.TEXT, false, #rsvPay);
         rsvF.rsv1 = true;
-        int8[] rsvWire = WsFrameEncoder.encodeUnmasked(rsvF);
-        WsFrameDecoder plainDec = WsFrameDecoder.forClient();
+        int8[] rsvWire #= WsFrameEncoder.encodeUnmasked(rsvF);
+        WsFrameDecoder plainDec #= WsFrameDecoder.forClient();
         boolean violated = false;
         try {
             plainDec.feed(rsvWire, (int32) rsvWire.count());
@@ -385,13 +385,13 @@ public class WebSocketDemo extends DemoClass {
 
         // 9. permessage-deflate: offer -> negotiate -> compressed frames.
         //    The negotiation is header algebra; the codec rides RSV1.
-        String offer = WsCompression.clientOffer();
-        PmdParams server = WsCompression.negotiateServer(offer);
-        PmdParams declined = WsCompression.negotiateServer("x-webkit-foo");
+        String offer #= WsCompression.clientOffer();
+        PmdParams server #= WsCompression.negotiateServer(offer);
+        PmdParams declined #= WsCompression.negotiateServer("x-webkit-foo");
         this.check(offer.contains("permessage-deflate") && server.enabled
             && !declined.enabled,
             "the server accepts a pmd offer, declines an unknown extension");
-        PmdParams strict = WsCompression.negotiateServer(
+        PmdParams strict #= WsCompression.negotiateServer(
             "permessage-deflate; client_no_context_takeover");
         this.check(strict.peerNoContextTakeover
             && strict.responseHeader.contains("client_no_context_takeover"),
@@ -401,22 +401,22 @@ public class WebSocketDemo extends DemoClass {
         PerMessageDeflate pmd = heap PerMessageDeflate(false, false);
         String memo = "reconnecting clients replay the same order book "
             + "snapshot over and over and over again";
-        int8[] mb = memo.toBytes();
-        int8[] squeezed = pmd.compress(mb, memo.byteLength());
-        int8[] restored = pmd.decompress(squeezed, (int32) squeezed.count());
+        int8[] mb #= memo.toBytes();
+        int8[] squeezed #= pmd.compress(mb, memo.byteLength());
+        int8[] restored #= pmd.decompress(squeezed, (int32) squeezed.count());
         this.check((int32) squeezed.count() < memo.byteLength()
             && this.sameBytes(restored, (int32) restored.count(),
                 mb, memo.byteLength()),
             "permessage-deflate compresses and round-trips the message");
         // End to end over MemChannels: a compressed masked client frame,
         // received and inflated by a server socket — no network involved.
-        PmdParams clientCfg = WsCompression.confirmClient("permessage-deflate");
-        PmdParams serverCfg = WsCompression.negotiateServer("permessage-deflate");
+        PmdParams clientCfg #= WsCompression.confirmClient("permessage-deflate");
+        PmdParams serverCfg #= WsCompression.negotiateServer("permessage-deflate");
         MemChannel wireCh = heap MemChannel();
         MemChannel cDiscard = heap MemChannel();
         AsyncReader cr = heap AsyncReader(cDiscard);
         AsyncWriter cw = heap AsyncWriter(wireCh);
-        WebSocket wsClient = WebSocket.forClient(cr, cw);
+        WebSocket wsClient #= WebSocket.forClient(cr, cw);
         wsClient.enableCompression(clientCfg);
         wsClient.send(memo);
         cw.flush();
@@ -425,9 +425,9 @@ public class WebSocketDemo extends DemoClass {
         sr.stage(wireCh.captured(), wireCh.capturedLen());
         sr.markEof();
         AsyncWriter sw = heap AsyncWriter(sDiscard);
-        WebSocket wsServer = WebSocket.forServer(sr, sw);
+        WebSocket wsServer #= WebSocket.forServer(sr, sw);
         wsServer.enableCompression(serverCfg);
-        WsMessage got = wsServer.receive();
+        WsMessage got #= wsServer.receive();
         this.check(wireCh.capturedLen() < memo.byteLength()
             && got.text().equals(memo),
             "compressed send -> receive round-trips smaller than plaintext");

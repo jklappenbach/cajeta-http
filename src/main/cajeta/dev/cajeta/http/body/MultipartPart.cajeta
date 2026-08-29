@@ -50,7 +50,7 @@ public final class MultipartPart {
      * with the value as a UTF-8 [`StringBody`](StringBody.cajeta).
      */
     public static #MultipartPart field(String name, String value) {
-        Headers h = heap Headers();
+        Headers h #= heap Headers();
         String disp #= MultipartPart.disposition(name, null);
         h.add("Content-Disposition", disp);
         StringBody sb #= StringBody.of(value);
@@ -65,7 +65,7 @@ public final class MultipartPart {
      */
     public static #MultipartPart file(String name, String filename,
                                       #MediaType type, #int8[] data, int32 len) {
-        Headers h = heap Headers();
+        Headers h #= heap Headers();
         String disp #= MultipartPart.disposition(name, filename);
         h.add("Content-Disposition", disp);
         String tv #= type.essence();

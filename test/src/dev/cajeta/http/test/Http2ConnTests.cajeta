@@ -55,7 +55,7 @@ public final class Http2ConnTests {
     // ---- server ----------------------------------------------------------
 
     static #HttpResponse handle(HttpRequest req) {
-        String target = req.getTarget();
+        String target #= req.getTarget();
         if (target.equals("/hello")) {
             String b = "hello, h2";
             return HttpResponse.ok().body(b.toBytes(), b.byteLength());
@@ -68,7 +68,7 @@ public final class Http2ConnTests {
     }
 
     public static async int32 h2Server(#TcpListener listener) {
-        TcpStream sock = listener.acceptAsync();
+        TcpStream sock #= listener.acceptAsync();
         AsyncReader reader = heap AsyncReader(sock);
         AsyncWriter writer = heap AsyncWriter(sock);
         (HttpRequest) -> #HttpResponse h = (req) -> Http2ConnTests.handle(req);
@@ -100,14 +100,14 @@ public final class Http2ConnTests {
     static void client(Check c, int32 port, String method, String path,
                        int8[] reqBody, int32 reqBodyLen, boolean hasReqBody,
                        int32 expStatus, String expBody) {
-        IpAddress ca = IpAddress.loopbackV4();
-        SocketAddress connAddr = SocketAddress.of(#ca, port);
-        TcpStream sock = TcpStream.connectAsync(#connAddr);
+        IpAddress ca #= IpAddress.loopbackV4();
+        SocketAddress connAddr #= SocketAddress.of(#ca, port);
+        TcpStream sock #= TcpStream.connectAsync(#connAddr);
         AsyncReader reader = heap AsyncReader(sock);
         AsyncWriter writer = heap AsyncWriter(sock);
 
         // preface + client SETTINGS + request HEADERS (+ DATA).
-        int8[] pf = Http2.preface();
+        int8[] pf #= Http2.preface();
         writer.writeAll(pf, 0, 24);
 
         Http2FrameWriter fw = heap Http2FrameWriter();
@@ -120,13 +120,13 @@ public final class Http2ConnTests {
         fl.put(Http2ConnTests.own(":path"), Http2ConnTests.own(path));
         fl.put(Http2ConnTests.own(":scheme"), Http2ConnTests.own("http"));
         fl.put(Http2ConnTests.own(":authority"), Http2ConnTests.own("127.0.0.1"));
-        int8[] block = enc.encode(fl);
+        int8[] block #= enc.encode(fl);
         Http2ContentFrames.writeHeaders(fw, 1, block, (int32) block.count(),
                                         !hasReqBody, true, 0);
         if (hasReqBody) {
             Http2ContentFrames.writeData(fw, 1, reqBody, reqBodyLen, true, 0);
         }
-        int8[] out = fw.toBytes();
+        int8[] out #= fw.toBytes();
         writer.writeAll(out, 0, (int32) out.count());
         writer.flush();
 
@@ -144,7 +144,7 @@ public final class Http2ConnTests {
                 System.stdout.println("  CLT timeout waiting for frame header");
                 timedOut = true;
             } else {
-            Http2FrameHeader h = Http2FrameHeader(hdr);
+            Http2FrameHeader h #= Http2FrameHeader(hdr);
             int32 type = h.typeCode();
             int32 flags = h.flags();
             int32 sid = h.streamId();
@@ -157,12 +157,12 @@ public final class Http2ConnTests {
                 if ((flags & Http2.FLAG_ACK) == 0) {
                     Http2FrameWriter afw = heap Http2FrameWriter();
                     Http2Frames.writeSettingsAck(afw);
-                    int8[] ab = afw.toBytes();
+                    int8[] ab #= afw.toBytes();
                     writer.writeAll(ab, 0, (int32) ab.count());
                     writer.flush();
                 }
             } else if (type == Http2.FRAME_HEADERS) {
-                Http2Payload reg = Http2ContentFrames.parseHeaders(pl, len,
+                Http2Payload reg #= Http2ContentFrames.parseHeaders(pl, len,
                                                                   flags, sid);
                 int8[] blk = heap int8[reg.length];
                 int32 j = 0;
@@ -170,13 +170,13 @@ public final class Http2ConnTests {
                     blk[j] = pl[reg.offset + j];
                     j = j + 1;
                 }
-                HpackFieldList rf = dec.decode(blk, reg.length);
+                HpackFieldList rf #= dec.decode(blk, reg.length);
                 status = Http2ConnTests.statusOf(rf);
                 if ((flags & Http2.FLAG_END_STREAM) != 0) {
                     done = true;
                 }
             } else if (type == Http2.FRAME_DATA) {
-                Http2Payload reg = Http2ContentFrames.parseData(pl, len, flags,
+                Http2Payload reg #= Http2ContentFrames.parseData(pl, len, flags,
                                                                sid);
                 int32 j = 0;
                 while (j < reg.length) {
@@ -225,8 +225,8 @@ public final class Http2ConnTests {
                             int32 reqBodyLen, boolean hasReqBody, int32 expStatus,
                             String expBody) {
         scope {
-            IpAddress la = IpAddress.loopbackV4();
-            SocketAddress bindAddr = SocketAddress.of(#la, 0);
+            IpAddress la #= IpAddress.loopbackV4();
+            SocketAddress bindAddr #= SocketAddress.of(#la, 0);
             TcpListener listener = TcpListener.bind(bindAddr);
             int32 port = listener.boundPort();
             Task<int32> sv = spawn h2Server(#listener);

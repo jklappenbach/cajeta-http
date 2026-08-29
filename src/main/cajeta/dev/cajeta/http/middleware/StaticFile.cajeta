@@ -143,7 +143,7 @@ public class StaticFile {
     /** realpath(`full`) as a string, or null if it can't be canonicalized. */
     static #String canonStr(String full) {
         try {
-            Path c = Path.of(full).canonical();
+            Path c #= Path.of(full).canonical();
             int8[] b = c.bytes;
             int32 n = b.count();
             int8[] copy = heap int8[n];

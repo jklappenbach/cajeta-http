@@ -62,12 +62,12 @@ public final class RedirectTests {
 
     /** `/final` echo: `method|authorization-or-dash|body`. */
     static #HttpResponse finalEcho(HttpRequest req) {
-        String auth = req.getHeaders().get("authorization");
+        String auth #= req.getHeaders().get("authorization");
         String a = "-";
         if (auth != null) {
             a = auth;
         }
-        String b = RedirectTests.bodyText(req);
+        String b #= RedirectTests.bodyText(req);
         String out = req.getMethod() + "|" + a + "|" + b;
         return HttpResponse.ok().body(out.toBytes(), out.byteLength());
     }
@@ -84,7 +84,7 @@ public final class RedirectTests {
     }
 
     public static #HttpResponse handle(HttpRequest req) {
-        String t = req.getTarget();
+        String t #= req.getTarget();
         if (t.equals("/r/301")) { return RedirectTests.redirectTo(301, "/final"); }
         if (t.equals("/r/302")) { return RedirectTests.redirectTo(302, "/final"); }
         if (t.equals("/r/303")) { return RedirectTests.redirectTo(303, "/final"); }
@@ -131,17 +131,17 @@ public final class RedirectTests {
      * redirects, and compare the `/final` echo against `expect`.
      */
     public static async int32 followPost(int32 port, String path, String expect) {
-        HttpClient client = heap HttpClient();
-        Uri uri = Uri.builder()
+        HttpClient client #= heap HttpClient();
+        Uri uri #= Uri.builder()
             .scheme("http").host("127.0.0.1").port(port).path(path)
             .build();
-        HttpRequest req = HttpRequest.fromUri("POST", uri);
+        HttpRequest req #= HttpRequest.fromUri("POST", uri);
         String data = "data";
         req.body(data.toBytes(), data.byteLength());
         req.setHeader("Authorization", "Bearer tok");
-        HttpResponse resp = client.sendFollowing(uri, req);
+        HttpResponse resp #= client.sendFollowing(uri, req);
         if (resp.statusCode() != 200) { return -1; }
-        String got = RedirectTests.respText(resp);
+        String got #= RedirectTests.respText(resp);
         if (!got.equals(expect)) {
             System.stdout.println("  (redirect echo: '{}')", got);
             return -2;
@@ -152,17 +152,17 @@ public final class RedirectTests {
     /** GET `path` (with auth iff `withAuth`), follow, compare the echo. */
     public static async int32 followGet(int32 port, String path,
                                         boolean withAuth, String expect) {
-        HttpClient client = heap HttpClient();
-        Uri uri = Uri.builder()
+        HttpClient client #= heap HttpClient();
+        Uri uri #= Uri.builder()
             .scheme("http").host("127.0.0.1").port(port).path(path)
             .build();
-        HttpRequest req = HttpRequest.fromUri("GET", uri);
+        HttpRequest req #= HttpRequest.fromUri("GET", uri);
         if (withAuth) {
             req.setHeader("Authorization", "Bearer tok");
         }
-        HttpResponse resp = client.sendFollowing(uri, req);
+        HttpResponse resp #= client.sendFollowing(uri, req);
         if (resp.statusCode() != 200) { return -1; }
-        String got = RedirectTests.respText(resp);
+        String got #= RedirectTests.respText(resp);
         if (!got.equals(expect)) {
             System.stdout.println("  (redirect echo: '{}')", got);
             return -2;
@@ -172,13 +172,13 @@ public final class RedirectTests {
 
     /** A self-redirect must trip the hop cap with the typed exception. */
     public static async int32 loopTrips(int32 port) {
-        HttpClient client = heap HttpClient();
-        Uri uri = Uri.builder()
+        HttpClient client #= heap HttpClient();
+        Uri uri #= Uri.builder()
             .scheme("http").host("127.0.0.1").port(port).path("/loop")
             .build();
-        HttpRequest req = HttpRequest.fromUri("GET", uri);
+        HttpRequest req #= HttpRequest.fromUri("GET", uri);
         try {
-            HttpResponse resp = client.sendFollowing(uri, req);
+            HttpResponse resp #= client.sendFollowing(uri, req);
             return -1;                       // followed forever?
         } catch (TooManyRedirectsException e) {
             return 1;
@@ -204,12 +204,12 @@ public final class RedirectTests {
      */
     static void sameOriginTable(Check c) {
         scope {
-            HttpServerBuilder b = HttpServer.builder();
+            HttpServerBuilder b #= HttpServer.builder();
             b.bind("127.0.0.1:0");
             (HttpRequest) -> #HttpResponse h =
                 (req) -> RedirectTests.handle(req);
             b.handler(h);
-            HttpServer srv = b.build();
+            HttpServer srv #= b.build();
             Server core = srv.server;
             int32 port = core.listener.boundPort();
             RedirectTests.ownPort = port;
@@ -267,12 +267,12 @@ public final class RedirectTests {
 
     static void hopCapTrips(Check c) {
         scope {
-            HttpServerBuilder b = HttpServer.builder();
+            HttpServerBuilder b #= HttpServer.builder();
             b.bind("127.0.0.1:0");
             (HttpRequest) -> #HttpResponse h =
                 (req) -> RedirectTests.handle(req);
             b.handler(h);
-            HttpServer srv = b.build();
+            HttpServer srv #= b.build();
             Server core = srv.server;
             int32 port = core.listener.boundPort();
 
@@ -294,21 +294,21 @@ public final class RedirectTests {
      */
     static void crossOriginAuthStrip(Check c) {
         scope {
-            HttpServerBuilder ba = HttpServer.builder();
+            HttpServerBuilder ba #= HttpServer.builder();
             ba.bind("127.0.0.1:0");
             (HttpRequest) -> #HttpResponse ha =
                 (req) -> RedirectTests.handle(req);
             ba.handler(ha);
-            HttpServer srvA = ba.build();
+            HttpServer srvA #= ba.build();
             Server coreA = srvA.server;
             int32 portA = coreA.listener.boundPort();
 
-            HttpServerBuilder bb = HttpServer.builder();
+            HttpServerBuilder bb #= HttpServer.builder();
             bb.bind("127.0.0.1:0");
             (HttpRequest) -> #HttpResponse hb =
                 (req) -> RedirectTests.handle(req);
             bb.handler(hb);
-            HttpServer srvB = bb.build();
+            HttpServer srvB #= bb.build();
             Server coreB = srvB.server;
             int32 portB = coreB.listener.boundPort();
             RedirectTests.xPort = portB;

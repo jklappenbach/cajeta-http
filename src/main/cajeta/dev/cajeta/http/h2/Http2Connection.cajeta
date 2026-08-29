@@ -153,7 +153,7 @@ public final class Http2Connection {
     // stop the loop. A connection error -> GOAWAY + stop; a stream error ->
     // RST_STREAM + continue.
     boolean readAndDispatch(int8[] hdr) {
-        Http2FrameHeader h = Http2FrameHeader(hdr);
+        Http2FrameHeader h #= Http2FrameHeader(hdr);
         int32 type = h.typeCode();
         int32 flags = h.flags();
         int32 sid = h.streamId();

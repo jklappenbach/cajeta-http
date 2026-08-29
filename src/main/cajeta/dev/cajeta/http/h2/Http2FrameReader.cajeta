@@ -66,7 +66,7 @@ public final class Http2FrameReader {
             hdr[i] = this.buf[this.pos + i];
             i = i + 1;
         }
-        Http2FrameHeader h = Http2FrameHeader(hdr);
+        Http2FrameHeader h #= Http2FrameHeader(hdr);
         int32 len = h.length();
         if (len > this.maxFrameSize) {
             throw heap Http2Exception(

@@ -209,7 +209,7 @@ public class WsProtocol {
         }
 
         // --- data frames (RFC 6455 §5.4) → the reassembler ---
-        WsMessage m = this.assembler.accept(frame);
+        WsMessage m #= this.assembler.accept(frame);
         if (m != null) {
             // A completed TEXT message MUST be valid UTF-8 (RFC 6455 §8.1);
             // an invalid one fails the connection with 1007. Compressed text

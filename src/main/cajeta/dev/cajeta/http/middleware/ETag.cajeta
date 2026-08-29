@@ -45,7 +45,7 @@ public class ETag {
         if (resp.getHeaders().contains("etag")) {
             return #resp;
         }
-        String tag = "\"" + Sha256.hashHex(resp.body, (int64) resp.bodyLength()) + "\"";
+        String tag #= "\"" + Sha256.hashHex(resp.body, (int64) resp.bodyLength()) + "\"";
         resp.setHeader("ETag", tag);
 
         String inm #= req.getHeaders().get("If-None-Match");

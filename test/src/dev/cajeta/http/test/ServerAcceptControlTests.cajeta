@@ -49,7 +49,7 @@ public final class ServerAcceptControlTests {
     // ---- server ----------------------------------------------------------
 
     public static #HttpResponse handle(HttpRequest req) {
-        String t = req.getTarget();
+        String t #= req.getTarget();
         if (t.equals("/slow")) {
             Tasks.sleepMillis((int64) 400);
             String s = "slow-done";
@@ -67,7 +67,7 @@ public final class ServerAcceptControlTests {
     static #HttpServer serverWith(int32 maxConns, int32 policy) {
         ConnectionLimits cl = heap ConnectionLimits(maxConns, 16, 65536,
                                                     65536, policy);
-        HttpServerBuilder b = HttpServer.builder();
+        HttpServerBuilder b #= HttpServer.builder();
         b.bind("127.0.0.1:0");
         (HttpRequest) -> #HttpResponse h =
             (req) -> ServerAcceptControlTests.handle(req);
@@ -101,11 +101,11 @@ public final class ServerAcceptControlTests {
      * the hang, not make a genuinely-starved exchange succeed).
      */
     public static async int32 getPath(int32 port, String path, String want) {
-        HttpClient client = heap HttpClient();
+        HttpClient client #= heap HttpClient();
         client.exchangeTimeout(15000);
         String url = "http://127.0.0.1:" + port + path;
         try {
-            HttpResponse resp = client.get(url);
+            HttpResponse resp #= client.get(url);
             if (resp.statusCode() != 200) { return -1; }
             int32 n = resp.bodyLength();
             int8[] copy = heap int8[n];
@@ -127,11 +127,11 @@ public final class ServerAcceptControlTests {
      * expect the connection to close WITHOUT a byte of HTTP back.
      */
     public static async int32 shedProbe(int32 port) {
-        IpAddress ip = IpAddress.loopbackV4();
-        SocketAddress a = SocketAddress.of(#ip, port);
-        TcpStream s = TcpStream.connectAsync(#a);
+        IpAddress ip #= IpAddress.loopbackV4();
+        SocketAddress a #= SocketAddress.of(#ip, port);
+        TcpStream s #= TcpStream.connectAsync(#a);
         String req = "GET / HTTP/1.1\r\nhost: t\r\nconnection: close\r\n\r\n";
-        int8[] rb = req.toBytes();
+        int8[] rb #= req.toBytes();
         try {
             s.writeAllAsync(rb, (int64) 0, (int64) req.byteLength());
         } catch (Exception e) {
@@ -156,10 +156,10 @@ public final class ServerAcceptControlTests {
 
     /** A connect after shutdown must fail (or read instant EOF). */
     public static async int32 deadPortProbe(int32 port) {
-        IpAddress ip = IpAddress.loopbackV4();
-        SocketAddress a = SocketAddress.of(#ip, port);
+        IpAddress ip #= IpAddress.loopbackV4();
+        SocketAddress a #= SocketAddress.of(#ip, port);
         try {
-            TcpStream s = TcpStream.connectAsync(#a);
+            TcpStream s #= TcpStream.connectAsync(#a);
             int8[] buf = heap int8[64];
             int64 n = s.readAsync(buf, (int64) 0, (int64) 64);
             s.close();
@@ -174,7 +174,7 @@ public final class ServerAcceptControlTests {
 
     static void refuseSheds(Check c) {
         scope {
-            HttpServer srv = ServerAcceptControlTests.serverWith(
+            HttpServer srv #= ServerAcceptControlTests.serverWith(
                 2, LoadShedPolicy.REFUSE);
             int32 port = srv.server.listener.boundPort();
             Task<int32> sv = spawn serveIt(srv);
@@ -188,7 +188,7 @@ public final class ServerAcceptControlTests {
             c.eqInt((int64) await a, 1, "first admitted exchange completed");
             c.eqInt((int64) await b, 1, "second admitted exchange completed");
 
-            boolean drained = srv.shutdown(Duration.ofSeconds(2));
+            boolean drained #= srv.shutdown(Duration.ofSeconds(2));
             c.that(drained, "REFUSE server drained clean");
             int32 s = await sv;
             c.eqInt((int64) s, 1, "accept loop exited after shutdown");
@@ -197,7 +197,7 @@ public final class ServerAcceptControlTests {
 
     static void blockQueues(Check c) {
         scope {
-            HttpServer srv = ServerAcceptControlTests.serverWith(
+            HttpServer srv #= ServerAcceptControlTests.serverWith(
                 1, LoadShedPolicy.BLOCK);
             int32 port = srv.server.listener.boundPort();
             Task<int32> sv = spawn serveIt(srv);
@@ -212,7 +212,7 @@ public final class ServerAcceptControlTests {
             c.that(elapsed >= (int64) 800,
                    "queued exchange waited for the permit (serialized)");
 
-            boolean drained = srv.shutdown(Duration.ofSeconds(2));
+            boolean drained #= srv.shutdown(Duration.ofSeconds(2));
             c.that(drained, "BLOCK server drained clean");
             int32 s = await sv;
             c.eqInt((int64) s, 1, "BLOCK accept loop exited");
@@ -221,14 +221,14 @@ public final class ServerAcceptControlTests {
 
     static void gracefulShutdown(Check c) {
         scope {
-            HttpServer srv = ServerAcceptControlTests.serverWith(
+            HttpServer srv #= ServerAcceptControlTests.serverWith(
                 8, LoadShedPolicy.REFUSE);
             int32 port = srv.server.listener.boundPort();
             Task<int32> sv = spawn serveIt(srv);
 
             Task<int32> a = spawn getPath(port, "/slow", "slow-done");
             Tasks.sleepMillis((int64) 100);      // exchange in flight
-            boolean drained = srv.shutdown(Duration.ofSeconds(2));
+            boolean drained #= srv.shutdown(Duration.ofSeconds(2));
             c.that(drained, "shutdown mid-exchange drained clean");
             c.eqInt((int64) await a, 1, "in-flight exchange completed");
 
@@ -241,7 +241,7 @@ public final class ServerAcceptControlTests {
 
     static void deadlineForcesStop(Check c) {
         scope {
-            HttpServer srv = ServerAcceptControlTests.serverWith(
+            HttpServer srv #= ServerAcceptControlTests.serverWith(
                 8, LoadShedPolicy.REFUSE);
             int32 port = srv.server.listener.boundPort();
             Task<int32> sv = spawn serveIt(srv);
@@ -249,7 +249,7 @@ public final class ServerAcceptControlTests {
             Task<int32> a = spawn getPath(port, "/hung", "hung-done");
             Tasks.sleepMillis((int64) 100);      // the hung exchange is in
             int64 t0 = ServerAcceptControlTests.nowMs();
-            boolean drained = srv.shutdown(Duration.ofMillis((int64) 300));
+            boolean drained #= srv.shutdown(Duration.ofMillis((int64) 300));
             int64 elapsed = ServerAcceptControlTests.nowMs() - t0;
             c.that(!drained, "hung exchange forces shutdown to report false");
             c.that(elapsed >= (int64) 300 && elapsed < (int64) 1200,

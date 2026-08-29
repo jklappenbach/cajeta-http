@@ -75,7 +75,7 @@ public class MiddlewareDemo extends DemoClass {
     }
 
     public static #HttpResponse echoIp(HttpRequest req) {
-        String ip = req.getHeaders().get("X-Real-IP");
+        String ip #= req.getHeaders().get("X-Real-IP");
         if (ip == null) {
             ip = "-";
         }
@@ -88,15 +88,15 @@ public class MiddlewareDemo extends DemoClass {
 
         // 1. The mechanics: Recover outermost, then RequestId, then Logging
         //    into a capturing sink. One compose() -> one ordinary handler.
-        Middleware rec = Recover.middleware();
-        Middleware rid = RequestId.middleware();
-        LogSink sink = LogSink.capturing();
-        Middleware logm = Logging.middleware(sink);
+        Middleware rec #= Recover.middleware();
+        Middleware rid #= RequestId.middleware();
+        LogSink sink #= LogSink.capturing();
+        Middleware logm #= Logging.middleware(sink);
         MiddlewareChain chain = heap MiddlewareChain();
         chain.use(#rec).use(#rid).use(#logm);
         (HttpRequest) -> #HttpResponse term = (req) -> MiddlewareDemo.okJson(req);
-        (HttpRequest) -> #HttpResponse app = chain.compose(term);
-        HttpResponse r1 = app(HttpRequest.of("GET", "/orders"));
+        (HttpRequest) -> #HttpResponse app #= chain.compose(term);
+        HttpResponse r1 #= app(HttpRequest.of("GET", "/orders"));
         this.check(r1.statusCode() == 200
             && r1.getHeaders().get(RequestId.HEADER) != null,
             "the composed handler runs; RequestId stamps X-Request-Id");
@@ -104,64 +104,64 @@ public class MiddlewareDemo extends DemoClass {
             "Logging wrote one access line into the capturing sink");
         // Recover turns a handler throw into a 500 instead of a dead fiber.
         MiddlewareChain crash = heap MiddlewareChain();
-        Middleware rec2 = Recover.middleware();
+        Middleware rec2 #= Recover.middleware();
         crash.use(#rec2);
         (HttpRequest) -> #HttpResponse boomT = (req) -> MiddlewareDemo.boom(req);
-        (HttpRequest) -> #HttpResponse crashApp = crash.compose(boomT);
-        HttpResponse crashed = crashApp(HttpRequest.of("GET", "/orders"));
+        (HttpRequest) -> #HttpResponse crashApp #= crash.compose(boomT);
+        HttpResponse crashed #= crashApp(HttpRequest.of("GET", "/orders"));
         this.check(crashed.statusCode() == 500,
             "Recover converts a handler throw into a 500");
 
         // 2. Auth. BasicAuth splits on the FIRST colon (passwords may
         //    contain colons) and compares in constant time; BearerAuth
         //    checks a token. Both challenge with WWW-Authenticate on 401.
-        BasicAuth ba = BasicAuth.create("orders");
+        BasicAuth ba #= BasicAuth.create("orders");
         (String, String) -> boolean verify =
             (u, pw) -> u.equals("ada") && Credentials.constantTimeEquals(pw, "s3cr:et");
         ba.verifier(#verify);
-        Middleware bam = BasicAuth.middleware(ba);
+        Middleware bam #= BasicAuth.middleware(ba);
         MiddlewareChain auth = heap MiddlewareChain();
         auth.use(#bam);
-        (HttpRequest) -> #HttpResponse authApp = auth.compose(term);
+        (HttpRequest) -> #HttpResponse authApp #= auth.compose(term);
         String creds = "ada:s3cr:et";
-        String good = Base64.encode(creds.toBytes(), (int64) creds.byteLength());
-        HttpRequest okReq = HttpRequest.of("GET", "/orders");
+        String good #= Base64.encode(creds.toBytes(), (int64) creds.byteLength());
+        HttpRequest okReq #= HttpRequest.of("GET", "/orders");
         okReq.setHeader("Authorization", "Basic " + good);
         HttpResponse admitted = authApp(okReq);
         this.check(admitted.statusCode() == 200,
             "BasicAuth admits valid credentials (colon in the password)");
-        HttpResponse denied = authApp(HttpRequest.of("GET", "/orders"));
-        String chal = denied.getHeaders().get("WWW-Authenticate");
+        HttpResponse denied #= authApp(HttpRequest.of("GET", "/orders"));
+        String chal #= denied.getHeaders().get("WWW-Authenticate");
         this.check(denied.statusCode() == 401 && chal != null
             && chal.startsWith("Basic realm="),
             "missing credentials answer 401 with the realm challenge");
-        BearerAuth bt = BearerAuth.create("orders");
+        BearerAuth bt #= BearerAuth.create("orders");
         (String) -> boolean tok = (t) -> t.equals("tok-live-42");
         bt.verifier(#tok);
-        Middleware btm = BearerAuth.middleware(bt);
+        Middleware btm #= BearerAuth.middleware(bt);
         MiddlewareChain bearer = heap MiddlewareChain();
         bearer.use(#btm);
-        (HttpRequest) -> #HttpResponse bearerApp = bearer.compose(term);
-        HttpRequest bReq = HttpRequest.of("GET", "/orders");
+        (HttpRequest) -> #HttpResponse bearerApp #= bearer.compose(term);
+        HttpRequest bReq #= HttpRequest.of("GET", "/orders");
         bReq.setHeader("Authorization", "Bearer tok-live-42");
         HttpResponse btOk = bearerApp(bReq);
-        HttpResponse btNo = bearerApp(HttpRequest.of("GET", "/orders"));
+        HttpResponse btNo #= bearerApp(HttpRequest.of("GET", "/orders"));
         this.check(btOk.statusCode() == 200 && btNo.statusCode() == 401,
             "BearerAuth: right token 200, missing token 401");
 
         // 3. Rate limiting: a token bucket per client key (default
         //    X-Forwarded-For). Burst 2, refill 1/s: the third rapid call
         //    429s with Retry-After.
-        RateLimit rl = RateLimit.create((int64) 2, (int64) 1);
-        Middleware rlm = RateLimit.middleware(rl);
+        RateLimit rl #= RateLimit.create((int64) 2, (int64) 1);
+        Middleware rlm #= RateLimit.middleware(rl);
         MiddlewareChain limited = heap MiddlewareChain();
         limited.use(#rlm);
-        (HttpRequest) -> #HttpResponse limApp = limited.compose(term);
-        HttpRequest l1 = HttpRequest.of("GET", "/orders");
+        (HttpRequest) -> #HttpResponse limApp #= limited.compose(term);
+        HttpRequest l1 #= HttpRequest.of("GET", "/orders");
         l1.setHeader("X-Forwarded-For", "10.0.0.9");
-        HttpRequest l2 = HttpRequest.of("GET", "/orders");
+        HttpRequest l2 #= HttpRequest.of("GET", "/orders");
         l2.setHeader("X-Forwarded-For", "10.0.0.9");
-        HttpRequest l3 = HttpRequest.of("GET", "/orders");
+        HttpRequest l3 #= HttpRequest.of("GET", "/orders");
         l3.setHeader("X-Forwarded-For", "10.0.0.9");
         HttpResponse lim1 = limApp(l1);
         HttpResponse lim2 = limApp(l2);
@@ -183,23 +183,23 @@ public class MiddlewareDemo extends DemoClass {
         // 4. Timeout: a handler over budget becomes 504 — the middleware
         //    answer to a stuck downstream (compare ClientDemo's
         //    exchangeTimeout, which is the CLIENT side of the same story).
-        Middleware tmo = Timeout.middleware((int64) 60);
+        Middleware tmo #= Timeout.middleware((int64) 60);
         MiddlewareChain slowChain = heap MiddlewareChain();
         slowChain.use(#tmo);
         (HttpRequest) -> #HttpResponse slowT = (req) -> MiddlewareDemo.slow(req);
-        (HttpRequest) -> #HttpResponse slowApp = slowChain.compose(slowT);
-        HttpResponse late = slowApp(HttpRequest.of("GET", "/orders"));
+        (HttpRequest) -> #HttpResponse slowApp #= slowChain.compose(slowT);
+        HttpResponse late #= slowApp(HttpRequest.of("GET", "/orders"));
         this.check(late.statusCode() == 504,
             "a 300ms handler against a 60ms budget answers 504");
 
         // 5. CORS: the browser's preflight OPTIONS answered from config.
-        Cors cors = Cors.create();
+        Cors cors #= Cors.create();
         cors.allowOrigin("https://app.example").allowMethods("GET, POST");
-        Middleware cm = Cors.middleware(cors);
+        Middleware cm #= Cors.middleware(cors);
         MiddlewareChain corsChain = heap MiddlewareChain();
         corsChain.use(#cm);
-        (HttpRequest) -> #HttpResponse corsApp = corsChain.compose(term);
-        HttpRequest pre = HttpRequest.of("OPTIONS", "/orders");
+        (HttpRequest) -> #HttpResponse corsApp #= corsChain.compose(term);
+        HttpRequest pre #= HttpRequest.of("OPTIONS", "/orders");
         pre.setHeader("Origin", "https://app.example");
         pre.setHeader("Access-Control-Request-Method", "POST");
         HttpResponse preResp = corsApp(pre);
@@ -211,27 +211,27 @@ public class MiddlewareDemo extends DemoClass {
         // 6. Caching + bandwidth: ETag hashes the body and honors
         //    If-None-Match with 304; Compression gzips when the client
         //    accepts it, restamps Content-Length, and adds Vary.
-        Middleware em = ETag.middleware();
+        Middleware em #= ETag.middleware();
         MiddlewareChain etagChain = heap MiddlewareChain();
         etagChain.use(#em);
-        (HttpRequest) -> #HttpResponse etagApp = etagChain.compose(term);
-        HttpResponse first = etagApp(HttpRequest.of("GET", "/orders"));
-        String tag = first.getHeaders().get("ETag");
-        HttpRequest cond = HttpRequest.of("GET", "/orders");
+        (HttpRequest) -> #HttpResponse etagApp #= etagChain.compose(term);
+        HttpResponse first #= etagApp(HttpRequest.of("GET", "/orders"));
+        String tag #= first.getHeaders().get("ETag");
+        HttpRequest cond #= HttpRequest.of("GET", "/orders");
         cond.setHeader("If-None-Match", tag);
         HttpResponse notMod = etagApp(cond);
         this.check(tag != null && notMod.statusCode() == 304 && !notMod.hasBody,
             "ETag: matching If-None-Match answers a bodyless 304");
-        Compression comp = Compression.create();
-        Middleware zm = Compression.middleware(comp);
+        Compression comp #= Compression.create();
+        Middleware zm #= Compression.middleware(comp);
         MiddlewareChain zipChain = heap MiddlewareChain();
         zipChain.use(#zm);
-        (HttpRequest) -> #HttpResponse zipApp = zipChain.compose(term);
-        HttpRequest zReq = HttpRequest.of("GET", "/orders");
+        (HttpRequest) -> #HttpResponse zipApp #= zipChain.compose(term);
+        HttpRequest zReq #= HttpRequest.of("GET", "/orders");
         zReq.setHeader("Accept-Encoding", "gzip");
         HttpResponse zResp = zipApp(zReq);
-        HttpResponse plainResp = MiddlewareDemo.okJson(HttpRequest.of("GET", "/x"));
-        int8[] unzipped = ContentCoding.decode("gzip", zResp.body,
+        HttpResponse plainResp #= MiddlewareDemo.okJson(HttpRequest.of("GET", "/x"));
+        int8[] unzipped #= ContentCoding.decode("gzip", zResp.body,
             zResp.bodyLength(), (int64) 65536);
         this.check(zResp.getHeaders().get("Content-Encoding").equals("gzip")
             && zResp.getHeaders().get("Vary") != null
@@ -240,8 +240,8 @@ public class MiddlewareDemo extends DemoClass {
             "Compression gzips, adds Vary, and round-trips the body");
         // Decompression is the inbound mirror: a gzip REQUEST body is
         // inflated before the handler sees it (with a bomb cap).
-        Decompression dz = Decompression.create();
-        Middleware dzm = Decompression.middleware(dz);
+        Decompression dz #= Decompression.create();
+        Middleware dzm #= Decompression.middleware(dz);
         this.check(dz != null && dzm != null,
             "Decompression middleware constructed (loopback demo in ServerDemo)");
 
@@ -251,14 +251,14 @@ public class MiddlewareDemo extends DemoClass {
         Path.of(root).mkdirs();
         String page = "<h1>orders console</h1>";
         File.writeAllBytes(root + "/index.html", page.toBytes(), page.byteLength());
-        StaticFile sf = StaticFile.create(root);
-        Middleware sfm = StaticFile.middleware(sf);
+        StaticFile sf #= StaticFile.create(root);
+        Middleware sfm #= StaticFile.middleware(sf);
         MiddlewareChain fileChain = heap MiddlewareChain();
         fileChain.use(#sfm);
         (HttpRequest) -> #HttpResponse notFound =
             (req) -> HttpResponse.of(404);
-        (HttpRequest) -> #HttpResponse fileApp = fileChain.compose(notFound);
-        HttpResponse idx = fileApp(HttpRequest.of("GET", "/"));
+        (HttpRequest) -> #HttpResponse fileApp #= fileChain.compose(notFound);
+        HttpResponse idx #= fileApp(HttpRequest.of("GET", "/"));
         this.check(idx.statusCode() == 200 && idx.bodyLength() == page.byteLength(),
             "StaticFile serves index.html for the directory root");
         this.check(StaticPath.jail("/../etc/passwd") == null
@@ -268,13 +268,13 @@ public class MiddlewareDemo extends DemoClass {
         // 8. ProxyHeaders: behind a TRUSTED load balancer, the first
         //    X-Forwarded-For hop becomes X-Real-IP; in untrusted mode the
         //    spoofable headers are stripped instead.
-        ProxyHeaders ph = ProxyHeaders.trusted();
-        Middleware phm = ProxyHeaders.middleware(ph);
+        ProxyHeaders ph #= ProxyHeaders.trusted();
+        Middleware phm #= ProxyHeaders.middleware(ph);
         MiddlewareChain proxied = heap MiddlewareChain();
         proxied.use(#phm);
         (HttpRequest) -> #HttpResponse ipT = (req) -> MiddlewareDemo.echoIp(req);
-        (HttpRequest) -> #HttpResponse ipApp = proxied.compose(ipT);
-        HttpRequest fwd = HttpRequest.of("GET", "/ip");
+        (HttpRequest) -> #HttpResponse ipApp #= proxied.compose(ipT);
+        HttpRequest fwd #= HttpRequest.of("GET", "/ip");
         fwd.setHeader("X-Forwarded-For", "203.0.113.7, 10.1.1.1");
         HttpResponse ipResp = ipApp(fwd);
         this.check(DemoClass.bodyString(ipResp.body, ipResp.bodyLength())

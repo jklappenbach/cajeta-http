@@ -47,7 +47,7 @@ public final class ServerStreamingTests {
         public BytesChannel chan;
 
         public Holder(int32 n) {
-            int8[] p = ServerStreamingTests.pattern(n);
+            int8[] p #= ServerStreamingTests.pattern(n);
             this.data = #p;
             BytesChannel c = heap BytesChannel(this.data, (int64) n);
             this.chan = #c;
@@ -78,13 +78,13 @@ public final class ServerStreamingTests {
     // ---- handlers --------------------------------------------------------
 
     public static #HttpResponse handleStream(HttpRequest req) {
-        String t = req.getTarget();
+        String t #= req.getTarget();
         if (t.equals("/stream")) {
             // The source channel lives in a static (it must outlive
             // this frame — the loop pumps it AFTER the handler returns).
             AsyncReader r = heap AsyncReader(ServerStreamingTests.src.chan);
-            StreamBody b = StreamBody.of(#r);
-            HttpResponse resp = HttpResponse.ok();
+            StreamBody b #= StreamBody.of(#r);
+            HttpResponse resp #= HttpResponse.ok();
             resp.body(#b);
             return #resp;
         }
@@ -93,7 +93,7 @@ public final class ServerStreamingTests {
     }
 
     public static #HttpResponse handleCount(HttpRequest req) {
-        String t = req.getTarget();
+        String t #= req.getTarget();
         if (t.equals("/count")) {
             Body b = req.getBody();
             if (b == null) {
@@ -142,28 +142,28 @@ public final class ServerStreamingTests {
 
     /** GET the streamed route; bytes must match; then a plain GET reuses. */
     public static async int32 getStreamed(int32 port, int32 n) {
-        HttpClient client = heap HttpClient();
+        HttpClient client #= heap HttpClient();
         String url = "http://127.0.0.1:" + port + "/stream";
-        HttpResponse resp = client.get(url);
+        HttpResponse resp #= client.get(url);
         if (resp.statusCode() != 200) { return -1; }
         if (resp.bodyLength() != n) {
             System.stdout.println("  (streamed body length: {})", resp.bodyLength());
             return -2;
         }
-        int8[] want = ServerStreamingTests.pattern(n);
+        int8[] want #= ServerStreamingTests.pattern(n);
         int32 i = 0;
         while (i < n) {
             if (resp.body[i] != want[i]) { return -3; }
             i = i + 1;
         }
-        String p2 = ServerStreamingTests.respTextOf(client, port, "/plain");
+        String p2 #= ServerStreamingTests.respTextOf(client, port, "/plain");
         if (p2 == null || !p2.equals("plain")) { return -4; }
         return 1;
     }
 
     static #String respTextOf(HttpClient client, int32 port, String path) {
         String url = "http://127.0.0.1:" + port + path;
-        HttpResponse resp = client.get(url);
+        HttpResponse resp #= client.get(url);
         if (resp.statusCode() != 200) {
             return null;
         }
@@ -172,13 +172,13 @@ public final class ServerStreamingTests {
 
     /** POST `n` bytes to `path`; return the response text (null on !200). */
     static #String postBytes(HttpClient client, int32 port, String path, int32 n) {
-        Uri uri = Uri.builder()
+        Uri uri #= Uri.builder()
             .scheme("http").host("127.0.0.1").port(port).path(path)
             .build();
-        HttpRequest req = HttpRequest.fromUri("POST", uri);
-        int8[] data = ServerStreamingTests.pattern(n);
+        HttpRequest req #= HttpRequest.fromUri("POST", uri);
+        int8[] data #= ServerStreamingTests.pattern(n);
         req.body(data, n);
-        HttpResponse resp = client.send(uri, req);
+        HttpResponse resp #= client.send(uri, req);
         if (resp.statusCode() != 200) {
             return null;
         }
@@ -187,13 +187,13 @@ public final class ServerStreamingTests {
 
     /** Two counted POSTs on one connection — the handler saw every byte. */
     public static async int32 countTwice(int32 port) {
-        HttpClient client = heap HttpClient();
-        String c1 = ServerStreamingTests.postBytes(client, port, "/count", 8000);
+        HttpClient client #= heap HttpClient();
+        String c1 #= ServerStreamingTests.postBytes(client, port, "/count", 8000);
         if (c1 == null || !c1.equals("8000")) {
             System.stdout.println("  (count 1: '{}')", c1);
             return -1;
         }
-        String c2 = ServerStreamingTests.postBytes(client, port, "/count", 300);
+        String c2 #= ServerStreamingTests.postBytes(client, port, "/count", 300);
         if (c2 == null || !c2.equals("300")) {
             System.stdout.println("  (count 2: '{}')", c2);
             return -2;
@@ -203,13 +203,13 @@ public final class ServerStreamingTests {
 
     /** Ignore a body, then count one — same connection stays framed. */
     public static async int32 ignoreThenCount(int32 port) {
-        HttpClient client = heap HttpClient();
-        String i1 = ServerStreamingTests.postBytes(client, port, "/ignore", 8000);
+        HttpClient client #= heap HttpClient();
+        String i1 #= ServerStreamingTests.postBytes(client, port, "/ignore", 8000);
         if (i1 == null || !i1.equals("IGNORED")) {
             System.stdout.println("  (ignore: '{}')", i1);
             return -1;
         }
-        String c1 = ServerStreamingTests.postBytes(client, port, "/count", 500);
+        String c1 #= ServerStreamingTests.postBytes(client, port, "/count", 500);
         if (c1 == null || !c1.equals("500")) {
             System.stdout.println("  (post-ignore count: '{}')", c1);
             return -2;
@@ -225,12 +225,12 @@ public final class ServerStreamingTests {
             Holder hold = heap Holder(N);
             ServerStreamingTests.src #= hold;
 
-            HttpServerBuilder b = HttpServer.builder();
+            HttpServerBuilder b #= HttpServer.builder();
             b.bind("127.0.0.1:0");
             (HttpRequest) -> #HttpResponse h =
                 (req) -> ServerStreamingTests.handleStream(req);
             b.handler(h);
-            HttpServer srv = b.build();
+            HttpServer srv #= b.build();
             Server core = srv.server;
             int32 port = core.listener.boundPort();
 
@@ -244,9 +244,9 @@ public final class ServerStreamingTests {
     }
 
     static #HttpServer streamingServer() {
-        ServerLimits l = ServerLimits.of(5000, 5000, (int64) 0, true);
+        ServerLimits l #= ServerLimits.of(5000, 5000, (int64) 0, true);
         l.streamRequestBody = true;
-        HttpServerBuilder b = HttpServer.builder();
+        HttpServerBuilder b #= HttpServer.builder();
         b.bind("127.0.0.1:0");
         (HttpRequest) -> #HttpResponse h =
             (req) -> ServerStreamingTests.handleCount(req);
@@ -257,7 +257,7 @@ public final class ServerStreamingTests {
 
     static void handlerReads(Check c) {
         scope {
-            HttpServer srv = ServerStreamingTests.streamingServer();
+            HttpServer srv #= ServerStreamingTests.streamingServer();
             Server core = srv.server;
             int32 port = core.listener.boundPort();
             Task<int32> s1 = spawn acceptAndDispatch(core);
@@ -270,7 +270,7 @@ public final class ServerStreamingTests {
 
     static void ignoredDrained(Check c) {
         scope {
-            HttpServer srv = ServerStreamingTests.streamingServer();
+            HttpServer srv #= ServerStreamingTests.streamingServer();
             Server core = srv.server;
             int32 port = core.listener.boundPort();
             Task<int32> s1 = spawn acceptAndDispatch(core);

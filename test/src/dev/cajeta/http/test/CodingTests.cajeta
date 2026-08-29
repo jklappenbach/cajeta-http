@@ -109,98 +109,98 @@ public final class CodingTests {
 
     /** The DEFLATE-level knob on the content-coding boundary (http:2.2c). */
     static void levels(Check c) {
-        String base = CodingTests.phrase();
+        String base #= CodingTests.phrase();
         String big = base + base + base + base + base;   // ~1.8 KiB, matchy
-        int8[] data = big.toBytes();
+        int8[] data #= big.toBytes();
         int32 n = big.byteLength();
 
-        int8[] fast = ContentCoding.encode("gzip", data, n, 1);
-        int8[] best = ContentCoding.encode("gzip", data, n, 9);
+        int8[] fast #= ContentCoding.encode("gzip", data, n, 1);
+        int8[] best #= ContentCoding.encode("gzip", data, n, 9);
         int32 fn = (int32) fast.count();
         int32 bn = (int32) best.count();
         c.that(bn <= fn, "gzip level 9 is no larger than level 1");
 
         // The no-level encode is the server's level-1 default policy.
-        int8[] dflt = ContentCoding.encode("gzip", data, n);
+        int8[] dflt #= ContentCoding.encode("gzip", data, n);
         c.that(CodingTests.bytesEqual(dflt, fast),
             "default gzip encode is level 1");
 
         // Every level still decodes byte-exactly.
-        int8[] b1 = ContentCoding.decode("gzip", fast, fn, (int64) 1000000);
-        int8[] b9 = ContentCoding.decode("gzip", best, bn, (int64) 1000000);
+        int8[] b1 #= ContentCoding.decode("gzip", fast, fn, (int64) 1000000);
+        int8[] b9 #= ContentCoding.decode("gzip", best, bn, (int64) 1000000);
         c.that(CodingTests.matchesPhrase(b1, (int32) b1.count(), big),
             "level-1 gzip decodes to the original");
         c.that(CodingTests.matchesPhrase(b9, (int32) b9.count(), big),
             "level-9 gzip decodes to the original");
 
         // A zlib (`deflate` token) level round-trips too.
-        int8[] z9 = ContentCoding.encode("deflate", data, n, 9);
-        int8[] zb = ContentCoding.decode("deflate", z9, (int32) z9.count(),
+        int8[] z9 #= ContentCoding.encode("deflate", data, n, 9);
+        int8[] zb #= ContentCoding.decode("deflate", z9, (int32) z9.count(),
             (int64) 1000000);
         c.that(CodingTests.matchesPhrase(zb, (int32) zb.count(), big),
             "level-9 deflate decodes to the original");
     }
 
     static void roundTrips(Check c) {
-        String text = CodingTests.phrase();
-        int8[] plain = text.toBytes();
+        String text #= CodingTests.phrase();
+        int8[] plain #= text.toBytes();
         int32 n = text.byteLength();
 
-        int8[] gz = ContentCoding.encode("gzip", plain, n);
+        int8[] gz #= ContentCoding.encode("gzip", plain, n);
         int32 gzLen = (int32) gz.count();
         c.that(gzLen < n, "gzip encoding shrinks the repetitive phrase");
-        int8[] back = ContentCoding.decode("gzip", gz, gzLen, (int64) 65536);
+        int8[] back #= ContentCoding.decode("gzip", gz, gzLen, (int64) 65536);
         c.that(CodingTests.matchesPhrase(back, (int32) back.count(), text),
             "gzip round-trips byte-exactly");
 
-        int8[] zl = ContentCoding.encode("deflate", plain, n);
+        int8[] zl #= ContentCoding.encode("deflate", plain, n);
         int32 zlLen = (int32) zl.count();
         c.that(zlLen < n, "deflate encoding shrinks the repetitive phrase");
-        int8[] back2 = ContentCoding.decode("deflate", zl, zlLen, (int64) 65536);
+        int8[] back2 #= ContentCoding.decode("deflate", zl, zlLen, (int64) 65536);
         c.that(CodingTests.matchesPhrase(back2, (int32) back2.count(), text),
             "deflate round-trips byte-exactly");
 
-        int8[] idt = ContentCoding.encode("identity", plain, n);
+        int8[] idt #= ContentCoding.encode("identity", plain, n);
         c.that(CodingTests.matchesPhrase(idt, (int32) idt.count(), text),
             "identity encode is a pass-through copy");
     }
 
     static void systemFixtures(Check c) {
-        String text = CodingTests.phrase();
+        String text #= CodingTests.phrase();
 
-        int8[] gz = CodingTests.gzipFixture();
-        int8[] out = ContentCoding.decode("gzip", gz, 69, (int64) 65536);
+        int8[] gz #= CodingTests.gzipFixture();
+        int8[] out #= ContentCoding.decode("gzip", gz, 69, (int64) 65536);
         c.that(CodingTests.matchesPhrase(out, (int32) out.count(), text),
             "system-gzip fixture (dynamic Huffman + back-refs) decodes exactly");
 
-        int8[] gz2 = CodingTests.gzipFixture();
-        int8[] out2 = ContentCoding.decode("x-gzip", gz2, 69, (int64) 65536);
+        int8[] gz2 #= CodingTests.gzipFixture();
+        int8[] out2 #= ContentCoding.decode("x-gzip", gz2, 69, (int64) 65536);
         c.that(CodingTests.matchesPhrase(out2, (int32) out2.count(), text),
             "the x-gzip alias decodes the same member");
 
-        int8[] zl = CodingTests.zlibFixture();
-        int8[] out3 = ContentCoding.decode("deflate", zl, 57, (int64) 65536);
+        int8[] zl #= CodingTests.zlibFixture();
+        int8[] out3 #= ContentCoding.decode("deflate", zl, 57, (int64) 65536);
         c.that(CodingTests.matchesPhrase(out3, (int32) out3.count(), text),
             "system-zlib fixture decodes exactly");
     }
 
     static void rejects(Check c) {
         // Truncated gzip member.
-        int8[] gz = CodingTests.gzipFixture();
+        int8[] gz #= CodingTests.gzipFixture();
         boolean caught = false;
         try {
-            int8[] out = ContentCoding.decode("gzip", gz, 30, (int64) 65536);
+            int8[] out #= ContentCoding.decode("gzip", gz, 30, (int64) 65536);
         } catch (ContentCodingException e) {
             caught = true;
         }
         c.that(caught, "truncated gzip raises ContentCodingException");
 
         // Corrupted CRC byte.
-        int8[] gz2 = CodingTests.gzipFixture();
+        int8[] gz2 #= CodingTests.gzipFixture();
         gz2[61] = (int8) 0x00;
         boolean caught2 = false;
         try {
-            int8[] out = ContentCoding.decode("gzip", gz2, 69, (int64) 65536);
+            int8[] out #= ContentCoding.decode("gzip", gz2, 69, (int64) 65536);
         } catch (ContentCodingException e) {
             caught2 = true;
         }
@@ -212,7 +212,7 @@ public final class CodingTests {
         while (i < 16) { junk[i] = (int8) (0x41 + i); i = i + 1; }
         boolean caught3 = false;
         try {
-            int8[] out = ContentCoding.decode("deflate", junk, 16, (int64) 65536);
+            int8[] out #= ContentCoding.decode("deflate", junk, 16, (int64) 65536);
         } catch (ContentCodingException e) {
             caught3 = true;
         }
@@ -220,16 +220,16 @@ public final class CodingTests {
     }
 
     static void capsAndTokens(Check c) {
-        String text = CodingTests.phrase();
-        int8[] plain = text.toBytes();
+        String text #= CodingTests.phrase();
+        int8[] plain #= text.toBytes();
         int32 n = text.byteLength();
-        int8[] gz = ContentCoding.encode("gzip", plain, n);
+        int8[] gz #= ContentCoding.encode("gzip", plain, n);
         int32 gzLen = (int32) gz.count();
 
         // 360 bytes of output against a 100-byte cap.
         boolean caught = false;
         try {
-            int8[] out = ContentCoding.decode("gzip", gz, gzLen, (int64) 100);
+            int8[] out #= ContentCoding.decode("gzip", gz, gzLen, (int64) 100);
         } catch (ContentCodingException e) {
             caught = true;
         }
@@ -243,7 +243,7 @@ public final class CodingTests {
 
         boolean caught2 = false;
         try {
-            int8[] out = ContentCoding.decode("br", gz, gzLen, (int64) 65536);
+            int8[] out #= ContentCoding.decode("br", gz, gzLen, (int64) 65536);
         } catch (ContentCodingException e) {
             caught2 = true;
         }

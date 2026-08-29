@@ -24,17 +24,17 @@ import dev.cajeta.http.ws.WsUpgrade;
 public final class AutobahnEchoServer {
     public static int32 main() {
         int32 port = 9001;
-        IpAddress la = IpAddress.loopbackV4();
-        SocketAddress bindAddr = SocketAddress.of(#la, port);
+        IpAddress la #= IpAddress.loopbackV4();
+        SocketAddress bindAddr #= SocketAddress.of(#la, port);
         TcpListener listener = TcpListener.bind(bindAddr);
         System.stdout.println("autobahn echo server: ws://127.0.0.1:{}", port);
         boolean running = true;
         while (running) {
-            TcpStream sock = listener.acceptAsync();
+            TcpStream sock #= listener.acceptAsync();
             try {
                 AsyncReader reader = heap AsyncReader(sock);
                 AsyncWriter writer = heap AsyncWriter(sock);
-                AutobahnEcho h = heap AutobahnEcho();
+                AutobahnEcho h #= heap AutobahnEcho();
                 WsUpgrade.serve(reader, writer, h, true);
             } catch (Exception e) {
                 // A malformed case fails its own connection; keep serving.

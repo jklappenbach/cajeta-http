@@ -47,7 +47,7 @@ final class EchoHandler implements WebSocketHandler {
     public void onMessage(WebSocketConnection conn, WsMessage message) {
         this.messages = this.messages + 1;
         this.rec(77);   // 'M'
-        String t = message.text();
+        String t #= message.text();
         conn.send(t);
     }
 
@@ -84,7 +84,7 @@ public final class WsHandlerTests {
 
     public static async int32 handlerServer(#TcpListener listener,
                                             EchoHandler h) {
-        TcpStream sock = listener.acceptAsync();
+        TcpStream sock #= listener.acceptAsync();
         AsyncReader reader = heap AsyncReader(sock);
         AsyncWriter writer = heap AsyncWriter(sock);
         WsUpgrade.serve(reader, writer, h);
@@ -94,7 +94,7 @@ public final class WsHandlerTests {
 
     public static async int32 throwingServer(#TcpListener listener,
                                              ThrowingHandler h) {
-        TcpStream sock = listener.acceptAsync();
+        TcpStream sock #= listener.acceptAsync();
         AsyncReader reader = heap AsyncReader(sock);
         AsyncWriter writer = heap AsyncWriter(sock);
         WsUpgrade.serve(reader, writer, h);
@@ -104,17 +104,17 @@ public final class WsHandlerTests {
 
     static void lifecycle(Check c) {
         scope {
-            EchoHandler h = heap EchoHandler();
-            IpAddress la = IpAddress.loopbackV4();
-            SocketAddress bindAddr = SocketAddress.of(#la, 0);
+            EchoHandler h #= heap EchoHandler();
+            IpAddress la #= IpAddress.loopbackV4();
+            SocketAddress bindAddr #= SocketAddress.of(#la, 0);
             TcpListener listener = TcpListener.bind(bindAddr);
             int32 port = listener.boundPort();
             Task<int32> sv = spawn handlerServer(#listener, h);
 
             String url = "ws://127.0.0.1:" + port + "/";
-            WebSocket client = WebSocket.connect(url);
+            WebSocket client #= WebSocket.connect(url);
             client.send("ping");
-            WsMessage reply = client.receive();
+            WsMessage reply #= client.receive();
             c.that(reply.text().equals("ping"), "handler onMessage echoes");
             client.close(WsCloseCode.NORMAL, "bye");
             int32 r = await sv;
@@ -135,19 +135,19 @@ public final class WsHandlerTests {
 
     static void throwingHandlerFails1011(Check c) {
         scope {
-            ThrowingHandler h = heap ThrowingHandler();
-            IpAddress la = IpAddress.loopbackV4();
-            SocketAddress bindAddr = SocketAddress.of(#la, 0);
+            ThrowingHandler h #= heap ThrowingHandler();
+            IpAddress la #= IpAddress.loopbackV4();
+            SocketAddress bindAddr #= SocketAddress.of(#la, 0);
             TcpListener listener = TcpListener.bind(bindAddr);
             int32 port = listener.boundPort();
             Task<int32> sv = spawn throwingServer(#listener, h);
 
             String url = "ws://127.0.0.1:" + port + "/";
-            WebSocket client = WebSocket.connect(url);
+            WebSocket client #= WebSocket.connect(url);
             client.send("boom");
             int32 code = 0;
             try {
-                WsMessage m = client.receive();
+                WsMessage m #= client.receive();
             } catch (ConnectionClosedException e) {
                 code = e.closeCode;
             }

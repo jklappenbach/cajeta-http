@@ -23,22 +23,22 @@ public final class SseClientTests {
         // Feed a two-event stream in two arbitrary byte splits.
         String part1 = "retry: 4000\ndata: hello\nid: 7\n\ndata: wor";
         String part2 = "ld\nid: 8\n\n";
-        int8[] b1 = part1.toBytes();
+        int8[] b1 #= part1.toBytes();
         d.feed(b1, (int32) b1.count());
-        int8[] b2 = part2.toBytes();
+        int8[] b2 #= part2.toBytes();
         d.feed(b2, (int32) b2.count());
 
         c.that(d.hasEvent(), "decoder: first event dispatched across a split");
-        SseEvent e1 = d.nextEvent();
+        SseEvent e1 #= d.nextEvent();
         c.that(e1.data.equals("hello"), "decoder: event 1 data 'hello'");
-        String id1 = d.lastEventId();
+        String id1 #= d.lastEventId();
         c.that(id1 != null && id1.equals("7"), "decoder: lastEventId tracks '7'");
         c.eqInt((int64) d.retryMillis(), (int64) 4000,
                 "decoder: retry: folds into retryMillis");
 
-        SseEvent e2 = d.nextEvent();
+        SseEvent e2 #= d.nextEvent();
         c.that(e2.data.equals("world"), "decoder: event 2 data 'world'");
-        String id2 = d.lastEventId();
+        String id2 #= d.lastEventId();
         c.that(id2 != null && id2.equals("8"), "decoder: lastEventId advances to '8'");
     }
 
@@ -46,29 +46,29 @@ public final class SseClientTests {
         SseDecoder d = heap SseDecoder();
         c.that(d.lastEventId() == null, "decoder: no id before any event");
         d.seedLastId("42");
-        String id = d.lastEventId();
+        String id #= d.lastEventId();
         c.that(id != null && id.equals("42"), "decoder: seedLastId sets the resume id");
     }
 
     static void buildRequest(Check c) {
         SseClient sc = heap SseClient("http://events.test/stream");
-        HttpRequest req = sc.buildRequest();
+        HttpRequest req #= sc.buildRequest();
         c.that(req.getMethod().equals("GET"), "request: GET");
         c.that(req.getTarget().equals("/stream"), "request: origin-form target");
-        String accept = req.getHeaders().get("Accept");
+        String accept #= req.getHeaders().get("Accept");
         c.that(accept != null && accept.equals("text/event-stream"),
                "request: Accept: text/event-stream");
-        String cc = req.getHeaders().get("Cache-Control");
+        String cc #= req.getHeaders().get("Cache-Control");
         c.that(cc != null && cc.equals("no-cache"), "request: Cache-Control: no-cache");
-        String host = req.getHeaders().get("Host");
+        String host #= req.getHeaders().get("Host");
         c.that(host != null && host.equals("events.test"), "request: Host from URL");
-        String le = req.getHeaders().get("Last-Event-ID");
+        String le #= req.getHeaders().get("Last-Event-ID");
         c.that(le == null, "request: no Last-Event-ID on the first connect");
 
         // After resuming, the request replays the last id.
         sc.resumeFrom("99");
-        HttpRequest req2 = sc.buildRequest();
-        String le2 = req2.getHeaders().get("Last-Event-ID");
+        HttpRequest req2 #= sc.buildRequest();
+        String le2 #= req2.getHeaders().get("Last-Event-ID");
         c.that(le2 != null && le2.equals("99"), "request: Last-Event-ID replayed on resume");
     }
 
@@ -76,7 +76,7 @@ public final class SseClientTests {
         SseClient sc = heap SseClient("http://events.test/stream");
 
         // A good head: 200 + text/event-stream — no throw.
-        HttpResponse ok = HttpResponse.ok();
+        HttpResponse ok #= HttpResponse.ok();
         ok.setHeader("Content-Type", "text/event-stream");
         boolean threwOk = false;
         try {
@@ -87,7 +87,7 @@ public final class SseClientTests {
         c.that(!threwOk, "checkHead: 200 text/event-stream accepted");
 
         // Wrong status.
-        HttpResponse notFound = HttpResponse.of(404);
+        HttpResponse notFound #= HttpResponse.of(404);
         notFound.setHeader("Content-Type", "text/event-stream");
         boolean threw404 = false;
         try {
@@ -98,7 +98,7 @@ public final class SseClientTests {
         c.that(threw404, "checkHead: non-200 is a terminal SseException");
 
         // Wrong content type.
-        HttpResponse wrongType = HttpResponse.ok();
+        HttpResponse wrongType #= HttpResponse.ok();
         wrongType.setHeader("Content-Type", "text/plain");
         boolean threwType = false;
         try {
@@ -109,7 +109,7 @@ public final class SseClientTests {
         c.that(threwType, "checkHead: wrong content-type is a terminal SseException");
 
         // Content-Type with a charset parameter still matches on essence.
-        HttpResponse withCharset = HttpResponse.ok();
+        HttpResponse withCharset #= HttpResponse.ok();
         withCharset.setHeader("Content-Type", "text/event-stream; charset=utf-8");
         boolean threwCharset = false;
         try {

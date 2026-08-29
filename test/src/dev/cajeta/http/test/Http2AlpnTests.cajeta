@@ -36,11 +36,11 @@ public final class Http2AlpnTests {
     }
 
     static #HttpServer tlsServer() {
-        String cp = ServerTlsTests.certPem();
-        String kp = ServerTlsTests.keyPem();
-        int8[] cert = cp.toBytes();
-        int8[] key = kp.toBytes();
-        HttpServerBuilder b = HttpServer.builder();
+        String cp #= ServerTlsTests.certPem();
+        String kp #= ServerTlsTests.keyPem();
+        int8[] cert #= cp.toBytes();
+        int8[] key #= kp.toBytes();
+        HttpServerBuilder b #= HttpServer.builder();
         b.bind("127.0.0.1:0");
         (HttpRequest) -> #HttpResponse h = (req) -> Http2AlpnTests.handle(req);
         b.handler(h);
@@ -58,17 +58,17 @@ public final class Http2AlpnTests {
 
     // 1 => 200 + body "HTTP/2.0" (h2 confirmed); 2 => body "HTTP/1.1"; <0 else.
     public static async int32 h2Client(int32 port) {
-        String cp = ServerTlsTests.certPem();
-        int8[] anchor = cp.toBytes();
-        HttpClient client = HttpClient.builder()
+        String cp #= ServerTlsTests.certPem();
+        int8[] anchor #= cp.toBytes();
+        HttpClient client #= HttpClient.builder()
             .trustAnchor(anchor, cp.byteLength())
             .build();
         String url = "https://127.0.0.1:" + port + "/proto";
-        HttpResponse resp = client.get(url);
+        HttpResponse resp #= client.get(url);
         if (resp.statusCode() != 200) {
             return -1;
         }
-        String body = Http2AlpnTests.bodyString(resp.body, resp.bodyLength());
+        String body #= Http2AlpnTests.bodyString(resp.body, resp.bodyLength());
         if (body.equals("HTTP/2.0")) {
             return 1;
         }
@@ -101,16 +101,16 @@ public final class Http2AlpnTests {
 
     // 1 => negotiated http/1.1 AND h1 exchange returned 200 + body "HTTP/1.1".
     public static async int32 h1FallbackClient(int32 port) {
-        String cp = ServerTlsTests.certPem();
-        IpAddress ip = IpAddress.loopbackV4();
-        SocketAddress a = SocketAddress.of(#ip, port);
-        TcpStream sock = TcpStream.connectAsync(#a);
+        String cp #= ServerTlsTests.certPem();
+        IpAddress ip #= IpAddress.loopbackV4();
+        SocketAddress a #= SocketAddress.of(#ip, port);
+        TcpStream sock #= TcpStream.connectAsync(#a);
         String host = "127.0.0.1";
-        int8[] hostBytes = host.toBytes();
-        int8[] anchor = cp.toBytes();
-        TlsStream tls = TlsStream.client(#sock, hostBytes, host.byteLength(),
+        int8[] hostBytes #= host.toBytes();
+        int8[] anchor #= cp.toBytes();
+        TlsStream tls #= TlsStream.client(#sock, hostBytes, host.byteLength(),
                                          anchor, cp.byteLength());
-        int8[] alpn = Http2AlpnTests.alpnHttp11();
+        int8[] alpn #= Http2AlpnTests.alpnHttp11();
         tls.offerAlpn(alpn, 9);
         tls.handshake();
 
@@ -129,7 +129,7 @@ public final class Http2AlpnTests {
 
     static void h2Negotiated(Check c) {
         scope {
-            HttpServer srv = Http2AlpnTests.tlsServer();
+            HttpServer srv #= Http2AlpnTests.tlsServer();
             int32 port = srv.tlsListener.boundPort();
             Task<int32> s1 = spawn acceptTlsOnce(srv);
             Task<int32> t1 = spawn h2Client(port);
@@ -141,7 +141,7 @@ public final class Http2AlpnTests {
 
     static void h1Fallback(Check c) {
         scope {
-            HttpServer srv = Http2AlpnTests.tlsServer();
+            HttpServer srv #= Http2AlpnTests.tlsServer();
             int32 port = srv.tlsListener.boundPort();
             Task<int32> s1 = spawn acceptTlsOnce(srv);
             Task<int32> t1 = spawn h1FallbackClient(port);

@@ -83,11 +83,11 @@ public final class ServerTlsTests {
     }
 
     static #HttpServer tlsServer() {
-        String cp = ServerTlsTests.certPem();
-        String kp = ServerTlsTests.keyPem();
-        int8[] cert = cp.toBytes();
-        int8[] key = kp.toBytes();
-        HttpServerBuilder b = HttpServer.builder();
+        String cp #= ServerTlsTests.certPem();
+        String kp #= ServerTlsTests.keyPem();
+        int8[] cert #= cp.toBytes();
+        int8[] key #= kp.toBytes();
+        HttpServerBuilder b #= HttpServer.builder();
         b.bind("127.0.0.1:0");
         (HttpRequest) -> #HttpResponse h =
             (req) -> ServerTlsTests.handle(req);
@@ -107,13 +107,13 @@ public final class ServerTlsTests {
 
     /** One HTTPS exchange with the shipped client (trust pinned). */
     public static async int32 httpsGet(int32 port) {
-        String cp = ServerTlsTests.certPem();
-        int8[] anchor = cp.toBytes();
-        HttpClient client = HttpClient.builder()
+        String cp #= ServerTlsTests.certPem();
+        int8[] anchor #= cp.toBytes();
+        HttpClient client #= HttpClient.builder()
             .trustAnchor(anchor, cp.byteLength())
             .build();
         String url = "https://127.0.0.1:" + port + "/x";
-        HttpResponse resp = client.get(url);
+        HttpResponse resp #= client.get(url);
         if (resp.statusCode() != 200) { return -1; }
         int32 n = resp.bodyLength();
         int8[] copy = heap int8[n];
@@ -132,11 +132,11 @@ public final class ServerTlsTests {
 
     /** Write plaintext HTTP at the TLS port; expect clean close, no hang. */
     public static async int32 plaintextProbe(int32 port) {
-        IpAddress ip = IpAddress.loopbackV4();
-        SocketAddress a = SocketAddress.of(#ip, port);
-        TcpStream s = TcpStream.connectAsync(#a);
+        IpAddress ip #= IpAddress.loopbackV4();
+        SocketAddress a #= SocketAddress.of(#ip, port);
+        TcpStream s #= TcpStream.connectAsync(#a);
         String req = "GET / HTTP/1.1\r\nhost: t\r\n\r\n";
-        int8[] rb = req.toBytes();
+        int8[] rb #= req.toBytes();
         try {
             s.writeAllAsync(rb, (int64) 0, (int64) req.byteLength());
         } catch (Exception e) {
@@ -159,9 +159,9 @@ public final class ServerTlsTests {
 
     /** Write garbage at the TLS port and close. */
     public static async int32 garbageProbe(int32 port) {
-        IpAddress ip = IpAddress.loopbackV4();
-        SocketAddress a = SocketAddress.of(#ip, port);
-        TcpStream s = TcpStream.connectAsync(#a);
+        IpAddress ip #= IpAddress.loopbackV4();
+        SocketAddress a #= SocketAddress.of(#ip, port);
+        TcpStream s #= TcpStream.connectAsync(#a);
         int8[] junk = heap int8[16];
         int32 i = 0;
         while (i < 16) {
@@ -182,14 +182,14 @@ public final class ServerTlsTests {
     public static async int32 wssServer(#TcpListener lst,
                                         int8[] cert, int32 certLen,
                                         int8[] key, int32 keyLen) {
-        TcpStream sock = lst.acceptAsync();
-        TlsStream tls = TlsStream.server(#sock, cert, certLen, key, keyLen);
+        TcpStream sock #= lst.acceptAsync();
+        TlsStream tls #= TlsStream.server(#sock, cert, certLen, key, keyLen);
         tls.handshake();
         AsyncReader reader = heap AsyncReader(tls);
         AsyncWriter writer = heap AsyncWriter(tls);
-        WebSocket ws = WsUpgrade.acceptServer(reader, writer);
-        WsMessage m = ws.receive();
-        String text = m.text();
+        WebSocket ws #= WsUpgrade.acceptServer(reader, writer);
+        WsMessage m #= ws.receive();
+        String text #= m.text();
         ws.send(text);
         tls.close();
         return m.length();
@@ -197,7 +197,7 @@ public final class ServerTlsTests {
 
     static void httpsExchange(Check c) {
         scope {
-            HttpServer srv = ServerTlsTests.tlsServer();
+            HttpServer srv #= ServerTlsTests.tlsServer();
             int32 port = srv.tlsListener.boundPort();
             Task<int32> s1 = spawn acceptTlsOnce(srv);
             Task<int32> t1 = spawn httpsGet(port);
@@ -209,7 +209,7 @@ public final class ServerTlsTests {
 
     static void plaintextFailsCleanly(Check c) {
         scope {
-            HttpServer srv = ServerTlsTests.tlsServer();
+            HttpServer srv #= ServerTlsTests.tlsServer();
             int32 port = srv.tlsListener.boundPort();
 
             Task<int32> s1 = spawn acceptTlsOnce(srv);
@@ -228,7 +228,7 @@ public final class ServerTlsTests {
 
     static void garbageHandshakes(Check c) {
         scope {
-            HttpServer srv = ServerTlsTests.tlsServer();
+            HttpServer srv #= ServerTlsTests.tlsServer();
             int32 port = srv.tlsListener.boundPort();
 
             int32 g = 0;
@@ -253,38 +253,38 @@ public final class ServerTlsTests {
 
     static void wssEcho(Check c) {
         scope {
-            String cp = ServerTlsTests.certPem();
-            String kp = ServerTlsTests.keyPem();
-            int8[] cert = cp.toBytes();
-            int8[] key = kp.toBytes();
+            String cp #= ServerTlsTests.certPem();
+            String kp #= ServerTlsTests.keyPem();
+            int8[] cert #= cp.toBytes();
+            int8[] key #= kp.toBytes();
 
-            IpAddress la = IpAddress.loopbackV4();
-            SocketAddress bindAddr = SocketAddress.of(#la, 0);
+            IpAddress la #= IpAddress.loopbackV4();
+            SocketAddress bindAddr #= SocketAddress.of(#la, 0);
             TcpListener listener = TcpListener.bind(bindAddr);
             int32 port = listener.boundPort();
             Task<int32> t = spawn wssServer(#listener, cert, cp.byteLength(),
                                             key, kp.byteLength());
 
-            IpAddress ca = IpAddress.loopbackV4();
-            SocketAddress connAddr = SocketAddress.of(#ca, port);
-            TcpStream sock = TcpStream.connectAsync(#connAddr);
+            IpAddress ca #= IpAddress.loopbackV4();
+            SocketAddress connAddr #= SocketAddress.of(#ca, port);
+            TcpStream sock #= TcpStream.connectAsync(#connAddr);
             String host = "127.0.0.1";
-            int8[] hostBytes = host.toBytes();
-            int8[] anchor = cp.toBytes();
-            TlsStream tls = TlsStream.client(#sock, hostBytes,
+            int8[] hostBytes #= host.toBytes();
+            int8[] anchor #= cp.toBytes();
+            TlsStream tls #= TlsStream.client(#sock, hostBytes,
                                              host.byteLength(),
                                              anchor, cp.byteLength());
             tls.handshake();
             AsyncReader reader = heap AsyncReader(tls);
             AsyncWriter writer = heap AsyncWriter(tls);
-            Uri curi = Uri.builder()
+            Uri curi #= Uri.builder()
                 .scheme("wss").host("127.0.0.1").port(port).path("/")
                 .build();
-            WebSocket ws = WsUpgrade.connectClient(reader, writer, curi, 424242);
+            WebSocket ws #= WsUpgrade.connectClient(reader, writer, curi, 424242);
 
             ws.send("wss-ping");
-            WsMessage e1 = ws.receive();
-            String back = e1.text();
+            WsMessage e1 #= ws.receive();
+            String back #= e1.text();
             c.that(e1.isText() && back.equals("wss-ping"),
                    "text echoed intact over the upgraded TLS stream");
 

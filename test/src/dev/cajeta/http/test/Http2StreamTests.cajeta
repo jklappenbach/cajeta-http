@@ -170,7 +170,7 @@ public final class Http2StreamTests {
         int8[] fragB = [ (int8) 0x84, (int8) 0x41 ];
         int8[] fragC = [ (int8) 0x8c, (int8) 0xf1, (int8) 0xe3 ];
 
-        HeaderBlockAssembler h = heap HeaderBlockAssembler();
+        HeaderBlockAssembler h #= heap HeaderBlockAssembler();
         c.that(!h.isOpen(), "assembler starts closed");
         h.begin(1, fragA, 0, 2);
         c.that(h.isOpen(), "open after begin");
@@ -178,7 +178,7 @@ public final class Http2StreamTests {
         h.continueOn(1, fragB, 0, 2);
         h.continueOn(1, fragC, 0, 3);
         c.eqInt((int64) h.blockLength(), (int64) 7, "accumulated 7 bytes");
-        int8[] block = h.complete();
+        int8[] block #= h.complete();
         c.that(!h.isOpen(), "closed after complete");
         c.eqInt((int64) block.count(), (int64) 7, "assembled block length 7");
         c.eqInt(((int64) block[0]) & (int64) 0xFF, (int64) 0x82, "block[0]");

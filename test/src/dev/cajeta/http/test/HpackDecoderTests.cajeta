@@ -40,7 +40,7 @@ public final class HpackDecoderTests {
         (int8) 0x74, (int8) 0x6f, (int8) 0x6d, (int8) 0x2d, (int8) 0x68, (int8) 0x65, (int8) 0x61, (int8) 0x64,
         (int8) 0x65, (int8) 0x72,
         ];
-        HpackFieldList v0l = d0.decode(v0, 26);
+        HpackFieldList v0l #= d0.decode(v0, 26);
         c.eqInt((int64) v0l.size(), (int64) 1, "C.2.1 field count");
         c.eqStr(v0l.nameAt(0), "custom-key", "C.2.1[0] name");
         c.eqStr(v0l.valueAt(0), "custom-header", "C.2.1[0] value");
@@ -55,7 +55,7 @@ public final class HpackDecoderTests {
         (int8) 0x04, (int8) 0x0c, (int8) 0x2f, (int8) 0x73, (int8) 0x61, (int8) 0x6d, (int8) 0x70, (int8) 0x6c,
         (int8) 0x65, (int8) 0x2f, (int8) 0x70, (int8) 0x61, (int8) 0x74, (int8) 0x68,
         ];
-        HpackFieldList v1l = d1.decode(v1, 14);
+        HpackFieldList v1l #= d1.decode(v1, 14);
         c.eqInt((int64) v1l.size(), (int64) 1, "C.2.2 field count");
         c.eqStr(v1l.nameAt(0), ":path", "C.2.2[0] name");
         c.eqStr(v1l.valueAt(0), "/sample/path", "C.2.2[0] value");
@@ -69,7 +69,7 @@ public final class HpackDecoderTests {
         (int8) 0x72, (int8) 0x64, (int8) 0x06, (int8) 0x73, (int8) 0x65, (int8) 0x63, (int8) 0x72, (int8) 0x65,
         (int8) 0x74,
         ];
-        HpackFieldList v2l = d2.decode(v2, 17);
+        HpackFieldList v2l #= d2.decode(v2, 17);
         c.eqInt((int64) v2l.size(), (int64) 1, "C.2.3 field count");
         c.eqStr(v2l.nameAt(0), "password", "C.2.3[0] name");
         c.eqStr(v2l.valueAt(0), "secret", "C.2.3[0] value");
@@ -81,7 +81,7 @@ public final class HpackDecoderTests {
         int8[] v3 = [
         (int8) 0x82,
         ];
-        HpackFieldList v3l = d3.decode(v3, 1);
+        HpackFieldList v3l #= d3.decode(v3, 1);
         c.eqInt((int64) v3l.size(), (int64) 1, "C.2.4 field count");
         c.eqStr(v3l.nameAt(0), ":method", "C.2.4[0] name");
         c.eqStr(v3l.valueAt(0), "GET", "C.2.4[0] value");
@@ -98,7 +98,7 @@ public final class HpackDecoderTests {
         (int8) 0x2e, (int8) 0x65, (int8) 0x78, (int8) 0x61, (int8) 0x6d, (int8) 0x70, (int8) 0x6c, (int8) 0x65,
         (int8) 0x2e, (int8) 0x63, (int8) 0x6f, (int8) 0x6d,
         ];
-        HpackFieldList v0l = d.decode(v0, 20);
+        HpackFieldList v0l #= d.decode(v0, 20);
         c.eqInt((int64) v0l.size(), (int64) 4, "C.3.1 field count");
         c.eqStr(v0l.nameAt(0), ":method", "C.3.1[0] name");
         c.eqStr(v0l.valueAt(0), "GET", "C.3.1[0] value");
@@ -118,7 +118,7 @@ public final class HpackDecoderTests {
         (int8) 0x82, (int8) 0x86, (int8) 0x84, (int8) 0xbe, (int8) 0x58, (int8) 0x08, (int8) 0x6e, (int8) 0x6f,
         (int8) 0x2d, (int8) 0x63, (int8) 0x61, (int8) 0x63, (int8) 0x68, (int8) 0x65,
         ];
-        HpackFieldList v1l = d.decode(v1, 14);
+        HpackFieldList v1l #= d.decode(v1, 14);
         c.eqInt((int64) v1l.size(), (int64) 5, "C.3.2 field count");
         c.eqStr(v1l.nameAt(0), ":method", "C.3.2[0] name");
         c.eqStr(v1l.valueAt(0), "GET", "C.3.2[0] value");
@@ -144,7 +144,7 @@ public final class HpackDecoderTests {
         (int8) 0x0c, (int8) 0x63, (int8) 0x75, (int8) 0x73, (int8) 0x74, (int8) 0x6f, (int8) 0x6d, (int8) 0x2d,
         (int8) 0x76, (int8) 0x61, (int8) 0x6c, (int8) 0x75, (int8) 0x65,
         ];
-        HpackFieldList v2l = d.decode(v2, 29);
+        HpackFieldList v2l #= d.decode(v2, 29);
         c.eqInt((int64) v2l.size(), (int64) 5, "C.3.3 field count");
         c.eqStr(v2l.nameAt(0), ":method", "C.3.3[0] name");
         c.eqStr(v2l.valueAt(0), "GET", "C.3.3[0] value");
@@ -175,7 +175,7 @@ public final class HpackDecoderTests {
         (int8) 0xe5, (int8) 0xf2, (int8) 0x3a, (int8) 0x6b, (int8) 0xa0, (int8) 0xab, (int8) 0x90, (int8) 0xf4,
         (int8) 0xff,
         ];
-        HpackFieldList v0l = d.decode(v0, 17);
+        HpackFieldList v0l #= d.decode(v0, 17);
         c.eqInt((int64) v0l.size(), (int64) 4, "C.4.1 field count");
         c.eqStr(v0l.nameAt(0), ":method", "C.4.1[0] name");
         c.eqStr(v0l.valueAt(0), "GET", "C.4.1[0] value");
@@ -195,7 +195,7 @@ public final class HpackDecoderTests {
         (int8) 0x82, (int8) 0x86, (int8) 0x84, (int8) 0xbe, (int8) 0x58, (int8) 0x86, (int8) 0xa8, (int8) 0xeb,
         (int8) 0x10, (int8) 0x64, (int8) 0x9c, (int8) 0xbf,
         ];
-        HpackFieldList v1l = d.decode(v1, 12);
+        HpackFieldList v1l #= d.decode(v1, 12);
         c.eqInt((int64) v1l.size(), (int64) 5, "C.4.2 field count");
         c.eqStr(v1l.nameAt(0), ":method", "C.4.2[0] name");
         c.eqStr(v1l.valueAt(0), "GET", "C.4.2[0] value");
@@ -220,7 +220,7 @@ public final class HpackDecoderTests {
         (int8) 0x49, (int8) 0xe9, (int8) 0x5b, (int8) 0xa9, (int8) 0x7d, (int8) 0x7f, (int8) 0x89, (int8) 0x25,
         (int8) 0xa8, (int8) 0x49, (int8) 0xe9, (int8) 0x5b, (int8) 0xb8, (int8) 0xe8, (int8) 0xb4, (int8) 0xbf,
         ];
-        HpackFieldList v2l = d.decode(v2, 24);
+        HpackFieldList v2l #= d.decode(v2, 24);
         c.eqInt((int64) v2l.size(), (int64) 5, "C.4.3 field count");
         c.eqStr(v2l.nameAt(0), ":method", "C.4.3[0] name");
         c.eqStr(v2l.valueAt(0), "GET", "C.4.3[0] value");
@@ -257,7 +257,7 @@ public final class HpackDecoderTests {
         (int8) 0x77, (int8) 0x77, (int8) 0x2e, (int8) 0x65, (int8) 0x78, (int8) 0x61, (int8) 0x6d, (int8) 0x70,
         (int8) 0x6c, (int8) 0x65, (int8) 0x2e, (int8) 0x63, (int8) 0x6f, (int8) 0x6d,
         ];
-        HpackFieldList v0l = d.decode(v0, 70);
+        HpackFieldList v0l #= d.decode(v0, 70);
         c.eqInt((int64) v0l.size(), (int64) 4, "C.5.1 field count");
         c.eqStr(v0l.nameAt(0), ":status", "C.5.1[0] name");
         c.eqStr(v0l.valueAt(0), "302", "C.5.1[0] value");
@@ -282,7 +282,7 @@ public final class HpackDecoderTests {
         int8[] v1 = [
         (int8) 0x48, (int8) 0x03, (int8) 0x33, (int8) 0x30, (int8) 0x37, (int8) 0xc1, (int8) 0xc0, (int8) 0xbf,
         ];
-        HpackFieldList v1l = d.decode(v1, 8);
+        HpackFieldList v1l #= d.decode(v1, 8);
         c.eqInt((int64) v1l.size(), (int64) 4, "C.5.2 field count");
         c.eqStr(v1l.nameAt(0), ":status", "C.5.2[0] name");
         c.eqStr(v1l.valueAt(0), "307", "C.5.2[0] value");
@@ -319,7 +319,7 @@ public final class HpackDecoderTests {
         (int8) 0x20, (int8) 0x76, (int8) 0x65, (int8) 0x72, (int8) 0x73, (int8) 0x69, (int8) 0x6f, (int8) 0x6e,
         (int8) 0x3d, (int8) 0x31,
         ];
-        HpackFieldList v2l = d.decode(v2, 98);
+        HpackFieldList v2l #= d.decode(v2, 98);
         c.eqInt((int64) v2l.size(), (int64) 6, "C.5.3 field count");
         c.eqStr(v2l.nameAt(0), ":status", "C.5.3[0] name");
         c.eqStr(v2l.valueAt(0), "200", "C.5.3[0] value");
@@ -356,7 +356,7 @@ public final class HpackDecoderTests {
         (int8) 0x17, (int8) 0x18, (int8) 0x63, (int8) 0xc7, (int8) 0x8f, (int8) 0x0b, (int8) 0x97, (int8) 0xc8,
         (int8) 0xe9, (int8) 0xae, (int8) 0x82, (int8) 0xae, (int8) 0x43, (int8) 0xd3,
         ];
-        HpackFieldList v0l = d.decode(v0, 54);
+        HpackFieldList v0l #= d.decode(v0, 54);
         c.eqInt((int64) v0l.size(), (int64) 4, "C.6.1 field count");
         c.eqStr(v0l.nameAt(0), ":status", "C.6.1[0] name");
         c.eqStr(v0l.valueAt(0), "302", "C.6.1[0] value");
@@ -381,7 +381,7 @@ public final class HpackDecoderTests {
         int8[] v1 = [
         (int8) 0x48, (int8) 0x83, (int8) 0x64, (int8) 0x0e, (int8) 0xff, (int8) 0xc1, (int8) 0xc0, (int8) 0xbf,
         ];
-        HpackFieldList v1l = d.decode(v1, 8);
+        HpackFieldList v1l #= d.decode(v1, 8);
         c.eqInt((int64) v1l.size(), (int64) 4, "C.6.2 field count");
         c.eqStr(v1l.nameAt(0), ":status", "C.6.2[0] name");
         c.eqStr(v1l.valueAt(0), "307", "C.6.2[0] value");
@@ -415,7 +415,7 @@ public final class HpackDecoderTests {
         (int8) 0x95, (int8) 0x87, (int8) 0x31, (int8) 0x60, (int8) 0x65, (int8) 0xc0, (int8) 0x03, (int8) 0xed,
         (int8) 0x4e, (int8) 0xe5, (int8) 0xb1, (int8) 0x06, (int8) 0x3d, (int8) 0x50, (int8) 0x07,
         ];
-        HpackFieldList v2l = d.decode(v2, 79);
+        HpackFieldList v2l #= d.decode(v2, 79);
         c.eqInt((int64) v2l.size(), (int64) 6, "C.6.3 field count");
         c.eqStr(v2l.nameAt(0), ":status", "C.6.3[0] name");
         c.eqStr(v2l.valueAt(0), "200", "C.6.3[0] value");
@@ -446,7 +446,7 @@ public final class HpackDecoderTests {
         int8[] bad = [ (int8) 0xbe ];   // 0x80 | 62
         boolean caught = false;
         try {
-            HpackFieldList l = d.decode(bad, 1);
+            HpackFieldList l #= d.decode(bad, 1);
         } catch (HpackException e) {
             caught = true;
         }
@@ -457,7 +457,7 @@ public final class HpackDecoderTests {
         boolean caught2 = false;
         HpackDecoder d2 = heap HpackDecoder(4096);
         try {
-            HpackFieldList l = d2.decode(zero, 1);
+            HpackFieldList l #= d2.decode(zero, 1);
         } catch (HpackException e) {
             caught2 = true;
         }
@@ -469,7 +469,7 @@ public final class HpackDecoderTests {
         boolean caught3 = false;
         HpackDecoder d3 = heap HpackDecoder(4096);
         try {
-            HpackFieldList l = d3.decode(su, 3);
+            HpackFieldList l #= d3.decode(su, 3);
         } catch (HpackException e) {
             caught3 = true;
         }
@@ -486,7 +486,7 @@ public final class HpackDecoderTests {
         HpackDecoder d4 = heap HpackDecoder(4096);
         d4.setMaxHeaderListSize(40);
         try {
-            HpackFieldList l = d4.decode(blk, 20);
+            HpackFieldList l #= d4.decode(blk, 20);
         } catch (HpackException e) {
             caught4 = true;
         }
@@ -495,7 +495,7 @@ public final class HpackDecoderTests {
         // A valid dynamic table size update to 0 then a fit-check: 0x20 = update to 0.
         int8[] su0 = [ (int8) 0x20, (int8) 0x82 ];   // update-to-0 then :method GET
         HpackDecoder d5 = heap HpackDecoder(4096);
-        HpackFieldList l5 = d5.decode(su0, 2);
+        HpackFieldList l5 #= d5.decode(su0, 2);
         c.eqInt((int64) l5.size(), (int64) 1, "size-update-then-indexed decodes");
         c.eqStr(l5.nameAt(0), ":method", "size-update leaves indexed intact");
         c.eqInt((int64) d5.dynamicTable().maxSize(), (int64) 0, "table max now 0");

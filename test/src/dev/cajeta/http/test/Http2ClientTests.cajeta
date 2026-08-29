@@ -25,7 +25,7 @@ import dev.cajeta.http.h2.Http2Client;
 public final class Http2ClientTests {
 
     static #HttpResponse handle(HttpRequest req) {
-        String target = req.getTarget();
+        String target #= req.getTarget();
         if (target.equals("/hello")) {
             String b = "hello, h2";
             return HttpResponse.ok().body(b.toBytes(), b.byteLength());
@@ -38,7 +38,7 @@ public final class Http2ClientTests {
     }
 
     public static async int32 h2Server(#TcpListener listener) {
-        TcpStream sock = listener.acceptAsync();
+        TcpStream sock #= listener.acceptAsync();
         AsyncReader reader = heap AsyncReader(sock);
         AsyncWriter writer = heap AsyncWriter(sock);
         (HttpRequest) -> #HttpResponse h = (req) -> Http2ClientTests.handle(req);
@@ -66,17 +66,17 @@ public final class Http2ClientTests {
     static void exchange(Check c, int32 port, String method, String path,
                          int8[] reqBody, int32 reqBodyLen, boolean hasReqBody,
                          int32 expStatus, String expBody) {
-        IpAddress ca = IpAddress.loopbackV4();
-        SocketAddress connAddr = SocketAddress.of(#ca, port);
-        TcpStream sock = TcpStream.connectAsync(#connAddr);
+        IpAddress ca #= IpAddress.loopbackV4();
+        SocketAddress connAddr #= SocketAddress.of(#ca, port);
+        TcpStream sock #= TcpStream.connectAsync(#connAddr);
         AsyncReader reader = heap AsyncReader(sock);
         AsyncWriter writer = heap AsyncWriter(sock);
 
-        HttpRequest req = HttpRequest.of(method, path);
+        HttpRequest req #= HttpRequest.of(method, path);
         if (hasReqBody) {
             req.body(reqBody, reqBodyLen);
         }
-        HttpResponse resp = Http2Client.exchange(reader, writer, req, "http",
+        HttpResponse resp #= Http2Client.exchange(reader, writer, req, "http",
                                                  "127.0.0.1");
         sock.close();
 
@@ -88,8 +88,8 @@ public final class Http2ClientTests {
                             int32 reqBodyLen, boolean hasReqBody, int32 expStatus,
                             String expBody) {
         scope {
-            IpAddress la = IpAddress.loopbackV4();
-            SocketAddress bindAddr = SocketAddress.of(#la, 0);
+            IpAddress la #= IpAddress.loopbackV4();
+            SocketAddress bindAddr #= SocketAddress.of(#la, 0);
             TcpListener listener = TcpListener.bind(bindAddr);
             int32 port = listener.boundPort();
             Task<int32> sv = spawn h2Server(#listener);

@@ -104,7 +104,7 @@ public class WsServerHandshake {
      */
     public static #String acceptKey(String key) {
         String g #= WsServerHandshake.guid();
-        Sha1 h = heap Sha1();
+        Sha1 h #= heap Sha1();
         int8[] kb #= key.toBytes();
         int8[] gb #= g.toBytes();
         h.update(kb, (int64) key.byteLength());
@@ -143,7 +143,7 @@ public class WsServerHandshake {
         if (!WsServerHandshake.methodIsGet(request)) {
             return false;
         }
-        Headers h = request.getHeaders();
+        Headers h #= request.getHeaders();
         if (!WsServerHandshake.headerHasToken(h, "Upgrade", "websocket")) {
             return false;
         }
@@ -169,7 +169,7 @@ public class WsServerHandshake {
             throw heap HandshakeRejectedException(
                 "websocket upgrade requires the GET method", 400);
         }
-        Headers h = request.getHeaders();
+        Headers h #= request.getHeaders();
         if (!WsServerHandshake.headerHasToken(h, "Upgrade", "websocket")) {
             throw heap HandshakeRejectedException(
                 "missing or non-websocket Upgrade header", 400);

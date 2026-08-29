@@ -23,12 +23,12 @@ import dev.cajeta.http.ws.HandshakeRejectedException;
 public final class WsConnectTests {
 
     public static async int32 echoServer(#TcpListener listener) {
-        TcpStream sock = listener.acceptAsync();
+        TcpStream sock #= listener.acceptAsync();
         AsyncReader reader = heap AsyncReader(sock);
         AsyncWriter writer = heap AsyncWriter(sock);
-        WebSocket ws = WsUpgrade.acceptServer(reader, writer);
-        WsMessage m = ws.receive();
-        String t = m.text();
+        WebSocket ws #= WsUpgrade.acceptServer(reader, writer);
+        WsMessage m #= ws.receive();
+        String t #= m.text();
         ws.send(t);
         sock.close();
         return 1;
@@ -36,17 +36,17 @@ public final class WsConnectTests {
 
     static void connectEcho(Check c) {
         scope {
-            IpAddress la = IpAddress.loopbackV4();
-            SocketAddress bindAddr = SocketAddress.of(#la, 0);
+            IpAddress la #= IpAddress.loopbackV4();
+            SocketAddress bindAddr #= SocketAddress.of(#la, 0);
             TcpListener listener = TcpListener.bind(bindAddr);
             int32 port = listener.boundPort();
-            Task<int32> sv = spawn echoServer(#listener);
+            Task<int32> sv #= spawn echoServer(#listener);
 
             String url = "ws://127.0.0.1:" + port + "/chat";
-            WebSocket client = WebSocket.connect(url);
+            WebSocket client #= WebSocket.connect(url);
             client.send("hello via connect");
-            WsMessage reply = client.receive();
-            String back = reply.text();
+            WsMessage reply #= client.receive();
+            String back #= reply.text();
             c.that(back.equals("hello via connect"),
                    "WebSocket.connect dials, upgrades, and echoes");
             int32 r = await sv;
@@ -57,19 +57,19 @@ public final class WsConnectTests {
     static void handshakeRejected(Check c) {
         // A non-101 handshake reply must raise HandshakeRejected.
         String bad = "HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n";
-        int8[] bb = bad.toBytes();
+        int8[] bb #= bad.toBytes();
         MemChannel rin = heap MemChannel();
         AsyncReader reader = heap AsyncReader(rin);
         reader.stage(bb, bad.byteLength());
         reader.markEof();
         MemChannel rout = heap MemChannel();
         AsyncWriter writer = heap AsyncWriter(rout);
-        Uri uri = Uri.builder()
+        Uri uri #= Uri.builder()
             .scheme("ws").host("127.0.0.1").port(80).path("/").build();
 
         boolean threw = false;
         try {
-            WebSocket ws = WsUpgrade.connectClient(reader, writer, uri, 123);
+            WebSocket ws #= WsUpgrade.connectClient(reader, writer, uri, 123);
         } catch (HandshakeRejectedException e) {
             threw = true;
         }

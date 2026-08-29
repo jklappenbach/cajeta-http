@@ -38,7 +38,7 @@ public class RoutingDemo extends DemoClass {
     }
 
     public static #HttpResponse getReport(HttpRequest req) {
-        String path = req.pathParam("rest");
+        String path #= req.pathParam("rest");
         String body = "report:" + path;
         return HttpResponse.ok().body(body.toBytes(), body.byteLength());
     }
@@ -48,7 +48,7 @@ public class RoutingDemo extends DemoClass {
     }
 
     public static #HttpResponse tenantUser(HttpRequest req) {
-        String body = req.pathParam("tid") + ":" + req.pathParam("uid");
+        String body #= req.pathParam("tid") + ":" + req.pathParam("uid");
         return HttpResponse.ok().body(body.toBytes(), body.byteLength());
     }
 
@@ -71,21 +71,21 @@ public class RoutingDemo extends DemoClass {
 
         // 1. Typed binding: {id:int64} decodes the segment to an int64 —
         //    and REJECTS non-canonical decimals ("007" is not an id).
-        HttpResponse hit = router.dispatch(HttpRequest.of("GET", "/orders/9001"));
+        HttpResponse hit #= router.dispatch(HttpRequest.of("GET", "/orders/9001"));
         this.check(hit.statusCode() == 200
             && RoutingDemo.bodyOf(hit).equals("order 9001"),
             "{id:int64} binds and converts the segment");
-        HttpResponse padded = router.dispatch(HttpRequest.of("GET", "/orders/007"));
+        HttpResponse padded #= router.dispatch(HttpRequest.of("GET", "/orders/007"));
         this.check(padded.statusCode() == 404,
             "non-canonical decimal fails the typed match (404, not a bad bind)");
 
         // 2. Precedence: the literal /orders/latest wins over {id:int64}.
-        HttpResponse latest = router.dispatch(HttpRequest.of("GET", "/orders/latest"));
+        HttpResponse latest #= router.dispatch(HttpRequest.of("GET", "/orders/latest"));
         this.check(RoutingDemo.bodyOf(latest).equals("latest"),
             "literal segment outranks the typed param");
 
         // 3. {rest:**} captures the remaining path — the file-serving shape.
-        HttpResponse rep = router.dispatch(
+        HttpResponse rep #= router.dispatch(
             HttpRequest.of("GET", "/reports/2026/07/daily.csv"));
         this.check(RoutingDemo.bodyOf(rep).equals("report:2026/07/daily.csv"),
             "{rest:**} captures the joined tail segments");
@@ -94,8 +94,8 @@ public class RoutingDemo extends DemoClass {
         //    an Allow header naming the methods that WOULD match.
         this.check(router.dispatch(HttpRequest.of("GET", "/nope")).statusCode() == 404,
             "unknown path answers 404");
-        HttpResponse wrong = router.dispatch(HttpRequest.of("DELETE", "/orders"));
-        String allow = wrong.getHeaders().get("Allow");
+        HttpResponse wrong #= router.dispatch(HttpRequest.of("DELETE", "/orders"));
+        String allow #= wrong.getHeaders().get("Allow");
         this.check(wrong.statusCode() == 405 && allow != null
             && allow.contains("POST"),
             "wrong method answers 405 with Allow: POST");
@@ -106,7 +106,7 @@ public class RoutingDemo extends DemoClass {
         sub.route("GET", "/users/{uid}", (req) -> RoutingDemo.tenantUser(req));
         Router root = heap Router();
         root.mount("/tenants/{tid}", sub);
-        HttpResponse tu = root.dispatch(
+        HttpResponse tu #= root.dispatch(
             HttpRequest.of("GET", "/tenants/acme/users/ada"));
         this.check(RoutingDemo.bodyOf(tu).equals("acme:ada"),
             "mounted routes bind prefix and sub params together");
@@ -116,7 +116,7 @@ public class RoutingDemo extends DemoClass {
         Router capped = heap Router();
         capped.routeLimited("POST", "/upload", (int64) 100,
             (req) -> RoutingDemo.createOrder(req));
-        HttpRequest bigPost = HttpRequest.post("/upload");
+        HttpRequest bigPost #= HttpRequest.post("/upload");
         String blob = "";
         int32 i = 0;
         while (i < 20) {

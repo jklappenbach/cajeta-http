@@ -87,11 +87,11 @@ public final class Http2PushTests {
     // ================= case 1: server push delivered ======================
 
     public static #HttpResponse handleIndex(HttpRequest req) {
-        String t = req.getTarget();
+        String t #= req.getTarget();
         if (t.equals("/index")) {
             String body = "INDEX";
             String css = "body{margin:0}";
-            HttpResponse resp = HttpResponse.ok()
+            HttpResponse resp #= HttpResponse.ok()
                 .body(body.toBytes(), body.byteLength());
             resp.push("/style.css", 200, css.toBytes(), css.byteLength());
             return #resp;
@@ -109,13 +109,13 @@ public final class Http2PushTests {
     // responses. Returns 1 iff promised path is /style.css, pushed body is the
     // stylesheet, and the main body is INDEX.
     static void pushClient(Check c, int32 port) {
-        IpAddress ca = IpAddress.loopbackV4();
-        SocketAddress connAddr = SocketAddress.of(#ca, port);
-        TcpStream sock = TcpStream.connectAsync(#connAddr);
+        IpAddress ca #= IpAddress.loopbackV4();
+        SocketAddress connAddr #= SocketAddress.of(#ca, port);
+        TcpStream sock #= TcpStream.connectAsync(#connAddr);
         AsyncReader reader = heap AsyncReader(sock);
         AsyncWriter writer = heap AsyncWriter(sock);
 
-        int8[] pf = Http2.preface();
+        int8[] pf #= Http2.preface();
         writer.writeAll(pf, 0, 24);
         Http2FrameWriter fw = heap Http2FrameWriter();
         Http2SettingsList st = heap Http2SettingsList();
@@ -127,10 +127,10 @@ public final class Http2PushTests {
         fl.put(Http2PushTests.own(":path"), Http2PushTests.own("/index"));
         fl.put(Http2PushTests.own(":scheme"), Http2PushTests.own("http"));
         fl.put(Http2PushTests.own(":authority"), Http2PushTests.own("127.0.0.1"));
-        int8[] block = enc.encode(fl);
+        int8[] block #= enc.encode(fl);
         Http2ContentFrames.writeHeaders(fw, 1, block, (int32) block.count(),
                                         true, true, 0);
-        int8[] out = fw.toBytes();
+        int8[] out #= fw.toBytes();
         writer.writeAll(out, 0, (int32) out.count());
         writer.flush();
 
@@ -150,7 +150,7 @@ public final class Http2PushTests {
             if (!Http2PushTests.readExactWithin(reader, hdr, 9, 4000)) {
                 timedOut = true;
             } else {
-                Http2FrameHeader h = Http2FrameHeader(hdr);
+                Http2FrameHeader h #= Http2FrameHeader(hdr);
                 int32 type = h.typeCode();
                 int32 flags = h.flags();
                 int32 sid = h.streamId();
@@ -163,33 +163,33 @@ public final class Http2PushTests {
                     if ((flags & Http2.FLAG_ACK) == 0) {
                         Http2FrameWriter afw = heap Http2FrameWriter();
                         Http2Frames.writeSettingsAck(afw);
-                        int8[] ab = afw.toBytes();
+                        int8[] ab #= afw.toBytes();
                         writer.writeAll(ab, 0, (int32) ab.count());
                         writer.flush();
                     }
                 } else if (type == Http2.FRAME_PUSH_PROMISE) {
-                    Http2Payload reg = Http2ContentFrames.parsePushPromise(pl,
+                    Http2Payload reg #= Http2ContentFrames.parsePushPromise(pl,
                                                                           len,
                                                                           flags,
                                                                           sid);
                     promisedStream = reg.promisedStreamId;
-                    int8[] blk = Http2PushTests.slice(pl, reg.offset, reg.length);
-                    HpackFieldList pfields = dec.decode(blk, reg.length);
+                    int8[] blk #= Http2PushTests.slice(pl, reg.offset, reg.length);
+                    HpackFieldList pfields #= dec.decode(blk, reg.length);
                     String pp #= Http2PushTests.fieldValue(pfields, ":path");
                     if (pp != null && pp.equals("/style.css")) {
                         promisedStyleCss = true;
                     }
                 } else if (type == Http2.FRAME_HEADERS) {
-                    Http2Payload reg = Http2ContentFrames.parseHeaders(pl, len,
+                    Http2Payload reg #= Http2ContentFrames.parseHeaders(pl, len,
                                                                       flags, sid);
-                    int8[] blk = Http2PushTests.slice(pl, reg.offset, reg.length);
-                    HpackFieldList rf = dec.decode(blk, reg.length);
+                    int8[] blk #= Http2PushTests.slice(pl, reg.offset, reg.length);
+                    HpackFieldList rf #= dec.decode(blk, reg.length);
                     Http2PushTests.statusOf(rf);   // keep the decoder in sync
                     if ((flags & Http2.FLAG_END_STREAM) != 0) {
                         if (sid == 1) { s1Done = true; } else { s2Done = true; }
                     }
                 } else if (type == Http2.FRAME_DATA) {
-                    Http2Payload reg = Http2ContentFrames.parseData(pl, len,
+                    Http2Payload reg #= Http2ContentFrames.parseData(pl, len,
                                                                    flags, sid);
                     int32 j = 0;
                     while (j < reg.length) {
@@ -219,19 +219,19 @@ public final class Http2PushTests {
 
     static void serverPushDelivered(Check c) {
         scope {
-            HttpServerBuilder b = HttpServer.builder();
+            HttpServerBuilder b #= HttpServer.builder();
             b.bind("127.0.0.1:0");
             (HttpRequest) -> #HttpResponse h =
                 (req) -> Http2PushTests.handleIndex(req);
             b.handler(h);
             b.h2PriorKnowledge();
-            HttpServer srv = b.build();
+            HttpServer srv #= b.build();
             int32 port = srv.server.listener.boundPort();
             Task<int32> sv = spawn serve(srv);
 
             Http2PushTests.pushClient(c, port);
 
-            boolean drained = srv.shutdown(Duration.ofSeconds(2));
+            boolean drained #= srv.shutdown(Duration.ofSeconds(2));
             c.that(drained, "h2 push: server drained clean");
             int32 s = await sv;
         }
@@ -242,7 +242,7 @@ public final class Http2PushTests {
     // Rogue server: record the client's advertised ENABLE_PUSH, then send a
     // PUSH_PROMISE anyway. out[0] <- the client's SETTINGS_ENABLE_PUSH.
     public static async int32 rogueServer(#TcpListener listener, int32[] out) {
-        TcpStream sock = listener.acceptAsync();
+        TcpStream sock #= listener.acceptAsync();
         AsyncReader reader = heap AsyncReader(sock);
         AsyncWriter writer = heap AsyncWriter(sock);
 
@@ -252,7 +252,7 @@ public final class Http2PushTests {
         Http2FrameWriter sfw = heap Http2FrameWriter();
         Http2SettingsList mine = heap Http2SettingsList();
         Http2Frames.writeSettings(sfw, mine);
-        int8[] sb = sfw.toBytes();
+        int8[] sb #= sfw.toBytes();
         writer.writeAll(sb, 0, (int32) sb.count());
         writer.flush();
 
@@ -264,7 +264,7 @@ public final class Http2PushTests {
                 sawHeaders = true;
                 sawSettings = true;
             } else {
-                Http2FrameHeader h = Http2FrameHeader(hdr);
+                Http2FrameHeader h #= Http2FrameHeader(hdr);
                 int32 type = h.typeCode();
                 int32 flags = h.flags();
                 int32 sid = h.streamId();
@@ -274,7 +274,7 @@ public final class Http2PushTests {
                     Http2PushTests.readExactWithin(reader, pl, len, 4000);
                 }
                 if (type == Http2.FRAME_SETTINGS && (flags & Http2.FLAG_ACK) == 0) {
-                    Http2SettingsList list = Http2Frames.parseSettings(pl, 0,
+                    Http2SettingsList list #= Http2Frames.parseSettings(pl, 0,
                                                                       len, flags,
                                                                       sid);
                     Http2Settings s = heap Http2Settings();
@@ -294,11 +294,11 @@ public final class Http2PushTests {
         prom.put(Http2PushTests.own(":path"), Http2PushTests.own("/pushed"));
         prom.put(Http2PushTests.own(":scheme"), Http2PushTests.own("http"));
         prom.put(Http2PushTests.own(":authority"), Http2PushTests.own("127.0.0.1"));
-        int8[] pblock = enc.encode(prom);
+        int8[] pblock #= enc.encode(prom);
         Http2FrameWriter pfw = heap Http2FrameWriter();
         Http2ContentFrames.writePushPromise(pfw, 1, 2, pblock,
                                             (int32) pblock.count(), true, 0);
-        int8[] pbytes = pfw.toBytes();
+        int8[] pbytes #= pfw.toBytes();
         writer.writeAll(pbytes, 0, (int32) pbytes.count());
         writer.flush();
 
@@ -308,25 +308,25 @@ public final class Http2PushTests {
 
     static void clientRejectsPush(Check c) {
         scope {
-            IpAddress la = IpAddress.loopbackV4();
-            SocketAddress bindAddr = SocketAddress.of(#la, 0);
+            IpAddress la #= IpAddress.loopbackV4();
+            SocketAddress bindAddr #= SocketAddress.of(#la, 0);
             TcpListener listener = TcpListener.bind(bindAddr);
             int32 port = listener.boundPort();
             int32[] out = heap int32[1];
             out[0] = -1;
             Task<int32> sv = spawn rogueServer(#listener, out);
 
-            IpAddress ca = IpAddress.loopbackV4();
-            SocketAddress connAddr = SocketAddress.of(#ca, port);
-            TcpStream sock = TcpStream.connectAsync(#connAddr);
+            IpAddress ca #= IpAddress.loopbackV4();
+            SocketAddress connAddr #= SocketAddress.of(#ca, port);
+            TcpStream sock #= TcpStream.connectAsync(#connAddr);
             AsyncReader reader = heap AsyncReader(sock);
             AsyncWriter writer = heap AsyncWriter(sock);
-            HttpRequest req = HttpRequest.of("GET", "/index");
+            HttpRequest req #= HttpRequest.of("GET", "/index");
 
             boolean threw = false;
             int32 code = 0;
             try {
-                HttpResponse r = Http2Client.exchange(reader, writer, req,
+                HttpResponse r #= Http2Client.exchange(reader, writer, req,
                                                       "http", "127.0.0.1");
             } catch (Http2Exception e) {
                 threw = true;

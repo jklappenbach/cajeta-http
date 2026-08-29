@@ -48,15 +48,15 @@ public final class ClientPoolTests {
     // ---- 1: two sequential exchanges ride one socket ---------------------
 
     public static async int32 twoGets(int32 port) {
-        HttpClient client = heap HttpClient();
-        Uri uri = Uri.builder()
+        HttpClient client #= heap HttpClient();
+        Uri uri #= Uri.builder()
             .scheme("http").host("127.0.0.1").port(port).path("/hello")
             .build();
-        HttpRequest r1 = HttpRequest.fromUri("GET", uri);
-        HttpResponse a = client.send(uri, r1);
+        HttpRequest r1 #= HttpRequest.fromUri("GET", uri);
+        HttpResponse a #= client.send(uri, r1);
         if (a.statusCode() != 200) { return -1; }
-        HttpRequest r2 = HttpRequest.fromUri("GET", uri);
-        HttpResponse b = client.send(uri, r2);
+        HttpRequest r2 #= HttpRequest.fromUri("GET", uri);
+        HttpResponse b #= client.send(uri, r2);
         if (b.statusCode() != 200) { return -2; }
         return 1;
     }
@@ -69,12 +69,12 @@ public final class ClientPoolTests {
      */
     static void reuseRidesOneSocket(Check c) {
         scope {
-            HttpServerBuilder b = HttpServer.builder();
+            HttpServerBuilder b #= HttpServer.builder();
             b.bind("127.0.0.1:0");
             (HttpRequest) -> #HttpResponse h =
                 (req) -> ServerTests.liveHandle(req);
             b.handler(h);
-            HttpServer srv = b.build();
+            HttpServer srv #= b.build();
             Server core = srv.server;
             int32 port = core.listener.boundPort();
 
@@ -96,7 +96,7 @@ public final class ClientPoolTests {
     public static #HttpResponse gateHandle(HttpRequest req) {
         if (req.getTarget().equals("/slow")) {
             ClientPoolTests.entered.send(1);
-            Optional<int32> go = ClientPoolTests.gate.receive();
+            Optional<int32> go #= ClientPoolTests.gate.receive();
             String slow = "slow";
             return HttpResponse.ok().body(slow.toBytes(), slow.byteLength());
         }
@@ -105,22 +105,22 @@ public final class ClientPoolTests {
     }
 
     public static async int32 slowGet(HttpClient client, int32 port) {
-        Uri uri = Uri.builder()
+        Uri uri #= Uri.builder()
             .scheme("http").host("127.0.0.1").port(port).path("/slow")
             .build();
-        HttpRequest req = HttpRequest.fromUri("GET", uri);
-        HttpResponse resp = client.send(uri, req);
+        HttpRequest req #= HttpRequest.fromUri("GET", uri);
+        HttpResponse resp #= client.send(uri, req);
         if (resp.statusCode() != 200) { return -1; }
         ClientPoolTests.slowDone.store(1);
         return 1;
     }
 
     public static async int32 fastGet(HttpClient client, int32 port) {
-        Uri uri = Uri.builder()
+        Uri uri #= Uri.builder()
             .scheme("http").host("127.0.0.1").port(port).path("/fast")
             .build();
-        HttpRequest req = HttpRequest.fromUri("GET", uri);
-        HttpResponse resp = client.send(uri, req);
+        HttpRequest req #= HttpRequest.fromUri("GET", uri);
+        HttpResponse resp #= client.send(uri, req);
         if (resp.statusCode() != 200) { return -1; }
         // The cap is 1 and the slow exchange held the only lease: by the
         // time OUR response lands, the slow one must have fully finished.
@@ -159,12 +159,12 @@ public final class ClientPoolTests {
         ClientPoolTests.orderOk = #ok;
 
         scope {
-            HttpServerBuilder b = HttpServer.builder();
+            HttpServerBuilder b #= HttpServer.builder();
             b.bind("127.0.0.1:0");
             (HttpRequest) -> #HttpResponse h =
                 (req) -> ClientPoolTests.gateHandle(req);
             b.handler(h);
-            HttpServer srv = b.build();
+            HttpServer srv #= b.build();
             Server core = srv.server;
             int32 port = core.listener.boundPort();
 
@@ -173,14 +173,14 @@ public final class ClientPoolTests {
             Task<int32> svc = spawn acceptAndDispatch(core);
 
             scope {
-                HttpClient client = heap HttpClient();
+                HttpClient client #= heap HttpClient();
                 client.poolLimits(1, 60000);
 
                 Task<int32> slow = spawn slowGet(client, port);
 
                 // Wait until the slow exchange is INSIDE the handler
                 // (lease held), then start the fast one — it must park.
-                Optional<int32> in = ClientPoolTests.entered.receive();
+                Optional<int32> in #= ClientPoolTests.entered.receive();
                 Task<int32> fast = spawn fastGet(client, port);
 
                 // Release the gate: slow completes, lease frees, fast
@@ -205,13 +205,13 @@ public final class ClientPoolTests {
     // ---- 3: idle reap ----------------------------------------------------
 
     public static async int32 twoGetsPause(int32 port, int32 pauseMs) {
-        HttpClient client = heap HttpClient();
+        HttpClient client #= heap HttpClient();
         client.poolLimits(6, 1);            // 1 ms idle window
-        Uri uri = Uri.builder()
+        Uri uri #= Uri.builder()
             .scheme("http").host("127.0.0.1").port(port).path("/hello")
             .build();
-        HttpRequest r1 = HttpRequest.fromUri("GET", uri);
-        HttpResponse a = client.send(uri, r1);
+        HttpRequest r1 #= HttpRequest.fromUri("GET", uri);
+        HttpResponse a #= client.send(uri, r1);
         if (a.statusCode() != 200) { return -1; }
         // Outlive the idle window (spin on the wall clock; no fiber sleep
         // in the stdlib yet, and a few ms of spin is harmless here).
@@ -222,8 +222,8 @@ public final class ClientPoolTests {
             Instant now = Clock.now();
             if (now.toEpochMilli() >= until) { waiting = false; }
         }
-        HttpRequest r2 = HttpRequest.fromUri("GET", uri);
-        HttpResponse b = client.send(uri, r2);
+        HttpRequest r2 #= HttpRequest.fromUri("GET", uri);
+        HttpResponse b #= client.send(uri, r2);
         if (b.statusCode() != 200) { return -2; }
         return 1;
     }
@@ -235,12 +235,12 @@ public final class ClientPoolTests {
      */
     static void idleReapClosesAfterWindow(Check c) {
         scope {
-            HttpServerBuilder b = HttpServer.builder();
+            HttpServerBuilder b #= HttpServer.builder();
             b.bind("127.0.0.1:0");
             (HttpRequest) -> #HttpResponse h =
                 (req) -> ServerTests.liveHandle(req);
             b.handler(h);
-            HttpServer srv = b.build();
+            HttpServer srv #= b.build();
             Server core = srv.server;
             int32 port = core.listener.boundPort();
 
@@ -274,7 +274,7 @@ public final class ClientPoolTests {
             String body = "ok";
             String head = "HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n";
             String wire = head + body;
-            int8[] w = wire.toBytes();
+            int8[] w #= wire.toBytes();
             s.writeAllAsync(w, (int64) 0, (int64) wire.byteLength());
             s.close();
         }
@@ -282,15 +282,15 @@ public final class ClientPoolTests {
     }
 
     public static async int32 twoGetsRaw(int32 port) {
-        HttpClient client = heap HttpClient();
-        Uri uri = Uri.builder()
+        HttpClient client #= heap HttpClient();
+        Uri uri #= Uri.builder()
             .scheme("http").host("127.0.0.1").port(port).path("/x")
             .build();
-        HttpRequest r1 = HttpRequest.fromUri("GET", uri);
-        HttpResponse a = client.send(uri, r1);
+        HttpRequest r1 #= HttpRequest.fromUri("GET", uri);
+        HttpResponse a #= client.send(uri, r1);
         if (a.statusCode() != 200) { return -1; }
-        HttpRequest r2 = HttpRequest.fromUri("GET", uri);
-        HttpResponse b = client.send(uri, r2);
+        HttpRequest r2 #= HttpRequest.fromUri("GET", uri);
+        HttpResponse b #= client.send(uri, r2);
         if (b.statusCode() != 200) { return -2; }
         return 1;
     }
@@ -304,7 +304,7 @@ public final class ClientPoolTests {
      */
     static void deadPooledConnectionReplaced(Check c) {
         scope {
-            SocketAddress addr = SocketAddress.parse("127.0.0.1:0");
+            SocketAddress addr #= SocketAddress.parse("127.0.0.1:0");
             TcpListener lst = TcpListener.bind(addr);
             int32 port = lst.boundPort();
 

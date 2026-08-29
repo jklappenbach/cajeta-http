@@ -26,12 +26,12 @@ public final class ClientTests {
 
     // Client fiber: GET /hello, expect 200 + the 5-byte "hello" body.
     public static async int32 clientGet(int32 port) {
-        HttpClient client = heap HttpClient();
-        Uri uri = Uri.builder()
+        HttpClient client #= heap HttpClient();
+        Uri uri #= Uri.builder()
             .scheme("http").host("127.0.0.1").port(port).path("/hello")
             .build();
-        HttpRequest req = HttpRequest.fromUri("GET", uri);
-        HttpResponse resp = client.send(uri, req);
+        HttpRequest req #= HttpRequest.fromUri("GET", uri);
+        HttpResponse resp #= client.send(uri, req);
         if (resp.statusCode() != 200) {
             return -1;
         }
@@ -48,14 +48,14 @@ public final class ClientTests {
     // Client fiber: POST /echo with a 4-byte "ping" body — the handler
     // echoes it back byte-for-byte.
     public static async int32 clientPost(int32 port) {
-        HttpClient client = heap HttpClient();
-        Uri uri = Uri.builder()
+        HttpClient client #= heap HttpClient();
+        Uri uri #= Uri.builder()
             .scheme("http").host("127.0.0.1").port(port).path("/echo")
             .build();
-        HttpRequest req = HttpRequest.fromUri("POST", uri);
+        HttpRequest req #= HttpRequest.fromUri("POST", uri);
         String ping = "ping";
         req.body(ping.toBytes(), ping.byteLength());
-        HttpResponse resp = client.send(uri, req);
+        HttpResponse resp #= client.send(uri, req);
         if (resp.statusCode() != 200) {
             return -1;
         }
@@ -71,12 +71,12 @@ public final class ClientTests {
 
     static void liveClient(Check c) {
         scope {
-            HttpServerBuilder b = HttpServer.builder();
+            HttpServerBuilder b #= HttpServer.builder();
             b.bind("127.0.0.1:0");
             (HttpRequest) -> #HttpResponse h =
                 (req) -> ServerTests.liveHandle(req);
             b.handler(h);
-            HttpServer srv = b.build();
+            HttpServer srv #= b.build();
             Server core = srv.server;
             int32 port = core.listener.boundPort();
             c.that(port > 0, "server bound an ephemeral port");

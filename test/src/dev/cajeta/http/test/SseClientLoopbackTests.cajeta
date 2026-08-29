@@ -33,22 +33,22 @@ public final class SseClientLoopbackTests {
     // the reconnect (Last-Event-ID: 2) serves ids 3,4. Each stream then ends,
     // dropping the connection so the client reconnects.
     public static #HttpResponse handleResume(HttpRequest req) {
-        String last = SseResponse.lastEventId(req);
+        String last #= SseResponse.lastEventId(req);
         SseEvent[] evs = heap SseEvent[2];
         if (last == null) {
-            SseEvent a = SseEvent.of("a");
-            a.id = "1".substring(0, 1);
+            SseEvent a #= SseEvent.of("a");
+            a.id #= "1".substring(0, 1);
             a.retry = 20;
             evs[0] = #a;
-            SseEvent b = SseEvent.of("b");
-            b.id = "2".substring(0, 1);
+            SseEvent b #= SseEvent.of("b");
+            b.id #= "2".substring(0, 1);
             evs[1] = #b;
         } else {
-            SseEvent cc = SseEvent.of("c");
-            cc.id = "3".substring(0, 1);
+            SseEvent cc #= SseEvent.of("c");
+            cc.id #= "3".substring(0, 1);
             evs[0] = #cc;
-            SseEvent d = SseEvent.of("d");
-            d.id = "4".substring(0, 1);
+            SseEvent d #= SseEvent.of("d");
+            d.id #= "4".substring(0, 1);
             evs[1] = #d;
         }
         return SseResponse.stream(#evs, 2);
@@ -80,12 +80,12 @@ public final class SseClientLoopbackTests {
         scope {
             SseCollectBox box = heap SseCollectBox();
 
-            HttpServerBuilder bld = HttpServer.builder();
+            HttpServerBuilder bld #= HttpServer.builder();
             bld.bind("127.0.0.1:0");
             (HttpRequest) -> #HttpResponse handler =
                 (req) -> SseClientLoopbackTests.handleResume(req);
             bld.handler(handler);
-            HttpServer srv = bld.build();
+            HttpServer srv #= bld.build();
             Server core = srv.server;
             int32 port = core.listener.boundPort();
 

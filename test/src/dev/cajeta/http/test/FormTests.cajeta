@@ -28,7 +28,7 @@ public final class FormTests {
     }
 
     static void encodesSimplePairs(Check c) {
-        FormBody f = FormBody.of();
+        FormBody f #= FormBody.of();
         f.add("a", "1");
         f.add("b", "two");
         c.eqStr(f.encoded(), "a=1&b=two", "simple pairs encode");
@@ -36,24 +36,24 @@ public final class FormTests {
     }
 
     static void encodesReservedAndSpaces(Check c) {
-        FormBody f = FormBody.of();
+        FormBody f #= FormBody.of();
         f.add("q", "two words");
         f.add("expr", "a=b&c+d%e");
         c.eqStr(f.encoded(), "q=two+words&expr=a%3Db%26c%2Bd%25e",
             "spaces as + and reserved as %XX");
-        FormBody g = FormBody.of();
+        FormBody g #= FormBody.of();
         g.add("keep", "A-Za-z0-9*-._");
         c.eqStr(g.encoded(), "keep=A-Za-z0-9*-._", "unreserved set verbatim");
     }
 
     static void encodesUtf8Multibyte(Check c) {
-        FormBody f = FormBody.of();
+        FormBody f #= FormBody.of();
         f.add("city", "café");
         c.eqStr(f.encoded(), "city=caf%C3%A9", "UTF-8 multibyte percent-encodes");
     }
 
     static void emptyValuesAndRepeatedKeys(Check c) {
-        FormBody f = FormBody.of();
+        FormBody f #= FormBody.of();
         f.add("k", "");
         f.add("k", "2");
         f.add("", "v");
@@ -64,13 +64,13 @@ public final class FormTests {
     }
 
     static void emptyForm(Check c) {
-        FormBody f = FormBody.of();
+        FormBody f #= FormBody.of();
         c.eqStr(f.encoded(), "", "empty form encodes empty");
         c.eqInt(f.contentLength(), 0, "empty form contentLength 0");
     }
 
     static void decodesPlusAndPercent(Check c) {
-        FormBody f = FormBody.parse("q=two+words&sym=%2B%25%3D&caf=caf%C3%A9");
+        FormBody f #= FormBody.parse("q=two+words&sym=%2B%25%3D&caf=caf%C3%A9");
         c.eqInt(f.count(), 3, "parse pair count");
         c.eqStr(f.value("q"), "two words", "+ decodes to space");
         c.eqStr(f.value("sym"), "+%=", "%XX decodes");
@@ -78,10 +78,10 @@ public final class FormTests {
     }
 
     static void roundTrips(Check c) {
-        FormBody f = FormBody.of();
+        FormBody f #= FormBody.of();
         f.add("a b", "c&d");
         f.add("u", "café + tea");
-        FormBody back = FormBody.parse(f.encoded());
+        FormBody back #= FormBody.parse(f.encoded());
         c.eqInt(back.count(), 2, "round-trip count");
         c.eqStr(back.name(0), "a b", "round-trip name");
         c.eqStr(back.valueAt(0), "c&d", "round-trip value");
@@ -89,9 +89,9 @@ public final class FormTests {
     }
 
     static void formIsABody(Check c) {
-        FormBody f = FormBody.of();
+        FormBody f #= FormBody.of();
         f.add("a", "1");
-        MediaType t = f.contentType();
+        MediaType t #= f.contentType();
         c.that(t != null, "form contentType present");
         c.eqStr(t.essence(), "application/x-www-form-urlencoded", "form media type");
         c.eqInt(f.contentLength(), 3, "form contentLength = encoded bytes");

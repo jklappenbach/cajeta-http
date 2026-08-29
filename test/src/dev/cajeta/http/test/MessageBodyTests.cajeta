@@ -63,8 +63,8 @@ public final class MessageBodyTests {
     }
 
     static void attachStringBody(Check c) {
-        HttpRequest req = HttpRequest.post("/x");
-        StringBody sb = StringBody.of("hello body");
+        HttpRequest req #= HttpRequest.post("/x");
+        StringBody sb #= StringBody.of("hello body");
         Body b = #sb;
         req.body(#b);
         c.eqInt((int64) req.bodyLength(), (int64) 10, "StringBody framed by length");
@@ -75,8 +75,8 @@ public final class MessageBodyTests {
     }
 
     static void attachFormBody(Check c) {
-        HttpRequest req = HttpRequest.post("/x");
-        FormBody f = FormBody.of();
+        HttpRequest req #= HttpRequest.post("/x");
+        FormBody f #= FormBody.of();
         f.add("a", "1");
         f.add("b", "two words");
         Body b = #f;
@@ -87,8 +87,8 @@ public final class MessageBodyTests {
     }
 
     static void attachMultipartCarriesBoundary(Check c) {
-        HttpRequest req = HttpRequest.post("/upload");
-        MultipartBody mb = MultipartBody.withBoundary("BeeF");
+        HttpRequest req #= HttpRequest.post("/upload");
+        MultipartBody mb #= MultipartBody.withBoundary("BeeF");
         mb.addField("k", "v");
         Body b = #mb;
         req.body(#b);
@@ -99,9 +99,9 @@ public final class MessageBodyTests {
     }
 
     static void attachDoesNotOverrideExplicitType(Check c) {
-        HttpRequest req = HttpRequest.post("/x");
+        HttpRequest req #= HttpRequest.post("/x");
         req.setHeader("Content-Type", "application/vnd.custom+json");
-        StringBody sb = StringBody.of("{}");
+        StringBody sb #= StringBody.of("{}");
         Body b = #sb;
         req.body(#b);
         c.eqStr(req.getHeaders().get("content-type"), "application/vnd.custom+json",
@@ -110,11 +110,11 @@ public final class MessageBodyTests {
 
     static void asBodyRoundTrip(Check c) {
         // A parsed message (raw bytes, no model) reads back as a Body.
-        HttpRequest req = HttpRequest.post("/x");
+        HttpRequest req #= HttpRequest.post("/x");
         String payload = "raw payload";
         req.body(payload.toBytes(), payload.byteLength());
         req.setHeader("Content-Type", "text/plain");
-        Body seen = req.asBody();
+        Body seen #= req.asBody();
         c.that(seen != null, "asBody() views a raw-byte message");
         c.eqInt(seen.contentLength(), (int64) 11, "asBody length");
         c.eqStr(MessageBodyTests.textOf(seen), "raw payload", "asBody streams the bytes");
@@ -125,8 +125,8 @@ public final class MessageBodyTests {
 
     /** Echo handler: reply with the request's body and its content type. */
     public static #HttpResponse echoHandle(HttpRequest req) {
-        HttpResponse resp = HttpResponse.ok();
-        String ct = req.getHeaders().get("content-type");
+        HttpResponse resp #= HttpResponse.ok();
+        String ct #= req.getHeaders().get("content-type");
         if (ct != null) {
             resp.setHeader("X-Echo-Type", ct);
         }
@@ -139,15 +139,15 @@ public final class MessageBodyTests {
 
     /** POST a StringBody and check the server saw it verbatim. */
     public static async int32 postString(int32 port) {
-        HttpClient client = heap HttpClient();
-        Uri uri = Uri.builder()
+        HttpClient client #= heap HttpClient();
+        Uri uri #= Uri.builder()
             .scheme("http").host("127.0.0.1").port(port).path("/echo")
             .build();
-        HttpRequest req = HttpRequest.fromUri("POST", uri);
-        StringBody sb = StringBody.of("streamed hello");
+        HttpRequest req #= HttpRequest.fromUri("POST", uri);
+        StringBody sb #= StringBody.of("streamed hello");
         Body b = #sb;
         req.body(#b);
-        HttpResponse resp = client.send(uri, req);
+        HttpResponse resp #= client.send(uri, req);
         if (resp.statusCode() != 200) { return -1; }
         if (resp.bodyLength() != 14) { return -2; }
         return 1;
@@ -155,16 +155,16 @@ public final class MessageBodyTests {
 
     /** POST a FormBody; the echo must round-trip the urlencoded bytes. */
     public static async int32 postForm(int32 port) {
-        HttpClient client = heap HttpClient();
-        Uri uri = Uri.builder()
+        HttpClient client #= heap HttpClient();
+        Uri uri #= Uri.builder()
             .scheme("http").host("127.0.0.1").port(port).path("/echo")
             .build();
-        HttpRequest req = HttpRequest.fromUri("POST", uri);
-        FormBody f = FormBody.of();
+        HttpRequest req #= HttpRequest.fromUri("POST", uri);
+        FormBody f #= FormBody.of();
         f.add("q", "a b");
         Body b = #f;
         req.body(#b);
-        HttpResponse resp = client.send(uri, req);
+        HttpResponse resp #= client.send(uri, req);
         if (resp.statusCode() != 200) { return -1; }
         if (resp.bodyLength() != 5) { return -2; }      // "q=a+b"
         return 2;
@@ -172,19 +172,19 @@ public final class MessageBodyTests {
 
     /** POST a MultipartBody and re-parse the echoed payload server-side. */
     public static async int32 postMultipart(int32 port) {
-        HttpClient client = heap HttpClient();
-        Uri uri = Uri.builder()
+        HttpClient client #= heap HttpClient();
+        Uri uri #= Uri.builder()
             .scheme("http").host("127.0.0.1").port(port).path("/echo")
             .build();
-        HttpRequest req = HttpRequest.fromUri("POST", uri);
-        MultipartBody mb = MultipartBody.withBoundary("Zed");
+        HttpRequest req #= HttpRequest.fromUri("POST", uri);
+        MultipartBody mb #= MultipartBody.withBoundary("Zed");
         mb.addField("name", "ada");
         Body b = #mb;
         req.body(#b);
-        HttpResponse resp = client.send(uri, req);
+        HttpResponse resp #= client.send(uri, req);
         if (resp.statusCode() != 200) { return -1; }
         // Re-parse the echoed body through the parser.
-        MultipartParser p = MultipartParser.forBoundary("Zed");
+        MultipartParser p #= MultipartParser.forBoundary("Zed");
         p.feed(resp.body, resp.bodyLength());
         if (!p.isComplete()) { return -2; }
         if (p.partCount() != 1) { return -3; }
@@ -195,12 +195,12 @@ public final class MessageBodyTests {
 
     static void loopbackBodies(Check c) {
         scope {
-            HttpServerBuilder bld = HttpServer.builder();
+            HttpServerBuilder bld #= HttpServer.builder();
             bld.bind("127.0.0.1:0");
             (HttpRequest) -> #HttpResponse h =
                 (req) -> MessageBodyTests.echoHandle(req);
             bld.handler(h);
-            HttpServer srv = bld.build();
+            HttpServer srv #= bld.build();
             Server core = srv.server;
             int32 port = core.listener.boundPort();
 

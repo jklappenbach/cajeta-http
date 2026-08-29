@@ -52,7 +52,7 @@ public class WireDemo extends DemoClass {
         //    Method/Status/Version are identity-comparable enums, MediaType
         //    parses parameters; string compares are for the wire, not code.
         String order = "{\"symbol\":\"ACME\",\"qty\":250}";
-        HttpRequest req = HttpRequest.post("/api/orders");
+        HttpRequest req #= HttpRequest.post("/api/orders");
         req.setHeader("Host", "orders.internal");
         req.setHeader("Content-Type", "application/json; charset=utf-8");
         req.body(order.toBytes(), order.byteLength());
@@ -63,7 +63,7 @@ public class WireDemo extends DemoClass {
         this.check(req.versionType() == Version.HTTP_1_1
             && req.versionType().supportsKeepAlive(),
             "Version: 1.1 defaults to keep-alive");
-        MediaType mt = req.contentType();
+        MediaType mt #= req.contentType();
         this.check(mt != null && mt.is("application", "json")
             && mt.parameter("charset").equals("utf-8"),
             "MediaType parses the essence and its parameters");
@@ -85,13 +85,13 @@ public class WireDemo extends DemoClass {
         HttpSerializer ser = heap HttpSerializer();
         ser.writeRequest(req);
         int32 wireLen = ser.size();
-        int8[] wire = ser.toBytes();
+        int8[] wire #= ser.toBytes();
         System.stdout.println("  POST /api/orders serialized to {} bytes", wireLen);
-        HttpParser p = HttpParser.forRequest();
+        HttpParser p #= HttpParser.forRequest();
         boolean headDone = p.feed(wire, wireLen);
         this.check(headDone && p.isComplete(),
             "parser completes on the serialized head");
-        HttpRequest back = p.takeRequest();
+        HttpRequest back #= p.takeRequest();
         this.check(back.getHeaders().get("HOST").equals("orders.internal"),
             "header lookup is case-insensitive");
         // The parser stops at the head; the BODY decodes via the framing it
@@ -100,7 +100,7 @@ public class WireDemo extends DemoClass {
         this.check(framing.isContentLength()
             && framing.length == (int64) order.byteLength(),
             "framing: Content-Length with the declared size");
-        BodyReader body = BodyReader.forFraming(framing);
+        BodyReader body #= BodyReader.forFraming(framing);
         body.feed(p.leftover(), p.leftoverLength());
         this.check(body.isComplete()
             && body.decodedLength() == order.byteLength(),
@@ -110,10 +110,10 @@ public class WireDemo extends DemoClass {
         //    split mid-header-name and it completes on the second feed.
         String partA = "GET /api/orders/7 HTTP/1.1\r\nHo";
         String partB = "st: orders.internal\r\n\r\n";
-        HttpParser sp = HttpParser.forRequest();
-        boolean early = sp.feed(partA.toBytes(), partA.byteLength());
-        boolean late = sp.feed(partB.toBytes(), partB.byteLength());
-        HttpRequest sreq = sp.takeRequest();
+        HttpParser sp #= HttpParser.forRequest();
+        boolean early #= sp.feed(partA.toBytes(), partA.byteLength());
+        boolean late #= sp.feed(partB.toBytes(), partB.byteLength());
+        HttpRequest sreq #= sp.takeRequest();
         this.check(!early && late
             && sreq.getHeaders().get("host").equals("orders.internal"),
             "a header spanning a feed boundary reassembles");
@@ -121,7 +121,7 @@ public class WireDemo extends DemoClass {
         // 4. The response side, plus the Status registry and multi-value
         //    headers: two Set-Cookie lines must NOT comma-fold (RFC 6265),
         //    so getAll() is the correct read.
-        HttpResponse resp = HttpResponse.of(201)
+        HttpResponse resp #= HttpResponse.of(201)
             .header("Set-Cookie", "sid=abc; Path=/")
             .header("Set-Cookie", "theme=dark; Path=/");
         String created = "{\"id\":9001}";
@@ -148,21 +148,21 @@ public class WireDemo extends DemoClass {
         //    consumed, never surfaced into the payload.
         String chead = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n";
         String chunks = "4\r\nWiki\r\n5\r\npedia\r\nE\r\n in\r\n\r\nchunks.\r\n0\r\n\r\n";
-        HttpParser cp = HttpParser.forResponse();
+        HttpParser cp #= HttpParser.forResponse();
         cp.feed(chead.toBytes(), chead.byteLength());
         BodyFraming cf = cp.getFraming();
-        BodyReader cbody = BodyReader.forFraming(cf);
+        BodyReader cbody #= BodyReader.forFraming(cf);
         cbody.feed(chunks.toBytes(), chunks.byteLength());
         int32 decLen = cbody.decodedLength();
-        int8[] dec = cbody.drain();
+        int8[] dec #= cbody.drain();
         String wiki = "Wikipedia in\r\n\r\nchunks.";
         this.check(cf.isChunked() && cbody.isComplete()
             && this.sameBytes(dec, decLen, wiki.toBytes(), wiki.byteLength()),
             "chunked decode matches the RFC 9112 worked example");
         String hello = "hello";
-        int8[] chunk = ChunkedEncoder.encodeChunk(hello.toBytes(), hello.byteLength());
+        int8[] chunk #= ChunkedEncoder.encodeChunk(hello.toBytes(), hello.byteLength());
         String expChunk = "5\r\nhello\r\n";
-        int8[] last = ChunkedEncoder.encodeLast();
+        int8[] last #= ChunkedEncoder.encodeLast();
         String expLast = "0\r\n\r\n";
         this.check(this.sameBytes(chunk, (int32) chunk.count(),
                 expChunk.toBytes(), expChunk.byteLength())
@@ -170,10 +170,10 @@ public class WireDemo extends DemoClass {
                 expLast.toBytes(), expLast.byteLength()),
             "encoder emits <hex>CRLF<data>CRLF and the 0-chunk terminator");
         String trailered = "4\r\ndata\r\n0\r\nX-Checksum: abc\r\n\r\n";
-        BodyReader tb = BodyReader.forChunked();
+        BodyReader tb #= BodyReader.forChunked();
         tb.feed(trailered.toBytes(), trailered.byteLength());
         int32 tlen = tb.decodedLength();
-        int8[] tdec = tb.drain();
+        int8[] tdec #= tb.drain();
         String data = "data";
         this.check(tb.isComplete()
             && this.sameBytes(tdec, tlen, data.toBytes(), data.byteLength()),
@@ -199,11 +199,11 @@ public class WireDemo extends DemoClass {
             big = big + "{\"seq\":" + i + ",\"status\":\"filled\"},";
             i = i + 1;
         }
-        int8[] plain = big.toBytes();
-        int8[] gz = ContentCoding.encode("gzip", plain, big.byteLength());
+        int8[] plain #= big.toBytes();
+        int8[] gz #= ContentCoding.encode("gzip", plain, big.byteLength());
         System.stdout.println("  gzip content-coding: {} -> {} bytes",
             big.byteLength(), gz.count());
-        int8[] inflated = ContentCoding.decode("gzip", gz, (int32) gz.count(),
+        int8[] inflated #= ContentCoding.decode("gzip", gz, (int32) gz.count(),
             (int64) 65536);
         this.check((int32) gz.count() < big.byteLength()
             && this.sameBytes(inflated, (int32) inflated.count(),
@@ -226,14 +226,14 @@ public class WireDemo extends DemoClass {
         String garbage = "GARBAGE\r\n\r\n";
         boolean malformed = false;
         try {
-            HttpParser bad = HttpParser.forRequest();
+            HttpParser bad #= HttpParser.forRequest();
             bad.feed(garbage.toBytes(), garbage.byteLength());
         } catch (MalformedMessageException me) {
             malformed = true;
         }
         this.check(malformed, "a garbage start line raises MalformedMessageException");
         // A hostile header line beyond the parser's line cap -> 431 material.
-        HttpParserLimits tight = HttpParserLimits.of(0, 64, 0);
+        HttpParserLimits tight #= HttpParserLimits.of(0, 64, 0);
         String longLine = "GET / HTTP/1.1\r\nX-Padding: ";
         int32 j = 0;
         while (j < 30) {
@@ -252,7 +252,7 @@ public class WireDemo extends DemoClass {
         // A connection dying mid-head is its own failure class.
         boolean eof = false;
         try {
-            HttpParser trunc = HttpParser.forRequest();
+            HttpParser trunc #= HttpParser.forRequest();
             String half = "GET / HTTP/1.1\r\nHost: or";
             trunc.feed(half.toBytes(), half.byteLength());
             trunc.endInput();
@@ -263,7 +263,7 @@ public class WireDemo extends DemoClass {
         // A chunk whose size line is not hex.
         boolean badChunk = false;
         try {
-            BodyReader cr = BodyReader.forChunked();
+            BodyReader cr #= BodyReader.forChunked();
             String zz = "zz\r\ndata\r\n";
             cr.feed(zz.toBytes(), zz.byteLength());
         } catch (InvalidChunkEncodingException ce) {
@@ -273,7 +273,7 @@ public class WireDemo extends DemoClass {
         // Truncated gzip.
         boolean badCoding = false;
         try {
-            int8[] cut = ContentCoding.decode("gzip", gz, 10, (int64) 65536);
+            int8[] cut #= ContentCoding.decode("gzip", gz, 10, (int64) 65536);
         } catch (ContentCodingException xe) {
             badCoding = true;
         }
@@ -283,7 +283,7 @@ public class WireDemo extends DemoClass {
         // whichever level your recovery operates.
         boolean asRoot = false;
         try {
-            HttpParser bad2 = HttpParser.forRequest();
+            HttpParser bad2 #= HttpParser.forRequest();
             bad2.feed(garbage.toBytes(), garbage.byteLength());
         } catch (HttpException he2) {
             asRoot = he2.httpStatus() == 400;

@@ -55,8 +55,8 @@ public final class MiddlewareCompressionTests {
     }
 
     static #HttpResponse jsonBody(HttpRequest req) {
-        String body = MiddlewareCompressionTests.bigText();
-        HttpResponse resp = HttpResponse.ok();
+        String body #= MiddlewareCompressionTests.bigText();
+        HttpResponse resp #= HttpResponse.ok();
         resp.setHeader("Content-Type", "application/json");
         resp.body(body.toBytes(), body.byteLength());
         return #resp;
@@ -64,23 +64,23 @@ public final class MiddlewareCompressionTests {
 
     static #HttpResponse tinyBody(HttpRequest req) {
         String body = "hello";
-        HttpResponse resp = HttpResponse.ok();
+        HttpResponse resp #= HttpResponse.ok();
         resp.setHeader("Content-Type", "text/plain");
         resp.body(body.toBytes(), body.byteLength());
         return #resp;
     }
 
     static #HttpResponse pngBody(HttpRequest req) {
-        String body = MiddlewareCompressionTests.bigText();
-        HttpResponse resp = HttpResponse.ok();
+        String body #= MiddlewareCompressionTests.bigText();
+        HttpResponse resp #= HttpResponse.ok();
         resp.setHeader("Content-Type", "image/png");
         resp.body(body.toBytes(), body.byteLength());
         return #resp;
     }
 
     static #HttpResponse preEncoded(HttpRequest req) {
-        String body = MiddlewareCompressionTests.bigText();
-        HttpResponse resp = HttpResponse.ok();
+        String body #= MiddlewareCompressionTests.bigText();
+        HttpResponse resp #= HttpResponse.ok();
         resp.setHeader("Content-Type", "application/json");
         resp.setHeader("Content-Encoding", "gzip");
         resp.body(body.toBytes(), body.byteLength());
@@ -113,59 +113,59 @@ public final class MiddlewareCompressionTests {
     // ---- buffered compression -------------------------------------------
 
     static void bufferedGzip(Check c) {
-        Compression cfg = Compression.create();
-        Middleware cm = Compression.middleware(cfg);
+        Compression cfg #= Compression.create();
+        Middleware cm #= Compression.middleware(cfg);
         MiddlewareChain chain = heap MiddlewareChain();
         chain.use(#cm);
         (HttpRequest) -> #HttpResponse term = (req) -> MiddlewareCompressionTests.jsonBody(req);
-        (HttpRequest) -> #HttpResponse app = chain.compose(term);
+        (HttpRequest) -> #HttpResponse app #= chain.compose(term);
 
-        HttpRequest req = HttpRequest.of("GET", "/x");
+        HttpRequest req #= HttpRequest.of("GET", "/x");
         req.setHeader("Accept-Encoding", "gzip");
         HttpResponse resp = app(req);
 
         c.eqStr(resp.getHeaders().get("Content-Encoding"), "gzip",
                 "buffered gzip: Content-Encoding stamped");
-        String vary = resp.getHeaders().get("Vary");
+        String vary #= resp.getHeaders().get("Vary");
         c.that(vary != null && vary.toLowerCase().contains("accept-encoding"),
                "buffered gzip: Vary: Accept-Encoding added");
-        String expect = MiddlewareCompressionTests.bigText();
-        int8[] back = ContentCoding.decode("gzip", resp.body, resp.bodyLength(),
+        String expect #= MiddlewareCompressionTests.bigText();
+        int8[] back #= ContentCoding.decode("gzip", resp.body, resp.bodyLength(),
                                            (int64) 100000);
         c.eqBytes(back, back.count(), expect, "buffered gzip: body round-trips");
-        String clen = resp.getHeaders().get("Content-Length");
+        String clen #= resp.getHeaders().get("Content-Length");
         c.eqStr(clen, "" + resp.bodyLength(), "buffered gzip: Content-Length restamped");
     }
 
     static void bufferedDeflate(Check c) {
-        Compression cfg = Compression.create();
-        Middleware cm = Compression.middleware(cfg);
+        Compression cfg #= Compression.create();
+        Middleware cm #= Compression.middleware(cfg);
         MiddlewareChain chain = heap MiddlewareChain();
         chain.use(#cm);
         (HttpRequest) -> #HttpResponse term = (req) -> MiddlewareCompressionTests.jsonBody(req);
-        (HttpRequest) -> #HttpResponse app = chain.compose(term);
+        (HttpRequest) -> #HttpResponse app #= chain.compose(term);
 
-        HttpRequest req = HttpRequest.of("GET", "/x");
+        HttpRequest req #= HttpRequest.of("GET", "/x");
         req.setHeader("Accept-Encoding", "deflate");
         HttpResponse resp = app(req);
 
         c.eqStr(resp.getHeaders().get("Content-Encoding"), "deflate",
                 "buffered deflate: Content-Encoding stamped");
-        String expect = MiddlewareCompressionTests.bigText();
-        int8[] back = ContentCoding.decode("deflate", resp.body, resp.bodyLength(),
+        String expect #= MiddlewareCompressionTests.bigText();
+        int8[] back #= ContentCoding.decode("deflate", resp.body, resp.bodyLength(),
                                            (int64) 100000);
         c.eqBytes(back, back.count(), expect, "buffered deflate: body round-trips");
     }
 
     static void skipTiny(Check c) {
-        Compression cfg = Compression.create();
-        Middleware cm = Compression.middleware(cfg);
+        Compression cfg #= Compression.create();
+        Middleware cm #= Compression.middleware(cfg);
         MiddlewareChain chain = heap MiddlewareChain();
         chain.use(#cm);
         (HttpRequest) -> #HttpResponse term = (req) -> MiddlewareCompressionTests.tinyBody(req);
-        (HttpRequest) -> #HttpResponse app = chain.compose(term);
+        (HttpRequest) -> #HttpResponse app #= chain.compose(term);
 
-        HttpRequest req = HttpRequest.of("GET", "/x");
+        HttpRequest req #= HttpRequest.of("GET", "/x");
         req.setHeader("Accept-Encoding", "gzip");
         HttpResponse resp = app(req);
         c.that(resp.getHeaders().get("Content-Encoding") == null,
@@ -173,34 +173,34 @@ public final class MiddlewareCompressionTests {
     }
 
     static void skipAlreadyEncoded(Check c) {
-        Compression cfg = Compression.create();
-        Middleware cm = Compression.middleware(cfg);
+        Compression cfg #= Compression.create();
+        Middleware cm #= Compression.middleware(cfg);
         MiddlewareChain chain = heap MiddlewareChain();
         chain.use(#cm);
         (HttpRequest) -> #HttpResponse term = (req) -> MiddlewareCompressionTests.preEncoded(req);
-        (HttpRequest) -> #HttpResponse app = chain.compose(term);
+        (HttpRequest) -> #HttpResponse app #= chain.compose(term);
 
-        HttpRequest req = HttpRequest.of("GET", "/x");
+        HttpRequest req #= HttpRequest.of("GET", "/x");
         req.setHeader("Accept-Encoding", "gzip");
         HttpResponse resp = app(req);
         // Handler's own Content-Encoding is left alone; body not re-compressed
         // (it's still the plaintext the handler wrote).
         c.eqStr(resp.getHeaders().get("Content-Encoding"), "gzip",
                 "skip already-encoded: handler's Content-Encoding preserved");
-        String expect = MiddlewareCompressionTests.bigText();
+        String expect #= MiddlewareCompressionTests.bigText();
         c.eqBytes(resp.body, resp.bodyLength(), expect,
                   "skip already-encoded: body not double-compressed");
     }
 
     static void skipIncompressible(Check c) {
-        Compression cfg = Compression.create();
-        Middleware cm = Compression.middleware(cfg);
+        Compression cfg #= Compression.create();
+        Middleware cm #= Compression.middleware(cfg);
         MiddlewareChain chain = heap MiddlewareChain();
         chain.use(#cm);
         (HttpRequest) -> #HttpResponse term = (req) -> MiddlewareCompressionTests.pngBody(req);
-        (HttpRequest) -> #HttpResponse app = chain.compose(term);
+        (HttpRequest) -> #HttpResponse app #= chain.compose(term);
 
-        HttpRequest req = HttpRequest.of("GET", "/x");
+        HttpRequest req #= HttpRequest.of("GET", "/x");
         req.setHeader("Accept-Encoding", "gzip");
         HttpResponse resp = app(req);
         c.that(resp.getHeaders().get("Content-Encoding") == null,
@@ -208,19 +208,19 @@ public final class MiddlewareCompressionTests {
     }
 
     static void skipIdentity(Check c) {
-        Compression cfg = Compression.create();
-        Middleware cm = Compression.middleware(cfg);
+        Compression cfg #= Compression.create();
+        Middleware cm #= Compression.middleware(cfg);
         MiddlewareChain chain = heap MiddlewareChain();
         chain.use(#cm);
         (HttpRequest) -> #HttpResponse term = (req) -> MiddlewareCompressionTests.jsonBody(req);
-        (HttpRequest) -> #HttpResponse app = chain.compose(term);
+        (HttpRequest) -> #HttpResponse app #= chain.compose(term);
 
-        HttpRequest req = HttpRequest.of("GET", "/x");
+        HttpRequest req #= HttpRequest.of("GET", "/x");
         // No Accept-Encoding → identity.
         HttpResponse resp = app(req);
         c.that(resp.getHeaders().get("Content-Encoding") == null,
                "skip identity: no Accept-Encoding → uncompressed");
-        String vary = resp.getHeaders().get("Vary");
+        String vary #= resp.getHeaders().get("Vary");
         c.that(vary != null && vary.toLowerCase().contains("accept-encoding"),
                "skip identity: Vary still added");
     }
@@ -228,10 +228,10 @@ public final class MiddlewareCompressionTests {
     // ---- streamed (incremental gzip) ------------------------------------
 
     static void streamedGzipRoundTrip(Check c) {
-        String plain = MiddlewareCompressionTests.bigText();
+        String plain #= MiddlewareCompressionTests.bigText();
         int32 pn = plain.byteLength();
-        BytesBody src = BytesBody.of(plain.toBytes(), pn);
-        GzipCompressBody cb = GzipCompressBody.of(#src);
+        BytesBody src #= BytesBody.of(plain.toBytes(), pn);
+        GzipCompressBody cb #= GzipCompressBody.of(#src);
 
         // Drain in tiny 7-byte reads to force incremental production.
         AsyncReader r = cb.reader();
@@ -252,7 +252,7 @@ public final class MiddlewareCompressionTests {
                 }
             }
         }
-        int8[] back = ContentCoding.decode("gzip", acc, accLen, (int64) 100000);
+        int8[] back #= ContentCoding.decode("gzip", acc, accLen, (int64) 100000);
         c.eqBytes(back, back.count(), plain,
                   "streamed gzip: chunk-drained stream decodes to the original");
     }
@@ -260,16 +260,16 @@ public final class MiddlewareCompressionTests {
     // ---- decompression ---------------------------------------------------
 
     static void decompressRoundTrip(Check c) {
-        Decompression cfg = Decompression.create();
-        Middleware dm = Decompression.middleware(cfg);
+        Decompression cfg #= Decompression.create();
+        Middleware dm #= Decompression.middleware(cfg);
         MiddlewareChain chain = heap MiddlewareChain();
         chain.use(#dm);
         (HttpRequest) -> #HttpResponse term = (req) -> MiddlewareCompressionTests.echoBody(req);
-        (HttpRequest) -> #HttpResponse app = chain.compose(term);
+        (HttpRequest) -> #HttpResponse app #= chain.compose(term);
 
-        String plain = MiddlewareCompressionTests.bigText();
-        int8[] gz = ContentCoding.encode("gzip", plain.toBytes(), plain.byteLength());
-        HttpRequest req = HttpRequest.of("POST", "/x");
+        String plain #= MiddlewareCompressionTests.bigText();
+        int8[] gz #= ContentCoding.encode("gzip", plain.toBytes(), plain.byteLength());
+        HttpRequest req #= HttpRequest.of("POST", "/x");
         req.body(gz, gz.count());
         req.setHeader("Content-Encoding", "gzip");
         HttpResponse resp = app(req);
@@ -280,17 +280,17 @@ public final class MiddlewareCompressionTests {
     }
 
     static void bombGuard413(Check c) {
-        Decompression cfg = Decompression.create();
+        Decompression cfg #= Decompression.create();
         cfg.maxSize((int64) 16);
-        Middleware dm = Decompression.middleware(cfg);
+        Middleware dm #= Decompression.middleware(cfg);
         MiddlewareChain chain = heap MiddlewareChain();
         chain.use(#dm);
         (HttpRequest) -> #HttpResponse term = (req) -> MiddlewareCompressionTests.echoBody(req);
-        (HttpRequest) -> #HttpResponse app = chain.compose(term);
+        (HttpRequest) -> #HttpResponse app #= chain.compose(term);
 
-        String plain = MiddlewareCompressionTests.bigText();   // ~900 B ≫ 16 B cap
-        int8[] gz = ContentCoding.encode("gzip", plain.toBytes(), plain.byteLength());
-        HttpRequest req = HttpRequest.of("POST", "/x");
+        String plain #= MiddlewareCompressionTests.bigText();   // ~900 B ≫ 16 B cap
+        int8[] gz #= ContentCoding.encode("gzip", plain.toBytes(), plain.byteLength());
+        HttpRequest req #= HttpRequest.of("POST", "/x");
         req.body(gz, gz.count());
         req.setHeader("Content-Encoding", "gzip");
         HttpResponse resp = app(req);
@@ -299,12 +299,12 @@ public final class MiddlewareCompressionTests {
     }
 
     static void malformed400(Check c) {
-        Decompression cfg = Decompression.create();
-        Middleware dm = Decompression.middleware(cfg);
+        Decompression cfg #= Decompression.create();
+        Middleware dm #= Decompression.middleware(cfg);
         MiddlewareChain chain = heap MiddlewareChain();
         chain.use(#dm);
         (HttpRequest) -> #HttpResponse term = (req) -> MiddlewareCompressionTests.echoBody(req);
-        (HttpRequest) -> #HttpResponse app = chain.compose(term);
+        (HttpRequest) -> #HttpResponse app #= chain.compose(term);
 
         int8[] junk = heap int8[8];
         int32 i = 0;
@@ -312,7 +312,7 @@ public final class MiddlewareCompressionTests {
             junk[i] = (int8) 0x41;
             i = i + 1;
         }
-        HttpRequest req = HttpRequest.of("POST", "/x");
+        HttpRequest req #= HttpRequest.of("POST", "/x");
         req.body(junk, 8);
         req.setHeader("Content-Encoding", "gzip");
         HttpResponse resp = app(req);
@@ -321,14 +321,14 @@ public final class MiddlewareCompressionTests {
     }
 
     static void unsupported415(Check c) {
-        Decompression cfg = Decompression.create();
-        Middleware dm = Decompression.middleware(cfg);
+        Decompression cfg #= Decompression.create();
+        Middleware dm #= Decompression.middleware(cfg);
         MiddlewareChain chain = heap MiddlewareChain();
         chain.use(#dm);
         (HttpRequest) -> #HttpResponse term = (req) -> MiddlewareCompressionTests.echoBody(req);
-        (HttpRequest) -> #HttpResponse app = chain.compose(term);
+        (HttpRequest) -> #HttpResponse app #= chain.compose(term);
 
-        HttpRequest req = HttpRequest.of("POST", "/x");
+        HttpRequest req #= HttpRequest.of("POST", "/x");
         int8[] payload = heap int8[4];
         req.body(payload, 4);
         req.setHeader("Content-Encoding", "br");

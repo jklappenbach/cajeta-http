@@ -42,15 +42,15 @@ public final class MiddlewareStaticEtagProxyTests {
     // ---- path jail (pure fuzz) -------------------------------------------
 
     static void pathJail(Check c) {
-        String j1 = StaticPath.jail("/a/b/c");
+        String j1 #= StaticPath.jail("/a/b/c");
         c.that(j1 != null && j1.equals("a/b/c"), "jail: plain path kept");
-        String j2 = StaticPath.jail("/a/./b");
+        String j2 #= StaticPath.jail("/a/./b");
         c.that(j2 != null && j2.equals("a/b"), "jail: '.' segment dropped");
-        String j3 = StaticPath.jail("/a/../b");
+        String j3 #= StaticPath.jail("/a/../b");
         c.that(j3 != null && j3.equals("b"), "jail: in-bounds '..' resolved");
-        String j4 = StaticPath.jail("/");
+        String j4 #= StaticPath.jail("/");
         c.that(j4 != null && j4.equals(""), "jail: root maps to empty (index)");
-        String j5 = StaticPath.jail("//a///b");
+        String j5 #= StaticPath.jail("//a///b");
         c.that(j5 != null && j5.equals("a/b"), "jail: empty segments collapsed");
 
         c.that(StaticPath.jail("/../etc/passwd") == null,
@@ -67,7 +67,7 @@ public final class MiddlewareStaticEtagProxyTests {
                "jail: NUL byte rejected");
 
         // A decoded %2f is a separator, not traversal — stays jailed.
-        String j6 = StaticPath.jail("/a%2fb");
+        String j6 #= StaticPath.jail("/a%2fb");
         c.that(j6 != null && j6.equals("a/b"), "jail: %2f is a separator, kept in bounds");
     }
 
@@ -85,7 +85,7 @@ public final class MiddlewareStaticEtagProxyTests {
         // A secret OUTSIDE the root, and a symlink inside pointing to it.
         String secret = "TOPSECRET";
         File.writeAllBytes("build/test/sfsecret.txt", secret.toBytes(), secret.byteLength());
-        Path link = Path.of(root + "/evil");
+        Path link #= Path.of(root + "/evil");
         if (!link.exists()) {
             link.symlinkTo(Path.of("../sfsecret.txt"));
         }
@@ -95,40 +95,40 @@ public final class MiddlewareStaticEtagProxyTests {
         String root = "build/test/sfroot";
         MiddlewareStaticEtagProxyTests.setupRoot(root);
 
-        StaticFile sf = StaticFile.create(root);
-        Middleware sm = StaticFile.middleware(sf);
+        StaticFile sf #= StaticFile.create(root);
+        Middleware sm #= StaticFile.middleware(sf);
         MiddlewareChain chain = heap MiddlewareChain();
         chain.use(#sm);
         (HttpRequest) -> #HttpResponse term = (req) -> MiddlewareStaticEtagProxyTests.marker(req);
-        (HttpRequest) -> #HttpResponse app = chain.compose(term);
+        (HttpRequest) -> #HttpResponse app #= chain.compose(term);
 
-        HttpResponse rFile = app(HttpRequest.of("GET", "/a.txt"));
+        HttpResponse rFile #= app(HttpRequest.of("GET", "/a.txt"));
         c.eqInt((int64) rFile.statusCode(), 200, "serve: existing file → 200");
         c.eqBytes(rFile.body, rFile.bodyLength(), "hello static", "serve: file body");
         c.eqStr(rFile.getHeaders().get("Content-Type"), "text/plain; charset=utf-8",
                 "serve: content-type from extension");
 
-        HttpResponse rIndex = app(HttpRequest.of("GET", "/"));
+        HttpResponse rIndex #= app(HttpRequest.of("GET", "/"));
         c.eqInt((int64) rIndex.statusCode(), 200, "serve: directory → index file");
         c.eqBytes(rIndex.body, rIndex.bodyLength(), "<h1>home</h1>", "serve: index body");
 
-        HttpResponse rCss = app(HttpRequest.of("GET", "/sub/b.css"));
+        HttpResponse rCss #= app(HttpRequest.of("GET", "/sub/b.css"));
         c.eqStr(rCss.getHeaders().get("Content-Type"), "text/css; charset=utf-8",
                 "serve: nested file content-type");
 
-        HttpResponse r404 = app(HttpRequest.of("GET", "/nope.txt"));
+        HttpResponse r404 #= app(HttpRequest.of("GET", "/nope.txt"));
         c.eqInt((int64) r404.statusCode(), 404, "serve: missing file → 404");
 
-        HttpResponse rTrav = app(HttpRequest.of("GET", "/../sfsecret.txt"));
+        HttpResponse rTrav #= app(HttpRequest.of("GET", "/../sfsecret.txt"));
         c.eqInt((int64) rTrav.statusCode(), 403, "serve: '..' traversal → 403");
 
-        HttpResponse rEnc = app(HttpRequest.of("GET", "/%2e%2e/sfsecret.txt"));
+        HttpResponse rEnc #= app(HttpRequest.of("GET", "/%2e%2e/sfsecret.txt"));
         c.eqInt((int64) rEnc.statusCode(), 403, "serve: encoded traversal → 403");
 
-        HttpResponse rLink = app(HttpRequest.of("GET", "/evil"));
+        HttpResponse rLink #= app(HttpRequest.of("GET", "/evil"));
         c.eqInt((int64) rLink.statusCode(), 403, "serve: symlink escaping root → 403");
 
-        HttpResponse rPost = app(HttpRequest.of("POST", "/a.txt"));
+        HttpResponse rPost #= app(HttpRequest.of("POST", "/a.txt"));
         c.eqInt((int64) rPost.statusCode(), 599, "serve: non-GET falls through to next");
     }
 
@@ -140,32 +140,32 @@ public final class MiddlewareStaticEtagProxyTests {
     }
 
     static void etag(Check c) {
-        Middleware em = ETag.middleware();
+        Middleware em #= ETag.middleware();
         MiddlewareChain chain = heap MiddlewareChain();
         chain.use(#em);
         (HttpRequest) -> #HttpResponse term = (req) -> MiddlewareStaticEtagProxyTests.bodyHandler(req);
-        (HttpRequest) -> #HttpResponse app = chain.compose(term);
+        (HttpRequest) -> #HttpResponse app #= chain.compose(term);
 
-        HttpResponse r1 = app(HttpRequest.of("GET", "/x"));
+        HttpResponse r1 #= app(HttpRequest.of("GET", "/x"));
         c.eqInt((int64) r1.statusCode(), 200, "etag: first GET is 200");
-        String tag = r1.getHeaders().get("ETag");
+        String tag #= r1.getHeaders().get("ETag");
         c.that(tag != null && tag.startsWith("\""), "etag: strong quoted tag stamped");
 
         // Conditional GET with the same tag → 304, no body.
-        HttpRequest req2 = HttpRequest.of("GET", "/x");
+        HttpRequest req2 #= HttpRequest.of("GET", "/x");
         req2.setHeader("If-None-Match", tag);
         HttpResponse r2 = app(req2);
         c.eqInt((int64) r2.statusCode(), 304, "etag: matching If-None-Match → 304");
         c.that(!r2.hasBody, "etag: 304 carries no body");
 
         // Wildcard → 304.
-        HttpRequest req3 = HttpRequest.of("GET", "/x");
+        HttpRequest req3 #= HttpRequest.of("GET", "/x");
         req3.setHeader("If-None-Match", "*");
         HttpResponse r3 = app(req3);
         c.eqInt((int64) r3.statusCode(), 304, "etag: If-None-Match: * → 304");
 
         // Non-matching tag → 200 with body.
-        HttpRequest req4 = HttpRequest.of("GET", "/x");
+        HttpRequest req4 #= HttpRequest.of("GET", "/x");
         req4.setHeader("If-None-Match", "\"stale-tag\"");
         HttpResponse r4 = app(req4);
         c.eqInt((int64) r4.statusCode(), 200, "etag: stale tag → 200 with body");
@@ -176,29 +176,29 @@ public final class MiddlewareStaticEtagProxyTests {
 
     static void proxyHeaders(Check c) {
         // Trusted: the forwarded client is resolved onto X-Real-IP.
-        ProxyHeaders trust = ProxyHeaders.trusted();
-        Middleware tm = ProxyHeaders.middleware(trust);
+        ProxyHeaders trust #= ProxyHeaders.trusted();
+        Middleware tm #= ProxyHeaders.middleware(trust);
         MiddlewareChain tchain = heap MiddlewareChain();
         tchain.use(#tm);
         (HttpRequest) -> #HttpResponse tterm = (req) -> MiddlewareStaticEtagProxyTests.marker(req);
-        (HttpRequest) -> #HttpResponse tapp = tchain.compose(tterm);
+        (HttpRequest) -> #HttpResponse tapp #= tchain.compose(tterm);
 
-        HttpRequest tr = HttpRequest.of("GET", "/x");
+        HttpRequest tr #= HttpRequest.of("GET", "/x");
         tr.setHeader("X-Forwarded-For", "1.2.3.4, 5.6.7.8");
         HttpResponse tResp = tapp(tr);
-        String real = tr.getHeaders().get("X-Real-IP");
+        String real #= tr.getHeaders().get("X-Real-IP");
         c.that(real != null && real.equals("1.2.3.4"),
                "proxy trusted: first forwarded hop resolved onto X-Real-IP");
 
         // Untrusted: forwarded headers are stripped before the handler.
-        ProxyHeaders notrust = ProxyHeaders.untrusted();
-        Middleware um = ProxyHeaders.middleware(notrust);
+        ProxyHeaders notrust #= ProxyHeaders.untrusted();
+        Middleware um #= ProxyHeaders.middleware(notrust);
         MiddlewareChain uchain = heap MiddlewareChain();
         uchain.use(#um);
         (HttpRequest) -> #HttpResponse uterm = (req) -> MiddlewareStaticEtagProxyTests.marker(req);
-        (HttpRequest) -> #HttpResponse uapp = uchain.compose(uterm);
+        (HttpRequest) -> #HttpResponse uapp #= uchain.compose(uterm);
 
-        HttpRequest ur = HttpRequest.of("GET", "/x");
+        HttpRequest ur #= HttpRequest.of("GET", "/x");
         ur.setHeader("X-Forwarded-For", "9.9.9.9");
         ur.setHeader("X-Real-IP", "spoofed");
         HttpResponse uResp = uapp(ur);

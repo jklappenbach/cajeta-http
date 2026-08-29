@@ -40,25 +40,25 @@ public final class MiddlewareBundleTests {
     }
 
     static void recoverUnit(Check c) {
-        Middleware rec = Recover.middleware();
+        Middleware rec #= Recover.middleware();
         (HttpRequest) -> #HttpResponse thrower = (req) -> {
             throw heap HttpException("boom");
         };
         MiddlewareChain chain = heap MiddlewareChain();
         chain.use(#rec);
-        (HttpRequest) -> #HttpResponse app = chain.compose(thrower);
+        (HttpRequest) -> #HttpResponse app #= chain.compose(thrower);
 
-        HttpResponse resp = app(HttpRequest.of("GET", "/x"));
+        HttpResponse resp #= app(HttpRequest.of("GET", "/x"));
         c.eqInt((int64) resp.statusCode(), 500,
                 "recover: uncaught exception becomes 500");
     }
 
     static void requestIdUnit(Check c) {
-        Middleware rid = RequestId.middleware();
+        Middleware rid #= RequestId.middleware();
         // Echo the request's stamped id into the body, to prove it reached
         // the handler as well as the response header.
         (HttpRequest) -> #HttpResponse echo = (req) -> {
-            String got = req.getHeaders().get("X-Request-Id");
+            String got #= req.getHeaders().get("X-Request-Id");
             if (got == null) {
                 return HttpResponse.of(500);
             }
@@ -66,35 +66,35 @@ public final class MiddlewareBundleTests {
         };
         MiddlewareChain chain = heap MiddlewareChain();
         chain.use(#rid);
-        (HttpRequest) -> #HttpResponse app = chain.compose(echo);
+        (HttpRequest) -> #HttpResponse app #= chain.compose(echo);
 
         // Propagation: an inbound id is kept verbatim.
-        HttpRequest req1 = HttpRequest.of("GET", "/x");
+        HttpRequest req1 #= HttpRequest.of("GET", "/x");
         req1.setHeader("X-Request-Id", "abc-123");
         HttpResponse r1 = app(req1);
         c.eqInt((int64) r1.statusCode(), 200, "requestid: handler saw the id");
         c.eqBytes(r1.body, r1.bodyLength(), "abc-123",
                   "requestid: inbound id stamped on the request");
-        String echoed1 = r1.getHeaders().get("X-Request-Id");
+        String echoed1 #= r1.getHeaders().get("X-Request-Id");
         c.that(echoed1 != null && echoed1.equals("abc-123"),
                "requestid: inbound id echoed on the response");
 
         // Generation: absent id yields a fresh req-<n>.
-        HttpResponse r2 = app(HttpRequest.of("GET", "/y"));
-        String echoed2 = r2.getHeaders().get("X-Request-Id");
+        HttpResponse r2 #= app(HttpRequest.of("GET", "/y"));
+        String echoed2 #= r2.getHeaders().get("X-Request-Id");
         c.that(echoed2 != null && echoed2.startsWith("req-"),
                "requestid: generates an id when none was sent");
     }
 
     static void loggingUnit(Check c) {
-        LogSink sink = LogSink.capturing();
-        Middleware log = Logging.middleware(sink);
+        LogSink sink #= LogSink.capturing();
+        Middleware log #= Logging.middleware(sink);
         (HttpRequest) -> #HttpResponse ok = (req) -> HttpResponse.of(200);
         MiddlewareChain chain = heap MiddlewareChain();
         chain.use(#log);
-        (HttpRequest) -> #HttpResponse app = chain.compose(ok);
+        (HttpRequest) -> #HttpResponse app #= chain.compose(ok);
 
-        HttpResponse resp = app(HttpRequest.of("GET", "/x"));
+        HttpResponse resp #= app(HttpRequest.of("GET", "/x"));
         c.eqInt((int64) resp.statusCode(), 200, "logging: passes the exchange through");
         c.eqInt((int64) sink.count(), 1, "logging: exactly one line per exchange");
         String line = sink.at(0);
@@ -107,7 +107,7 @@ public final class MiddlewareBundleTests {
 
     /** /boom throws (Recover → 500); anything else is 200. */
     public static #HttpResponse handle(HttpRequest req) {
-        String t = req.getTarget();
+        String t #= req.getTarget();
         if (t.equals("/boom")) {
             throw heap HttpException("boom");
         }
@@ -121,10 +121,10 @@ public final class MiddlewareBundleTests {
 
     /** GET `path`; the status code, or -3 on a fail-fast timeout/fault. */
     public static async int32 statusOf(int32 port, String path) {
-        HttpClient client = heap HttpClient();
+        HttpClient client #= heap HttpClient();
         client.exchangeTimeout(15000);
         try {
-            HttpResponse resp = client.get("http://127.0.0.1:" + port + path);
+            HttpResponse resp #= client.get("http://127.0.0.1:" + port + path);
             return resp.statusCode();
         } catch (Exception e) {
             return -3;
@@ -133,11 +133,11 @@ public final class MiddlewareBundleTests {
 
     /** 1 iff GET `path` came back with a generated `X-Request-Id` (`req-…`). */
     public static async int32 hasGenId(int32 port, String path) {
-        HttpClient client = heap HttpClient();
+        HttpClient client #= heap HttpClient();
         client.exchangeTimeout(15000);
         try {
-            HttpResponse resp = client.get("http://127.0.0.1:" + port + path);
-            String id = resp.getHeaders().get("X-Request-Id");
+            HttpResponse resp #= client.get("http://127.0.0.1:" + port + path);
+            String id #= resp.getHeaders().get("X-Request-Id");
             if (id != null && id.startsWith("req-")) {
                 return 1;
             }
@@ -150,21 +150,21 @@ public final class MiddlewareBundleTests {
     static void liveServer(Check c) {
         // The ergonomic global-middleware wiring: compose the bundle around
         // the app handler and bind the composed handler to the server.
-        LogSink sink = LogSink.capturing();
-        Middleware rec = Recover.middleware();
-        Middleware rid = RequestId.middleware();
-        Middleware log = Logging.middleware(sink);
+        LogSink sink #= LogSink.capturing();
+        Middleware rec #= Recover.middleware();
+        Middleware rid #= RequestId.middleware();
+        Middleware log #= Logging.middleware(sink);
         MiddlewareChain chain = heap MiddlewareChain();
         chain.use(#rec).use(#rid).use(#log);
         (HttpRequest) -> #HttpResponse termi =
             (req) -> MiddlewareBundleTests.handle(req);
-        (HttpRequest) -> #HttpResponse app = chain.compose(termi);
+        (HttpRequest) -> #HttpResponse app #= chain.compose(termi);
 
         scope {
-            HttpServerBuilder b = HttpServer.builder();
+            HttpServerBuilder b #= HttpServer.builder();
             b.bind("127.0.0.1:0");
             b.handler(app);
-            HttpServer srv = b.build();
+            HttpServer srv #= b.build();
             int32 port = srv.server.listener.boundPort();
             Task<int32> sv = spawn serveBundle(srv);
 
@@ -178,7 +178,7 @@ public final class MiddlewareBundleTests {
             Task<int32> t3 = spawn hasGenId(port, "/also");
             c.eqInt((int64) await t3, 1, "live: response carries a generated X-Request-Id");
 
-            boolean drained = srv.shutdown(Duration.ofSeconds(2));
+            boolean drained #= srv.shutdown(Duration.ofSeconds(2));
             c.that(drained, "live: bundle server drained clean");
             int32 s = await sv;
             c.eqInt((int64) s, 1, "live: accept loop exited");

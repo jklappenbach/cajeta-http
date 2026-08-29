@@ -35,21 +35,21 @@ public final class WsTests {
     static void acceptKeyVectors(Check c) {
         // RFC 6455 §1.3 example + an all-zeros key (golden vectors from
         // the stdlib's test corpus).
-        String rfc = WsServerHandshake.acceptKey("dGhlIHNhbXBsZSBub25jZQ==");
+        String rfc #= WsServerHandshake.acceptKey("dGhlIHNhbXBsZSBub25jZQ==");
         c.eqStr(rfc, "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=", "RFC example accept key");
-        String zeros = WsServerHandshake.acceptKey("AAAAAAAAAAAAAAAAAAAAAA==");
+        String zeros #= WsServerHandshake.acceptKey("AAAAAAAAAAAAAAAAAAAAAA==");
         c.eqStr(zeros, "ICX+Yqv66kxgM0FcWaLWlFLwTAI=", "all-zeros accept key");
     }
 
     static void pureHandshake(Check c) {
-        Uri huri = Uri.builder()
+        Uri huri #= Uri.builder()
             .scheme("ws").host("example.test").port(80).path("/chat")
             .build();
-        String key = WsClientHandshake.placeholderKey(42);
-        HttpRequest upgrade = WsClientHandshake.buildRequest(huri, key);
+        String key #= WsClientHandshake.placeholderKey(42);
+        HttpRequest upgrade #= WsClientHandshake.buildRequest(huri, key);
         c.that(WsServerHandshake.isUpgradeRequest(upgrade),
                "client builds a valid Upgrade request");
-        HttpResponse resp = WsServerHandshake.accept(upgrade);
+        HttpResponse resp #= WsServerHandshake.accept(upgrade);
         c.eqInt((int64) resp.statusCode(), 101, "server answers 101");
         c.that(WsClientHandshake.validateAccept(resp, key),
                "accept token binds to the client key");
@@ -58,16 +58,16 @@ public final class WsTests {
     // Server fiber: accept one connection, upgrade, echo a text and a
     // binary message preserving type; returns len1 * 100 + len2.
     public static async int32 wsServer(#TcpListener listener) {
-        TcpStream sock = listener.acceptAsync();
+        TcpStream sock #= listener.acceptAsync();
         AsyncReader reader = heap AsyncReader(sock);
         AsyncWriter writer = heap AsyncWriter(sock);
-        WebSocket ws = WsUpgrade.acceptServer(reader, writer);
+        WebSocket ws #= WsUpgrade.acceptServer(reader, writer);
 
-        WsMessage m1 = ws.receive();
-        String text = m1.text();
+        WsMessage m1 #= ws.receive();
+        String text #= m1.text();
         ws.send(text);
 
-        WsMessage m2 = ws.receive();
+        WsMessage m2 #= ws.receive();
         ws.sendBinary(m2.getPayload());
 
         sock.close();
@@ -76,24 +76,24 @@ public final class WsTests {
 
     static void liveEcho(Check c) {
         scope {
-            IpAddress la = IpAddress.loopbackV4();
-            SocketAddress bindAddr = SocketAddress.of(#la, 0);
+            IpAddress la #= IpAddress.loopbackV4();
+            SocketAddress bindAddr #= SocketAddress.of(#la, 0);
             TcpListener listener = TcpListener.bind(bindAddr);
             int32 port = listener.boundPort();
             Task<int32> t = spawn wsServer(#listener);
 
-            IpAddress ca = IpAddress.loopbackV4();
-            SocketAddress connAddr = SocketAddress.of(#ca, port);
-            TcpStream sock = TcpStream.connectAsync(#connAddr);
+            IpAddress ca #= IpAddress.loopbackV4();
+            SocketAddress connAddr #= SocketAddress.of(#ca, port);
+            TcpStream sock #= TcpStream.connectAsync(#connAddr);
             AsyncReader reader = heap AsyncReader(sock);
             AsyncWriter writer = heap AsyncWriter(sock);
-            Uri curi = Uri.builder()
+            Uri curi #= Uri.builder()
                 .scheme("ws").host("127.0.0.1").port(port).path("/")
                 .build();
-            WebSocket ws = WsUpgrade.connectClient(reader, writer, curi, 1234567);
+            WebSocket ws #= WsUpgrade.connectClient(reader, writer, curi, 1234567);
 
             ws.send("ping");
-            WsMessage e1 = ws.receive();
+            WsMessage e1 #= ws.receive();
             int8[] p1 = e1.getPayload();
             boolean textOk = e1.isText() && e1.length() == 4
                 && p1[0] == (int8) 112 && p1[1] == (int8) 105
@@ -105,7 +105,7 @@ public final class WsTests {
             bin[1] = (int8) 2;
             bin[2] = (int8) 3;
             ws.sendBinary(bin);
-            WsMessage e2 = ws.receive();
+            WsMessage e2 #= ws.receive();
             int8[] p2 = e2.getPayload();
             boolean binOk = e2.isBinary() && e2.length() == 3
                 && p2[0] == (int8) 1 && p2[1] == (int8) 2

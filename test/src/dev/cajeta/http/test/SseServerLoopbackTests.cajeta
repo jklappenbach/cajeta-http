@@ -52,11 +52,11 @@ public final class SseServerLoopbackTests {
 
     /** Producer: push three events (one multi-line), then close the stream. */
     public static async int32 produce(SseChannel ch) {
-        SseEvent e0 = SseEvent.of("first");
+        SseEvent e0 #= SseEvent.of("first");
         ch.send(#e0);
-        SseEvent e1 = SseEvent.typed("tick", "2");
+        SseEvent e1 #= SseEvent.typed("tick", "2");
         ch.send(#e1);
-        SseEvent e2 = SseEvent.of("multi\nline");
+        SseEvent e2 #= SseEvent.of("multi\nline");
         ch.send(#e2);
         ch.close();
         return 1;
@@ -68,13 +68,13 @@ public final class SseServerLoopbackTests {
 
     /** GET the SSE stream and recover the events with the parser. */
     public static async int32 getSse(int32 port) {
-        HttpClient client = heap HttpClient();
+        HttpClient client #= heap HttpClient();
         String url = "http://127.0.0.1:" + port + "/events";
-        HttpResponse resp = client.get(url);
+        HttpResponse resp #= client.get(url);
         if (resp.statusCode() != 200) {
             return -1;
         }
-        String ct = resp.getHeaders().get("Content-Type");
+        String ct #= resp.getHeaders().get("Content-Type");
         if (ct == null || !ct.equals("text/event-stream")) {
             return -2;
         }
@@ -83,15 +83,15 @@ public final class SseServerLoopbackTests {
         if (!p.hasEvent()) {
             return -3;
         }
-        SseEvent a = p.nextEvent();
+        SseEvent a #= p.nextEvent();
         if (!a.data.equals("first")) {
             return -4;
         }
-        SseEvent b = p.nextEvent();
+        SseEvent b #= p.nextEvent();
         if (b.event == null || !b.event.equals("tick") || !b.data.equals("2")) {
             return -5;
         }
-        SseEvent g = p.nextEvent();
+        SseEvent g #= p.nextEvent();
         if (!g.data.equals("multi\nline")) {
             return -6;
         }
@@ -108,12 +108,12 @@ public final class SseServerLoopbackTests {
             SseHolder hold = heap SseHolder(8);
             SseServerLoopbackTests.src #= hold;
 
-            HttpServerBuilder b = HttpServer.builder();
+            HttpServerBuilder b #= HttpServer.builder();
             b.bind("127.0.0.1:0");
             (HttpRequest) -> #HttpResponse h =
                 (req) -> SseServerLoopbackTests.handleSse(req);
             b.handler(h);
-            HttpServer srv = b.build();
+            HttpServer srv #= b.build();
             Server core = srv.server;
             int32 port = core.listener.boundPort();
 

@@ -77,19 +77,19 @@ public class Http2Demo extends DemoClass {
     // SETTINGS, HPACK HEADERS, DATA — all inside exchange()).
     // 1 => 200 with body "HTTP/2.0".
     public static async int32 h2Probe(int32 port) {
-        IpAddress ca = IpAddress.loopbackV4();
-        SocketAddress connAddr = SocketAddress.of(#ca, port);
-        TcpStream sock = TcpStream.connectAsync(#connAddr);
+        IpAddress ca #= IpAddress.loopbackV4();
+        SocketAddress connAddr #= SocketAddress.of(#ca, port);
+        TcpStream sock #= TcpStream.connectAsync(#connAddr);
         AsyncReader reader = heap AsyncReader(sock);
         AsyncWriter writer = heap AsyncWriter(sock);
-        HttpRequest req = HttpRequest.of("GET", "/proto");
-        HttpResponse resp = Http2Client.exchange(reader, writer, req, "http",
+        HttpRequest req #= HttpRequest.of("GET", "/proto");
+        HttpResponse resp #= Http2Client.exchange(reader, writer, req, "http",
                                                  "127.0.0.1");
         sock.close();
         if (resp.statusCode() != 200) {
             return 0 - 1;
         }
-        String body = DemoClass.bodyString(resp.body, resp.bodyLength());
+        String body #= DemoClass.bodyString(resp.body, resp.bodyLength());
         if (body.equals("HTTP/2.0")) {
             return 1;
         }
@@ -99,14 +99,14 @@ public class Http2Demo extends DemoClass {
     // An ordinary h1 client hitting the SAME port: the server sniffs a
     // non-preface first read and degrades to HTTP/1.1 keep-alive.
     public static async int32 h1Probe(int32 port) {
-        HttpClient client = HttpClient.builder()
+        HttpClient client #= HttpClient.builder()
             .defaultHeader("Connection", "close").build();
         String url = "http://127.0.0.1:" + port + "/proto";
-        HttpResponse resp = client.get(url);
+        HttpResponse resp #= client.get(url);
         if (resp.statusCode() != 200) {
             return 0 - 1;
         }
-        String body = DemoClass.bodyString(resp.body, resp.bodyLength());
+        String body #= DemoClass.bodyString(resp.body, resp.bodyLength());
         if (body.equals("HTTP/1.1")) {
             return 1;
         }
@@ -122,12 +122,12 @@ public class Http2Demo extends DemoClass {
         //      HTTP/2 connection, anything else -> HTTP/1.1. One handler
         //      serves both — the message model is protocol-neutral.
         scope {
-            HttpServerBuilder b = HttpServer.builder();
+            HttpServerBuilder b #= HttpServer.builder();
             b.bind("127.0.0.1:0");
             (HttpRequest) -> #HttpResponse h = (req) -> Http2Demo.handle(req);
             b.handler(h);
             b.h2PriorKnowledge();
-            HttpServer srv = b.build();
+            HttpServer srv #= b.build();
             int32 port = srv.server.listener.boundPort();
             Task<int32> sv = spawn serveLoop(srv);
 
@@ -138,7 +138,7 @@ public class Http2Demo extends DemoClass {
             this.check(await th1 == 1,
                 "non-preface bytes -> same port degrades to HTTP/1.1");
 
-            boolean drained = srv.shutdown(Duration.ofSeconds(2));
+            boolean drained #= srv.shutdown(Duration.ofSeconds(2));
             int32 sret = await sv;
             this.check(drained && sret == 1,
                 "shutdown() drained; serve() loop exited");
@@ -154,9 +154,9 @@ public class Http2Demo extends DemoClass {
         req.put(DemoClass.own(":path"), DemoClass.own("/api/status"));
         req.put(DemoClass.own(":scheme"), DemoClass.own("http"));
         req.put(DemoClass.own("accept"), DemoClass.own("application/json"));
-        int8[] block = enc.encode(req);
+        int8[] block #= enc.encode(req);
         System.stdout.println("  HPACK: 4 header fields -> {} bytes", block.count());
-        HpackFieldList back = dec.decode(block, (int32) block.count());
+        HpackFieldList back #= dec.decode(block, (int32) block.count());
         this.check(back.size() == 4
             && back.nameAt(1).equals(":path")
             && back.valueAt(1).equals("/api/status"),
@@ -165,7 +165,7 @@ public class Http2Demo extends DemoClass {
         HpackEncoder one = heap HpackEncoder(4096, false);
         HpackFieldList onlyMethod = heap HpackFieldList();
         onlyMethod.put(DemoClass.own(":method"), DemoClass.own("GET"));
-        int8[] mb = one.encode(onlyMethod);
+        int8[] mb #= one.encode(onlyMethod);
         this.check((int32) mb.count() == 1
             && (((int32) mb[0]) & 0xFF) == 0x82,
             ":method GET is one static-table byte (0x82, RFC 7541 C.2.4)");
@@ -175,16 +175,16 @@ public class Http2Demo extends DemoClass {
         HpackFieldList sl = heap HpackFieldList();
         sl.putSensitive(DemoClass.own("authorization"),
             DemoClass.own("Bearer t0ps3cret"), true);
-        int8[] sb = se.encode(sl);
+        int8[] sb #= se.encode(sl);
         this.check(se.dynamicTable().count() == 0,
             "a sensitive field never enters the dynamic table");
         // The dynamic table is bounded; adding past the cap evicts oldest.
         HpackDynamicTable dt = heap HpackDynamicTable(100);
-        HpackField f1 = heap HpackField(DemoClass.own("aaa"),
+        HpackField f1 #= heap HpackField(DemoClass.own("aaa"),
             DemoClass.own("bbb"), false);           // 3+3+32 = 38 bytes
-        HpackField f2 = heap HpackField(DemoClass.own("ccc"),
+        HpackField f2 #= heap HpackField(DemoClass.own("ccc"),
             DemoClass.own("ddd"), false);
-        HpackField f3 = heap HpackField(DemoClass.own("eee"),
+        HpackField f3 #= heap HpackField(DemoClass.own("eee"),
             DemoClass.own("fff"), false);           // 3rd add: 114 > 100
         dt.add(#f1);
         dt.add(#f2);
@@ -194,8 +194,8 @@ public class Http2Demo extends DemoClass {
         // Huffman: the string coding under HPACK, usable alone.
         Huffman huffman = heap Huffman();
         String word = "www.example.com";
-        int8[] wb = word.toBytes();
-        int8[] huff = huffman.encode(wb, word.byteLength());
+        int8[] wb #= word.toBytes();
+        int8[] huff #= huffman.encode(wb, word.byteLength());
         this.check((int32) huff.count() < word.byteLength()
             && huffman.decode(huff, (int32) huff.count()).equals(word),
             "Huffman coding shrinks and round-trips header text");
@@ -212,7 +212,7 @@ public class Http2Demo extends DemoClass {
         boolean hpackBad = false;
         try {
             HpackDecoder badDec = heap HpackDecoder(4096);
-            HpackFieldList never = badDec.decode(hpackJunk, 2);
+            HpackFieldList never #= badDec.decode(hpackJunk, 2);
         } catch (HpackException hpe) {
             hpackBad = true;
         }
@@ -220,7 +220,7 @@ public class Http2Demo extends DemoClass {
 
         // 3c. Http2Requests bridges messages <-> HPACK field lists — the
         //     pseudo-header (:method/:path/:scheme/:authority) encoding.
-        HttpRequest bridged = HttpRequest.of("GET", "/api/status");
+        HttpRequest bridged #= HttpRequest.of("GET", "/api/status");
         HpackFieldList fields = Http2Requests.requestFields(bridged, "http",
             "orders.internal");
         HttpRequest rebuilt = Http2Requests.fromFields(fields);
@@ -239,13 +239,13 @@ public class Http2Demo extends DemoClass {
         fw.writeFrame(Http2.FRAME_DATA, Http2.FLAG_END_STREAM, 1, pay, 4);
         int8[] dbg = [ (int8) 0x62, (int8) 0x79, (int8) 0x65 ];   // "bye"
         Http2Frames.writeGoaway(fw, 1, (int64) Http2.NO_ERROR, dbg, 3);
-        int8[] wire = fw.toBytes();
+        int8[] wire #= fw.toBytes();
         Http2FrameReader fr = heap Http2FrameReader(wire, (int32) wire.count(),
             Http2.DEFAULT_MAX_FRAME_SIZE);
         this.check(fr.next() && fr.type() == Http2.FRAME_SETTINGS,
             "frame 1: SETTINGS");
-        int8[] spl = fr.copyPayload();
-        Http2SettingsList got = Http2Frames.parseSettings(spl, 0, fr.length(),
+        int8[] spl #= fr.copyPayload();
+        Http2SettingsList got #= Http2Frames.parseSettings(spl, 0, fr.length(),
             fr.flags(), fr.streamId());
         this.check(got.get(Http2.SETTINGS_INITIAL_WINDOW_SIZE, (int64) 0 - (int64) 1)
                 == (int64) 131072,
@@ -255,8 +255,8 @@ public class Http2Demo extends DemoClass {
             "frame 2: DATA on stream 1 with END_STREAM");
         this.check(fr.next() && fr.type() == Http2.FRAME_GOAWAY,
             "frame 3: GOAWAY");
-        int8[] gpl = fr.copyPayload();
-        Http2GoawayInfo gi = Http2Frames.parseGoaway(gpl, 0, fr.length(),
+        int8[] gpl #= fr.copyPayload();
+        Http2GoawayInfo gi #= Http2Frames.parseGoaway(gpl, 0, fr.length(),
             fr.streamId());
         this.check(gi.lastStreamId == 1 && gi.errorCode == (int64) Http2.NO_ERROR
             && gi.debugLength == 3,
@@ -268,12 +268,12 @@ public class Http2Demo extends DemoClass {
         Http2FrameWriter dw = heap Http2FrameWriter();
         int8[] tick = [ (int8) 0x74, (int8) 0x69, (int8) 0x63, (int8) 0x6B ];
         Http2ContentFrames.writeData(dw, 1, tick, 4, true, 3);   // 3 pad bytes
-        int8[] dwire = dw.toBytes();
+        int8[] dwire #= dw.toBytes();
         Http2FrameReader dr = heap Http2FrameReader(dwire, (int32) dwire.count(),
             Http2.DEFAULT_MAX_FRAME_SIZE);
         dr.next();
-        int8[] dpl = dr.copyPayload();
-        Http2Payload region = Http2ContentFrames.parseData(dpl, dr.length(),
+        int8[] dpl #= dr.copyPayload();
+        Http2Payload region #= Http2ContentFrames.parseData(dpl, dr.length(),
             dr.flags(), dr.streamId());
         int8[] rb0 = heap int8[1];
         rb0[0] = dpl[region.offset];
@@ -281,7 +281,7 @@ public class Http2Demo extends DemoClass {
             "parseData strips padding to the (offset, length) region");
         // Server push declares (path, response) pairs on the response;
         // over h1 they are ignored, over h2 they become PUSH_PROMISE.
-        HttpResponse pushy = HttpResponse.ok();
+        HttpResponse pushy #= HttpResponse.ok();
         String css = "body{}";
         pushy.push("/style.css", 200, css.toBytes(), css.byteLength());
         this.check(pushy.pushCount() == 1
@@ -294,7 +294,7 @@ public class Http2Demo extends DemoClass {
         Http2Settings s = heap Http2Settings();
         s.maxConcurrentStreams = (int64) 250;
         s.enablePush = 0;
-        Http2SettingsList l = s.toList();
+        Http2SettingsList l #= s.toList();
         Http2Settings back2 = heap Http2Settings();
         back2.apply(l);
         this.check(l.size() == 2 && back2.maxConcurrentStreams == (int64) 250

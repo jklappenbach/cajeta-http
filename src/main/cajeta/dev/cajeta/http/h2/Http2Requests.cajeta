@@ -103,7 +103,7 @@ public final class Http2Requests {
         fl.put(Http2Requests.own(":path"), Http2Requests.own(req.getTarget()));
         fl.put(Http2Requests.own(":scheme"), Http2Requests.own(scheme));
         fl.put(Http2Requests.own(":authority"), Http2Requests.own(authority));
-        Headers h = req.getHeaders();
+        Headers h #= req.getHeaders();
         int32 i = 0;
         while (i < h.count()) {
             String n = h.nameAt(i);
@@ -177,7 +177,7 @@ public final class Http2Requests {
         String status #= Http2Requests.statusString(resp.status);
         String sname = ":status";
         fl.put(Http2Requests.own(sname), #status);
-        Headers h = resp.getHeaders();
+        Headers h #= resp.getHeaders();
         int32 i = 0;
         while (i < h.count()) {
             String n = h.nameAt(i);

@@ -274,7 +274,7 @@ public final class MultipartParser {
 
     /** Parse `buf[from..to)` as CRLF-delimited `name: value` lines. */
     #Headers parseHeaderBlock(int32 from, int32 to) {
-        Headers h = heap Headers();
+        Headers h #= heap Headers();
         int32 pos = from;
         while (pos < to) {
             int32 end = pos;

@@ -34,7 +34,7 @@ public final class ServerTests {
 
     static void routerDispatch(Check c) {
         (HttpRequest) -> #HttpResponse userRoute = (req) -> {
-            String id = req.pathParam("id");
+            String id #= req.pathParam("id");
             if (id == null) {
                 return HttpResponse.of(500);
             }
@@ -45,19 +45,19 @@ public final class ServerTests {
         router.route("GET", "/users/{id}", userRoute);
         router.route("GET", "/health", (req) -> HttpResponse.of(204));
 
-        HttpResponse hit = router.dispatch(HttpRequest.of("GET", "/users/42"));
+        HttpResponse hit #= router.dispatch(HttpRequest.of("GET", "/users/42"));
         c.eqInt((int64) hit.statusCode(), 200, "param route matches");
         c.eqBytes(hit.body, hit.bodyLength(), "id=42", "path param bound");
 
-        HttpResponse health = router.dispatch(HttpRequest.of("GET", "/health"));
+        HttpResponse health #= router.dispatch(HttpRequest.of("GET", "/health"));
         c.eqInt((int64) health.statusCode(), 204, "literal route matches");
 
-        HttpResponse miss = router.dispatch(HttpRequest.of("GET", "/nope"));
+        HttpResponse miss #= router.dispatch(HttpRequest.of("GET", "/nope"));
         c.eqInt((int64) miss.statusCode(), 404, "unknown path is 404");
 
-        HttpResponse wrong = router.dispatch(HttpRequest.of("POST", "/health"));
+        HttpResponse wrong #= router.dispatch(HttpRequest.of("POST", "/health"));
         c.eqInt((int64) wrong.statusCode(), 405, "wrong method is 405");
-        String allow = wrong.getHeaders().get("Allow");
+        String allow #= wrong.getHeaders().get("Allow");
         c.that(allow != null && allow.equals("GET"), "405 carries Allow: GET");
     }
 
@@ -70,14 +70,14 @@ public final class ServerTests {
         HttpSerializer s = heap HttpSerializer();
         s.writeRequest(req);
         int32 wireLen = s.size();
-        int8[] wire = s.toBytes();
+        int8[] wire #= s.toBytes();
 
-        IpAddress ip = IpAddress.loopbackV4();
-        SocketAddress addr = SocketAddress.of(#ip, port);
-        TcpStream client = TcpStream.connect(#addr);
+        IpAddress ip #= IpAddress.loopbackV4();
+        SocketAddress addr #= SocketAddress.of(#ip, port);
+        TcpStream client #= TcpStream.connect(#addr);
         client.write(wire, (int64) 0, (int64) wireLen);
 
-        HttpParser parser = HttpParser.forResponse();
+        HttpParser parser #= HttpParser.forResponse();
         int8[] scratch = heap int8[4096];
         boolean headDone = false;
         while (!headDone) {
@@ -88,8 +88,8 @@ public final class ServerTests {
             }
             headDone = parser.feed(scratch, (int32) got);
         }
-        HttpResponse resp = parser.takeResponse();
-        BodyReader body = BodyReader.forFraming(parser.getFraming());
+        HttpResponse resp #= parser.takeResponse();
+        BodyReader body #= BodyReader.forFraming(parser.getFraming());
         body.feed(parser.leftover(), parser.leftoverLength());
         while (!body.isComplete()) {
             int64 got = client.readAsync(scratch, (int64) 0, (int64) 4096);
@@ -129,24 +129,24 @@ public final class ServerTests {
 
     static void liveServer(Check c) {
         scope {
-            HttpServerBuilder b = HttpServer.builder();
+            HttpServerBuilder b #= HttpServer.builder();
             b.bind("127.0.0.1:0");
             (HttpRequest) -> #HttpResponse h = (req) -> ServerTests.liveHandle(req);
             b.handler(h);
-            HttpServer srv = b.build();
+            HttpServer srv #= b.build();
             Server core = srv.server;
             int32 port = core.listener.boundPort();
             c.that(port > 0, "server bound an ephemeral port");
 
             // GET /hello -> 200, body "hello" (5 bytes).
-            Task<int32> tg = spawn rawExchange(port, HttpRequest.get("/hello"));
+            Task<int32> tg #= spawn rawExchange(port, HttpRequest.get("/hello"));
             TcpStream c1 #= core.acceptNext();
             core.dispatch(#c1);
             int32 got = await tg;
             c.eqInt((int64) got, 200005, "GET /hello over loopback");
 
             // POST /echo with a 4-byte body -> 200, 4 bytes back.
-            HttpRequest post = HttpRequest.post("/echo");
+            HttpRequest post #= HttpRequest.post("/echo");
             String ping = "ping";
             post.body(ping.toBytes(), ping.byteLength());
             Task<int32> tp = spawn rawExchange(port, #post);
@@ -156,7 +156,7 @@ public final class ServerTests {
             c.eqInt((int64) gotPost, 200004, "POST /echo over loopback");
 
             // Unknown path -> 404 (body may be empty or a reason string).
-            Task<int32> tn = spawn rawExchange(port, HttpRequest.get("/nope"));
+            Task<int32> tn #= spawn rawExchange(port, HttpRequest.get("/nope"));
             TcpStream c3 #= core.acceptNext();
             core.dispatch(#c3);
             int32 gotMiss = await tn;

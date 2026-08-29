@@ -47,7 +47,7 @@ public final class ClientCookieTests {
     }
 
     static #HttpResponse echoCookie(HttpRequest req) {
-        String ck = req.getHeaders().get("cookie");
+        String ck #= req.getHeaders().get("cookie");
         String out = "-";
         if (ck != null) {
             out = ck;
@@ -56,7 +56,7 @@ public final class ClientCookieTests {
     }
 
     public static #HttpResponse handle(HttpRequest req) {
-        String t = req.getTarget();
+        String t #= req.getTarget();
         if (t.equals("/set")) {
             return ClientCookieTests.setOne("sid=abc; Path=/", "set");
         }
@@ -111,7 +111,7 @@ public final class ClientCookieTests {
     }
 
     static #HttpServer cookieServer() {
-        HttpServerBuilder b = HttpServer.builder();
+        HttpServerBuilder b #= HttpServer.builder();
         b.bind("127.0.0.1:0");
         (HttpRequest) -> #HttpResponse h =
             (req) -> ClientCookieTests.handle(req);
@@ -122,7 +122,7 @@ public final class ClientCookieTests {
     /** GET `path` with `client`, return the body text (or null on !200). */
     static #String getText(HttpClient client, int32 port, String path) {
         String url = "http://127.0.0.1:" + port + path;
-        HttpResponse resp = client.get(url);
+        HttpResponse resp #= client.get(url);
         if (resp.statusCode() != 200) {
             return null;
         }
@@ -133,10 +133,10 @@ public final class ClientCookieTests {
 
     /** The default client never stores or returns a cookie. */
     public static async int32 noJar(int32 port) {
-        HttpClient client = heap HttpClient();
-        String s = ClientCookieTests.getText(client, port, "/set");
+        HttpClient client #= heap HttpClient();
+        String s #= ClientCookieTests.getText(client, port, "/set");
         if (s == null || !s.equals("set")) { return -1; }
-        String e = ClientCookieTests.getText(client, port, "/echo");
+        String e #= ClientCookieTests.getText(client, port, "/echo");
         if (e == null) { return -2; }
         if (!e.equals("-")) {
             System.stdout.println("  (no-jar echo: '{}')", e);
@@ -147,17 +147,17 @@ public final class ClientCookieTests {
 
     /** Set → return across exchanges; two Set-Cookie headers both stick. */
     public static async int32 roundTrip(int32 port) {
-        HttpClient client = HttpClient.builder().cookieJar().build();
-        String s = ClientCookieTests.getText(client, port, "/set");
+        HttpClient client #= HttpClient.builder().cookieJar().build();
+        String s #= ClientCookieTests.getText(client, port, "/set");
         if (s == null) { return -1; }
-        String e1 = ClientCookieTests.getText(client, port, "/echo");
+        String e1 #= ClientCookieTests.getText(client, port, "/echo");
         if (e1 == null || !e1.equals("sid=abc")) {
             System.stdout.println("  (round-trip echo 1: '{}')", e1);
             return -2;
         }
-        String s2 = ClientCookieTests.getText(client, port, "/settwo");
+        String s2 #= ClientCookieTests.getText(client, port, "/settwo");
         if (s2 == null) { return -3; }
-        String e2 = ClientCookieTests.getText(client, port, "/echo");
+        String e2 #= ClientCookieTests.getText(client, port, "/echo");
         if (e2 == null || !e2.equals("sid=abc; a=1; b=2")) {
             System.stdout.println("  (round-trip echo 2: '{}')", e2);
             return -4;
@@ -167,15 +167,15 @@ public final class ClientCookieTests {
 
     /** A `/app`-scoped cookie rides `/app/echo`, never `/echo`. */
     public static async int32 pathScoped(int32 port) {
-        HttpClient client = HttpClient.builder().cookieJar().build();
-        String s = ClientCookieTests.getText(client, port, "/setpath");
+        HttpClient client #= HttpClient.builder().cookieJar().build();
+        String s #= ClientCookieTests.getText(client, port, "/setpath");
         if (s == null) { return -1; }
-        String top = ClientCookieTests.getText(client, port, "/echo");
+        String top #= ClientCookieTests.getText(client, port, "/echo");
         if (top == null || !top.equals("-")) {
             System.stdout.println("  (path-scope top echo: '{}')", top);
             return -2;
         }
-        String app = ClientCookieTests.getText(client, port, "/app/echo");
+        String app #= ClientCookieTests.getText(client, port, "/app/echo");
         if (app == null || !app.equals("app=1")) {
             System.stdout.println("  (path-scope app echo: '{}')", app);
             return -3;
@@ -185,28 +185,28 @@ public final class ClientCookieTests {
 
     /** Max-Age=0 deletes; past Expires never stores; future Expires does. */
     public static async int32 expiryDrops(int32 port) {
-        HttpClient client = HttpClient.builder().cookieJar().build();
-        String s = ClientCookieTests.getText(client, port, "/set");
+        HttpClient client #= HttpClient.builder().cookieJar().build();
+        String s #= ClientCookieTests.getText(client, port, "/set");
         if (s == null) { return -1; }
-        String e1 = ClientCookieTests.getText(client, port, "/echo");
+        String e1 #= ClientCookieTests.getText(client, port, "/echo");
         if (e1 == null || !e1.equals("sid=abc")) { return -2; }
-        String k = ClientCookieTests.getText(client, port, "/kill");
+        String k #= ClientCookieTests.getText(client, port, "/kill");
         if (k == null) { return -3; }
-        String e2 = ClientCookieTests.getText(client, port, "/echo");
+        String e2 #= ClientCookieTests.getText(client, port, "/echo");
         if (e2 == null || !e2.equals("-")) {
             System.stdout.println("  (post-kill echo: '{}')", e2);
             return -4;
         }
-        String f = ClientCookieTests.getText(client, port, "/setfuture");
+        String f #= ClientCookieTests.getText(client, port, "/setfuture");
         if (f == null) { return -5; }
-        String e3 = ClientCookieTests.getText(client, port, "/echo");
+        String e3 #= ClientCookieTests.getText(client, port, "/echo");
         if (e3 == null || !e3.equals("fut=1")) {
             System.stdout.println("  (future-expires echo: '{}')", e3);
             return -6;
         }
-        String p = ClientCookieTests.getText(client, port, "/setpast");
+        String p #= ClientCookieTests.getText(client, port, "/setpast");
         if (p == null) { return -7; }
-        String e4 = ClientCookieTests.getText(client, port, "/echo");
+        String e4 #= ClientCookieTests.getText(client, port, "/echo");
         if (e4 == null || !e4.equals("fut=1")) {
             System.stdout.println("  (past-expires echo: '{}')", e4);
             return -8;
@@ -216,17 +216,17 @@ public final class ClientCookieTests {
 
     /** Secure withheld over http; foreign Domain rejected at store. */
     public static async int32 secureAndForeign(int32 port) {
-        HttpClient client = HttpClient.builder().cookieJar().build();
-        String s = ClientCookieTests.getText(client, port, "/setsecure");
+        HttpClient client #= HttpClient.builder().cookieJar().build();
+        String s #= ClientCookieTests.getText(client, port, "/setsecure");
         if (s == null) { return -1; }
-        String e1 = ClientCookieTests.getText(client, port, "/echo");
+        String e1 #= ClientCookieTests.getText(client, port, "/echo");
         if (e1 == null || !e1.equals("-")) {
             System.stdout.println("  (secure-over-http echo: '{}')", e1);
             return -2;
         }
-        String f = ClientCookieTests.getText(client, port, "/setforeign");
+        String f #= ClientCookieTests.getText(client, port, "/setforeign");
         if (f == null) { return -3; }
-        String e2 = ClientCookieTests.getText(client, port, "/echo");
+        String e2 #= ClientCookieTests.getText(client, port, "/echo");
         if (e2 == null || !e2.equals("-")) {
             System.stdout.println("  (foreign-domain echo: '{}')", e2);
             return -4;
@@ -238,7 +238,7 @@ public final class ClientCookieTests {
 
     static void offByDefault(Check c) {
         scope {
-            HttpServer srv = ClientCookieTests.cookieServer();
+            HttpServer srv #= ClientCookieTests.cookieServer();
             Server core = srv.server;
             int32 port = core.listener.boundPort();
             Task<int32> s1 = spawn acceptAndDispatch(core);
@@ -250,7 +250,7 @@ public final class ClientCookieTests {
 
     static void jarRoundTrip(Check c) {
         scope {
-            HttpServer srv = ClientCookieTests.cookieServer();
+            HttpServer srv #= ClientCookieTests.cookieServer();
             Server core = srv.server;
             int32 port = core.listener.boundPort();
             Task<int32> s1 = spawn acceptAndDispatch(core);
@@ -263,7 +263,7 @@ public final class ClientCookieTests {
 
     static void pathScope(Check c) {
         scope {
-            HttpServer srv = ClientCookieTests.cookieServer();
+            HttpServer srv #= ClientCookieTests.cookieServer();
             Server core = srv.server;
             int32 port = core.listener.boundPort();
             Task<int32> s1 = spawn acceptAndDispatch(core);
@@ -275,7 +275,7 @@ public final class ClientCookieTests {
 
     static void expiry(Check c) {
         scope {
-            HttpServer srv = ClientCookieTests.cookieServer();
+            HttpServer srv #= ClientCookieTests.cookieServer();
             Server core = srv.server;
             int32 port = core.listener.boundPort();
             Task<int32> s1 = spawn acceptAndDispatch(core);
@@ -288,7 +288,7 @@ public final class ClientCookieTests {
 
     static void withheld(Check c) {
         scope {
-            HttpServer srv = ClientCookieTests.cookieServer();
+            HttpServer srv #= ClientCookieTests.cookieServer();
             Server core = srv.server;
             int32 port = core.listener.boundPort();
             Task<int32> s1 = spawn acceptAndDispatch(core);

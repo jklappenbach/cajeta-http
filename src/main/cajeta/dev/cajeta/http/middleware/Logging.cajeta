@@ -39,7 +39,7 @@ public class Logging {
                 int64 start = Clock.now().toEpochMilli();
                 HttpResponse resp = next(req);
                 int64 dur = Clock.now().toEpochMilli() - start;
-                String line = req.getMethod() + " " + req.getTarget() + " "
+                String line #= req.getMethod() + " " + req.getTarget() + " "
                             + resp.statusCode() + " " + dur + "ms";
                 sink.line(#line);
                 return resp;

@@ -406,7 +406,7 @@ public class CookieJar {
         // "Wdy, DD Mon YYYY HH:MM:SS GMT"
         //   0123456789012345678901234567 8
         int64 day = CookieJar.digits2(s, 5);
-        int32 mon = CookieJar.monthOf(s.substring(8, 11));
+        int32 mon #= CookieJar.monthOf(s.substring(8, 11));
         int64 year = CookieJar.digits4(s, 12);
         int64 hh = CookieJar.digits2(s, 17);
         int64 mm = CookieJar.digits2(s, 20);

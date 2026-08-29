@@ -499,7 +499,7 @@ public class HttpClient {
         if ((st >= 100 && st < 200) || st == 204 || st == 304) {
             return true;                        // definitionally bodyless
         }
-        Headers h = resp.getHeaders();
+        Headers h #= resp.getHeaders();
         String te #= h.get("transfer-encoding");
         if (te != null) {
             return true;                        // chunked self-terminates
@@ -641,7 +641,7 @@ public class HttpClient {
      * the scheme (a retry, a redirect re-send) is left alone.
      */
     static void ensureAbsoluteTarget(HttpRequest req, String host, int32 port) {
-        String t = req.getTarget();
+        String t #= req.getTarget();
         if (t.startsWith("http://")) {
             return;
         }
@@ -710,7 +710,7 @@ public class HttpClient {
         if (!resp.hasBody) {
             return;
         }
-        Headers h = resp.getHeaders();
+        Headers h #= resp.getHeaders();
         String ce #= h.get("content-encoding");
         if (ce == null) {
             return;

@@ -18,7 +18,7 @@ public final class SseTests {
 
     static #SseParser parseOf(String s) {
         SseParser p = heap SseParser();
-        int8[] b = s.toBytes();
+        int8[] b #= s.toBytes();
         p.feed(b, s.byteLength());
         return #p;
     }
@@ -26,22 +26,22 @@ public final class SseTests {
     // ---- serialize -> parse round-trips ----------------------------------
 
     static void roundTrips(Check c) {
-        SseEvent e = SseEvent.of("YHOO\n+2\n10");
-        int8[] wire = e.serialize();
+        SseEvent e #= SseEvent.of("YHOO\n+2\n10");
+        int8[] wire #= e.serialize();
         SseParser p = heap SseParser();
         p.feed(wire, (int32) wire.count());
         c.that(p.hasEvent(), "multi-line data event parses");
-        SseEvent g = p.nextEvent();
+        SseEvent g #= p.nextEvent();
         c.that(g.data.equals("YHOO\n+2\n10"), "multi-line data round-trips");
         c.that(g.typeOrDefault().equals("message"), "untyped event -> message");
 
-        SseEvent t = SseEvent.typed("update", "hello");
-        t.id = SseTests.own("42");
+        SseEvent t #= SseEvent.typed("update", "hello");
+        t.id #= SseTests.own("42");
         t.retry = 3000;
-        int8[] w2 = t.serialize();
+        int8[] w2 #= t.serialize();
         SseParser p2 = heap SseParser();
         p2.feed(w2, (int32) w2.count());
-        SseEvent g2 = p2.nextEvent();
+        SseEvent g2 #= p2.nextEvent();
         c.that(g2.event != null && g2.event.equals("update"),
                "event type round-trips");
         c.that(g2.data.equals("hello"), "data round-trips");
@@ -56,14 +56,14 @@ public final class SseTests {
             + "data: first event\nid: 1\n\n"
             + "data:second event\nid\n\n"
             + "data:  third event\n\n";
-        SseParser p = SseTests.parseOf(stream);
+        SseParser p #= SseTests.parseOf(stream);
 
-        SseEvent e1 = p.nextEvent();
+        SseEvent e1 #= p.nextEvent();
         c.that(e1.data.equals("first event") && e1.id != null
                 && e1.id.equals("1"), "vector event 1: 'first event' id 1");
-        SseEvent e2 = p.nextEvent();
+        SseEvent e2 #= p.nextEvent();
         c.that(e2.data.equals("second event"), "vector event 2: 'second event'");
-        SseEvent e3 = p.nextEvent();
+        SseEvent e3 #= p.nextEvent();
         c.that(e3.data.equals(" third event"),
                "vector event 3: ' third event' (one leading space kept)");
         c.that(!p.hasEvent(), "exactly three events dispatched");
@@ -73,36 +73,36 @@ public final class SseTests {
 
     static void tolerance(Check c) {
         // CRLF line endings.
-        SseParser crlf = SseTests.parseOf("data: hi\r\n\r\n");
-        SseEvent a = crlf.nextEvent();
+        SseParser crlf #= SseTests.parseOf("data: hi\r\n\r\n");
+        SseEvent a #= crlf.nextEvent();
         c.that(a.data.equals("hi"), "CRLF line endings parse");
 
         // Bare CR line endings.
-        SseParser cr = SseTests.parseOf("data: hi\r\r");
-        SseEvent b = cr.nextEvent();
+        SseParser cr #= SseTests.parseOf("data: hi\r\r");
+        SseEvent b #= cr.nextEvent();
         c.that(b.data.equals("hi"), "bare CR line endings parse");
 
         // A comment (keep-alive) between the field and the blank line.
-        SseParser cm = SseTests.parseOf("data: x\n: keep-alive\n\n");
-        SseEvent d = cm.nextEvent();
+        SseParser cm #= SseTests.parseOf("data: x\n: keep-alive\n\n");
+        SseEvent d #= cm.nextEvent();
         c.that(d.data.equals("x"), "comment lines are ignored");
 
         // Leading UTF-8 BOM stripped.
         int8[] bom = [ (int8) 0xEF, (int8) 0xBB, (int8) 0xBF ];
         SseParser bp = heap SseParser();
         bp.feed(bom, 3);
-        int8[] rest = "data: z\n\n".toBytes();
+        int8[] rest #= "data: z\n\n".toBytes();
         bp.feed(rest, (int32) rest.count());
-        SseEvent be = bp.nextEvent();
+        SseEvent be #= bp.nextEvent();
         c.that(be.data.equals("z"), "a leading BOM is stripped");
 
         // Unknown field ignored; the event still dispatches on its data.
-        SseParser uf = SseTests.parseOf("foo: bar\ndata: ok\n\n");
-        SseEvent ue = uf.nextEvent();
+        SseParser uf #= SseTests.parseOf("foo: bar\ndata: ok\n\n");
+        SseEvent ue #= uf.nextEvent();
         c.that(ue.data.equals("ok"), "unknown fields are ignored");
 
         // A blank line with no data dispatches nothing.
-        SseParser empty = SseTests.parseOf("\n\n");
+        SseParser empty #= SseTests.parseOf("\n\n");
         c.that(!empty.hasEvent(), "blank lines with no data dispatch nothing");
     }
 

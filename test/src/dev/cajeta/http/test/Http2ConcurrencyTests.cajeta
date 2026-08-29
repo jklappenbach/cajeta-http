@@ -53,7 +53,7 @@ public final class Http2ConcurrencyTests {
     // ---- server ----------------------------------------------------------
 
     static #HttpResponse handle(HttpRequest req) {
-        String target = req.getTarget();
+        String target #= req.getTarget();
         if (target.equals("/slow")) {
             Tasks.sleepMillis((int64) 150);
             String b = "slow";
@@ -64,7 +64,7 @@ public final class Http2ConcurrencyTests {
     }
 
     public static async int32 h2Server(#TcpListener listener) {
-        TcpStream sock = listener.acceptAsync();
+        TcpStream sock #= listener.acceptAsync();
         AsyncReader reader = heap AsyncReader(sock);
         AsyncWriter writer = heap AsyncWriter(sock);
         (HttpRequest) -> #HttpResponse h = (req) -> Http2ConcurrencyTests.handle(req);
@@ -101,7 +101,7 @@ public final class Http2ConcurrencyTests {
         fl.put(Http2ConcurrencyTests.own(":scheme"), Http2ConcurrencyTests.own("http"));
         fl.put(Http2ConcurrencyTests.own(":authority"),
                Http2ConcurrencyTests.own("127.0.0.1"));
-        int8[] block = enc.encode(fl);
+        int8[] block #= enc.encode(fl);
         Http2ContentFrames.writeHeaders(fw, sid, block, (int32) block.count(),
                                         true, true, 0);
     }
@@ -115,13 +115,13 @@ public final class Http2ConcurrencyTests {
     }
 
     static void client(Check c, int32 port) {
-        IpAddress ca = IpAddress.loopbackV4();
-        SocketAddress connAddr = SocketAddress.of(#ca, port);
-        TcpStream sock = TcpStream.connectAsync(#connAddr);
+        IpAddress ca #= IpAddress.loopbackV4();
+        SocketAddress connAddr #= SocketAddress.of(#ca, port);
+        TcpStream sock #= TcpStream.connectAsync(#connAddr);
         AsyncReader reader = heap AsyncReader(sock);
         AsyncWriter writer = heap AsyncWriter(sock);
 
-        int8[] pf = Http2.preface();
+        int8[] pf #= Http2.preface();
         writer.writeAll(pf, 0, 24);
 
         Http2FrameWriter fw = heap Http2FrameWriter();
@@ -132,7 +132,7 @@ public final class Http2ConcurrencyTests {
         // Open the slow stream first, then the fast one — back to back.
         Http2ConcurrencyTests.encodeRequest(enc, fw, 1, "/slow");
         Http2ConcurrencyTests.encodeRequest(enc, fw, 3, "/fast");
-        int8[] out = fw.toBytes();
+        int8[] out #= fw.toBytes();
         writer.writeAll(out, 0, (int32) out.count());
         writer.flush();
 
@@ -151,7 +151,7 @@ public final class Http2ConcurrencyTests {
             if (!Http2ConcurrencyTests.readExactWithin(reader, hdr, 9, 4000)) {
                 timedOut = true;
             } else {
-                Http2FrameHeader h = Http2FrameHeader(hdr);
+                Http2FrameHeader h #= Http2FrameHeader(hdr);
                 int32 type = h.typeCode();
                 int32 flags = h.flags();
                 int32 sid = h.streamId();
@@ -164,12 +164,12 @@ public final class Http2ConcurrencyTests {
                     if ((flags & Http2.FLAG_ACK) == 0) {
                         Http2FrameWriter afw = heap Http2FrameWriter();
                         Http2Frames.writeSettingsAck(afw);
-                        int8[] ab = afw.toBytes();
+                        int8[] ab #= afw.toBytes();
                         writer.writeAll(ab, 0, (int32) ab.count());
                         writer.flush();
                     }
                 } else if (type == Http2.FRAME_HEADERS) {
-                    Http2Payload reg = Http2ContentFrames.parseHeaders(pl, len,
+                    Http2Payload reg #= Http2ContentFrames.parseHeaders(pl, len,
                                                                       flags, sid);
                     int8[] blk = heap int8[reg.length];
                     int32 j = 0;
@@ -177,7 +177,7 @@ public final class Http2ConcurrencyTests {
                         blk[j] = pl[reg.offset + j];
                         j = j + 1;
                     }
-                    HpackFieldList rf = dec.decode(blk, reg.length);
+                    HpackFieldList rf #= dec.decode(blk, reg.length);
                     int32 st = Http2ConcurrencyTests.statusOf(rf);
                     c.eqInt((int64) st, (int64) 200, "h2 mux status 200");
                     if ((flags & Http2.FLAG_END_STREAM) != 0) {
@@ -187,7 +187,7 @@ public final class Http2ConcurrencyTests {
                         if (sid == 1) { done0 = true; } else { done1 = true; }
                     }
                 } else if (type == Http2.FRAME_DATA) {
-                    Http2Payload reg = Http2ContentFrames.parseData(pl, len,
+                    Http2Payload reg #= Http2ContentFrames.parseData(pl, len,
                                                                    flags, sid);
                     int32 slot = Http2ConcurrencyTests.slotOf(sid);
                     int32 j = 0;
@@ -237,8 +237,8 @@ public final class Http2ConcurrencyTests {
     public static void run(Check c) {
         System.stdout.println("-- h2 conn: multiplexing (out-of-order completion) --");
         scope {
-            IpAddress la = IpAddress.loopbackV4();
-            SocketAddress bindAddr = SocketAddress.of(#la, 0);
+            IpAddress la #= IpAddress.loopbackV4();
+            SocketAddress bindAddr #= SocketAddress.of(#la, 0);
             TcpListener listener = TcpListener.bind(bindAddr);
             int32 port = listener.boundPort();
             Task<int32> sv = spawn h2Server(#listener);

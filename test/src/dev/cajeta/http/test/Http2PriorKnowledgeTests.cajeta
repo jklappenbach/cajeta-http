@@ -47,32 +47,32 @@ public final class Http2PriorKnowledgeTests {
 
     // h2 over the prior-knowledge port: 1 => 200 + body "HTTP/2.0".
     public static async int32 h2Client(int32 port) {
-        IpAddress ca = IpAddress.loopbackV4();
-        SocketAddress connAddr = SocketAddress.of(#ca, port);
-        TcpStream sock = TcpStream.connectAsync(#connAddr);
+        IpAddress ca #= IpAddress.loopbackV4();
+        SocketAddress connAddr #= SocketAddress.of(#ca, port);
+        TcpStream sock #= TcpStream.connectAsync(#connAddr);
         AsyncReader reader = heap AsyncReader(sock);
         AsyncWriter writer = heap AsyncWriter(sock);
-        HttpRequest req = HttpRequest.of("GET", "/proto");
-        HttpResponse resp = Http2Client.exchange(reader, writer, req, "http",
+        HttpRequest req #= HttpRequest.of("GET", "/proto");
+        HttpResponse resp #= Http2Client.exchange(reader, writer, req, "http",
                                                  "127.0.0.1");
         sock.close();
         if (resp.statusCode() != 200) {
             return -1;
         }
-        String body = Http2PriorKnowledgeTests.bodyString(resp.body,
+        String body #= Http2PriorKnowledgeTests.bodyString(resp.body,
                                                           resp.bodyLength());
         return body.equals("HTTP/2.0") ? 1 : -2;
     }
 
     // h1 to the same port (non-preface first byte): 1 => 200 + body "HTTP/1.1".
     public static async int32 h1Client(int32 port) {
-        HttpClient client = HttpClient.builder().build();
+        HttpClient client #= HttpClient.builder().build();
         String url = "http://127.0.0.1:" + port + "/proto";
-        HttpResponse resp = client.get(url);
+        HttpResponse resp #= client.get(url);
         if (resp.statusCode() != 200) {
             return -1;
         }
-        String body = Http2PriorKnowledgeTests.bodyString(resp.body,
+        String body #= Http2PriorKnowledgeTests.bodyString(resp.body,
                                                           resp.bodyLength());
         return body.equals("HTTP/1.1") ? 1 : -2;
     }
@@ -80,13 +80,13 @@ public final class Http2PriorKnowledgeTests {
     public static void run(Check c) {
         System.stdout.println("-- h2 prior-knowledge: preface sniff -> h2, else h1 --");
         scope {
-            HttpServerBuilder b = HttpServer.builder();
+            HttpServerBuilder b #= HttpServer.builder();
             b.bind("127.0.0.1:0");
             (HttpRequest) -> #HttpResponse h =
                 (req) -> Http2PriorKnowledgeTests.handle(req);
             b.handler(h);
             b.h2PriorKnowledge();
-            HttpServer srv = b.build();
+            HttpServer srv #= b.build();
             int32 port = srv.server.listener.boundPort();
             Task<int32> sv = spawn serve(srv);
 
@@ -98,7 +98,7 @@ public final class Http2PriorKnowledgeTests {
             c.eqInt((int64) await th1, 1,
                     "prior-knowledge: non-preface -> degrades to h1");
 
-            boolean drained = srv.shutdown(Duration.ofSeconds(2));
+            boolean drained #= srv.shutdown(Duration.ofSeconds(2));
             c.that(drained, "prior-knowledge: server drained clean");
             int32 s = await sv;
             c.eqInt((int64) s, 1, "prior-knowledge: accept loop exited");

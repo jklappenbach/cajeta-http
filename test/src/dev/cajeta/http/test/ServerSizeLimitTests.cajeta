@@ -48,7 +48,7 @@ public final class ServerSizeLimitTests {
     }
 
     static #HttpServer serverWith(#ServerLimits l) {
-        HttpServerBuilder b = HttpServer.builder();
+        HttpServerBuilder b #= HttpServer.builder();
         b.bind("127.0.0.1:0");
         (HttpRequest) -> #HttpResponse h =
             (req) -> ServerSizeLimitTests.handle(req);
@@ -67,13 +67,13 @@ public final class ServerSizeLimitTests {
     // ---- raw socket ------------------------------------------------------
 
     static #TcpStream rawConnect(int32 port) {
-        IpAddress ip = IpAddress.loopbackV4();
-        SocketAddress a = SocketAddress.of(#ip, port);
+        IpAddress ip #= IpAddress.loopbackV4();
+        SocketAddress a #= SocketAddress.of(#ip, port);
         return TcpStream.connectAsync(#a);
     }
 
     static void writeStr(TcpStream s, String text) {
-        int8[] b = text.toBytes();
+        int8[] b #= text.toBytes();
         s.writeAllAsync(b, (int64) 0, (int64) text.byteLength());
     }
 
@@ -116,12 +116,12 @@ public final class ServerSizeLimitTests {
      * handler's "HANDLED" body must be ABSENT (it never ran).
      */
     public static async int32 overContentLength(int32 port) {
-        TcpStream s = ServerSizeLimitTests.rawConnect(port);
-        String body = ServerSizeLimitTests.repeat("x", 100);
+        TcpStream s #= ServerSizeLimitTests.rawConnect(port);
+        String body #= ServerSizeLimitTests.repeat("x", 100);
         ServerSizeLimitTests.writeStr(s,
             "POST / HTTP/1.1\r\nhost: t\r\nconnection: close\r\n"
             + "content-length: 100\r\n\r\n" + body);
-        String got = ServerSizeLimitTests.readAll(s);
+        String got #= ServerSizeLimitTests.readAll(s);
         s.close();
         if (!got.contains("413")) {
             System.stdout.println("  (over-CL got: '{}')", got);
@@ -135,12 +135,12 @@ public final class ServerSizeLimitTests {
 
     /** A body exactly at the cap is served (200, handler ran). */
     public static async int32 atCap(int32 port, int32 cap) {
-        TcpStream s = ServerSizeLimitTests.rawConnect(port);
-        String body = ServerSizeLimitTests.repeat("x", cap);
+        TcpStream s #= ServerSizeLimitTests.rawConnect(port);
+        String body #= ServerSizeLimitTests.repeat("x", cap);
         ServerSizeLimitTests.writeStr(s,
             "POST / HTTP/1.1\r\nhost: t\r\nconnection: close\r\n"
             + "content-length: " + cap + "\r\n\r\n" + body);
-        String got = ServerSizeLimitTests.readAll(s);
+        String got #= ServerSizeLimitTests.readAll(s);
         s.close();
         if (!got.contains("200") || !got.contains("HANDLED")) {
             System.stdout.println("  (at-cap got: '{}')", got);
@@ -154,11 +154,11 @@ public final class ServerSizeLimitTests {
      * crosses a 32-byte cap: 413, handler absent.
      */
     public static async int32 overChunked(int32 port) {
-        TcpStream s = ServerSizeLimitTests.rawConnect(port);
+        TcpStream s #= ServerSizeLimitTests.rawConnect(port);
         ServerSizeLimitTests.writeStr(s,
             "POST / HTTP/1.1\r\nhost: t\r\nconnection: close\r\n"
             + "transfer-encoding: chunked\r\n\r\n");
-        String chunk = ServerSizeLimitTests.repeat("y", 50);   // 0x32
+        String chunk #= ServerSizeLimitTests.repeat("y", 50);   // 0x32
         int32 i = 0;
         boolean peerGone = false;
         while (i < 4 && !peerGone) {
@@ -173,7 +173,7 @@ public final class ServerSizeLimitTests {
             ServerSizeLimitTests.writeStr(s, "0\r\n\r\n");
         } catch (Exception e) {
         }
-        String got = ServerSizeLimitTests.readAll(s);
+        String got #= ServerSizeLimitTests.readAll(s);
         s.close();
         if (!got.contains("413")) {
             System.stdout.println("  (over-chunked got: '{}')", got);
@@ -187,7 +187,7 @@ public final class ServerSizeLimitTests {
 
     /** More header fields than the cap → 431, handler absent. */
     public static async int32 tooManyHeaders(int32 port) {
-        TcpStream s = ServerSizeLimitTests.rawConnect(port);
+        TcpStream s #= ServerSizeLimitTests.rawConnect(port);
         String hdrs = "";
         int32 i = 0;
         while (i < 12) {
@@ -199,7 +199,7 @@ public final class ServerSizeLimitTests {
         ServerSizeLimitTests.writeStr(s,
             "GET / HTTP/1.1\r\nhost: t\r\nconnection: close\r\n"
             + hdrs + "\r\n");
-        String got = ServerSizeLimitTests.readAll(s);
+        String got #= ServerSizeLimitTests.readAll(s);
         s.close();
         if (!got.contains("431")) {
             System.stdout.println("  (too-many-headers got: '{}')", got);
@@ -213,11 +213,11 @@ public final class ServerSizeLimitTests {
 
     /** A single header line over the line cap → 431. */
     public static async int32 lineTooLong(int32 port) {
-        TcpStream s = ServerSizeLimitTests.rawConnect(port);
-        String big = ServerSizeLimitTests.repeat("a", 300);
+        TcpStream s #= ServerSizeLimitTests.rawConnect(port);
+        String big #= ServerSizeLimitTests.repeat("a", 300);
         ServerSizeLimitTests.writeStr(s,
             "GET / HTTP/1.1\r\nhost: t\r\nx-big: " + big + "\r\n\r\n");
-        String got = ServerSizeLimitTests.readAll(s);
+        String got #= ServerSizeLimitTests.readAll(s);
         s.close();
         if (!got.contains("431")) {
             System.stdout.println("  (line-too-long got: '{}')", got);
@@ -229,13 +229,13 @@ public final class ServerSizeLimitTests {
     // ---- scenarios -------------------------------------------------------
 
     static #ServerLimits smallBodyCap() {
-        ServerLimits l = ServerLimits.of(5000, 5000, (int64) 32, true);
+        ServerLimits l #= ServerLimits.of(5000, 5000, (int64) 32, true);
         return #l;
     }
 
     static void contentLengthCap(Check c) {
         scope {
-            HttpServer srv = ServerSizeLimitTests.serverWith(
+            HttpServer srv #= ServerSizeLimitTests.serverWith(
                 ServerSizeLimitTests.smallBodyCap());
             Server core = srv.server;
             int32 port = core.listener.boundPort();
@@ -249,7 +249,7 @@ public final class ServerSizeLimitTests {
 
     static void atLimitPasses(Check c) {
         scope {
-            HttpServer srv = ServerSizeLimitTests.serverWith(
+            HttpServer srv #= ServerSizeLimitTests.serverWith(
                 ServerSizeLimitTests.smallBodyCap());
             Server core = srv.server;
             int32 port = core.listener.boundPort();
@@ -262,7 +262,7 @@ public final class ServerSizeLimitTests {
 
     static void chunkedCap(Check c) {
         scope {
-            HttpServer srv = ServerSizeLimitTests.serverWith(
+            HttpServer srv #= ServerSizeLimitTests.serverWith(
                 ServerSizeLimitTests.smallBodyCap());
             Server core = srv.server;
             int32 port = core.listener.boundPort();
@@ -277,10 +277,10 @@ public final class ServerSizeLimitTests {
     static void headerCaps(Check c) {
         scope {
             // Head caps: at most 5 header fields, 128-byte lines.
-            ServerLimits l = ServerLimits.of(5000, 5000, (int64) 0, true);
+            ServerLimits l #= ServerLimits.of(5000, 5000, (int64) 0, true);
             l.maxHeaderCount = 5;
             l.maxLineBytes = 128;
-            HttpServer srv = ServerSizeLimitTests.serverWith(#l);
+            HttpServer srv #= ServerSizeLimitTests.serverWith(#l);
             Server core = srv.server;
             int32 port = core.listener.boundPort();
 

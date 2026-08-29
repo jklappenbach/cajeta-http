@@ -69,13 +69,13 @@ public class TlsDemo extends DemoClass {
     // without the anchor would refuse this self-signed server.
     public static async int32 clientGetTls(int32 port) {
         String cp = TlsDemo.tourCertPem();
-        int8[] anchor = cp.toBytes();
-        HttpClient client = HttpClient.builder()
+        int8[] anchor #= cp.toBytes();
+        HttpClient client #= HttpClient.builder()
             .trustAnchor(anchor, cp.byteLength())
             .exchangeTimeout(15000)
             .build();
         String url = "https://127.0.0.1:" + port + "/health";
-        HttpResponse resp = client.get(url);
+        HttpResponse resp #= client.get(url);
         if (resp.statusCode() != 200) {
             return 0 - 1;
         }
@@ -89,14 +89,14 @@ public class TlsDemo extends DemoClass {
         scope {
             String cp = TlsDemo.tourCertPem();
             String kp = TlsDemo.tourKeyPem();
-            int8[] cert = cp.toBytes();
-            int8[] key = kp.toBytes();
-            HttpServerBuilder b = HttpServer.builder();
+            int8[] cert #= cp.toBytes();
+            int8[] key #= kp.toBytes();
+            HttpServerBuilder b #= HttpServer.builder();
             b.bind("127.0.0.1:0");
             (HttpRequest) -> #HttpResponse h = (req) -> TlsDemo.handle(req);
             b.handler(h);
             b.tls(cert, cp.byteLength(), key, kp.byteLength());
-            HttpServer srv = b.build();
+            HttpServer srv #= b.build();
             int32 port = srv.tlsListener.boundPort();
             System.stdout.println("  TLS bound 127.0.0.1:{} (ephemeral)", port);
             this.check(srv.isTls && port > 0, "TLS server bound an ephemeral port");

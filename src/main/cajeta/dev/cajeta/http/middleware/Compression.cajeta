@@ -97,7 +97,7 @@ public class Compression {
         if (resp.getHeaders().contains("content-encoding")) {
             return #resp;
         }
-        String coding = AcceptEncoding.best(req.getHeaders().get("Accept-Encoding"));
+        String coding #= AcceptEncoding.best(req.getHeaders().get("Accept-Encoding"));
         if (coding.equals("identity")) {
             return #resp;
         }

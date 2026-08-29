@@ -52,7 +52,7 @@ public final class SseClient {
     public SseClient(String url) {
         Uri u #= Uri.parse(url);
         this.uri = #u;
-        String h = this.uri.getHost();
+        String h #= this.uri.getHost();
         this.host #= h.substring(0, h.byteLength());
         int32 p = this.uri.getPort();
         if (p <= 0) {
@@ -87,7 +87,7 @@ public final class SseClient {
         HttpRequest req #= HttpRequest.fromUri("GET", this.uri);
         req.setHeader("Accept", "text/event-stream");
         req.setHeader("Cache-Control", "no-cache");
-        String last = this.decoder.lastEventId();
+        String last #= this.decoder.lastEventId();
         if (last != null) {
             req.setHeader("Last-Event-ID", last);
         }

@@ -48,9 +48,9 @@ public final class ClientBuilderTests {
     // ---- the loopback HTTP server (config + absolute-form scenarios) ----
 
     public static #HttpResponse handle(HttpRequest req) {
-        String t = req.getTarget();
+        String t #= req.getTarget();
         if (t.equals("/hdr")) {
-            String v = req.getHeaders().get("x-app");
+            String v #= req.getHeaders().get("x-app");
             String out = "-";
             if (v != null) {
                 out = v;
@@ -77,7 +77,7 @@ public final class ClientBuilderTests {
         }
         // Absolute-form targets land here: echo exactly what arrived.
         if (t.startsWith("http://")) {
-            String h = req.getHeaders().get("host");
+            String h #= req.getHeaders().get("host");
             String hv = "-";
             if (h != null) {
                 hv = h;
@@ -107,7 +107,7 @@ public final class ClientBuilderTests {
     }
 
     static #HttpServer echoServer() {
-        HttpServerBuilder b = HttpServer.builder();
+        HttpServerBuilder b #= HttpServer.builder();
         b.bind("127.0.0.1:0");
         (HttpRequest) -> #HttpResponse h =
             (req) -> ClientBuilderTests.handle(req);
@@ -119,23 +119,23 @@ public final class ClientBuilderTests {
 
     /** Default header rides every request; a caller-set one wins. */
     public static async int32 defaultHeaderPair(int32 port) {
-        HttpClient client = HttpClient.builder()
+        HttpClient client #= HttpClient.builder()
             .defaultHeader("x-app", "juju")
             .build();
         String url = "http://127.0.0.1:" + port + "/hdr";
-        HttpResponse d = client.get(url);
-        String def = ClientBuilderTests.respText(d);
+        HttpResponse d #= client.get(url);
+        String def #= ClientBuilderTests.respText(d);
         if (!def.equals("juju")) {
             System.stdout.println("  (default header echo: '{}')", def);
             return -1;
         }
-        Uri uri = Uri.builder()
+        Uri uri #= Uri.builder()
             .scheme("http").host("127.0.0.1").port(port).path("/hdr")
             .build();
-        HttpRequest req = HttpRequest.fromUri("GET", uri);
+        HttpRequest req #= HttpRequest.fromUri("GET", uri);
         req.setHeader("x-app", "own");
-        HttpResponse o = client.send(uri, req);
-        String ovr = ClientBuilderTests.respText(o);
+        HttpResponse o #= client.send(uri, req);
+        String ovr #= ClientBuilderTests.respText(o);
         if (!ovr.equals("own")) {
             System.stdout.println("  (override echo: '{}')", ovr);
             return -2;
@@ -145,12 +145,12 @@ public final class ClientBuilderTests {
 
     /** The version pin is what hits the wire. */
     public static async int32 pinnedVersion(int32 port) {
-        HttpClient client = HttpClient.builder()
+        HttpClient client #= HttpClient.builder()
             .version("HTTP/1.0")
             .build();
         String url = "http://127.0.0.1:" + port + "/ver";
-        HttpResponse resp = client.get(url);
-        String got = ClientBuilderTests.respText(resp);
+        HttpResponse resp #= client.get(url);
+        String got #= ClientBuilderTests.respText(resp);
         if (!got.equals("HTTP/1.0")) {
             System.stdout.println("  (version echo: '{}')", got);
             return -1;
@@ -160,20 +160,20 @@ public final class ClientBuilderTests {
 
     /** redirectLimit(2) follows a 2-hop chain; redirectLimit(1) trips. */
     public static async int32 twoHopsUnderCapTwo(int32 port) {
-        HttpClient client = HttpClient.builder().redirectLimit(2).build();
+        HttpClient client #= HttpClient.builder().redirectLimit(2).build();
         String url = "http://127.0.0.1:" + port + "/chain/1";
-        HttpResponse resp = client.get(url);
+        HttpResponse resp #= client.get(url);
         if (resp.statusCode() != 200) { return -1; }
-        String got = ClientBuilderTests.respText(resp);
+        String got #= ClientBuilderTests.respText(resp);
         if (!got.equals("done")) { return -2; }
         return 1;
     }
 
     public static async int32 twoHopsOverCapOne(int32 port) {
-        HttpClient client = HttpClient.builder().redirectLimit(1).build();
+        HttpClient client #= HttpClient.builder().redirectLimit(1).build();
         String url = "http://127.0.0.1:" + port + "/chain/1";
         try {
-            HttpResponse resp = client.get(url);
+            HttpResponse resp #= client.get(url);
             return -1;
         } catch (TooManyRedirectsException e) {
             return 1;
@@ -188,13 +188,13 @@ public final class ClientBuilderTests {
      * client dialed the proxy; the echoed target proves absolute-form.
      */
     public static async int32 absoluteThroughProxy(int32 proxyPort) {
-        HttpClient client = HttpClient.builder()
+        HttpClient client #= HttpClient.builder()
             .proxy("127.0.0.1", proxyPort)
             .build();
         String url = "http://127.0.0.1:59151/hello";
-        HttpResponse resp = client.get(url);
+        HttpResponse resp #= client.get(url);
         if (resp.statusCode() != 200) { return -1; }
-        String got = ClientBuilderTests.respText(resp);
+        String got #= ClientBuilderTests.respText(resp);
         if (!got.equals("http://127.0.0.1:59151/hello|127.0.0.1:59151")) {
             System.stdout.println("  (proxy echo: '{}')", got);
             return -2;
@@ -275,12 +275,12 @@ public final class ClientBuilderTests {
      * fixed 200 with body "tunnel", close.
      */
     public static async int32 tlsOrigin(#TcpListener lst) {
-        TcpStream sock = lst.acceptAsync();
-        String cp = ClientBuilderTests.certPem();
-        String kp = ClientBuilderTests.keyPem();
-        int8[] cert = cp.toBytes();
-        int8[] key = kp.toBytes();
-        TlsStream tls = TlsStream.server(#sock, cert, cp.byteLength(),
+        TcpStream sock #= lst.acceptAsync();
+        String cp #= ClientBuilderTests.certPem();
+        String kp #= ClientBuilderTests.keyPem();
+        int8[] cert #= cp.toBytes();
+        int8[] key #= kp.toBytes();
+        TlsStream tls #= TlsStream.server(#sock, cert, cp.byteLength(),
                                          key, kp.byteLength());
         tls.handshake();
         int8[] buf = heap int8[4096];
@@ -301,7 +301,7 @@ public final class ClientBuilderTests {
             if (done) { break; }
         }
         String resp = "HTTP/1.1 200 OK\r\ncontent-length: 6\r\n\r\ntunnel";
-        int8[] rb = resp.toBytes();
+        int8[] rb #= resp.toBytes();
         tls.writeAllAsync(rb, (int64) 0, (int64) resp.byteLength());
         tls.close();
         return 1;
@@ -313,7 +313,7 @@ public final class ClientBuilderTests {
      * until both sides hang up. Returns 1 iff the head was well-formed.
      */
     public static async int32 connectProxy(#TcpListener lst, int32 originPort) {
-        TcpStream cli = lst.acceptAsync();
+        TcpStream cli #= lst.acceptAsync();
         int8[] buf = heap int8[4096];
         int32 n = ClientBuilderTests.readHead(cli, buf);
         if (n <= 0) { return -1; }
@@ -330,12 +330,12 @@ public final class ClientBuilderTests {
             return -2;
         }
         String ok = "HTTP/1.1 200 Connection Established\r\n\r\n";
-        int8[] ob = ok.toBytes();
+        int8[] ob #= ok.toBytes();
         cli.writeAllAsync(ob, (int64) 0, (int64) ok.byteLength());
 
-        IpAddress ip = IpAddress.loopbackV4();
-        SocketAddress oa = SocketAddress.of(#ip, originPort);
-        TcpStream origin = TcpStream.connectAsync(#oa);
+        IpAddress ip #= IpAddress.loopbackV4();
+        SocketAddress oa #= SocketAddress.of(#ip, originPort);
+        TcpStream origin #= TcpStream.connectAsync(#oa);
         Task<int32> up = spawn pump(cli, origin);
         Task<int32> down = spawn pump(origin, cli);
         int32 u = await up;
@@ -348,16 +348,16 @@ public final class ClientBuilderTests {
 
     /** The client end: pinned trust + proxy; the GET must ride the tunnel. */
     public static async int32 httpsThroughTunnel(int32 proxyPort, int32 originPort) {
-        String cp = ClientBuilderTests.certPem();
-        int8[] anchor = cp.toBytes();
-        HttpClient client = HttpClient.builder()
+        String cp #= ClientBuilderTests.certPem();
+        int8[] anchor #= cp.toBytes();
+        HttpClient client #= HttpClient.builder()
             .trustAnchor(anchor, cp.byteLength())
             .proxy("127.0.0.1", proxyPort)
             .build();
         String url = "https://127.0.0.1:" + originPort + "/x";
-        HttpResponse resp = client.get(url);
+        HttpResponse resp #= client.get(url);
         if (resp.statusCode() != 200) { return -1; }
-        String got = ClientBuilderTests.respText(resp);
+        String got #= ClientBuilderTests.respText(resp);
         if (!got.equals("tunnel")) {
             System.stdout.println("  (tunnel body: '{}')", got);
             return -2;
@@ -369,7 +369,7 @@ public final class ClientBuilderTests {
 
     static void defaultsOnTheWire(Check c) {
         scope {
-            HttpServer srv = ClientBuilderTests.echoServer();
+            HttpServer srv #= ClientBuilderTests.echoServer();
             Server core = srv.server;
             int32 port = core.listener.boundPort();
             Task<int32> s1 = spawn acceptAndDispatch(core);
@@ -382,7 +382,7 @@ public final class ClientBuilderTests {
 
     static void versionPin(Check c) {
         scope {
-            HttpServer srv = ClientBuilderTests.echoServer();
+            HttpServer srv #= ClientBuilderTests.echoServer();
             Server core = srv.server;
             int32 port = core.listener.boundPort();
             Task<int32> s1 = spawn acceptAndDispatch(core);
@@ -394,7 +394,7 @@ public final class ClientBuilderTests {
 
     static void redirectCap(Check c) {
         scope {
-            HttpServer srv = ClientBuilderTests.echoServer();
+            HttpServer srv #= ClientBuilderTests.echoServer();
             Server core = srv.server;
             int32 port = core.listener.boundPort();
 
@@ -412,7 +412,7 @@ public final class ClientBuilderTests {
 
     static void absoluteForm(Check c) {
         scope {
-            HttpServer srv = ClientBuilderTests.echoServer();
+            HttpServer srv #= ClientBuilderTests.echoServer();
             Server core = srv.server;
             int32 port = core.listener.boundPort();
             Task<int32> s1 = spawn acceptAndDispatch(core);
@@ -425,13 +425,13 @@ public final class ClientBuilderTests {
 
     static void connectTunnel(Check c) {
         scope {
-            IpAddress oip = IpAddress.loopbackV4();
-            SocketAddress obind = SocketAddress.of(#oip, 0);
+            IpAddress oip #= IpAddress.loopbackV4();
+            SocketAddress obind #= SocketAddress.of(#oip, 0);
             TcpListener olst = TcpListener.bind(obind);
             int32 originPort = olst.boundPort();
 
-            IpAddress pip = IpAddress.loopbackV4();
-            SocketAddress pbind = SocketAddress.of(#pip, 0);
+            IpAddress pip #= IpAddress.loopbackV4();
+            SocketAddress pbind #= SocketAddress.of(#pip, 0);
             TcpListener plst = TcpListener.bind(pbind);
             int32 proxyPort = plst.boundPort();
 

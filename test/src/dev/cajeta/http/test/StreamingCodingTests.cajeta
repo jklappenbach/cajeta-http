@@ -45,9 +45,9 @@ public final class StreamingCodingTests {
     }
 
     static void chunked(Check c) {
-        String p = StreamingCodingTests.phrase();
-        int8[] plain = p.toBytes();
-        int8[] raw = Deflate.deflate(plain, (int64) p.byteLength());
+        String p #= StreamingCodingTests.phrase();
+        int8[] plain #= p.toBytes();
+        int8[] raw #= Deflate.deflate(plain, (int64) p.byteLength());
         int64 rn = (int64) raw.count();
 
         InflateStream s = heap InflateStream();
@@ -67,7 +67,7 @@ public final class StreamingCodingTests {
                 k = k + 1;
             }
             s.feed(piece, take);
-            int8[] got = s.drain();
+            int8[] got #= s.drain();
             int64 gn = got.count();
             int64 j = (int64) 0;
             while (j < gn) {
@@ -90,11 +90,11 @@ public final class StreamingCodingTests {
 
     static void syncAndContext(Check c) {
         String m = "the quick brown fox jumps over the lazy dog. ";
-        int8[] mb = m.toBytes();
+        int8[] mb #= m.toBytes();
 
         DeflateStream d = heap DeflateStream();
         d.write(mb, m.byteLength());
-        int8[] w1 = d.syncFlush();
+        int8[] w1 #= d.syncFlush();
         int32 w1n = (int32) w1.count();
         boolean tail = w1n >= 4
             && w1[w1n - 4] == (int8) 0x00 && w1[w1n - 3] == (int8) 0x00
@@ -103,16 +103,16 @@ public final class StreamingCodingTests {
 
         InflateStream s = heap InflateStream();
         s.feed(w1, w1n);
-        int8[] g1 = s.drain();
+        int8[] g1 #= s.drain();
         c.that(!s.finished() && StreamingCodingTests.matches(g1, m),
                "sync segment decodes standalone off the unfinished stream");
 
         d.write(mb, m.byteLength());
-        int8[] w2 = d.syncFlush();
+        int8[] w2 #= d.syncFlush();
         c.that(w2.count() < w1.count(),
                "second identical message compresses smaller (window carry)");
         s.feed(w2, (int32) w2.count());
-        int8[] g2 = s.drain();
+        int8[] g2 #= s.drain();
         c.that(StreamingCodingTests.matches(g2, m),
                "carried context decodes the second message");
     }

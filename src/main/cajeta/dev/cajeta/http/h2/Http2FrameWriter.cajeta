@@ -36,7 +36,7 @@ public final class Http2FrameWriter {
                                       Http2.FRAME_SIZE_ERROR);
         }
         int8[] hdr = heap int8[9];
-        Http2FrameHeader h = Http2FrameHeader(hdr);
+        Http2FrameHeader h #= Http2FrameHeader(hdr);
         h.set(payloadLen, type, flags, streamId);
         this.appendBytes(hdr, 9);
         if (payloadLen > 0) {
@@ -47,7 +47,7 @@ public final class Http2FrameWriter {
     /** Write a frame with an empty payload (e.g. a SETTINGS or PING ack). */
     public void writeEmptyFrame(int32 type, int32 flags, int32 streamId) {
         int8[] hdr = heap int8[9];
-        Http2FrameHeader h = Http2FrameHeader(hdr);
+        Http2FrameHeader h #= Http2FrameHeader(hdr);
         h.set(0, type, flags, streamId);
         this.appendBytes(hdr, 9);
     }

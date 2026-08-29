@@ -66,31 +66,31 @@ public final class ClientCodingTests {
 
     /** Body compressed under `token`, honestly labeled. */
     static #HttpResponse coded(String token, String text) {
-        int8[] raw = text.toBytes();
-        int8[] enc = ContentCoding.encode(token, raw, text.byteLength());
+        int8[] raw #= text.toBytes();
+        int8[] enc #= ContentCoding.encode(token, raw, text.byteLength());
         return HttpResponse.ok()
             .setHeader("Content-Encoding", token)
             .body(enc, (int32) enc.count());
     }
 
     public static #HttpResponse handle(HttpRequest req) {
-        String t = req.getTarget();
+        String t #= req.getTarget();
         if (t.equals("/gz")) {
-            String p = ClientCodingTests.phrase();
+            String p #= ClientCodingTests.phrase();
             return ClientCodingTests.coded("gzip", p);
         }
         if (t.equals("/df")) {
-            String p = ClientCodingTests.phrase();
+            String p #= ClientCodingTests.phrase();
             return ClientCodingTests.coded("deflate", p);
         }
         if (t.equals("/id")) {
-            String p = ClientCodingTests.phrase();
+            String p #= ClientCodingTests.phrase();
             return HttpResponse.ok()
                 .setHeader("Content-Encoding", "identity")
                 .body(p.toBytes(), p.byteLength());
         }
         if (t.equals("/echo-ae")) {
-            String ae = req.getHeaders().get("accept-encoding");
+            String ae #= req.getHeaders().get("accept-encoding");
             String out = "-";
             if (ae != null) {
                 out = ae;
@@ -116,7 +116,7 @@ public final class ClientCodingTests {
                 .body(junk, 8);
         }
         if (t.equals("/json")) {
-            String j = ClientCodingTests.jsonText();
+            String j #= ClientCodingTests.jsonText();
             return ClientCodingTests.coded("gzip", j);
         }
         return HttpResponse.notFound();
@@ -150,13 +150,13 @@ public final class ClientCodingTests {
     public static async int32 getDecoded(HttpClient client, int32 port,
                                          String path) {
         String url = "http://127.0.0.1:" + port + path;
-        HttpResponse resp = client.get(url);
+        HttpResponse resp #= client.get(url);
         if (resp.statusCode() != 200) { return -1; }
-        String want = ClientCodingTests.phrase();
-        String got = ClientCodingTests.respText(resp);
+        String want #= ClientCodingTests.phrase();
+        String got #= ClientCodingTests.respText(resp);
         if (!got.equals(want)) { return -2; }
         if (resp.getHeaders().get("content-encoding") != null) { return -3; }
-        String cl = resp.getHeaders().get("content-length");
+        String cl #= resp.getHeaders().get("content-length");
         if (cl == null) { return -4; }
         String wantLen = "" + want.byteLength();
         if (!cl.equals(wantLen)) { return -5; }
@@ -165,7 +165,7 @@ public final class ClientCodingTests {
 
     /** All three codings over ONE pooled connection. */
     public static async int32 threeCodings(int32 port) {
-        HttpClient client = heap HttpClient();
+        HttpClient client #= heap HttpClient();
         int32 gz = await spawn getDecoded(client, port, "/gz");
         if (gz != 1) { return gz - 10; }
         int32 df = await spawn getDecoded(client, port, "/df");
@@ -177,21 +177,21 @@ public final class ClientCodingTests {
 
     /** Default advertise, then a caller override, one connection. */
     public static async int32 advertise(int32 port) {
-        HttpClient client = heap HttpClient();
+        HttpClient client #= heap HttpClient();
         String url = "http://127.0.0.1:" + port + "/echo-ae";
-        HttpResponse d = client.get(url);
-        String def = ClientCodingTests.respText(d);
+        HttpResponse d #= client.get(url);
+        String def #= ClientCodingTests.respText(d);
         if (!def.equals("gzip, deflate")) {
             System.stdout.println("  (default advertise: '{}')", def);
             return -1;
         }
-        Uri uri = Uri.builder()
+        Uri uri #= Uri.builder()
             .scheme("http").host("127.0.0.1").port(port).path("/echo-ae")
             .build();
-        HttpRequest req = HttpRequest.fromUri("GET", uri);
+        HttpRequest req #= HttpRequest.fromUri("GET", uri);
         req.setHeader("Accept-Encoding", "identity");
-        HttpResponse o = client.send(uri, req);
-        String ovr = ClientCodingTests.respText(o);
+        HttpResponse o #= client.send(uri, req);
+        String ovr #= ClientCodingTests.respText(o);
         if (!ovr.equals("identity")) {
             System.stdout.println("  (override advertise: '{}')", ovr);
             return -2;
@@ -201,24 +201,24 @@ public final class ClientCodingTests {
 
     /** Unknown coding: raw body and the header both untouched. */
     public static async int32 unknownIntact(int32 port) {
-        HttpClient client = heap HttpClient();
+        HttpClient client #= heap HttpClient();
         String url = "http://127.0.0.1:" + port + "/br";
-        HttpResponse resp = client.get(url);
+        HttpResponse resp #= client.get(url);
         if (resp.statusCode() != 200) { return -1; }
-        String ce = resp.getHeaders().get("content-encoding");
+        String ce #= resp.getHeaders().get("content-encoding");
         if (ce == null) { return -2; }
         if (!ce.equals("br")) { return -3; }
-        String got = ClientCodingTests.respText(resp);
+        String got #= ClientCodingTests.respText(resp);
         if (!got.equals("brotli-ish")) { return -4; }
         return 1;
     }
 
     /** Corrupt gzip must raise the typed coding fault, not return junk. */
     public static async int32 corruptRaises(int32 port) {
-        HttpClient client = heap HttpClient();
+        HttpClient client #= heap HttpClient();
         String url = "http://127.0.0.1:" + port + "/badgz";
         try {
-            HttpResponse resp = client.get(url);
+            HttpResponse resp #= client.get(url);
             return -1;
         } catch (ContentCodingException e) {
             return 1;
@@ -227,11 +227,11 @@ public final class ClientCodingTests {
 
     /** An over-cap decoded body must trip `decodeLimit`. */
     public static async int32 capTrips(int32 port) {
-        HttpClient client = heap HttpClient();
+        HttpClient client #= heap HttpClient();
         client.decodeLimit((int64) 16);
         String url = "http://127.0.0.1:" + port + "/gz";
         try {
-            HttpResponse resp = client.get(url);
+            HttpResponse resp #= client.get(url);
             return -1;
         } catch (ContentCodingException e) {
             return 1;
@@ -244,24 +244,24 @@ public final class ClientCodingTests {
      * own its strings), then a byte round-trip through `Json.toBytes`.
      */
     public static async int32 getJsonParses(int32 port) {
-        HttpClient client = heap HttpClient();
+        HttpClient client #= heap HttpClient();
         String url = "http://127.0.0.1:" + port + "/json";
-        JsonValue v = client.getJson(url);
+        JsonValue v #= client.getJson(url);
         JsonObject o = v.object();
-        String name = o.get("name").asString();
+        String name #= o.get("name").asString();
         if (!name.equals("cajeta")) { return -1; }
         if (o.get("n").asInt64() != (int64) 42) { return -2; }
         if (!o.get("ok").asBoolean()) { return -3; }
-        JsonArray tags = o.get("tags").array();
+        JsonArray tags #= o.get("tags").array();
         if (tags.count() != 2) { return -4; }
-        String t0 = tags.get(0).asString();
+        String t0 #= tags.get(0).asString();
         if (!t0.equals("a")) { return -5; }
-        String t1 = tags.get(1).asString();
+        String t1 #= tags.get(1).asString();
         if (!t1.equals("b")) { return -6; }
-        int8[] rt = Json.toBytes(v);
+        int8[] rt #= Json.toBytes(v);
         int32 rtLen = (int32) rt.count();
         String back = heap String(#rt, rtLen);
-        String want = ClientCodingTests.jsonText();
+        String want #= ClientCodingTests.jsonText();
         if (!back.equals(want)) {
             System.stdout.println("  (round-trip: '{}')", back);
             return -7;
@@ -271,10 +271,10 @@ public final class ClientCodingTests {
 
     /** A non-2xx is an `HttpException`, never a parse attempt. */
     public static async int32 getJsonNon2xx(int32 port) {
-        HttpClient client = heap HttpClient();
+        HttpClient client #= heap HttpClient();
         String url = "http://127.0.0.1:" + port + "/missing";
         try {
-            JsonValue v = client.getJson(url);
+            JsonValue v #= client.getJson(url);
             return -1;
         } catch (HttpException e) {
             return 1;
@@ -285,12 +285,12 @@ public final class ClientCodingTests {
 
     static void transparentBodies(Check c) {
         scope {
-            HttpServerBuilder b = HttpServer.builder();
+            HttpServerBuilder b #= HttpServer.builder();
             b.bind("127.0.0.1:0");
             (HttpRequest) -> #HttpResponse h =
                 (req) -> ClientCodingTests.handle(req);
             b.handler(h);
-            HttpServer srv = b.build();
+            HttpServer srv #= b.build();
             Server core = srv.server;
             int32 port = core.listener.boundPort();
 
@@ -304,12 +304,12 @@ public final class ClientCodingTests {
 
     static void acceptEncoding(Check c) {
         scope {
-            HttpServerBuilder b = HttpServer.builder();
+            HttpServerBuilder b #= HttpServer.builder();
             b.bind("127.0.0.1:0");
             (HttpRequest) -> #HttpResponse h =
                 (req) -> ClientCodingTests.handle(req);
             b.handler(h);
-            HttpServer srv = b.build();
+            HttpServer srv #= b.build();
             Server core = srv.server;
             int32 port = core.listener.boundPort();
 
@@ -323,12 +323,12 @@ public final class ClientCodingTests {
 
     static void edges(Check c) {
         scope {
-            HttpServerBuilder b = HttpServer.builder();
+            HttpServerBuilder b #= HttpServer.builder();
             b.bind("127.0.0.1:0");
             (HttpRequest) -> #HttpResponse h =
                 (req) -> ClientCodingTests.handle(req);
             b.handler(h);
-            HttpServer srv = b.build();
+            HttpServer srv #= b.build();
             Server core = srv.server;
             int32 port = core.listener.boundPort();
 
@@ -351,12 +351,12 @@ public final class ClientCodingTests {
 
     static void json(Check c) {
         scope {
-            HttpServerBuilder b = HttpServer.builder();
+            HttpServerBuilder b #= HttpServer.builder();
             b.bind("127.0.0.1:0");
             (HttpRequest) -> #HttpResponse h =
                 (req) -> ClientCodingTests.handle(req);
             b.handler(h);
-            HttpServer srv = b.build();
+            HttpServer srv #= b.build();
             Server core = srv.server;
             int32 port = core.listener.boundPort();
 

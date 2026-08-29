@@ -40,7 +40,7 @@ public final class HttpTour {
         ServerDemo server = heap ServerDemo();
         server.execute();
 
-        ClientDemo client = heap ClientDemo();
+        ClientDemo client #= heap ClientDemo();
         client.execute();
 
         BodiesDemo bodies = heap BodiesDemo();

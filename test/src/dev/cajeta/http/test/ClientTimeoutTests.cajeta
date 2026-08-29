@@ -58,7 +58,7 @@ public final class ClientTimeoutTests {
     /** `/slow` parks on the gate; everything else answers fast. */
     public static #HttpResponse gateHandle(HttpRequest req) {
         if (req.getTarget().equals("/slow")) {
-            Optional<int32> go = ClientTimeoutTests.gate.receive();
+            Optional<int32> go #= ClientTimeoutTests.gate.receive();
             String slow = "slow";
             return HttpResponse.ok().body(slow.toBytes(), slow.byteLength());
         }
@@ -90,15 +90,15 @@ public final class ClientTimeoutTests {
     // ---- 1: the stalled exchange times out at the budget -----------------
 
     public static async int32 slowTimesOut(int32 port) {
-        HttpClient client = heap HttpClient();
+        HttpClient client #= heap HttpClient();
         client.exchangeTimeout(150);
-        Uri uri = Uri.builder()
+        Uri uri #= Uri.builder()
             .scheme("http").host("127.0.0.1").port(port).path("/slow")
             .build();
-        HttpRequest req = HttpRequest.fromUri("GET", uri);
+        HttpRequest req #= HttpRequest.fromUri("GET", uri);
         Instant t0 = Clock.now();
         try {
-            HttpResponse resp = client.send(uri, req);
+            HttpResponse resp #= client.send(uri, req);
             return -1;                          // a response?! the gate is shut
         } catch (TimedOutException e) {
             Instant t1 = Clock.now();
@@ -113,12 +113,12 @@ public final class ClientTimeoutTests {
         Channel<int32> g = heap Channel<int32>(1);
         ClientTimeoutTests.gate = #g;
         scope {
-            HttpServerBuilder b = HttpServer.builder();
+            HttpServerBuilder b #= HttpServer.builder();
             b.bind("127.0.0.1:0");
             (HttpRequest) -> #HttpResponse h =
                 (req) -> ClientTimeoutTests.gateHandle(req);
             b.handler(h);
-            HttpServer srv = b.build();
+            HttpServer srv #= b.build();
             Server core = srv.server;
             int32 port = core.listener.boundPort();
 
@@ -141,25 +141,25 @@ public final class ClientTimeoutTests {
     // ---- 2: the timed-out exchange releases lease + evicts ---------------
 
     public static async int32 timeoutThenReuse(int32 port) {
-        HttpClient client = heap HttpClient();
+        HttpClient client #= heap HttpClient();
         client.poolLimits(1, 60000);
         client.exchangeTimeout(150);
-        Uri slowUri = Uri.builder()
+        Uri slowUri #= Uri.builder()
             .scheme("http").host("127.0.0.1").port(port).path("/slow")
             .build();
-        HttpRequest slowReq = HttpRequest.fromUri("GET", slowUri);
+        HttpRequest slowReq #= HttpRequest.fromUri("GET", slowUri);
         try {
-            HttpResponse r1 = client.send(slowUri, slowReq);
+            HttpResponse r1 #= client.send(slowUri, slowReq);
             return -1;
         } catch (TimedOutException e) {
             // expected — now the only permit must be free again, and the
             // dead connection evicted, or this second exchange wedges.
         }
-        Uri fastUri = Uri.builder()
+        Uri fastUri #= Uri.builder()
             .scheme("http").host("127.0.0.1").port(port).path("/fast")
             .build();
-        HttpRequest fastReq = HttpRequest.fromUri("GET", fastUri);
-        HttpResponse r2 = client.send(fastUri, fastReq);
+        HttpRequest fastReq #= HttpRequest.fromUri("GET", fastUri);
+        HttpResponse r2 #= client.send(fastUri, fastReq);
         if (r2.statusCode() != 200) { return -2; }
         return 1;
     }
@@ -168,12 +168,12 @@ public final class ClientTimeoutTests {
         Channel<int32> g = heap Channel<int32>(1);
         ClientTimeoutTests.gate = #g;
         scope {
-            HttpServerBuilder b = HttpServer.builder();
+            HttpServerBuilder b #= HttpServer.builder();
             b.bind("127.0.0.1:0");
             (HttpRequest) -> #HttpResponse h =
                 (req) -> ClientTimeoutTests.gateHandle(req);
             b.handler(h);
-            HttpServer srv = b.build();
+            HttpServer srv #= b.build();
             Server core = srv.server;
             int32 port = core.listener.boundPort();
 
@@ -197,17 +197,17 @@ public final class ClientTimeoutTests {
     // ---- 3: POST never auto-retries --------------------------------------
 
     public static async int32 postRefused(int32 port) {
-        HttpClient client = heap HttpClient();
+        HttpClient client #= heap HttpClient();
         client.retryPolicy(2, 400);            // a retry would cost >= 400ms
-        Uri uri = Uri.builder()
+        Uri uri #= Uri.builder()
             .scheme("http").host("127.0.0.1").port(port).path("/x")
             .build();
-        HttpRequest req = HttpRequest.fromUri("POST", uri);
+        HttpRequest req #= HttpRequest.fromUri("POST", uri);
         String data = "data";
         req.body(data.toBytes(), data.byteLength());
         Instant t0 = Clock.now();
         try {
-            HttpResponse resp = client.send(uri, req);
+            HttpResponse resp #= client.send(uri, req);
             return -1;                          // nothing listens there
         } catch (NetException e) {
             Instant t1 = Clock.now();
@@ -219,7 +219,7 @@ public final class ClientTimeoutTests {
 
     /** A loopback port with nothing listening (bind :0, note, close). */
     static int32 deadPort() {
-        SocketAddress addr = SocketAddress.parse("127.0.0.1:0");
+        SocketAddress addr #= SocketAddress.parse("127.0.0.1:0");
         TcpListener lst = TcpListener.bind(addr);
         int32 port = lst.boundPort();
         lst.close();
@@ -238,13 +238,13 @@ public final class ClientTimeoutTests {
     // ---- 4: GET retries once on refused-then-listening -------------------
 
     public static async int32 getWithRetry(int32 port) {
-        HttpClient client = heap HttpClient();
+        HttpClient client #= heap HttpClient();
         client.retryPolicy(1, 250);
-        Uri uri = Uri.builder()
+        Uri uri #= Uri.builder()
             .scheme("http").host("127.0.0.1").port(port).path("/fast")
             .build();
-        HttpRequest req = HttpRequest.fromUri("GET", uri);
-        HttpResponse resp = client.send(uri, req);
+        HttpRequest req #= HttpRequest.fromUri("GET", uri);
+        HttpResponse resp #= client.send(uri, req);
         if (resp.statusCode() != 200) { return -1; }
         return 1;
     }
@@ -258,12 +258,12 @@ public final class ClientTimeoutTests {
             Task<int32> t = spawn getWithRetry(port);
             Tasks.sleepMillis((int64) 60);
 
-            HttpServerBuilder b = HttpServer.builder();
+            HttpServerBuilder b #= HttpServer.builder();
             b.bind("127.0.0.1:" + port);
             (HttpRequest) -> #HttpResponse h =
                 (req) -> ClientTimeoutTests.gateHandle(req);
             b.handler(h);
-            HttpServer srv = b.build();
+            HttpServer srv #= b.build();
             Server core = srv.server;
 
             Task<int32> svc = spawn acceptAndDispatch(core);
@@ -281,22 +281,22 @@ public final class ClientTimeoutTests {
 
     public static async int32 dialFailThenSucceed(int32 port,
                                                   Channel<int32> bound) {
-        HttpClient client = heap HttpClient();
+        HttpClient client #= heap HttpClient();
         client.poolLimits(1, 60000);
         client.retryPolicy(0, 0);              // no auto-retry — raw raise
-        Uri uri = Uri.builder()
+        Uri uri #= Uri.builder()
             .scheme("http").host("127.0.0.1").port(port).path("/fast")
             .build();
-        HttpRequest r1 = HttpRequest.fromUri("GET", uri);
+        HttpRequest r1 #= HttpRequest.fromUri("GET", uri);
         try {
-            HttpResponse a = client.send(uri, r1);
+            HttpResponse a #= client.send(uri, r1);
             return -1;                          // nothing listens yet
         } catch (NetException e) {
             // expected: refused. The single permit must be free again.
         }
-        Optional<int32> ok = bound.receive();   // wait for the server
-        HttpRequest r2 = HttpRequest.fromUri("GET", uri);
-        HttpResponse b = client.send(uri, r2);
+        Optional<int32> ok #= bound.receive();   // wait for the server
+        HttpRequest r2 #= HttpRequest.fromUri("GET", uri);
+        HttpResponse b #= client.send(uri, r2);
         if (b.statusCode() != 200) { return -2; }
         return 1;
     }
@@ -308,12 +308,12 @@ public final class ClientTimeoutTests {
             Task<int32> t = spawn dialFailThenSucceed(port, bound);
             Tasks.sleepMillis((int64) 60);      // let the dead dial fail
 
-            HttpServerBuilder b = HttpServer.builder();
+            HttpServerBuilder b #= HttpServer.builder();
             b.bind("127.0.0.1:" + port);
             (HttpRequest) -> #HttpResponse h =
                 (req) -> ClientTimeoutTests.gateHandle(req);
             b.handler(h);
-            HttpServer srv = b.build();
+            HttpServer srv #= b.build();
             Server core = srv.server;
             bound.send(1);
 

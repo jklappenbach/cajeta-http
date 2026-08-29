@@ -376,7 +376,7 @@ public class HttpResponse {
      * unknown-length body is carried for the chunked writer.
      */
     public HttpResponse body(#Body b) {
-        MediaType t = b.contentType();
+        MediaType t #= b.contentType();
         if (t != null && !this.headers.contains("content-type")) {
             String tv #= t.format();
             this.headers.set("Content-Type", tv);

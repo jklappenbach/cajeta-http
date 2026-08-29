@@ -41,7 +41,7 @@ public final class MultipartTests {
 
     /** The body's wire bytes as a String (text vectors only). */
     static #String wireOf(MultipartBody b) {
-        int8[] w = b.wire();
+        int8[] w #= b.wire();
         int32 n = w.count();
         String s = heap String(#w, n);
         return #s;
@@ -68,7 +68,7 @@ public final class MultipartTests {
     // ---- compose ---------------------------------------------------------
 
     static void composesFieldsGolden(Check c) {
-        MultipartBody b = MultipartBody.withBoundary("X");
+        MultipartBody b #= MultipartBody.withBoundary("X");
         b.addField("a", "1");
         b.addField("b", "two");
         String expected =
@@ -79,15 +79,15 @@ public final class MultipartTests {
         c.eqInt(b.contentLength(), (int64) expected.byteLength(),
             "contentLength equals the wire byte count");
         c.eqInt((int64) b.count(), (int64) 2, "part count");
-        MediaType t = b.contentType();
+        MediaType t #= b.contentType();
         c.that(t.is("multipart", "form-data"), "contentType essence");
         c.eqStr(t.parameter("boundary"), "X", "contentType carries the boundary");
     }
 
     static void composesFileWithType(Check c) {
-        MultipartBody b = MultipartBody.withBoundary("Y");
-        MediaType tp = MediaType.textPlain();
-        int8[] data = MultipartTests.bytes("hi");
+        MultipartBody b #= MultipartBody.withBoundary("Y");
+        MediaType tp #= MediaType.textPlain();
+        int8[] data #= MultipartTests.bytes("hi");
         b.addFile("f", "a.txt", #tp, #data, 2);
         String expected =
             "--Y\r\nContent-Disposition: form-data; name=\"f\"; filename=\"a.txt\"\r\n"
@@ -97,15 +97,15 @@ public final class MultipartTests {
     }
 
     static void generatedBoundaryIsUsable(Check c) {
-        MultipartBody b = MultipartBody.of();
+        MultipartBody b #= MultipartBody.of();
         b.addField("k", "v");
         String bound = b.boundary();
         c.that(bound.byteLength() >= 16, "generated boundary is long enough to be unique");
         // A generated boundary must never appear inside its own payload.
-        String wire = MultipartTests.wireOf(b);
+        String wire #= MultipartTests.wireOf(b);
         c.that(wire.byteLength() > bound.byteLength(), "wire contains the payload");
-        MultipartParser p = MultipartParser.forBoundary(bound);
-        int8[] w = b.wire();
+        MultipartParser p #= MultipartParser.forBoundary(bound);
+        int8[] w #= b.wire();
         boolean done = p.feed(w, (int32) w.count());
         c.that(done, "generated-boundary body parses back");
         c.eqInt((int64) p.partCount(), (int64) 1, "generated-boundary part count");
@@ -118,8 +118,8 @@ public final class MultipartTests {
             "--X\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\n1\r\n"
           + "--X\r\nContent-Disposition: form-data; name=\"b\"\r\n\r\ntwo\r\n"
           + "--X--\r\n";
-        MultipartParser p = MultipartParser.forBoundary("X");
-        boolean done = p.feed(wire.toBytes(), wire.byteLength());
+        MultipartParser p #= MultipartParser.forBoundary("X");
+        boolean done #= p.feed(wire.toBytes(), wire.byteLength());
         c.that(done, "terminal boundary completes the parse");
         c.that(p.isComplete(), "parser reports complete");
         c.eqInt((int64) p.partCount(), (int64) 2, "parsed part count");
@@ -130,7 +130,7 @@ public final class MultipartTests {
         MultipartPart p1 = p.part(1);
         c.eqStr(p1.name(), "b", "part 1 name");
         c.eqStr(MultipartTests.textOf(p1), "two", "part 1 content");
-        Headers h = p0.headers();
+        Headers h #= p0.headers();
         c.that(h.contains("content-disposition"), "part headers are exposed");
     }
 
@@ -141,7 +141,7 @@ public final class MultipartTests {
             "This is a preamble a non-MIME reader would show.\r\n"
           + "--X\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\n1\r\n"
           + "--X--\r\nand an epilogue.\r\n";
-        MultipartParser p = MultipartParser.forBoundary("X");
+        MultipartParser p #= MultipartParser.forBoundary("X");
         p.feed(wire.toBytes(), wire.byteLength());
         c.that(p.isComplete(), "preamble/epilogue tolerated");
         c.eqInt((int64) p.partCount(), (int64) 1, "preamble is not a part");
@@ -149,13 +149,13 @@ public final class MultipartTests {
     }
 
     static void parsesQuotedBoundaryFromContentType(Check c) {
-        MediaType t = MediaType.parse("multipart/form-data; boundary=\"a b\"");
-        String bound = MultipartParser.boundaryOf(t);
+        MediaType t #= MediaType.parse("multipart/form-data; boundary=\"a b\"");
+        String bound #= MultipartParser.boundaryOf(t);
         c.eqStr(bound, "a b", "quoted boundary unquotes");
-        MediaType t2 = MediaType.parse("multipart/form-data; boundary=simple");
+        MediaType t2 #= MediaType.parse("multipart/form-data; boundary=simple");
         c.eqStr(MultipartParser.boundaryOf(t2), "simple", "bare boundary reads through");
-        MediaType t3 = MediaType.parse("multipart/form-data");
-        String none = MultipartParser.boundaryOf(t3);
+        MediaType t3 #= MediaType.parse("multipart/form-data");
+        String none #= MultipartParser.boundaryOf(t3);
         c.that(none == null, "missing boundary is null");
     }
 
@@ -169,11 +169,11 @@ public final class MultipartTests {
         payload[3] = (int8) 10;     // bare LF
         payload[4] = (int8) 45;     // '-'
         payload[5] = (int8) 45;     // '-'
-        MultipartBody b = MultipartBody.withBoundary("B");
-        MediaType oct = MediaType.applicationOctetStream();
+        MultipartBody b #= MultipartBody.withBoundary("B");
+        MediaType oct #= MediaType.applicationOctetStream();
         b.addFile("bin", "b.dat", #oct, #payload, 6);
-        int8[] w = b.wire();
-        MultipartParser p = MultipartParser.forBoundary("B");
+        int8[] w #= b.wire();
+        MultipartParser p #= MultipartParser.forBoundary("B");
         p.feed(w, (int32) w.count());
         c.that(p.isComplete(), "binary part parses");
         MultipartPart part = p.part(0);
@@ -198,10 +198,10 @@ public final class MultipartTests {
             "--X\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\nhello\r\n"
           + "--X\r\nContent-Disposition: form-data; name=\"b\"\r\n\r\nworld\r\n"
           + "--X--\r\n";
-        int8[] all = wire.toBytes();
+        int8[] all #= wire.toBytes();
         int32 n = wire.byteLength();
         // Byte-at-a-time: a delimiter split across feeds must still match.
-        MultipartParser p = MultipartParser.forBoundary("X");
+        MultipartParser p #= MultipartParser.forBoundary("X");
         int8[] one = heap int8[1];
         int32 i = 0;
         while (i < n) {
@@ -218,15 +218,15 @@ public final class MultipartTests {
     // ---- round-trip ------------------------------------------------------
 
     static void composeParseRoundTrip(Check c) {
-        MultipartBody b = MultipartBody.of();
+        MultipartBody b #= MultipartBody.of();
         b.addField("field", "value with spaces");
-        MediaType json = MediaType.applicationJson();
-        int8[] doc = MultipartTests.bytes("{\"k\":1}");
+        MediaType json #= MediaType.applicationJson();
+        int8[] doc #= MultipartTests.bytes("{\"k\":1}");
         b.addFile("upload", "doc.json", #json, #doc, 7);
         b.addField("tail", "");
         String bound = b.boundary();
-        int8[] w = b.wire();
-        MultipartParser p = MultipartParser.forBoundary(bound);
+        int8[] w #= b.wire();
+        MultipartParser p #= MultipartParser.forBoundary(bound);
         p.feed(w, (int32) w.count());
         c.that(p.isComplete(), "round-trip completes");
         c.eqInt((int64) p.partCount(), (int64) 3, "round-trip part count");
@@ -248,7 +248,7 @@ public final class MultipartTests {
     static void rejectsMissingTerminalBoundary(Check c) {
         String wire =
             "--X\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\n1\r\n";
-        MultipartParser p = MultipartParser.forBoundary("X");
+        MultipartParser p #= MultipartParser.forBoundary("X");
         p.feed(wire.toBytes(), wire.byteLength());
         c.that(!p.isComplete(), "truncated body is not complete");
         boolean threw = false;
@@ -263,7 +263,7 @@ public final class MultipartTests {
     static void rejectsOversizePart(Check c) {
         // maxPartBytes = 4; the part carries 10 — the parser must raise as
         // soon as the overrun is provable, not after buffering it all.
-        MultipartParser p = MultipartParser.forBoundaryWithLimits("X", 8, 4);
+        MultipartParser p #= MultipartParser.forBoundaryWithLimits("X", 8, 4);
         String wire =
             "--X\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\n0123456789\r\n"
           + "--X--\r\n";
@@ -277,7 +277,7 @@ public final class MultipartTests {
     }
 
     static void rejectsTooManyParts(Check c) {
-        MultipartParser p = MultipartParser.forBoundaryWithLimits("X", 2, 1024);
+        MultipartParser p #= MultipartParser.forBoundaryWithLimits("X", 2, 1024);
         String wire =
             "--X\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\n1\r\n"
           + "--X\r\nContent-Disposition: form-data; name=\"b\"\r\n\r\n2\r\n"

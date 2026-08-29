@@ -37,13 +37,13 @@ public final class RouterTests {
     // Dispatch (method, target) with an `n`-byte body, returning the status.
     static int32 statusBody(Router r, String method, String target, int32 n) {
         int8[] buf = heap int8[n];
-        HttpResponse resp = r.dispatch(HttpRequest.of(method, target).body(buf, n));
+        HttpResponse resp #= r.dispatch(HttpRequest.of(method, target).body(buf, n));
         return resp.statusCode();
     }
 
     // Small helper: dispatch (method, target) and return the status code.
     static int32 status(Router r, String method, String target) {
-        HttpResponse resp = r.dispatch(HttpRequest.of(method, target));
+        HttpResponse resp #= r.dispatch(HttpRequest.of(method, target));
         return resp.statusCode();
     }
 
@@ -55,7 +55,7 @@ public final class RouterTests {
 
     // Dispatch (method, target) and return the response body as a String.
     static #String body(Router r, String method, String target) {
-        HttpResponse resp = r.dispatch(HttpRequest.of(method, target));
+        HttpResponse resp #= r.dispatch(HttpRequest.of(method, target));
         int32 len = resp.bodyLength();
         int8[] b = resp.body;
         int8[] copy = heap int8[len];
@@ -85,7 +85,7 @@ public final class RouterTests {
             return HttpResponse.of(v ? 222 : 223);
         };
         (HttpRequest) -> #HttpResponse strEcho = (req) -> {
-            String v = req.pathParam("v");
+            String v #= req.pathParam("v");
             if (v == null) {
                 return HttpResponse.of(500);
             }
@@ -102,19 +102,19 @@ public final class RouterTests {
         r.route("GET", "/s2/{v:string}", strEcho);
 
         // -- int64: match, round-trip, 404 matrix ---------------------------
-        HttpResponse hit = r.dispatch(HttpRequest.of("GET", "/i64/42"));
+        HttpResponse hit #= r.dispatch(HttpRequest.of("GET", "/i64/42"));
         c.eqInt((int64) hit.statusCode(), 200, "int64 matches");
         c.eqBytes(hit.body, hit.bodyLength(), "42", "int64 getter round-trip");
 
-        HttpResponse neg = r.dispatch(HttpRequest.of("GET", "/i64/-7"));
+        HttpResponse neg #= r.dispatch(HttpRequest.of("GET", "/i64/-7"));
         c.eqInt((int64) neg.statusCode(), 200, "int64 negative matches");
         c.eqBytes(neg.body, neg.bodyLength(), "-7", "int64 negative round-trip");
 
-        HttpResponse zero = r.dispatch(HttpRequest.of("GET", "/i64/0"));
+        HttpResponse zero #= r.dispatch(HttpRequest.of("GET", "/i64/0"));
         c.eqInt((int64) zero.statusCode(), 200, "int64 zero matches");
         c.eqBytes(zero.body, zero.bodyLength(), "0", "int64 zero round-trip");
 
-        HttpResponse maxV = r.dispatch(HttpRequest.of("GET", "/i64/9223372036854775807"));
+        HttpResponse maxV #= r.dispatch(HttpRequest.of("GET", "/i64/9223372036854775807"));
         c.eqInt((int64) maxV.statusCode(), 200, "int64 max matches");
 
         c.eqInt((int64) RouterTests.status(r, "GET", "/i64/abc"), 404,
@@ -137,7 +137,7 @@ public final class RouterTests {
         // -- int32: width-specific overflow ---------------------------------
         c.eqInt((int64) RouterTests.status(r, "GET", "/i32/2147483647"), 200,
                 "int32 max matches");
-        HttpResponse i32neg = r.dispatch(HttpRequest.of("GET", "/i32/-2147483648"));
+        HttpResponse i32neg #= r.dispatch(HttpRequest.of("GET", "/i32/-2147483648"));
         c.eqInt((int64) i32neg.statusCode(), 200, "int32 min matches");
         c.eqBytes(i32neg.body, i32neg.bodyLength(), "-2147483648",
                   "int32 min round-trip");
@@ -175,29 +175,29 @@ public final class RouterTests {
                 "bool is case-sensitive (404)");
 
         // -- string params unchanged ----------------------------------------
-        HttpResponse s1 = r.dispatch(HttpRequest.of("GET", "/s/hello"));
+        HttpResponse s1 #= r.dispatch(HttpRequest.of("GET", "/s/hello"));
         c.eqInt((int64) s1.statusCode(), 200, "string param matches");
         c.eqBytes(s1.body, s1.bodyLength(), "hello", "string param bound");
 
-        HttpResponse s2 = r.dispatch(HttpRequest.of("GET", "/s/a%2Fb"));
+        HttpResponse s2 #= r.dispatch(HttpRequest.of("GET", "/s/a%2Fb"));
         c.eqInt((int64) s2.statusCode(), 200, "string param percent-decoded match");
         c.eqBytes(s2.body, s2.bodyLength(), "a/b", "string param percent-decoded");
 
         // A digit path still matches a string param (types don't leak).
-        HttpResponse s3 = r.dispatch(HttpRequest.of("GET", "/s/42"));
+        HttpResponse s3 #= r.dispatch(HttpRequest.of("GET", "/s/42"));
         c.eqInt((int64) s3.statusCode(), 200, "string param accepts digits");
         c.eqBytes(s3.body, s3.bodyLength(), "42", "string param digit body");
 
         // Explicit {v:string} behaves exactly like {v}.
-        HttpResponse s4 = r.dispatch(HttpRequest.of("GET", "/s2/world"));
+        HttpResponse s4 #= r.dispatch(HttpRequest.of("GET", "/s2/world"));
         c.eqInt((int64) s4.statusCode(), 200, "explicit string type matches");
         c.eqBytes(s4.body, s4.bodyLength(), "world", "explicit string type bound");
 
         // -- 404 vs 405: a type mismatch is 404, never 405 ------------------
         // POST /i64/42 : path matches, method differs -> 405 + Allow: GET.
-        HttpResponse m405 = r.dispatch(HttpRequest.of("POST", "/i64/42"));
+        HttpResponse m405 #= r.dispatch(HttpRequest.of("POST", "/i64/42"));
         c.eqInt((int64) m405.statusCode(), 405, "typed path, wrong method is 405");
-        String allow = m405.getHeaders().get("Allow");
+        String allow #= m405.getHeaders().get("Allow");
         c.that(allow != null && allow.equals("GET"), "typed 405 carries Allow: GET");
 
         // POST /i64/abc : path does NOT match (type mismatch) -> 404, not 405.
@@ -208,15 +208,15 @@ public final class RouterTests {
     static void wildcards(Check c) {
         (HttpRequest) -> #HttpResponse lit = (req) -> RouterTests.text("LIT");
         (HttpRequest) -> #HttpResponse par = (req) -> {
-            String v = req.pathParam("id");
+            String v #= req.pathParam("id");
             return RouterTests.text("PARAM:" + v);
         };
         (HttpRequest) -> #HttpResponse star = (req) -> {
-            String v = req.pathParam("w");
+            String v #= req.pathParam("w");
             return RouterTests.text("STAR:" + v);
         };
         (HttpRequest) -> #HttpResponse dstar = (req) -> {
-            String v = req.pathParam("rest");
+            String v #= req.pathParam("rest");
             return RouterTests.text("REST:" + v);
         };
 
@@ -284,14 +284,14 @@ public final class RouterTests {
 
     static void mounts(Check c) {
         (HttpRequest) -> #HttpResponse userH = (req) -> {
-            String tid = req.pathParam("tid");
-            String id = req.pathParam("id");
+            String tid #= req.pathParam("tid");
+            String id #= req.pathParam("id");
             return RouterTests.text("T:" + tid + ",U:" + id);
         };
         (HttpRequest) -> #HttpResponse healthH = (req) ->
             RouterTests.text("HEALTH");
         (HttpRequest) -> #HttpResponse listH = (req) -> {
-            String id = req.pathParam("id");
+            String id #= req.pathParam("id");
             return RouterTests.text("LIST:" + id);
         };
 
@@ -328,10 +328,10 @@ public final class RouterTests {
         Router p3 = heap Router();
         p3.route("GET", "/api2/{id}", healthH);     // GET /api2/{id}
         p3.mount("/api2", sub3);
-        HttpResponse d = p3.dispatch(HttpRequest.of("DELETE", "/api2/5"));
+        HttpResponse d #= p3.dispatch(HttpRequest.of("DELETE", "/api2/5"));
         c.eqInt((int64) d.statusCode(), 405,
                 "mount: unmatched method across merged tree is 405");
-        String allow = d.getHeaders().get("Allow");
+        String allow #= d.getHeaders().get("Allow");
         c.that(allow != null && allow.equals("GET, POST"),
                "mount: Allow aggregates methods across direct + mounted routes");
     }
@@ -360,12 +360,12 @@ public final class RouterTests {
 
         // A declared Content-Length over the cap 413s even with no buffered
         // body (the router trusts the declared length too).
-        HttpResponse d = r.dispatch(
+        HttpResponse d #= r.dispatch(
             HttpRequest.of("POST", "/upload").setHeader("Content-Length", "1000"));
         c.eqInt((int64) d.statusCode(), 413,
                 "declared Content-Length over cap 413s");
         // The cap is per-route: a route without one admits the same declared body.
-        HttpResponse f = r.dispatch(
+        HttpResponse f #= r.dispatch(
             HttpRequest.of("POST", "/free").setHeader("Content-Length", "1000"));
         c.eqInt((int64) f.statusCode(), 200,
                 "another route without a cap admits the same body");

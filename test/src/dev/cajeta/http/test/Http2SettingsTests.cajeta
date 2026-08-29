@@ -98,7 +98,7 @@ public final class Http2SettingsTests {
         s.maxConcurrentStreams = (int64) 250;
         s.initialWindowSize = (int64) 131072;
         s.enablePush = 0;
-        Http2SettingsList l = s.toList();
+        Http2SettingsList l #= s.toList();
         c.eqInt((int64) l.size(), (int64) 3, "toList emits 3 non-defaults");
 
         Http2Settings back = heap Http2Settings();
@@ -109,11 +109,11 @@ public final class Http2SettingsTests {
         c.eqInt(back.maxFrameSize, (int64) 16384, "unset stays default");
 
         // Preface matching.
-        int8[] pf = Http2.preface();
+        int8[] pf #= Http2.preface();
         c.eqInt((int64) pf.count(), (int64) 24, "preface is 24 octets");
         c.that(Http2.matchesPreface(pf, 0, (int32) pf.count()), "preface matches");
 
-        int8[] bad = Http2.preface();
+        int8[] bad #= Http2.preface();
         bad[0] = (int8) 0x00;
         c.that(!Http2.matchesPreface(bad, 0, 24), "corrupted preface rejected");
         c.that(!Http2.matchesPreface(pf, 0, 20), "short buffer rejected");

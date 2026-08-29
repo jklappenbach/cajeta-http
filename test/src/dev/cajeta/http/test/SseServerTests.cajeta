@@ -52,12 +52,12 @@ public final class SseServerTests {
         c.eqInt((int64) resp.statusCode(), (int64) 200, "SSE response is 200");
         c.that(resp.bodyModel != null, "SSE response has a streaming body");
         c.that(!resp.hasBody, "SSE body streams (no in-memory body)");
-        String ct = resp.getHeaders().get("Content-Type");
+        String ct #= resp.getHeaders().get("Content-Type");
         c.that(ct != null && ct.equals("text/event-stream"),
                "Content-Type is text/event-stream");
-        String cc = resp.getHeaders().get("Cache-Control");
+        String cc #= resp.getHeaders().get("Cache-Control");
         c.that(cc != null && cc.equals("no-cache"), "Cache-Control is no-cache");
-        String cn = resp.getHeaders().get("Connection");
+        String cn #= resp.getHeaders().get("Connection");
         c.that(cn != null && cn.equals("keep-alive"), "Connection is keep-alive");
     }
 
@@ -65,23 +65,23 @@ public final class SseServerTests {
 
     static void streamFixed(Check c) {
         SseEvent[] evs = heap SseEvent[3];
-        evs[0] = SseEvent.of("alpha");
-        evs[1] = SseEvent.typed("tick", "1");
-        evs[2] = SseEvent.of("beta\ngamma");   // multi-line data
+        evs[0] #= SseEvent.of("alpha");
+        evs[1] #= SseEvent.typed("tick", "1");
+        evs[2] #= SseEvent.of("beta\ngamma");   // multi-line data
 
-        HttpResponse resp = SseResponse.stream(#evs, 3);
+        HttpResponse resp #= SseResponse.stream(#evs, 3);
         SseServerTests.headers(c, resp);
 
-        SseParser p = SseServerTests.drainInto(resp.bodyModel);
+        SseParser p #= SseServerTests.drainInto(resp.bodyModel);
         c.that(p.hasEvent(), "fixed stream: first event present");
-        SseEvent a = p.nextEvent();
+        SseEvent a #= p.nextEvent();
         c.that(a.data.equals("alpha"), "fixed stream: event 1 data 'alpha'");
         c.that(a.typeOrDefault().equals("message"), "fixed stream: event 1 untyped");
-        SseEvent b = p.nextEvent();
+        SseEvent b #= p.nextEvent();
         c.that(b.event != null && b.event.equals("tick"),
                "fixed stream: event 2 type 'tick'");
         c.that(b.data.equals("1"), "fixed stream: event 2 data '1'");
-        SseEvent g = p.nextEvent();
+        SseEvent g #= p.nextEvent();
         c.that(g.data.equals("beta\ngamma"),
                "fixed stream: event 3 multi-line data round-trips");
         c.that(!p.hasEvent(), "fixed stream: exactly three events, then EOF");
@@ -91,25 +91,25 @@ public final class SseServerTests {
 
     static void channelLive(Check c) {
         SseChannel ch = heap SseChannel(8);
-        SseEvent e0 = SseEvent.of("one");
+        SseEvent e0 #= SseEvent.of("one");
         ch.send(#e0);
-        SseEvent e1 = SseEvent.typed("update", "two");
+        SseEvent e1 #= SseEvent.typed("update", "two");
         ch.send(#e1);
-        SseEvent e2 = SseEvent.of("three");
+        SseEvent e2 #= SseEvent.of("three");
         ch.send(#e2);
         ch.close();   // closed + buffered: drains to EOF
 
-        HttpResponse resp = SseResponse.channel(ch);
+        HttpResponse resp #= SseResponse.channel(ch);
         SseServerTests.headers(c, resp);
 
-        SseParser p = SseServerTests.drainInto(resp.bodyModel);
-        SseEvent a = p.nextEvent();
+        SseParser p #= SseServerTests.drainInto(resp.bodyModel);
+        SseEvent a #= p.nextEvent();
         c.that(a.data.equals("one"), "channel stream: event 1 'one'");
-        SseEvent b = p.nextEvent();
+        SseEvent b #= p.nextEvent();
         c.that(b.event != null && b.event.equals("update"),
                "channel stream: event 2 type 'update'");
         c.that(b.data.equals("two"), "channel stream: event 2 'two'");
-        SseEvent g = p.nextEvent();
+        SseEvent g #= p.nextEvent();
         c.that(g.data.equals("three"), "channel stream: event 3 'three'");
         c.that(!p.hasEvent(), "channel stream: three events, then EOF on close");
     }
@@ -117,28 +117,28 @@ public final class SseServerTests {
     // ---- Last-Event-ID request view --------------------------------------
 
     static void lastEventId(Check c) {
-        HttpRequest with = HttpRequest.of("GET", "/events")
+        HttpRequest with #= HttpRequest.of("GET", "/events")
             .header("Last-Event-ID", "42");
-        String id = SseResponse.lastEventId(with);
+        String id #= SseResponse.lastEventId(with);
         c.that(id != null && id.equals("42"), "Last-Event-ID read from request");
 
-        HttpRequest without = HttpRequest.of("GET", "/events");
-        String none = SseResponse.lastEventId(without);
+        HttpRequest without #= HttpRequest.of("GET", "/events");
+        String none #= SseResponse.lastEventId(without);
         c.that(none == null, "Last-Event-ID absent -> null");
     }
 
     // ---- keep-alive comment ----------------------------------------------
 
     static void keepAlive(Check c) {
-        int8[] ka = SseByteChannel.keepAliveBytes();
+        int8[] ka #= SseByteChannel.keepAliveBytes();
         c.that(ka.count() >= 2 && ka[0] == (int8) 58,
                "keep-alive ping is a ':' comment line");
 
         // A buffered event beats the keep-alive timer (deterministic).
         SseChannel ready = heap SseChannel(2);
-        SseEvent ev = SseEvent.of("live");
+        SseEvent ev #= SseEvent.of("live");
         ready.send(#ev);
-        SseByteChannel bc = SseByteChannel.overChannel(ready, 5);
+        SseByteChannel bc #= SseByteChannel.overChannel(ready, 5);
         int8[] buf = heap int8[256];
         int64 got = bc.readAsync(buf, (int64) 0, (int64) 256);
         c.that(got > (int64) 0 && buf[0] != (int8) 58,
@@ -148,7 +148,7 @@ public final class SseServerTests {
 
         // An idle open channel emits a keep-alive after the interval elapses.
         SseChannel idle = heap SseChannel(2);
-        SseByteChannel kc = SseByteChannel.overChannel(idle, 5);
+        SseByteChannel kc #= SseByteChannel.overChannel(idle, 5);
         int8[] kbuf = heap int8[256];
         int64 kgot = kc.readAsync(kbuf, (int64) 0, (int64) 256);
         c.that(kgot > (int64) 0 && kbuf[0] == (int8) 58,
@@ -161,9 +161,9 @@ public final class SseServerTests {
 
     static void cancellation(Check c) {
         SseChannel ch = heap SseChannel(2);
-        SseByteChannel bc = SseByteChannel.overChannel(ch);
+        SseByteChannel bc #= SseByteChannel.overChannel(ch);
         c.that(!bc.isCancelled(), "byte source starts un-cancelled");
-        SseBody body = SseBody.of(#bc);
+        SseBody body #= SseBody.of(#bc);
         body.abort();                    // the server's client-disconnect hook
         c.that(ch.isClosed(), "abort() closes the backing channel (ends producer)");
         // A read after cancellation reports EOF immediately.
