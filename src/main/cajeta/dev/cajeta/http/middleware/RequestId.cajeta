@@ -40,9 +40,15 @@ public class RequestId {
                     id #= RequestId.generate();
                 }
                 req.setHeader("X-Request-Id", id);
-                HttpResponse resp = next(req);
+                // The lambda is declared `#HttpResponse`, so the title has
+                // to be TENDERED on the way out. A plain `return resp` does
+                // not: `resp` was armed from the arriving flag, so its drop
+                // entry fires at this scope's exit and the server writes a
+                // freed response — on the wire that is no response at all,
+                // and the client times out rather than seeing a fault.
+                HttpResponse resp #= next(req);
                 resp.setHeader("X-Request-Id", id);
-                return resp;
+                return #resp;
             };
         return Middleware.of(#f);
     }
