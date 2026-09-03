@@ -271,7 +271,7 @@ public class ClientDemo extends DemoClass {
         // Connection refused — no server involved: bind, note the port,
         // close, then dial it.
         SocketAddress probe #= SocketAddress.parse("127.0.0.1:0");
-        TcpListener lst = TcpListener.bind(probe);
+        TcpListener lst #= TcpListener.bind(probe);
         int32 dead = lst.boundPort();
         lst.close();
         scope {
@@ -285,13 +285,13 @@ public class ClientDemo extends DemoClass {
         // be injected wholesale — the Cookie chain is inspectable state.
         CookieJar jar = heap CookieJar();
         jar.store("session=preset-9; Path=/", "127.0.0.1", "/", (int64) 0);
-        String header = jar.cookieHeaderFor("127.0.0.1", "/orders", false, (int64) 1);
+        String header #= jar.cookieHeaderFor("127.0.0.1", "/orders", false, (int64) 1);
         this.check(header != null && header.equals("session=preset-9"),
             "a prepared CookieJar answers cookieHeaderFor by host and path");
         HttpClient tuned = heap HttpClient();
         tuned.poolLimits(2, 30000);
         tuned.cookieJar(#jar);
-        ConnectionPool pool = ConnectionPool.withLimits(2, 30000);
+        ConnectionPool pool #= ConnectionPool.withLimits(2, 30000);
         this.check(pool.idleCount("127.0.0.1", 80) == 0,
             "a fresh pool holds no idle connections for an origin");
         Cookie c = heap Cookie();

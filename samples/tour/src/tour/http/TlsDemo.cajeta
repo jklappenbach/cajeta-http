@@ -68,7 +68,7 @@ public class TlsDemo extends DemoClass {
     // The client trusts exactly OUR cert — not the OS store. A client
     // without the anchor would refuse this self-signed server.
     public static async int32 clientGetTls(int32 port) {
-        String cp = TlsDemo.tourCertPem();
+        String cp #= TlsDemo.tourCertPem();
         int8[] anchor #= cp.toBytes();
         HttpClient client #= HttpClient.builder()
             .trustAnchor(anchor, cp.byteLength())
@@ -87,8 +87,8 @@ public class TlsDemo extends DemoClass {
         System.stdout.println("-- HTTPS: the same server + client, TLS-terminated --");
 
         scope {
-            String cp = TlsDemo.tourCertPem();
-            String kp = TlsDemo.tourKeyPem();
+            String cp #= TlsDemo.tourCertPem();
+            String kp #= TlsDemo.tourKeyPem();
             int8[] cert #= cp.toBytes();
             int8[] key #= kp.toBytes();
             HttpServerBuilder b #= HttpServer.builder();

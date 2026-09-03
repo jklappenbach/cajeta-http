@@ -98,7 +98,14 @@ echo ">> codec ${CODEC_VER}: ${CODEC_CJA##*/}"
 # 3. extract-bridge (same as run-tests.sh): the codec .cja bakes the native
 #    zlib archives, but the toolchain doesn't yet auto-extract natives from a
 #    classpath .cja — explode native/ and point the linker at it.
-NATIVE_DIR="${SCRIPT_DIR}/build/.cajeta-native"
+#
+#    NOT under ${SCRIPT_DIR}/build: that directory is the compile's OUTPUT
+#    directory, and `archive extract` explodes the WHOLE .cja — sources
+#    included. A toolchain from v0.26.0 refuses to write build output into a
+#    tree that holds .cajeta files ("refusing to write build output into a
+#    source tree"), so extracting there makes the very next command fail.
+#    A sibling directory keeps the natives reachable and the output dir clean.
+NATIVE_DIR="${SCRIPT_DIR}/build-native"
 rm -rf "${NATIVE_DIR}"
 mkdir -p "${SCRIPT_DIR}/build"
 "${CAJETA_BIN}" archive extract "${CODEC_CJA}" -C "${NATIVE_DIR}" >/dev/null

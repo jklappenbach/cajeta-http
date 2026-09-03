@@ -221,9 +221,9 @@ public class Http2Demo extends DemoClass {
         // 3c. Http2Requests bridges messages <-> HPACK field lists — the
         //     pseudo-header (:method/:path/:scheme/:authority) encoding.
         HttpRequest bridged #= HttpRequest.of("GET", "/api/status");
-        HpackFieldList fields = Http2Requests.requestFields(bridged, "http",
+        HpackFieldList fields #= Http2Requests.requestFields(bridged, "http",
             "orders.internal");
-        HttpRequest rebuilt = Http2Requests.fromFields(fields);
+        HttpRequest rebuilt #= Http2Requests.fromFields(fields);
         this.check(fields.nameAt(0).startsWith(":")
             && rebuilt.getMethod().equals("GET")
             && rebuilt.getTarget().equals("/api/status"),

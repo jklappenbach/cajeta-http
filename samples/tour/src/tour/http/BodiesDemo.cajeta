@@ -187,7 +187,7 @@ public class BodiesDemo extends DemoClass {
         FormBody form #= FormBody.of();
         form.add("q", "two words");
         form.add("expr", "a=b&c");
-        String encoded = form.encoded();
+        String encoded #= form.encoded();
         this.check(encoded.equals("q=two+words&expr=a%3Db%26c"),
             "FormBody encodes spaces as + and reserved bytes as %XX");
         FormBody parsed #= FormBody.parse("city=caf%C3%A9&q=two+words");
