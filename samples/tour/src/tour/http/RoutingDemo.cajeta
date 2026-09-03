@@ -29,18 +29,24 @@ public class RoutingDemo extends DemoClass {
     public static #HttpResponse getOrder(HttpRequest req) {
         int64 id = req.pathParamInt64("id", (int64) 0 - (int64) 1);
         String body = "order " + id;
-        return HttpResponse.ok().body(body.toBytes(), body.byteLength());
+        HttpResponse r #= HttpResponse.ok();
+        r.body(body.toBytes(), body.byteLength());
+        return #r;
     }
 
     public static #HttpResponse latestOrder(HttpRequest req) {
         String body = "latest";
-        return HttpResponse.ok().body(body.toBytes(), body.byteLength());
+        HttpResponse r #= HttpResponse.ok();
+        r.body(body.toBytes(), body.byteLength());
+        return #r;
     }
 
     public static #HttpResponse getReport(HttpRequest req) {
         String path #= req.pathParam("rest");
         String body = "report:" + path;
-        return HttpResponse.ok().body(body.toBytes(), body.byteLength());
+        HttpResponse r #= HttpResponse.ok();
+        r.body(body.toBytes(), body.byteLength());
+        return #r;
     }
 
     public static #HttpResponse createOrder(HttpRequest req) {
@@ -49,7 +55,9 @@ public class RoutingDemo extends DemoClass {
 
     public static #HttpResponse tenantUser(HttpRequest req) {
         String body #= req.pathParam("tid") + ":" + req.pathParam("uid");
-        return HttpResponse.ok().body(body.toBytes(), body.byteLength());
+        HttpResponse r #= HttpResponse.ok();
+        r.body(body.toBytes(), body.byteLength());
+        return #r;
     }
 
     // support: read a dispatched response body as a String.

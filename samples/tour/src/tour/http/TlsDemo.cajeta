@@ -51,10 +51,14 @@ public class TlsDemo extends DemoClass {
     public static #HttpResponse handle(HttpRequest req) {
         if (req.getTarget().equals("/health")) {
             String up = "orders: all systems nominal";
-            return HttpResponse.ok().body(up.toBytes(), up.byteLength());
+            HttpResponse r #= HttpResponse.ok();
+            r.body(up.toBytes(), up.byteLength());
+            return #r;
         }
         String nf = "not found";
-        return HttpResponse.of(404).body(nf.toBytes(), nf.byteLength());
+        HttpResponse r #= HttpResponse.of(404);
+        r.body(nf.toBytes(), nf.byteLength());
+        return #r;
     }
 
     // TLS accept is explicit in v1: take the next TLS connection and

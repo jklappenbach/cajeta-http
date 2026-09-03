@@ -19,8 +19,9 @@ import dev.cajeta.http.h1.KeepAlive;
  *
  * ```cajeta
  * // Inside a streaming handler, given the connection's AsyncWriter:
- * ResponseBodyWriter body = ResponseBodyWriter.begin(writer,
- *     HttpResponse.of(200).header("Content-Type", "text/plain"), true);
+ * HttpResponse head #= HttpResponse.of(200);
+ * head.header("Content-Type", "text/plain");
+ * ResponseBodyWriter body = ResponseBodyWriter.begin(writer, head, true);
  * for (piece in source) {
  *     body.write(piece, piece.count());   // one chunk on the wire
  * }

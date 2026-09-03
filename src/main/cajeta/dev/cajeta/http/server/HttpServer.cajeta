@@ -49,9 +49,13 @@ import cajeta.concurrent.Tasks;
  *
  * ```cajeta
  * HttpServer srv = HttpServer.bind("0.0.0.0:8080", (req) -> {
- *     return HttpResponse.ok()
- *         .header("Content-Type", "text/plain")
- *         .body(req.body, req.bodyLength());     // echo
+ *     // Do NOT chain over the owned temporary: `header`/`body` return a
+ *     // view of the receiver, so the chain's value is a borrow and the
+ *     // handler's `#HttpResponse` return would dangle. Bind, then transfer.
+ *     HttpResponse resp #= HttpResponse.ok();
+ *     resp.header("Content-Type", "text/plain");
+ *     resp.body(req.body, req.bodyLength());     // echo
+ *     return #resp;
  * });
  * scope {
  *     spawn srv.runAsync();

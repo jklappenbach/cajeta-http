@@ -51,31 +51,37 @@ public class ClientDemo extends DemoClass {
         String t #= req.getTarget();
         if (t.equals("/status")) {
             String body = "{\"service\":\"orders\",\"healthy\":true,\"queue\":17}";
-            return HttpResponse.ok()
-                .setHeader("Content-Type", "application/json")
-                .body(body.toBytes(), body.byteLength());
+            HttpResponse r #= HttpResponse.ok();
+            r.setHeader("Content-Type", "application/json");
+            r.body(body.toBytes(), body.byteLength());
+            return #r;
         }
         if (t.equals("/hop")) {
             String moved = "moved";
-            return HttpResponse.of(307)
-                .setHeader("Location", "/status")
-                .body(moved.toBytes(), moved.byteLength());
+            HttpResponse r #= HttpResponse.of(307);
+            r.setHeader("Location", "/status");
+            r.body(moved.toBytes(), moved.byteLength());
+            return #r;
         }
         if (t.equals("/loop")) {
             String moved = "moved";
-            return HttpResponse.of(302)
-                .setHeader("Location", "/loop")
-                .body(moved.toBytes(), moved.byteLength());
+            HttpResponse r #= HttpResponse.of(302);
+            r.setHeader("Location", "/loop");
+            r.body(moved.toBytes(), moved.byteLength());
+            return #r;
         }
         if (t.equals("/artifact")) {
             String art = "orders-service-1.4.2 release artifact bytes";
-            return HttpResponse.ok().body(art.toBytes(), art.byteLength());
+            HttpResponse r #= HttpResponse.ok();
+            r.body(art.toBytes(), art.byteLength());
+            return #r;
         }
         if (t.equals("/login")) {
             String in = "welcome";
-            return HttpResponse.ok()
-                .setHeader("Set-Cookie", "session=tok-77; Path=/")
-                .body(in.toBytes(), in.byteLength());
+            HttpResponse r #= HttpResponse.ok();
+            r.setHeader("Set-Cookie", "session=tok-77; Path=/");
+            r.body(in.toBytes(), in.byteLength());
+            return #r;
         }
         if (t.equals("/whoami")) {
             String ck #= req.getHeaders().get("cookie");
@@ -83,14 +89,18 @@ public class ClientDemo extends DemoClass {
             if (ck != null) {
                 out = ck;
             }
-            return HttpResponse.ok().body(out.toBytes(), out.byteLength());
+            HttpResponse r #= HttpResponse.ok();
+            r.body(out.toBytes(), out.byteLength());
+            return #r;
         }
         if (t.equals("/slow")) {
             Tasks.sleepMillis((int64) 800);
             return HttpResponse.of(200);
         }
         String nf = "not found";
-        return HttpResponse.of(404).body(nf.toBytes(), nf.byteLength());
+        HttpResponse r #= HttpResponse.of(404);
+        r.body(nf.toBytes(), nf.byteLength());
+        return #r;
     }
 
     public static async int32 serveLoop(HttpServer srv) {

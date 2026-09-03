@@ -62,10 +62,14 @@ public class Http2Demo extends DemoClass {
     public static #HttpResponse handle(HttpRequest req) {
         if (req.getTarget().equals("/proto")) {
             String v = req.version;
-            return HttpResponse.ok().body(v.toBytes(), v.byteLength());
+            HttpResponse r #= HttpResponse.ok();
+            r.body(v.toBytes(), v.byteLength());
+            return #r;
         }
         String nf = "not found";
-        return HttpResponse.of(404).body(nf.toBytes(), nf.byteLength());
+        HttpResponse r #= HttpResponse.of(404);
+        r.body(nf.toBytes(), nf.byteLength());
+        return #r;
     }
 
     public static async int32 serveLoop(HttpServer srv) {

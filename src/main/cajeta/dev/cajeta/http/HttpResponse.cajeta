@@ -55,10 +55,27 @@ import dev.cajeta.http.HeaderValues;
  * response, then chainable mutators (`header`, `body`, `reason`,
  * `version`) layer fields on, each returning the borrowed `this`:
  *
+ * Because each mutator hands back a borrow, the VALUE OF A CHAIN IS A
+ * BORROW. That is fine while the response stays in the scope that built it:
+ *
  * ```cajeta
  * HttpResponse resp = HttpResponse.ok()
  *     .header("Content-Type", "text/plain")
  *     .body(payload, payload.count());
+ * ```
+ *
+ * It is NOT fine when the response must leave that scope. A handler declared
+ * `#HttpResponse` would return a borrow of a temporary it owns and frees, and
+ * the ownership guard rejects the transfer at the caller. Bind the title
+ * first, mutate through it, then transfer:
+ *
+ * ```cajeta
+ * public static #HttpResponse handle(HttpRequest req) {
+ *     HttpResponse resp #= HttpResponse.ok();
+ *     resp.header("Content-Type", "text/plain");
+ *     resp.body(payload, payload.count());
+ *     return #resp;
+ * }
  * ```
  */
 public class HttpResponse {
