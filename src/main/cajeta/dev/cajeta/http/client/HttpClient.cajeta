@@ -954,7 +954,7 @@ public class HttpClient {
     public #Sha256 downloadTo(String url, String destPath) {
         Uri uri #= Uri.parse(url);
         HttpRequest req #= HttpRequest.fromUri("GET", uri);
-        FileWriter out = File.openWrite(destPath, OpenMode.WRITE);
+        FileWriter out #= File.openWrite(destPath, OpenMode.WRITE);
         Sha256 hasher = heap Sha256();
 
         HttpResponse first #= this.sendDownload(uri, req, out, hasher);

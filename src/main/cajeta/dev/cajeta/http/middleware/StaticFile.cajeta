@@ -99,7 +99,7 @@ public class StaticFile {
             return HttpResponse.of(403);
         }
 
-        int8[] bytes = File.readAllBytes(serveFull);
+        int8[] bytes #= File.readAllBytes(serveFull);
         int32 blen = bytes.count();
         HttpResponse resp #= HttpResponse.ok();
         resp.setHeader("Content-Type", StaticFile.contentTypeFor(serveFull));

@@ -471,7 +471,7 @@ public class HttpServer {
         srv.tlsKey #= keyCopy;
         srv.tlsKeyLen = keyLen;
         srv.isTls = true;
-        TcpListener lst = TcpListener.bind(addr);
+        TcpListener lst #= TcpListener.bind(addr);
         srv.tlsListener #= lst;
         return #srv;
     }
