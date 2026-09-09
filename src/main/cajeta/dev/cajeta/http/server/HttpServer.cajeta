@@ -250,7 +250,7 @@ public class HttpServer {
     public boolean h2Prior;
 
     public HttpServer((HttpRequest) -> #HttpResponse handler) {
-        this.handler = handler;
+        this.handler #= handler;   // a keeper stores with `#=`: a lambda literal moves in, a name lends (cajeta ownership 5.13)
         this.server = null;
         this.limits = heap HttpParserLimits();
         this.serverLimits = heap ServerLimits();
@@ -359,7 +359,7 @@ public class HttpServer {
             #SocketAddress addr, ServerModel model,
             (HttpRequest) -> #HttpResponse handler, #ServerLimits limits,
             #ConnectionLimits climits, boolean h2Prior) {
-        HttpServer srv = heap HttpServer(handler);
+        HttpServer srv = heap HttpServer(#handler);   // forward the title that arrived (cajeta ownership 5.13)
         srv.model = model;
         srv.h2Prior = h2Prior;
         if (limits != null) {
@@ -447,7 +447,7 @@ public class HttpServer {
                                              #ServerLimits limits,
                                              int8[] cert, int32 certLen,
                                              int8[] key, int32 keyLen) {
-        HttpServer srv = heap HttpServer(handler);
+        HttpServer srv = heap HttpServer(#handler);   // forward the title that arrived (cajeta ownership 5.13)
         if (limits != null) {
             ServerLimits l #= limits;
             srv.serverLimits #= l;
@@ -1774,7 +1774,7 @@ public class HttpServerBuilder {
 
     /** Set the request handler `(HttpRequest) -> #HttpResponse`. Returns `this`. */
     public HttpServerBuilder handler((HttpRequest) -> #HttpResponse handler) {
-        this.handler = handler;
+        this.handler #= handler;   // a keeper stores with `#=`: a lambda literal moves in, a name lends (cajeta ownership 5.13)
         return this;
     }
 

@@ -117,7 +117,7 @@ public class Router {
         if (err != null) {
             throw heap UnrecoverableException(#err);
         }
-        Route r = heap Route(method, pattern, handler);
+        Route r = heap Route(method, pattern, #handler);   // forward the title that arrived (cajeta ownership 5.13)
         this.append(#r);
         return this;
     }
@@ -138,7 +138,7 @@ public class Router {
         if (err != null) {
             throw heap UnrecoverableException(#err);
         }
-        Route r = heap Route(method, pattern, handler);
+        Route r = heap Route(method, pattern, #handler);   // forward the title that arrived (cajeta ownership 5.13)
         r.maxBodyBytes = maxBodyBytes;
         this.append(#r);
         return this;
@@ -159,7 +159,7 @@ public class Router {
         if (err != null) {
             throw heap UnrecoverableException(#err);
         }
-        Route r = heap Route(method, pattern, handler);
+        Route r = heap Route(method, pattern, #handler);   // forward the title that arrived (cajeta ownership 5.13)
         r.mw = #chain;
         this.append(#r);
         return this;

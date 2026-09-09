@@ -97,7 +97,7 @@ public class Route {
                  (HttpRequest) -> #HttpResponse handler) {
         this.method #= method.substring(0, method.byteLength());
         this.pattern #= pattern.substring(0, pattern.byteLength());
-        this.handler = handler;
+        this.handler #= handler;   // a keeper stores with `#=`: a lambda literal moves in, a name lends (cajeta ownership 5.13)
         this.maxBodyBytes = 0;
         this.mw = null;
         this.splitPattern(pattern);

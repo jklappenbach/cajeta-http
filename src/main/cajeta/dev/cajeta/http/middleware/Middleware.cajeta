@@ -52,13 +52,13 @@ public class Middleware {
     /** Wrap a middleware function in a holder. */
     public Middleware(
             (HttpRequest, (HttpRequest) -> #HttpResponse) -> #HttpResponse fn) {
-        this.fn = fn;
+        this.fn #= fn;   // a keeper stores with `#=`: a lambda literal moves in, a name lends (cajeta ownership 5.13)
     }
 
     /** Factory: a heap `Middleware` wrapping `fn`. */
     public static #Middleware of(
             (HttpRequest, (HttpRequest) -> #HttpResponse) -> #HttpResponse fn) {
-        return heap Middleware(fn);
+        return heap Middleware(#fn);   // forward the title that arrived (cajeta ownership 5.13)
     }
 
     /**
