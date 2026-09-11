@@ -13,7 +13,7 @@
 
     "details": {
         "name":               "dev.cajeta.http",
-        "version":            "0.1.4",
+        "version":            "0.2.0",
         "description":        "cajeta-http — HTTP/1.1·2 + WebSocket + SSE client/server over cajeta.io.net",
         "license":            "Apache-2.0",
         "authors":            ["Julian Klappenbach"],
@@ -43,8 +43,25 @@
         // Proven not to be ours: an identical binary against the pre-native
         // codec 0.6.0 aborts the same way (5/5), and both go green on 0.10.0.
         // `distribution` defaults to "official" and `fetch` to "auto".
+        //
+        // 0.10.0 is HISTORY, not the floor any more, and the paragraphs above
+        // are kept for the record rather than as current guidance. Since
+        // f02c1f6 the sources call `JsonValue.array()/object()`, the v0.22
+        // stdlib rename, which 0.10.0 has no spelling for -- it declares
+        // `asArray`/`asObject` and cannot compile this tree at all. The floor
+        // is therefore v0.22. This pin names 0.28.0, which the tree needs for a
+        // second reason: nine `Task<T> t #= spawn f()` bindings across the suite
+        // and the tour double-free their Task on every release before it.
+        //
+        // Keep this in step with `cajeta-version` in
+        // .github/workflows/release.yml. They are separate knobs -- this one is
+        // documentation today (`cajeta toolchain which` reports "No pin in
+        // scope", and there is no ~/.cajeta/toolchains store, so auto-fetch and
+        // dispatch are not wired up yet), while the workflow's pin is what CI
+        // actually installs. A stale value here is a false claim about what
+        // builds, which is exactly how the workflow pin came to be wrong.
         "toolchain": {
-            "version": "0.10.0"
+            "version": "0.28.0"
         },
 
         // Uses the network transport stack (sockets + TLS via cajeta.io.net).

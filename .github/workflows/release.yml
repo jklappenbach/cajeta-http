@@ -33,7 +33,7 @@ jobs:
       # Raised to v0.12.1 with the unit-5 tour rewrite: the expanded tour is
       # authored and verified against the 0.12 line.
       #
-      # Raised to v0.22.2, and again a correctness requirement. Commit f02c1f6
+      # Raised past v0.15.0, and again a correctness requirement. Commit f02c1f6
       # migrated this tree onto the cajeta v0.22 stdlib rename
       # `JsonValue.asArray()/asObject()` -> `array()/object()`, so the sources
       # now call `array()`/`object()`. Checked, not assumed:
@@ -41,9 +41,18 @@ jobs:
       # declares `asArray`/`asObject`. The old pin therefore could not compile
       # the sources it was aimed at, and every tagged run would have died in
       # `cajeta build` -- before reaching the Publish-to-Olla step the tag exists
-      # to trigger. v0.22.2 is the build this tree is verified green against;
-      # v0.23.0 and v0.24.0 are released but unverified here.
-      cajeta-version: v0.26.0
+      # to trigger. So v0.22 is the FLOOR.
+      #
+      # Raised to v0.28.0, a correctness requirement for the third time. The
+      # suite and the tour bind nine tasks `Task<T> t #= spawn f()`. Before
+      # v0.28.0 the spawn's own drop entry was never marked inactive under a
+      # sharp binding -- the compiler unwrap missed the MoveExpression that `#=`
+      # wraps the spawn in -- so both entries stayed armed and the Task was
+      # freed twice, aborting the run in the drop chain. Verified rather than
+      # assumed: the released binary is downloaded and the suite run against it
+      # before the pin moves. Raise it the same way -- this line has already
+      # shipped a pin that could not build the sources beneath it once.
+      cajeta-version: v0.28.0
       # Suite + tour + tour-coverage gate, chained in scripts/ci-checks.sh.
       # (`./run-tests.sh` rather than `cajeta test` because the suite needs the
       # codec's native zlib backend extracted out of its .cja with
