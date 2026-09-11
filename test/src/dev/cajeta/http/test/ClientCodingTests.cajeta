@@ -95,7 +95,9 @@ public final class ClientCodingTests {
             if (ae != null) {
                 out = ae;
             }
-            return HttpResponse.ok().body(out.toBytes(), out.byteLength());
+            HttpResponse resp0 #= HttpResponse.ok();
+            resp0.body(out.toBytes(), out.byteLength());
+            return #resp0;
         }
         if (t.equals("/br")) {
             // A coding this client does not speak — must pass through raw.

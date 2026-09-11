@@ -55,25 +55,35 @@ public final class ClientBuilderTests {
             if (v != null) {
                 out = v;
             }
-            return HttpResponse.ok().body(out.toBytes(), out.byteLength());
+            HttpResponse resp0 #= HttpResponse.ok();
+            resp0.body(out.toBytes(), out.byteLength());
+            return #resp0;
         }
         if (t.equals("/ver")) {
             String v = req.getVersion();
-            return HttpResponse.ok().body(v.toBytes(), v.byteLength());
+            HttpResponse resp1 #= HttpResponse.ok();
+            resp1.body(v.toBytes(), v.byteLength());
+            return #resp1;
         }
         if (t.equals("/chain/1")) {
             String moved = "moved";
-            return HttpResponse.of(302).setHeader("Location", "/chain/2")
-                .body(moved.toBytes(), moved.byteLength());
+            HttpResponse resp2 #= HttpResponse.of(302);
+            resp2.setHeader("Location", "/chain/2");
+            resp2.body(moved.toBytes(), moved.byteLength());
+            return #resp2;
         }
         if (t.equals("/chain/2")) {
             String moved = "moved";
-            return HttpResponse.of(302).setHeader("Location", "/final")
-                .body(moved.toBytes(), moved.byteLength());
+            HttpResponse resp3 #= HttpResponse.of(302);
+            resp3.setHeader("Location", "/final");
+            resp3.body(moved.toBytes(), moved.byteLength());
+            return #resp3;
         }
         if (t.equals("/final")) {
             String done = "done";
-            return HttpResponse.ok().body(done.toBytes(), done.byteLength());
+            HttpResponse resp4 #= HttpResponse.ok();
+            resp4.body(done.toBytes(), done.byteLength());
+            return #resp4;
         }
         // Absolute-form targets land here: echo exactly what arrived.
         if (t.startsWith("http://")) {
@@ -83,7 +93,9 @@ public final class ClientBuilderTests {
                 hv = h;
             }
             String out = t + "|" + hv;
-            return HttpResponse.ok().body(out.toBytes(), out.byteLength());
+            HttpResponse resp5 #= HttpResponse.ok();
+            resp5.body(out.toBytes(), out.byteLength());
+            return #resp5;
         }
         return HttpResponse.notFound();
     }
@@ -427,12 +439,12 @@ public final class ClientBuilderTests {
         scope {
             IpAddress oip #= IpAddress.loopbackV4();
             SocketAddress obind #= SocketAddress.of(#oip, 0);
-            TcpListener olst = TcpListener.bind(obind);
+            TcpListener olst #= TcpListener.bind(obind);
             int32 originPort = olst.boundPort();
 
             IpAddress pip #= IpAddress.loopbackV4();
             SocketAddress pbind #= SocketAddress.of(#pip, 0);
-            TcpListener plst = TcpListener.bind(pbind);
+            TcpListener plst #= TcpListener.bind(pbind);
             int32 proxyPort = plst.boundPort();
 
             Task<int32> o = spawn tlsOrigin(#olst);

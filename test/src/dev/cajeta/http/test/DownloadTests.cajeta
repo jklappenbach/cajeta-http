@@ -78,7 +78,7 @@ public final class DownloadTests {
 
     /** Sha256 hex of a file's contents, read back in 8 KiB pieces. */
     static #String hashFile(String path) {
-        FileReader r = File.openRead(path);
+        FileReader r #= File.openRead(path);
         Sha256 h #= heap Sha256();
         int8[] buf = heap int8[8192];
         boolean going = true;
@@ -99,7 +99,9 @@ public final class DownloadTests {
         String t #= req.getTarget();
         if (t.equals("/big")) {
             int8[] data #= DownloadTests.pattern(DownloadTests.DL_SIZE);
-            return HttpResponse.ok().body(data, DownloadTests.DL_SIZE);
+            HttpResponse resp0 #= HttpResponse.ok();
+            resp0.body(data, DownloadTests.DL_SIZE);
+            return #resp0;
         }
         if (t.equals("/hop")) {
             String moved = "moved";
@@ -117,7 +119,9 @@ public final class DownloadTests {
             int32 n = req.bodyLength();
             String bodyHash #= Sha256.hashHex(req.body, (int64) n);
             String out = bodyHash + "|" + marker;
-            return HttpResponse.ok().body(out.toBytes(), out.byteLength());
+            HttpResponse resp1 #= HttpResponse.ok();
+            resp1.body(out.toBytes(), out.byteLength());
+            return #resp1;
         }
         return HttpResponse.notFound();
     }
@@ -259,7 +263,7 @@ public final class DownloadTests {
         String want #= DownloadTests.hashOf(data, DownloadTests.DL_SIZE);
         scope {
             SocketAddress addr #= SocketAddress.parse("127.0.0.1:0");
-            TcpListener lst = TcpListener.bind(addr);
+            TcpListener lst #= TcpListener.bind(addr);
             int32 port = lst.boundPort();
 
             Task<int32> s1 = spawn chunkedOneShot(lst, DownloadTests.DL_SIZE);

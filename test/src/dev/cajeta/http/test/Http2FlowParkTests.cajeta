@@ -62,7 +62,9 @@ public final class Http2FlowParkTests {
             b[i] = (int8) (65 + (i % 26));   // 'A'..'Z' repeating
             i = i + 1;
         }
-        return HttpResponse.ok().body(b, Http2FlowParkTests.BODY_LEN);
+        HttpResponse resp0 #= HttpResponse.ok();
+        resp0.body(b, Http2FlowParkTests.BODY_LEN);
+        return #resp0;
     }
 
     public static async int32 h2Server(#TcpListener listener) {
@@ -194,7 +196,7 @@ public final class Http2FlowParkTests {
         scope {
             IpAddress la #= IpAddress.loopbackV4();
             SocketAddress bindAddr #= SocketAddress.of(#la, 0);
-            TcpListener listener = TcpListener.bind(bindAddr);
+            TcpListener listener #= TcpListener.bind(bindAddr);
             int32 port = listener.boundPort();
             Task<int32> sv = spawn h2Server(#listener);
             Http2FlowParkTests.client(c, port);

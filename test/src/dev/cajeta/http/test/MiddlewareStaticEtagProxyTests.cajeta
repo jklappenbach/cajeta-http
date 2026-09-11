@@ -136,7 +136,9 @@ public final class MiddlewareStaticEtagProxyTests {
 
     static #HttpResponse bodyHandler(HttpRequest req) {
         String body = "the entity body";
-        return HttpResponse.ok().body(body.toBytes(), body.byteLength());
+        HttpResponse resp0 #= HttpResponse.ok();
+        resp0.body(body.toBytes(), body.byteLength());
+        return #resp0;
     }
 
     static void etag(Check c) {

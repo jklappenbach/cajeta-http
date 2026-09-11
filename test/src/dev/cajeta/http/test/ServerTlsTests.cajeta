@@ -79,7 +79,9 @@ public final class ServerTlsTests {
 
     public static #HttpResponse handle(HttpRequest req) {
         String s = "SECURE";
-        return HttpResponse.ok().body(s.toBytes(), s.byteLength());
+        HttpResponse resp0 #= HttpResponse.ok();
+        resp0.body(s.toBytes(), s.byteLength());
+        return #resp0;
     }
 
     static #HttpServer tlsServer() {
@@ -260,7 +262,7 @@ public final class ServerTlsTests {
 
             IpAddress la #= IpAddress.loopbackV4();
             SocketAddress bindAddr #= SocketAddress.of(#la, 0);
-            TcpListener listener = TcpListener.bind(bindAddr);
+            TcpListener listener #= TcpListener.bind(bindAddr);
             int32 port = listener.boundPort();
             Task<int32> t = spawn wssServer(#listener, cert, cp.byteLength(),
                                             key, kp.byteLength());

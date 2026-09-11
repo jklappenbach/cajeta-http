@@ -32,7 +32,9 @@ public final class Http2AlpnTests {
     // The handler echoes the negotiated protocol back as the body.
     public static #HttpResponse handle(HttpRequest req) {
         String v = req.version;
-        return HttpResponse.ok().body(v.toBytes(), v.byteLength());
+        HttpResponse resp0 #= HttpResponse.ok();
+        resp0.body(v.toBytes(), v.byteLength());
+        return #resp0;
     }
 
     static #HttpServer tlsServer() {

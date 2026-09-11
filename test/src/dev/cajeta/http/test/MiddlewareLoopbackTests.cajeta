@@ -236,7 +236,9 @@ public final class MiddlewareLoopbackTests {
             if (ip == null) {
                 ip = "none";
             }
-            return HttpResponse.ok().body(ip.toBytes(), ip.byteLength());
+            HttpResponse resp0 #= HttpResponse.ok();
+            resp0.body(ip.toBytes(), ip.byteLength());
+            return #resp0;
         }
         if (t.equals("/data")) {
             String body #= MiddlewareLoopbackTests.big();
@@ -362,7 +364,9 @@ public final class MiddlewareLoopbackTests {
     // ---- server C: request transform (basic + decompression) -------------
 
     public static #HttpResponse handleEcho(HttpRequest req) {
-        return HttpResponse.ok().body(req.body, req.bodyLength());
+        HttpResponse resp1 #= HttpResponse.ok();
+        resp1.body(req.body, req.bodyLength());
+        return #resp1;
     }
 
     static void transformServer(Check c) {

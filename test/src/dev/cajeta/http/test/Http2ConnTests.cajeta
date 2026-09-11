@@ -58,13 +58,19 @@ public final class Http2ConnTests {
         String target #= req.getTarget();
         if (target.equals("/hello")) {
             String b = "hello, h2";
-            return HttpResponse.ok().body(b.toBytes(), b.byteLength());
+            HttpResponse resp0 #= HttpResponse.ok();
+            resp0.body(b.toBytes(), b.byteLength());
+            return #resp0;
         }
         if (target.equals("/echo")) {
-            return HttpResponse.ok().body(req.body, req.bodyLength());
+            HttpResponse resp1 #= HttpResponse.ok();
+            resp1.body(req.body, req.bodyLength());
+            return #resp1;
         }
         String nf = "nope";
-        return HttpResponse.of(404).body(nf.toBytes(), nf.byteLength());
+        HttpResponse resp2 #= HttpResponse.of(404);
+        resp2.body(nf.toBytes(), nf.byteLength());
+        return #resp2;
     }
 
     public static async int32 h2Server(#TcpListener listener) {
@@ -227,7 +233,7 @@ public final class Http2ConnTests {
         scope {
             IpAddress la #= IpAddress.loopbackV4();
             SocketAddress bindAddr #= SocketAddress.of(#la, 0);
-            TcpListener listener = TcpListener.bind(bindAddr);
+            TcpListener listener #= TcpListener.bind(bindAddr);
             int32 port = listener.boundPort();
             Task<int32> sv = spawn h2Server(#listener);
             Http2ConnTests.client(c, port, method, path, reqBody, reqBodyLen,

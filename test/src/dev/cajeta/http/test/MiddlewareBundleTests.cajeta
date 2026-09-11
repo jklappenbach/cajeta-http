@@ -62,7 +62,9 @@ public final class MiddlewareBundleTests {
             if (got == null) {
                 return HttpResponse.of(500);
             }
-            return HttpResponse.ok().body(got.toBytes(), got.byteLength());
+            HttpResponse resp0 #= HttpResponse.ok();
+            resp0.body(got.toBytes(), got.byteLength());
+            return #resp0;
         };
         MiddlewareChain chain = heap MiddlewareChain();
         chain.use(#rid);

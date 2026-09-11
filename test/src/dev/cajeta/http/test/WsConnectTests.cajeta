@@ -38,7 +38,7 @@ public final class WsConnectTests {
         scope {
             IpAddress la #= IpAddress.loopbackV4();
             SocketAddress bindAddr #= SocketAddress.of(#la, 0);
-            TcpListener listener = TcpListener.bind(bindAddr);
+            TcpListener listener #= TcpListener.bind(bindAddr);
             int32 port = listener.boundPort();
             Task<int32> sv #= spawn echoServer(#listener);
 

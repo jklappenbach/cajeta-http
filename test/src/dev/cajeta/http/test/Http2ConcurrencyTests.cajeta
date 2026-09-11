@@ -57,10 +57,14 @@ public final class Http2ConcurrencyTests {
         if (target.equals("/slow")) {
             Tasks.sleepMillis((int64) 150);
             String b = "slow";
-            return HttpResponse.ok().body(b.toBytes(), b.byteLength());
+            HttpResponse resp0 #= HttpResponse.ok();
+            resp0.body(b.toBytes(), b.byteLength());
+            return #resp0;
         }
         String f = "fast";
-        return HttpResponse.ok().body(f.toBytes(), f.byteLength());
+        HttpResponse resp1 #= HttpResponse.ok();
+        resp1.body(f.toBytes(), f.byteLength());
+        return #resp1;
     }
 
     public static async int32 h2Server(#TcpListener listener) {
@@ -239,7 +243,7 @@ public final class Http2ConcurrencyTests {
         scope {
             IpAddress la #= IpAddress.loopbackV4();
             SocketAddress bindAddr #= SocketAddress.of(#la, 0);
-            TcpListener listener = TcpListener.bind(bindAddr);
+            TcpListener listener #= TcpListener.bind(bindAddr);
             int32 port = listener.boundPort();
             Task<int32> sv = spawn h2Server(#listener);
             Http2ConcurrencyTests.client(c, port);

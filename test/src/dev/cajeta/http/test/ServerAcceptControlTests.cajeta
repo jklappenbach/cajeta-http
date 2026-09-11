@@ -53,15 +53,21 @@ public final class ServerAcceptControlTests {
         if (t.equals("/slow")) {
             Tasks.sleepMillis((int64) 400);
             String s = "slow-done";
-            return HttpResponse.ok().body(s.toBytes(), s.byteLength());
+            HttpResponse resp0 #= HttpResponse.ok();
+            resp0.body(s.toBytes(), s.byteLength());
+            return #resp0;
         }
         if (t.equals("/hung")) {
             Tasks.sleepMillis((int64) 1500);
             String hd = "hung-done";
-            return HttpResponse.ok().body(hd.toBytes(), hd.byteLength());
+            HttpResponse resp1 #= HttpResponse.ok();
+            resp1.body(hd.toBytes(), hd.byteLength());
+            return #resp1;
         }
         String ok = "ok";
-        return HttpResponse.ok().body(ok.toBytes(), ok.byteLength());
+        HttpResponse resp2 #= HttpResponse.ok();
+        resp2.body(ok.toBytes(), ok.byteLength());
+        return #resp2;
     }
 
     static #HttpServer serverWith(int32 maxConns, int32 policy) {

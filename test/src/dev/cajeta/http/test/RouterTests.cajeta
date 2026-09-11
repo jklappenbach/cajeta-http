@@ -50,7 +50,9 @@ public final class RouterTests {
     // A 200 response whose body is `s` — a marker the tests read back to see
     // which route won.
     static #HttpResponse text(String s) {
-        return HttpResponse.ok().body(s.toBytes(), s.byteLength());
+        HttpResponse resp0 #= HttpResponse.ok();
+        resp0.body(s.toBytes(), s.byteLength());
+        return #resp0;
     }
 
     // Dispatch (method, target) and return the response body as a String.
@@ -73,12 +75,16 @@ public final class RouterTests {
         (HttpRequest) -> #HttpResponse i64Echo = (req) -> {
             int64 v = req.pathParamInt64("v", (int64) -999);
             String b = "" + v;
-            return HttpResponse.ok().body(b.toBytes(), b.byteLength());
+            HttpResponse resp1 #= HttpResponse.ok();
+            resp1.body(b.toBytes(), b.byteLength());
+            return #resp1;
         };
         (HttpRequest) -> #HttpResponse i32Echo = (req) -> {
             int32 v = req.pathParamInt32("v", (int32) -999);
             String b = "" + v;
-            return HttpResponse.ok().body(b.toBytes(), b.byteLength());
+            HttpResponse resp2 #= HttpResponse.ok();
+            resp2.body(b.toBytes(), b.byteLength());
+            return #resp2;
         };
         (HttpRequest) -> #HttpResponse boolEcho = (req) -> {
             boolean v = req.pathParamBool("v", false);
@@ -89,7 +95,9 @@ public final class RouterTests {
             if (v == null) {
                 return HttpResponse.of(500);
             }
-            return HttpResponse.ok().body(v.toBytes(), v.byteLength());
+            HttpResponse resp3 #= HttpResponse.ok();
+            resp3.body(v.toBytes(), v.byteLength());
+            return #resp3;
         };
 
         Router r = heap Router();

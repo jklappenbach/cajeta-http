@@ -107,7 +107,7 @@ public final class WsHandlerTests {
             EchoHandler h #= heap EchoHandler();
             IpAddress la #= IpAddress.loopbackV4();
             SocketAddress bindAddr #= SocketAddress.of(#la, 0);
-            TcpListener listener = TcpListener.bind(bindAddr);
+            TcpListener listener #= TcpListener.bind(bindAddr);
             int32 port = listener.boundPort();
             Task<int32> sv = spawn handlerServer(#listener, h);
 
@@ -138,7 +138,7 @@ public final class WsHandlerTests {
             ThrowingHandler h #= heap ThrowingHandler();
             IpAddress la #= IpAddress.loopbackV4();
             SocketAddress bindAddr #= SocketAddress.of(#la, 0);
-            TcpListener listener = TcpListener.bind(bindAddr);
+            TcpListener listener #= TcpListener.bind(bindAddr);
             int32 port = listener.boundPort();
             Task<int32> sv = spawn throwingServer(#listener, h);
 

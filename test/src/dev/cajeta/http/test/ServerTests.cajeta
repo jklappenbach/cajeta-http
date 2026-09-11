@@ -39,7 +39,9 @@ public final class ServerTests {
                 return HttpResponse.of(500);
             }
             String body = "id=" + id;
-            return HttpResponse.ok().body(body.toBytes(), body.byteLength());
+            HttpResponse resp0 #= HttpResponse.ok();
+            resp0.body(body.toBytes(), body.byteLength());
+            return #resp0;
         };
         Router router = heap Router();
         router.route("GET", "/users/{id}", userRoute);
@@ -113,18 +115,24 @@ public final class ServerTests {
     // /hello answers a 5-byte body, POST echoes, anything else is 404.
     public static #HttpResponse liveHandle(HttpRequest req) {
         if (req.getMethod().equals("POST")) {
-            return HttpResponse.ok().body(req.body, req.bodyLength());
+            HttpResponse resp1 #= HttpResponse.ok();
+            resp1.body(req.body, req.bodyLength());
+            return #resp1;
         }
         if (req.getTarget().equals("/hello")) {
             String hello = "hello";
-            return HttpResponse.ok().body(hello.toBytes(), hello.byteLength());
+            HttpResponse resp2 #= HttpResponse.ok();
+            resp2.body(hello.toBytes(), hello.byteLength());
+            return #resp2;
         }
         // Body the 404 so it frames as Content-Length. A bodyless
         // handler response serializes with no framing header, which a
         // raw client can only read to EOF — and the connection loop
         // decides reuse before the client sees a close (v1 wrinkle).
         String nf = "nf";
-        return HttpResponse.of(404).body(nf.toBytes(), nf.byteLength());
+        HttpResponse resp3 #= HttpResponse.of(404);
+        resp3.body(nf.toBytes(), nf.byteLength());
+        return #resp3;
     }
 
     static void liveServer(Check c) {

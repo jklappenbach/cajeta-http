@@ -97,7 +97,9 @@ public final class Http2PushTests {
             return #resp;
         }
         String nf = "nope";
-        return HttpResponse.of(404).body(nf.toBytes(), nf.byteLength());
+        HttpResponse resp0 #= HttpResponse.of(404);
+        resp0.body(nf.toBytes(), nf.byteLength());
+        return #resp0;
     }
 
     public static async int32 serve(HttpServer srv) {
@@ -310,7 +312,7 @@ public final class Http2PushTests {
         scope {
             IpAddress la #= IpAddress.loopbackV4();
             SocketAddress bindAddr #= SocketAddress.of(#la, 0);
-            TcpListener listener = TcpListener.bind(bindAddr);
+            TcpListener listener #= TcpListener.bind(bindAddr);
             int32 port = listener.boundPort();
             int32[] out = heap int32[1];
             out[0] = -1;

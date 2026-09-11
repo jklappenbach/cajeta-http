@@ -44,7 +44,9 @@ public final class ServerSizeLimitTests {
 
     public static #HttpResponse handle(HttpRequest req) {
         String s = "HANDLED";
-        return HttpResponse.ok().body(s.toBytes(), s.byteLength());
+        HttpResponse resp0 #= HttpResponse.ok();
+        resp0.body(s.toBytes(), s.byteLength());
+        return #resp0;
     }
 
     static #HttpServer serverWith(#ServerLimits l) {

@@ -52,7 +52,9 @@ public final class ClientCookieTests {
         if (ck != null) {
             out = ck;
         }
-        return HttpResponse.ok().body(out.toBytes(), out.byteLength());
+        HttpResponse resp0 #= HttpResponse.ok();
+        resp0.body(out.toBytes(), out.byteLength());
+        return #resp0;
     }
 
     public static #HttpResponse handle(HttpRequest req) {

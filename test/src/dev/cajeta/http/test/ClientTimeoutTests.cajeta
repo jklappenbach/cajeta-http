@@ -60,10 +60,14 @@ public final class ClientTimeoutTests {
         if (req.getTarget().equals("/slow")) {
             Optional<int32> go #= ClientTimeoutTests.gate.receive();
             String slow = "slow";
-            return HttpResponse.ok().body(slow.toBytes(), slow.byteLength());
+            HttpResponse resp0 #= HttpResponse.ok();
+            resp0.body(slow.toBytes(), slow.byteLength());
+            return #resp0;
         }
         String fast = "fast";
-        return HttpResponse.ok().body(fast.toBytes(), fast.byteLength());
+        HttpResponse resp1 #= HttpResponse.ok();
+        resp1.body(fast.toBytes(), fast.byteLength());
+        return #resp1;
     }
 
     /**
@@ -220,7 +224,7 @@ public final class ClientTimeoutTests {
     /** A loopback port with nothing listening (bind :0, note, close). */
     static int32 deadPort() {
         SocketAddress addr #= SocketAddress.parse("127.0.0.1:0");
-        TcpListener lst = TcpListener.bind(addr);
+        TcpListener lst #= TcpListener.bind(addr);
         int32 port = lst.boundPort();
         lst.close();
         return port;

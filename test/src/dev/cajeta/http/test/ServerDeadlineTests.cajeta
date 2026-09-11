@@ -55,10 +55,14 @@ public final class ServerDeadlineTests {
         if (t.equals("/slow")) {
             Tasks.sleepMillis((int64) 900);
             String late = "late";
-            return HttpResponse.ok().body(late.toBytes(), late.byteLength());
+            HttpResponse resp0 #= HttpResponse.ok();
+            resp0.body(late.toBytes(), late.byteLength());
+            return #resp0;
         }
         String ok = "ok";
-        return HttpResponse.ok().body(ok.toBytes(), ok.byteLength());
+        HttpResponse resp1 #= HttpResponse.ok();
+        resp1.body(ok.toBytes(), ok.byteLength());
+        return #resp1;
     }
 
     /** A server whose `ServerLimits` are exactly `l`. */

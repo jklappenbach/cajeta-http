@@ -88,7 +88,9 @@ public final class MiddlewareCompressionTests {
     }
 
     static #HttpResponse echoBody(HttpRequest req) {
-        return HttpResponse.ok().body(req.body, req.bodyLength());
+        HttpResponse resp0 #= HttpResponse.ok();
+        resp0.body(req.body, req.bodyLength());
+        return #resp0;
     }
 
     // ---- negotiation -----------------------------------------------------

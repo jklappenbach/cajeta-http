@@ -27,7 +27,9 @@ public final class Http2PriorKnowledgeTests {
 
     public static #HttpResponse handle(HttpRequest req) {
         String v = req.version;
-        return HttpResponse.ok().body(v.toBytes(), v.byteLength());
+        HttpResponse resp0 #= HttpResponse.ok();
+        resp0.body(v.toBytes(), v.byteLength());
+        return #resp0;
     }
 
     public static async int32 serve(HttpServer srv) {

@@ -89,7 +89,9 @@ public final class ServerStreamingTests {
             return #resp;
         }
         String ok = "plain";
-        return HttpResponse.ok().body(ok.toBytes(), ok.byteLength());
+        HttpResponse resp0 #= HttpResponse.ok();
+        resp0.body(ok.toBytes(), ok.byteLength());
+        return #resp0;
     }
 
     public static #HttpResponse handleCount(HttpRequest req) {
@@ -98,7 +100,9 @@ public final class ServerStreamingTests {
             Body b = req.getBody();
             if (b == null) {
                 String none = "-1";
-                return HttpResponse.ok().body(none.toBytes(), none.byteLength());
+                HttpResponse resp1 #= HttpResponse.ok();
+                resp1.body(none.toBytes(), none.byteLength());
+                return #resp1;
             }
             AsyncReader r = b.reader();
             int8[] scratch = heap int8[2048];
@@ -113,11 +117,15 @@ public final class ServerStreamingTests {
                 }
             }
             String out = "" + total;
-            return HttpResponse.ok().body(out.toBytes(), out.byteLength());
+            HttpResponse resp2 #= HttpResponse.ok();
+            resp2.body(out.toBytes(), out.byteLength());
+            return #resp2;
         }
         // /ignore (and anything else): never touches the body.
         String ig = "IGNORED";
-        return HttpResponse.ok().body(ig.toBytes(), ig.byteLength());
+        HttpResponse resp3 #= HttpResponse.ok();
+        resp3.body(ig.toBytes(), ig.byteLength());
+        return #resp3;
     }
 
     /** Accept one connection and dispatch it (local copy — bare-spawn rule). */
