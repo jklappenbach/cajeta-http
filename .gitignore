@@ -4,3 +4,10 @@ build/
 # (run-tests.sh). Regenerated every run; never edit, never commit.
 .cajeta-native/
 samples/tour/build-native/
+
+# Scratch: downloaded toolchains, verification logs. Repo-local by policy
+# (never /tmp), so it has to be ignored rather than merely untracked -- a
+# 138 MB release tarball one `git add -A` away from the history.
+tmp/
+# IDE-local project files.
+.idea/
