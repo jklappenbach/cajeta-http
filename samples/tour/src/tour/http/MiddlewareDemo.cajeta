@@ -59,9 +59,10 @@ public class MiddlewareDemo extends DemoClass {
             fi = fi + 1;
         }
         body = body + "{}]}";
-        return HttpResponse.ok()
-            .setHeader("Content-Type", "application/json")
-            .body(body.toBytes(), body.byteLength());
+        HttpResponse r #= HttpResponse.ok();
+        r.setHeader("Content-Type", "application/json");
+        r.body(body.toBytes(), body.byteLength());
+        return #r;
     }
 
     public static #HttpResponse boom(HttpRequest req) {
@@ -79,7 +80,9 @@ public class MiddlewareDemo extends DemoClass {
         if (ip == null) {
             ip = "-";
         }
-        return HttpResponse.ok().body(ip.toBytes(), ip.byteLength());
+        HttpResponse r #= HttpResponse.ok();
+        r.body(ip.toBytes(), ip.byteLength());
+        return #r;
     }
 
     public void execute() {

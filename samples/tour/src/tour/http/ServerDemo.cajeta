@@ -44,13 +44,17 @@ public class ServerDemo extends DemoClass {
     public static #HttpResponse getOrder(HttpRequest req) {
         int64 id = req.pathParamInt64("id", (int64) 0 - (int64) 1);
         String body = "order " + id;
-        return HttpResponse.ok().body(body.toBytes(), body.byteLength());
+        HttpResponse r #= HttpResponse.ok();
+        r.body(body.toBytes(), body.byteLength());
+        return #r;
     }
 
     public static #HttpResponse createOrder(HttpRequest req) {
         // Decompression already inflated a gzip body; echo what arrived.
         String body = "stored " + req.bodyLength() + " bytes";
-        return HttpResponse.of(201).body(body.toBytes(), body.byteLength());
+        HttpResponse r #= HttpResponse.of(201);
+        r.body(body.toBytes(), body.byteLength());
+        return #r;
     }
 
     public static async int32 serveLoop(HttpServer srv) {

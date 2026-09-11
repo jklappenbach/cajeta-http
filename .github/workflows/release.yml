@@ -43,7 +43,7 @@ jobs:
       # `cajeta build` -- before reaching the Publish-to-Olla step the tag exists
       # to trigger. v0.22.2 is the build this tree is verified green against;
       # v0.23.0 and v0.24.0 are released but unverified here.
-      cajeta-version: v0.22.2
+      cajeta-version: v0.26.0
       # Suite + tour + tour-coverage gate, chained in scripts/ci-checks.sh.
       # (`./run-tests.sh` rather than `cajeta test` because the suite needs the
       # codec's native zlib backend extracted out of its .cja with

@@ -98,10 +98,28 @@ if [ -z "$CODEC_VER" ]; then
     echo "run-tests.sh: could not read dev.cajeta.codec version from cajeta.json" >&2
     exit 1
 fi
-CODEC_CJA="$OLLA_HOME/dev.cajeta.codec/$CODEC_VER/dev.cajeta.codec-$CODEC_VER.cja"
+# Sibling checkout FIRST, then the store — the cajeta-llm / cajeta-ml pattern.
+# CI resolves into $OLLA_HOME via the reusable workflow's own `cajeta build`,
+# so the store branch is the one that runs there. A developer box typically has
+# no populated ~/.olla at all, and the store-only lookup this replaces made the
+# suite unrunnable locally the moment the pin moved ahead of a published
+# release — which is exactly what happened at codec 0.8.1.
+CODEC_REPO="${CODEC_REPO:-$PWD/../cajeta-codec}"
+CODEC_CJA=""
+CODEC_FROM_CHECKOUT=""
+if [ -d "$CODEC_REPO" ]; then
+    echo "==> building dev.cajeta.codec from checkout ($CODEC_REPO)"
+    ( cd "$CODEC_REPO" && "$CAJETA_BIN" build >/dev/null )
+    CODEC_CJA="$(cajeta_artifact_path "$CODEC_REPO" dev.cajeta.codec 2>/dev/null)"
+    [ -n "$CODEC_CJA" ] && CODEC_FROM_CHECKOUT=yes
+fi
+if [ -z "$CODEC_CJA" ]; then
+    CODEC_CJA="$OLLA_HOME/dev.cajeta.codec/$CODEC_VER/dev.cajeta.codec-$CODEC_VER.cja"
+fi
 if [ ! -f "$CODEC_CJA" ]; then
     echo "run-tests.sh: codec archive not found: $CODEC_CJA" >&2
-    echo "  (resolve it first — e.g. \`$CAJETA_BIN build\` — or fix the dep pin)" >&2
+    echo "  (build the sibling checkout at $CODEC_REPO, resolve it with" >&2
+    echo "   \`$CAJETA_BIN build\`, or fix the dep pin)" >&2
     exit 1
 fi
 
@@ -112,13 +130,28 @@ echo "==> codec $CODEC_VER: $CODEC_CJA"
 # silently links an old backend.
 NATIVE_DIR="$PWD/.cajeta-native"
 rm -rf "$NATIVE_DIR"
-"$CAJETA_BIN" archive extract "$CODEC_CJA" -C "$NATIVE_DIR" >/dev/null
 
-if [ -d "$NATIVE_DIR/native" ]; then
+if [ -n "$CODEC_FROM_CHECKOUT" ]; then
+    # A LOCALLY BUILT codec .cja carries no native tree: cajeta.json says the
+    # per-platform libcajeta_zlib.a is baked into the archive "at publish", so
+    # only a released archive has one. Extracting it would yield a native/ dir
+    # holding nothing but native-libraries.json — `{"requires":["cajeta_zlib"],
+    # "libraries":{}}` — and --emit=exe then fails to resolve cajeta_zlib.
+    # Against a checkout the source of truth is the checkout's own native tree,
+    # so build it and point at it directly.
+    "$CODEC_REPO/native/build.sh" >/dev/null
+    export CAJETA_NATIVE_PATH="$CODEC_REPO/native"
+    echo "==> CAJETA_NATIVE_PATH=$CAJETA_NATIVE_PATH (codec checkout)"
+    find "$CAJETA_NATIVE_PATH" -name '*.a' -printf '    %p (%s bytes)\n' 2>/dev/null || true
+else
+    "$CAJETA_BIN" archive extract "$CODEC_CJA" -C "$NATIVE_DIR" >/dev/null
+fi
+
+if [ -z "${CAJETA_NATIVE_PATH:-}" ] && [ -d "$NATIVE_DIR/native" ]; then
     export CAJETA_NATIVE_PATH="$NATIVE_DIR/native"
     echo "==> CAJETA_NATIVE_PATH=$CAJETA_NATIVE_PATH"
     find "$NATIVE_DIR/native" -name '*.a' -printf '    %p (%s bytes)\n' 2>/dev/null || true
-else
+elif [ -z "${CAJETA_NATIVE_PATH:-}" ]; then
     # A pre-native codec (<= 0.6.0) has no native/ tree. Not fatal — the pure
     # cajeta DEFLATE fallback still builds — but say so loudly, because the
     # whole point of this script is the native path.

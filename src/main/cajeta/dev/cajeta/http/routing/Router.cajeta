@@ -19,7 +19,12 @@ import dev.cajeta.http.middleware.MiddlewareChain;
  * Router r = heap Router();
  * r.route("GET", "/users/{id}", (req) -> {
  *     String id = req.pathParam("id");
- *     return HttpResponse.of(200).body(...);
+ *     // Bind the title first: the mutators return a VIEW of the receiver,
+ *     // so a chain over an owned temporary yields a BORROW, and the
+ *     // enclosing `#HttpResponse` would hand back a dead object.
+ *     HttpResponse resp #= HttpResponse.of(200);
+ *     resp.body(...);
+ *     return #resp;
  * });
  * HttpResponse resp = r.dispatch(request);   // 200 / 404 / 405
  * ```

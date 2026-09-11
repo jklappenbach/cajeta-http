@@ -62,10 +62,14 @@ public class Http2Demo extends DemoClass {
     public static #HttpResponse handle(HttpRequest req) {
         if (req.getTarget().equals("/proto")) {
             String v = req.version;
-            return HttpResponse.ok().body(v.toBytes(), v.byteLength());
+            HttpResponse r #= HttpResponse.ok();
+            r.body(v.toBytes(), v.byteLength());
+            return #r;
         }
         String nf = "not found";
-        return HttpResponse.of(404).body(nf.toBytes(), nf.byteLength());
+        HttpResponse r #= HttpResponse.of(404);
+        r.body(nf.toBytes(), nf.byteLength());
+        return #r;
     }
 
     public static async int32 serveLoop(HttpServer srv) {
@@ -221,9 +225,9 @@ public class Http2Demo extends DemoClass {
         // 3c. Http2Requests bridges messages <-> HPACK field lists — the
         //     pseudo-header (:method/:path/:scheme/:authority) encoding.
         HttpRequest bridged #= HttpRequest.of("GET", "/api/status");
-        HpackFieldList fields = Http2Requests.requestFields(bridged, "http",
+        HpackFieldList fields #= Http2Requests.requestFields(bridged, "http",
             "orders.internal");
-        HttpRequest rebuilt = Http2Requests.fromFields(fields);
+        HttpRequest rebuilt #= Http2Requests.fromFields(fields);
         this.check(fields.nameAt(0).startsWith(":")
             && rebuilt.getMethod().equals("GET")
             && rebuilt.getTarget().equals("/api/status"),

@@ -128,7 +128,7 @@ public class WireDemo extends DemoClass {
         resp.body(created.toBytes(), created.byteLength());
         this.check(resp.isSuccess() && resp.getReason().equals("Created"),
             "Status registry supplies the canonical reason (201 Created)");
-        String[] cookies = resp.getHeaders().getAll("set-cookie");
+        String[] cookies #= resp.getHeaders().getAll("set-cookie");
         this.check((int32) cookies.count() == 2
             && cookies[1].startsWith("theme="),
             "getAll returns each Set-Cookie separately (get() folds)");
@@ -243,7 +243,7 @@ public class WireDemo extends DemoClass {
         longLine = longLine + "\r\n\r\n";
         boolean tooLarge = false;
         try {
-            HttpParser lim = HttpParser.forRequestWithLimits(tight);
+            HttpParser lim #= HttpParser.forRequestWithLimits(tight);
             lim.feed(longLine.toBytes(), longLine.byteLength());
         } catch (HeadersTooLargeException he) {
             tooLarge = true;

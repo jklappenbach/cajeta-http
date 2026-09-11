@@ -37,12 +37,14 @@ public class Logging {
         (HttpRequest, (HttpRequest) -> #HttpResponse) -> #HttpResponse f =
             (req, next) -> {
                 int64 start = Clock.now().toEpochMilli();
-                HttpResponse resp = next(req);
+                // Tender the title on the way out — see RequestId: a plain
+                // `return resp` drops the response at this scope's exit.
+                HttpResponse resp #= next(req);
                 int64 dur = Clock.now().toEpochMilli() - start;
                 String line #= req.getMethod() + " " + req.getTarget() + " "
                             + resp.statusCode() + " " + dur + "ms";
                 sink.line(#line);
-                return resp;
+                return #resp;
             };
         return Middleware.of(#f);
     }

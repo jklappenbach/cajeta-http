@@ -189,12 +189,12 @@ public class WebSocketDemo extends DemoClass {
         scope {
             IpAddress laEcho #= IpAddress.loopbackV4();
             SocketAddress bindEcho #= SocketAddress.of(#laEcho, 0);
-            TcpListener echoLst = TcpListener.bind(bindEcho);
+            TcpListener echoLst #= TcpListener.bind(bindEcho);
             int32 port = echoLst.boundPort();
             Task<int32> t #= spawn echoServer(#echoLst);
 
             String url = "ws://127.0.0.1:" + port + "/tickets";
-            WebSocket ws = WebSocket.connect(url);
+            WebSocket ws #= WebSocket.connect(url);
             ws.send("open ticket 4417");
             WsMessage e1 #= ws.receive();
             this.check(e1.isText() && e1.text().equals("open ticket 4417"),
@@ -221,7 +221,7 @@ public class WebSocketDemo extends DemoClass {
             TicketHandler h #= heap TicketHandler();
             IpAddress laTick #= IpAddress.loopbackV4();
             SocketAddress bindTick #= SocketAddress.of(#laTick, 0);
-            TcpListener tickLst = TcpListener.bind(bindTick);
+            TcpListener tickLst #= TcpListener.bind(bindTick);
             int32 port = tickLst.boundPort();
             Task<int32> sv = spawn handlerServer(#tickLst, h);
 
@@ -248,7 +248,7 @@ public class WebSocketDemo extends DemoClass {
             FaultyHandler h #= heap FaultyHandler();
             IpAddress laFault #= IpAddress.loopbackV4();
             SocketAddress bindFault #= SocketAddress.of(#laFault, 0);
-            TcpListener faultLst = TcpListener.bind(bindFault);
+            TcpListener faultLst #= TcpListener.bind(bindFault);
             int32 port = faultLst.boundPort();
             Task<int32> sv = spawn faultyServer(#faultLst, h);
 
@@ -298,8 +298,8 @@ public class WebSocketDemo extends DemoClass {
         int8[] probe = heap int8[2];
         probe[0] = (int8) 0x68;    // 'h'
         probe[1] = (int8) 0x69;    // 'i'
-        WsFrame ping = WsControlFrames.ping(#probe);
-        WsFrame pong = WsControlFrames.pongFor(ping);
+        WsFrame ping #= WsControlFrames.ping(#probe);
+        WsFrame pong #= WsControlFrames.pongFor(ping);
         int8[] pongPay = pong.getPayload();
         this.check(pong.getOpcode() == WsOpcode.PONG
             && pong.payloadLength() == 2 && pongPay[0] == (int8) 0x68,
@@ -307,18 +307,18 @@ public class WebSocketDemo extends DemoClass {
         WsProtocol proto #= WsProtocol.create();
         int8[] probe2 = heap int8[1];
         probe2[0] = (int8) 0x21;
-        WsFrame ping2 = WsControlFrames.ping(#probe2);
-        WsReadAction act = proto.onFrame(ping2);
+        WsFrame ping2 #= WsControlFrames.ping(#probe2);
+        WsReadAction act #= proto.onFrame(ping2);
         WsFrame auto = act.getFrame();
         this.check(act.isSendFrame() && auto.getOpcode() == WsOpcode.PONG,
             "WsProtocol answers a PING with an auto-PONG send action");
-        WsFrame closeF = WsControlFrames.close(WsCloseCode.GOING_AWAY, "redeploy");
-        WsCloseReason reason = WsControlFrames.parseClose(closeF);
+        WsFrame closeF #= WsControlFrames.close(WsCloseCode.GOING_AWAY, "redeploy");
+        WsCloseReason reason #= WsControlFrames.parseClose(closeF);
         this.check(reason.getCode() == WsCloseCode.GOING_AWAY
             && reason.getReason().equals("redeploy"),
             "a close frame carries (code, reason) both ways");
-        WsFrame echo = WsControlFrames.reciprocalClose(reason);
-        WsCloseReason echoed = WsControlFrames.parseClose(echo);
+        WsFrame echo #= WsControlFrames.reciprocalClose(reason);
+        WsCloseReason echoed #= WsControlFrames.parseClose(echo);
         this.check(echoed.getCode() == WsCloseCode.GOING_AWAY
             && echoed.getReason().equals(""),
             "the reciprocal close echoes the code, never the reason");
@@ -376,7 +376,7 @@ public class WebSocketDemo extends DemoClass {
         int8[] fat = heap int8[126];
         boolean fatPing = false;
         try {
-            WsFrame nope = WsControlFrames.ping(#fat);
+            WsFrame nope #= WsControlFrames.ping(#fat);
         } catch (WebSocketException we) {
             fatPing = true;
         }
