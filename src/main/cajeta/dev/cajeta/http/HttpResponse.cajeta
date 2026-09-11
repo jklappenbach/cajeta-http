@@ -59,9 +59,9 @@ import dev.cajeta.http.HeaderValues;
  * BORROW. That is fine while the response stays in the scope that built it:
  *
  * ```cajeta
- * HttpResponse resp = HttpResponse.ok()
- *     .header("Content-Type", "text/plain")
- *     .body(payload, payload.count());
+ * HttpResponse resp #= HttpResponse.ok();
+ * resp.header("Content-Type", "text/plain");
+ * resp.body(payload, payload.count());
  * ```
  *
  * It is NOT fine when the response must leave that scope. A handler declared

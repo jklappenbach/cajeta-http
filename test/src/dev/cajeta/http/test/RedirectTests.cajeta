@@ -55,9 +55,10 @@ public final class RedirectTests {
      */
     static #HttpResponse redirectTo(int32 code, String loc) {
         String moved = "moved";
-        return HttpResponse.of(code)
-            .setHeader("Location", loc)
-            .body(moved.toBytes(), moved.byteLength());
+        HttpResponse resp2 #= HttpResponse.of(code);
+        resp2.setHeader("Location", loc);
+        resp2.body(moved.toBytes(), moved.byteLength());
+        return #resp2;
     }
 
     /** `/final` echo: `method|authorization-or-dash|body`. */

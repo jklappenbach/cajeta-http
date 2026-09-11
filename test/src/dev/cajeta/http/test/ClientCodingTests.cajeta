@@ -68,9 +68,10 @@ public final class ClientCodingTests {
     static #HttpResponse coded(String token, String text) {
         int8[] raw #= text.toBytes();
         int8[] enc #= ContentCoding.encode(token, raw, text.byteLength());
-        return HttpResponse.ok()
-            .setHeader("Content-Encoding", token)
-            .body(enc, (int32) enc.count());
+        HttpResponse resp1 #= HttpResponse.ok();
+        resp1.setHeader("Content-Encoding", token);
+        resp1.body(enc, (int32) enc.count());
+        return #resp1;
     }
 
     public static #HttpResponse handle(HttpRequest req) {
@@ -85,9 +86,10 @@ public final class ClientCodingTests {
         }
         if (t.equals("/id")) {
             String p #= ClientCodingTests.phrase();
-            return HttpResponse.ok()
-                .setHeader("Content-Encoding", "identity")
-                .body(p.toBytes(), p.byteLength());
+            HttpResponse resp2 #= HttpResponse.ok();
+            resp2.setHeader("Content-Encoding", "identity");
+            resp2.body(p.toBytes(), p.byteLength());
+            return #resp2;
         }
         if (t.equals("/echo-ae")) {
             String ae #= req.getHeaders().get("accept-encoding");
@@ -102,9 +104,10 @@ public final class ClientCodingTests {
         if (t.equals("/br")) {
             // A coding this client does not speak — must pass through raw.
             String fake = "brotli-ish";
-            return HttpResponse.ok()
-                .setHeader("Content-Encoding", "br")
-                .body(fake.toBytes(), fake.byteLength());
+            HttpResponse resp3 #= HttpResponse.ok();
+            resp3.setHeader("Content-Encoding", "br");
+            resp3.body(fake.toBytes(), fake.byteLength());
+            return #resp3;
         }
         if (t.equals("/badgz")) {
             int8[] junk = heap int8[8];
@@ -113,9 +116,10 @@ public final class ClientCodingTests {
                 junk[i] = (int8) (0x41 + i);
                 i = i + 1;
             }
-            return HttpResponse.ok()
-                .setHeader("Content-Encoding", "gzip")
-                .body(junk, 8);
+            HttpResponse resp4 #= HttpResponse.ok();
+            resp4.setHeader("Content-Encoding", "gzip");
+            resp4.body(junk, 8);
+            return #resp4;
         }
         if (t.equals("/json")) {
             String j #= ClientCodingTests.jsonText();

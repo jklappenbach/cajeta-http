@@ -41,9 +41,10 @@ public final class ClientCookieTests {
     // ---- the loopback cookie server -------------------------------------
 
     static #HttpResponse setOne(String header, String body) {
-        return HttpResponse.ok()
-            .setHeader("Set-Cookie", header)
-            .body(body.toBytes(), body.byteLength());
+        HttpResponse resp1 #= HttpResponse.ok();
+        resp1.setHeader("Set-Cookie", header);
+        resp1.body(body.toBytes(), body.byteLength());
+        return #resp1;
     }
 
     static #HttpResponse echoCookie(HttpRequest req) {
@@ -64,10 +65,11 @@ public final class ClientCookieTests {
         }
         if (t.equals("/settwo")) {
             String two = "two";
-            return HttpResponse.ok()
-                .header("Set-Cookie", "a=1; Path=/")
-                .header("Set-Cookie", "b=2; Path=/")
-                .body(two.toBytes(), two.byteLength());
+            HttpResponse resp2 #= HttpResponse.ok();
+            resp2.header("Set-Cookie", "a=1; Path=/");
+            resp2.header("Set-Cookie", "b=2; Path=/");
+            resp2.body(two.toBytes(), two.byteLength());
+            return #resp2;
         }
         if (t.equals("/setpath")) {
             return ClientCookieTests.setOne("app=1; Path=/app", "set");

@@ -117,8 +117,8 @@ public final class SseServerTests {
     // ---- Last-Event-ID request view --------------------------------------
 
     static void lastEventId(Check c) {
-        HttpRequest with #= HttpRequest.of("GET", "/events")
-            .header("Last-Event-ID", "42");
+        HttpRequest with #= HttpRequest.of("GET", "/events");
+        with.header("Last-Event-ID", "42");
         String id #= SseResponse.lastEventId(with);
         c.that(id != null && id.equals("42"), "Last-Event-ID read from request");
 

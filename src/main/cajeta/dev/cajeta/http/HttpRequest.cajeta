@@ -66,9 +66,9 @@ import dev.cajeta.http.HeaderValues;
  * chaining convention) so a request reads as one expression:
  *
  * ```cajeta
- * HttpRequest req = HttpRequest.get("/index.html")
- *     .header("Host", "example.test")
- *     .header("Accept", "text/html");
+ * HttpRequest req #= HttpRequest.get("/index.html");
+ * req.header("Host", "example.test");
+ * req.header("Accept", "text/html");
  * ```
  *
  * "Immutable-ish" because the type carries no defensive copies and the

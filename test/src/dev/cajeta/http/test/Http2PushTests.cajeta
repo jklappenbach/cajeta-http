@@ -91,8 +91,8 @@ public final class Http2PushTests {
         if (t.equals("/index")) {
             String body = "INDEX";
             String css = "body{margin:0}";
-            HttpResponse resp #= HttpResponse.ok()
-                .body(body.toBytes(), body.byteLength());
+            HttpResponse resp #= HttpResponse.ok();
+            resp.body(body.toBytes(), body.byteLength());
             resp.push("/style.css", 200, css.toBytes(), css.byteLength());
             return #resp;
         }

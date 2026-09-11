@@ -105,9 +105,10 @@ public final class DownloadTests {
         }
         if (t.equals("/hop")) {
             String moved = "moved";
-            return HttpResponse.of(302)
-                .setHeader("Location", "/big")
-                .body(moved.toBytes(), moved.byteLength());
+            HttpResponse resp2 #= HttpResponse.of(302);
+            resp2.setHeader("Location", "/big");
+            resp2.body(moved.toBytes(), moved.byteLength());
+            return #resp2;
         }
         if (t.equals("/upload")) {
             // Echo what actually arrived: "<sha256hex>|<te-or-cl marker>".
