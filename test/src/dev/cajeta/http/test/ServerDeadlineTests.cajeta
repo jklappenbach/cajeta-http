@@ -130,22 +130,92 @@ public final class ServerDeadlineTests {
      * budget `headMs`) must answer 408 + close at `headMs`-or-later
      * counted from the FIRST byte, and long before the drip would end.
      */
+    /**
+     * Drip one header byte every 60 ms until the server answers, **reading
+     * before every write**, and return whatever it sent.
+     *
+     * The read-first order is the whole point. A write to a peer that has
+     * already closed draws an RST, and on Windows an RST DISCARDS the
+     * receiving socket's own buffer — so one more `y` after the server's 408
+     * destroys the 408 that had already arrived. Linux keeps already-received
+     * data readable after a reset, which is why writing blind worked there.
+     *
+     * Measured with a raw socket pair, client still dripping after the server
+     * answered and closed:
+     *
+     *                                     linux   windows
+     *     server: plain close              51 B      0 B
+     *     server: shutdown(WR) + close     51 B      0 B
+     *     server: shutdown + drain + close 51 B      0 B
+     *
+     * No server-side close discipline rescues it — the loss is on the client,
+     * so the client is where it has to be fixed. Stopping the moment anything
+     * is readable is also what a real client does: nothing writes for 2.4 s
+     * without ever looking at the socket.
+     */
+    static #String dripUntilAnswered(TcpStream s) {
+        int8[] buf = heap int8[8192];
+        int32 have = 0;
+        int32 i = 0;
+        boolean done = false;
+        while (i < 40 && !done) {
+            try {
+                // The READ is the pacing. A 60 ms readWithin waits the same
+                // interval the old sleep did but spends it listening, so the
+                // answer is seen the moment it lands. Sleeping 60 ms and then
+                // sampling for 5 ms missed it under full-suite load, and every
+                // miss is another `y` written — which is exactly what destroys
+                // the response on Windows.
+                int64 n = s.readWithin(buf, (int64) have,
+                                       (int64) (8192 - have), 60);
+                if (n > (int64) 0) {
+                    have = have + (int32) n;
+                    done = true;            // answered — stop writing NOW
+                } else {
+                    done = true;            // EOF: the server closed
+                }
+            } catch (Exception e) {
+                // Nothing readable inside the 5 ms window; keep dripping.
+            }
+            if (!done) {
+                try {
+                    ServerDeadlineTests.writeStr(s, "y");
+                } catch (Exception we) {
+                    done = true;            // server already cut us — fine
+                }
+            }
+            i = i + 1;
+        }
+        // We have stopped writing, so the rest of the response is safe to take.
+        boolean going = have > 0 && have < 8192;
+        while (going) {
+            try {
+                int64 n = s.readWithin(buf, (int64) have,
+                                       (int64) (8192 - have), 50);
+                if (n > (int64) 0) {
+                    have = have + (int32) n;
+                    going = have < 8192;
+                } else {
+                    going = false;
+                }
+            } catch (Exception e) {
+                going = false;
+            }
+        }
+        int8[] copy = heap int8[have];
+        int32 j = 0;
+        while (j < have) {
+            copy[j] = buf[j];
+            j = j + 1;
+        }
+        return heap String(#copy, have);
+    }
+
     public static async int32 dripHead(int32 port, int32 headMs) {
         TcpStream s #= ServerDeadlineTests.rawConnect(port);
         int64 t0 = ServerDeadlineTests.nowMs();
         ServerDeadlineTests.writeStr(s, "GET / HTTP/1.1\r\nx-a: ");
-        int32 i = 0;
-        boolean peerGone = false;
-        while (i < 40 && !peerGone) {
-            Tasks.sleepMillis((int64) 60);
-            try {
-                ServerDeadlineTests.writeStr(s, "y");
-            } catch (Exception e) {
-                peerGone = true;            // server already cut us — fine
-            }
-            i = i + 1;
-        }
-        String got #= ServerDeadlineTests.readAll(s);
+        String got #= ServerDeadlineTests.dripUntilAnswered(s);
         int64 elapsed = ServerDeadlineTests.nowMs() - t0;
         s.close();
         if (!got.contains("408")) {
@@ -258,18 +328,7 @@ public final class ServerDeadlineTests {
         TcpStream s #= ServerDeadlineTests.rawConnect(port);
         int64 t0 = ServerDeadlineTests.nowMs();
         ServerDeadlineTests.writeStr(s, "GET / HTTP/1.1\r\nx-a: ");
-        int32 i = 0;
-        boolean peerGone = false;
-        while (i < 40 && !peerGone) {
-            Tasks.sleepMillis((int64) 60);
-            try {
-                ServerDeadlineTests.writeStr(s, "y");
-            } catch (Exception e) {
-                peerGone = true;
-            }
-            i = i + 1;
-        }
-        String got #= ServerDeadlineTests.readAll(s);
+        String got #= ServerDeadlineTests.dripUntilAnswered(s);
         int64 elapsed = ServerDeadlineTests.nowMs() - t0;
         s.close();
         if (!got.contains("408")) {
