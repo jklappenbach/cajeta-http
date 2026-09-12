@@ -24,6 +24,7 @@ public final class MiddlewareAuthRateTests {
     public static void run(Check c) {
         System.stdout.println("-- rate limit: token bucket (2.2d) --");
         bucketRefill(c);
+        bucketNeverRefills(c);
         System.stdout.println("-- rate limit: middleware (2.2d) --");
         rateLimitMiddleware(c);
         System.stdout.println("-- auth: constant-time compare (2.2d) --");
@@ -49,6 +50,27 @@ public final class MiddlewareAuthRateTests {
         c.that(b.tryAcquire((int64) 1000), "bucket: one token refilled after 1s");
         c.that(!b.tryAcquire((int64) 1000), "bucket: only one token refilled");
         c.that(b.tryAcquire((int64) 3000), "bucket: refill accrues over elapsed time");
+    }
+
+    /**
+     * A hard quota — capacity with no replenishment — is a legitimate
+     * configuration, and `retryAfterSecs` used to divide by the rate to
+     * answer it. At rate 0 that is a divide by zero, and it fired on the
+     * FIRST 429 such a limiter served, because `RateLimit.middleware` calls
+     * this to fill in `Retry-After`. The bucket must still say something
+     * finite.
+     */
+    static void bucketNeverRefills(Check c) {
+        TokenBucket b = heap TokenBucket((int64) 2, (int64) 0, (int64) 0);
+        c.that(b.tryAcquire((int64) 0), "hard quota: first token");
+        c.that(b.tryAcquire((int64) 0), "hard quota: second token (burst)");
+        c.that(!b.tryAcquire((int64) 0), "hard quota: empty after burst");
+        // The call that used to trap. Time passing changes nothing.
+        c.eqInt(b.retryAfterSecs((int64) 0), TokenBucket.NEVER_SECS,
+                "hard quota: retryAfter reports never, and does not divide by zero");
+        c.eqInt(b.retryAfterSecs((int64) 60000), TokenBucket.NEVER_SECS,
+                "hard quota: still never, a minute later");
+        c.that(!b.tryAcquire((int64) 3600000), "hard quota: an hour later, still empty");
     }
 
     // ---- rate limit middleware -------------------------------------------

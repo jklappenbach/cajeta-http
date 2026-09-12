@@ -320,7 +320,14 @@ public final class MiddlewareLoopbackTests {
         (String) -> boolean vf = (t) -> t.equals("good-token");
         ba.verifier(#vf);
         Middleware am #= BearerAuth.middleware(ba);
-        RateLimit rl #= RateLimit.create((int64) 2, (int64) 1);
+        // Burst 2, NO refill. The three burst requests below are three full
+        // sequential exchanges, so at +1/s a host slow enough to spend a second
+        // on them refills a token and the third returns 200 — which is what
+        // Windows did. Refill timing is already pinned deterministically in
+        // MiddlewareAuthRateTests with an injected clock; what this test is for
+        // is that the limiter is wired into the chain and answers 429 over the
+        // wire. A rate of 0 asserts exactly that and cannot be outrun.
+        RateLimit rl #= RateLimit.create((int64) 2, (int64) 0);
         Middleware lm #= RateLimit.middleware(rl);
         Middleware tm #= Timeout.middleware((int64) 60);
         MiddlewareChain chain = heap MiddlewareChain();

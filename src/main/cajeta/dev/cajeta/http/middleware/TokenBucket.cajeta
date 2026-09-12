@@ -56,11 +56,26 @@ public final class TokenBucket {
         return false;
     }
 
-    /** Seconds until the next whole token is available (≥1 when empty; 0 if ready). */
+    /**
+     * Seconds until the next whole token is available (≥1 when empty; 0 if
+     * ready).
+     *
+     * A non-positive `refillPerSec` is a legitimate configuration — a hard
+     * quota that never replenishes — and the honest answer for it is "never".
+     * It is reported as `NEVER_SECS` rather than computed, because the general
+     * path divides by the rate and a zero rate trapped on the divide. That
+     * fired the moment such a limiter answered its first 429, since
+     * `RateLimit.middleware` calls this to fill in `Retry-After`.
+     */
+    public static int64 NEVER_SECS = (int64) 86400;
+
     public int64 retryAfterSecs(int64 nowMillis) {
         this.refill(nowMillis);
         if (this.tokensMilli >= (int64) 1000) {
             return (int64) 0;
+        }
+        if (this.refillPerSec <= (int64) 0) {
+            return TokenBucket.NEVER_SECS;
         }
         int64 need = (int64) 1000 - this.tokensMilli;
         int64 ratePerSec = this.refillPerSec * (int64) 1000;
