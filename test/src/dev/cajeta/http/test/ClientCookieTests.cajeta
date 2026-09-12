@@ -125,10 +125,17 @@ public final class ClientCookieTests {
             if (conn == null) {
                 going = false;      // listener closed — the test is finished
             } else {
-                // `dispatch` runs the connection to completion before it
-                // returns, which is what these suites want: the client drives
-                // its legs sequentially over one keep-alive connection, and a
-                // second dial is accepted only once the first is finished.
+                // `dispatch` SPAWNS the connection fiber and returns at
+                // once (Server.dispatch), so accepts overlap and a scenario
+                // that needs two connections in flight still works.
+                //
+                // Do NOT wrap this call in a `try`: a try block is a scope
+                // frame, and a statement-position spawn is joined at its
+                // enclosing frame's exit. Wrapping it therefore joins each
+                // connection before the next accept — serializing them, and
+                // deadlocking any scenario whose first handler is waiting on
+                // something the second one delivers. Measured: it wedged
+                // `timeoutReleasesLease` until the deadline elapsed.
                 core.dispatch(#conn);
                 n = n + 1;
             }

@@ -74,6 +74,21 @@ public final class ClientTimeoutTests {
      * Accept + dispatch, tolerating a raise: after a client-side timeout
      * the socket is gone, so the parked handler's late response write
      * fails in the connection fiber — expected here, not a test failure.
+     *
+     * Deliberately NOT converted to the `acceptLoop` shape the rest of this
+     * suite now uses. Both scenarios below need a precisely counted number of
+     * CONCURRENT accepts: in `timeoutReleasesLease` the timed-out socket and
+     * the fresh dial have to be acceptable at the same time, because the first
+     * connection's handler stays parked on `gate` until after the second has
+     * been served. Replacing the pair with one sequential loop wedges it — the
+     * /fast exchange gets no response inside its 150 ms budget and the suite
+     * dies with `readWithin: deadline elapsed before data arrived` (measured
+     * twice on Linux, with and without a try around the dispatch).
+     *
+     * So the hang hazard documented on `acceptLoop` still applies to these
+     * two. It is bounded here in a way it was not elsewhere: the dial count is
+     * fixed by the scenario itself rather than by connection-reuse behaviour
+     * that can change underneath the test.
      */
     public static async int32 acceptAndDispatchLenient(Server core) {
         try {
@@ -85,10 +100,47 @@ public final class ClientTimeoutTests {
         }
     }
 
-    public static async int32 acceptAndDispatch(Server core) {
-        TcpStream conn #= core.acceptNext();
-        core.dispatch(#conn);
-        return 1;
+    /**
+     * Accept and dispatch until the listener closes; returns how many
+     * connections were served.
+     *
+     * The single-accept version this replaces returned after ONE connection,
+     * so the moment a client dialled a second nobody accepted it and the
+     * client waited forever for a response that could not come — an infinite
+     * hang where a plain failure belonged. MEASURED on Windows: one client
+     * fiber cycling PARKED -> READY -> PARKED forever inside
+     * `Reactor.pollPark`, every carrier asleep — a healthy scheduler
+     * faithfully running a wait nothing would ever satisfy.
+     *
+     * Looping keeps the client unblocked; the returned COUNT keeps the
+     * guarantee. A suite that means "these legs rode one connection each"
+     * still asserts exactly that, and a regression reports the number
+     * instead of wedging the run.
+     *
+     * Await it only AFTER closing the listener: `acceptNext` answers NULL on
+     * a closed listener rather than raising, and that NULL is what ends the
+     * loop.
+     */
+    public static async int32 acceptLoop(Server core) {
+        int32 n = 0;
+        boolean going = true;
+        while (going) {
+            TcpStream conn #= core.acceptNext();
+            if (conn == null) {
+                going = false;      // listener closed — the test is finished
+            } else {
+                // `dispatch` SPAWNS the connection fiber and returns at
+                // once (Server.dispatch), so accepts overlap and a scenario
+                // that needs two connections in flight still works.
+                //
+                // Do NOT wrap this call in a `try`: a try block is a scope
+                // frame, and a statement-position spawn is joined at its
+                // enclosing frame's exit.
+                core.dispatch(#conn);
+                n = n + 1;
+            }
+        }
+        return n;
     }
 
     // ---- 1: the stalled exchange times out at the budget -----------------
@@ -303,14 +355,14 @@ public final class ClientTimeoutTests {
             HttpServer srv #= b.build();
             Server core = srv.server;
 
-            Task<int32> svc = spawn acceptAndDispatch(core);
+            Task<int32> svc = spawn acceptLoop(core);
             c.eqInt((int64) await t, 1,
                 "GET retried after backoff and hit the now-listening server");
-            c.eqInt((int64) await svc, 1, "retry attempt was served");
 
             boolean drained = core.drainInflight(Duration.ofSeconds(5));
             c.that(drained, "retry connection drained");
             core.listener.close();
+            c.eqInt((int64) await svc, 1, "retry attempt was served");
         }
     }
 
@@ -364,14 +416,14 @@ public final class ClientTimeoutTests {
             Server core = srv.server;
             bound.send(1);
 
-            Task<int32> svc = spawn acceptAndDispatch(core);
+            Task<int32> svc = spawn acceptLoop(core);
             c.eqInt((int64) await t, 1,
                 "a failed dial freed its permit; the next exchange got it");
-            c.eqInt((int64) await svc, 1, "post-failure exchange was served");
 
             boolean drained = core.drainInflight(Duration.ofSeconds(5));
             c.that(drained, "permit-test connection drained");
             core.listener.close();
+            c.eqInt((int64) await svc, 1, "post-failure exchange was served");
         }
     }
 }

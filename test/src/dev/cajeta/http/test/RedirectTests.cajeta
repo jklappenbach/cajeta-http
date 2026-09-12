@@ -121,14 +121,50 @@ public final class RedirectTests {
     // ---- client fibers ---------------------------------------------------
 
     /**
-     * Accept one connection and dispatch it, on a fiber (dispatch joins
-     * the connection fiber — see ClientPoolTests.acceptAndDispatch; a
-     * local copy because `spawn` only takes a bare same-class call).
+     * Accept and dispatch until the listener closes; returns how many
+     * connections were served.
+     *
+     * The single-accept version this replaces returned after ONE connection,
+     * so the moment a client dialled a second nobody accepted it and the
+     * client waited forever for a response that could not come — an infinite
+     * hang where a plain failure belonged. MEASURED on Windows: one client
+     * fiber cycling PARKED -> READY -> PARKED forever inside
+     * `Reactor.pollPark`, every carrier asleep — a healthy scheduler
+     * faithfully running a wait nothing would ever satisfy.
+     *
+     * Looping keeps the client unblocked; the returned COUNT keeps the
+     * guarantee. A suite that means "these legs rode one connection each"
+     * still asserts exactly that, and a regression reports the number
+     * instead of wedging the run.
+     *
+     * Await it only AFTER closing the listener: `acceptNext` answers NULL on
+     * a closed listener rather than raising, and that NULL is what ends the
+     * loop.
      */
-    public static async int32 acceptAndDispatch(Server core) {
-        TcpStream conn #= core.acceptNext();
-        core.dispatch(#conn);
-        return 1;
+    public static async int32 acceptLoop(Server core) {
+        int32 n = 0;
+        boolean going = true;
+        while (going) {
+            TcpStream conn #= core.acceptNext();
+            if (conn == null) {
+                going = false;      // listener closed — the test is finished
+            } else {
+                // `dispatch` SPAWNS the connection fiber and returns at
+                // once (Server.dispatch), so accepts overlap and a scenario
+                // that needs two connections in flight still works.
+                //
+                // Do NOT wrap this call in a `try`: a try block is a scope
+                // frame, and a statement-position spawn is joined at its
+                // enclosing frame's exit. Wrapping it therefore joins each
+                // connection before the next accept — serializing them, and
+                // deadlocking any scenario whose first handler is waiting on
+                // something the second one delivers. Measured: it wedged
+                // `timeoutReleasesLease` until the deadline elapsed.
+                core.dispatch(#conn);
+                n = n + 1;
+            }
+        }
+        return n;
     }
 
     /**
@@ -219,54 +255,44 @@ public final class RedirectTests {
             int32 port = core.listener.boundPort();
             RedirectTests.ownPort = port;
 
-            Task<int32> s1 = spawn acceptAndDispatch(core);
+            // ONE accept loop for all nine legs. Spawning a fresh
+            // single-accept server per leg hung the moment a leg dialled
+            // twice; the loop serves every dial and the total below is what
+            // still pins "one connection per leg".
+            Task<int32> s = spawn acceptLoop(core);
+
             Task<int32> t1 = spawn followPost(port, "/r/301", "GET|Bearer tok|");
             c.eqInt((int64) await t1, 1, "301 rewrites POST to GET and drops the body");
-            c.eqInt((int64) await s1, 1, "301 chain rode one connection");
 
-            Task<int32> s2 = spawn acceptAndDispatch(core);
             Task<int32> t2 = spawn followPost(port, "/r/302", "GET|Bearer tok|");
             c.eqInt((int64) await t2, 1, "302 rewrites POST to GET and drops the body");
-            c.eqInt((int64) await s2, 1, "302 chain rode one connection");
 
-            Task<int32> s3 = spawn acceptAndDispatch(core);
             Task<int32> t3 = spawn followPost(port, "/r/303", "GET|Bearer tok|");
             c.eqInt((int64) await t3, 1, "303 rewrites POST to GET and drops the body");
-            c.eqInt((int64) await s3, 1, "303 chain rode one connection");
 
-            Task<int32> s4 = spawn acceptAndDispatch(core);
             Task<int32> t4 = spawn followPost(port, "/r/307", "POST|Bearer tok|data");
             c.eqInt((int64) await t4, 1, "307 preserves method and body");
-            c.eqInt((int64) await s4, 1, "307 chain rode one connection");
 
-            Task<int32> s5 = spawn acceptAndDispatch(core);
             Task<int32> t5 = spawn followPost(port, "/r/308", "POST|Bearer tok|data");
             c.eqInt((int64) await t5, 1, "308 preserves method and body");
-            c.eqInt((int64) await s5, 1, "308 chain rode one connection");
 
-            Task<int32> s6 = spawn acceptAndDispatch(core);
             Task<int32> t6 = spawn followGet(port, "/r/301", false, "GET|-|");
             c.eqInt((int64) await t6, 1, "301 leaves a GET a GET");
-            c.eqInt((int64) await s6, 1, "GET-301 chain rode one connection");
 
-            Task<int32> s7 = spawn acceptAndDispatch(core);
             Task<int32> t7 = spawn followGet(port, "/dir/hop", false, "reldir");
             c.eqInt((int64) await t7, 1, "relative Location resolves against the base path");
-            c.eqInt((int64) await s7, 1, "relative-hop chain rode one connection");
 
-            Task<int32> s8 = spawn acceptAndDispatch(core);
             Task<int32> t8 = spawn followGet(port, "/chain/1", false, "GET|-|");
             c.eqInt((int64) await t8, 1, "a two-hop chain lands");
-            c.eqInt((int64) await s8, 1, "two-hop chain rode one connection");
 
-            Task<int32> s9 = spawn acceptAndDispatch(core);
             Task<int32> t9 = spawn followGet(port, "/abs", true, "GET|Bearer tok|");
             c.eqInt((int64) await t9, 1, "same-origin absolute hop keeps Authorization");
-            c.eqInt((int64) await s9, 1, "absolute same-origin chain rode one connection");
 
             boolean drained = core.drainInflight(Duration.ofSeconds(5));
             c.that(drained, "redirect-table connections drained");
+            // Close first: the NULL from `acceptNext` is what ends the loop.
             core.listener.close();
+            c.eqInt((int64) await s, 9, "each of the nine legs rode one connection");
         }
     }
 
@@ -281,15 +307,16 @@ public final class RedirectTests {
             Server core = srv.server;
             int32 port = core.listener.boundPort();
 
-            Task<int32> s1 = spawn acceptAndDispatch(core);
+            Task<int32> s1 = spawn acceptLoop(core);
             Task<int32> t1 = spawn loopTrips(port);
             c.eqInt((int64) await t1, 1,
                 "a redirect loop raises TooManyRedirectsException at the cap");
-            c.eqInt((int64) await s1, 1, "loop exchanges rode one connection");
 
             boolean drained = core.drainInflight(Duration.ofSeconds(5));
             c.that(drained, "hop-cap connection drained");
+            // Close first: the NULL from `acceptNext` ends the loop.
             core.listener.close();
+            c.eqInt((int64) await s1, 1, "loop exchanges rode one connection");
         }
     }
 
@@ -318,19 +345,18 @@ public final class RedirectTests {
             int32 portB = coreB.listener.boundPort();
             RedirectTests.xPort = portB;
 
-            Task<int32> sa = spawn acceptAndDispatch(coreA);
-            Task<int32> sb = spawn acceptAndDispatch(coreB);
+            Task<int32> sa = spawn acceptLoop(coreA);
+            Task<int32> sb = spawn acceptLoop(coreB);
             Task<int32> t = spawn followGet(portA, "/x", true, "GET|-|");
             c.eqInt((int64) await t, 1, "cross-origin hop strips Authorization");
-            c.eqInt((int64) await sa, 1, "origin A accepted once");
-            c.eqInt((int64) await sb, 1, "origin B accepted once");
-
             boolean drainedA = coreA.drainInflight(Duration.ofSeconds(5));
             boolean drainedB = coreB.drainInflight(Duration.ofSeconds(5));
             c.that(drainedA, "origin A drained");
             c.that(drainedB, "origin B drained");
             coreA.listener.close();
             coreB.listener.close();
+            c.eqInt((int64) await sa, 1, "origin A accepted once");
+            c.eqInt((int64) await sb, 1, "origin B accepted once");
         }
     }
 }

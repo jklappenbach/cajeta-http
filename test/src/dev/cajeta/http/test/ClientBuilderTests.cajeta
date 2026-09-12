@@ -100,11 +100,51 @@ public final class ClientBuilderTests {
         return HttpResponse.notFound();
     }
 
-    /** Accept one connection and dispatch it (local copy — bare-spawn rule). */
-    public static async int32 acceptAndDispatch(Server core) {
-        TcpStream conn #= core.acceptNext();
-        core.dispatch(#conn);
-        return 1;
+    /**
+     * Accept and dispatch until the listener closes; returns how many
+     * connections were served.
+     *
+     * The single-accept version this replaces returned after ONE connection,
+     * so the moment a client dialled a second nobody accepted it and the
+     * client waited forever for a response that could not come — an infinite
+     * hang where a plain failure belonged. MEASURED on Windows: one client
+     * fiber cycling PARKED -> READY -> PARKED forever inside
+     * `Reactor.pollPark`, every carrier asleep — a healthy scheduler
+     * faithfully running a wait nothing would ever satisfy.
+     *
+     * Looping keeps the client unblocked; the returned COUNT keeps the
+     * guarantee. A suite that means "these legs rode one connection each"
+     * still asserts exactly that, and a regression reports the number
+     * instead of wedging the run.
+     *
+     * Await it only AFTER closing the listener: `acceptNext` answers NULL on
+     * a closed listener rather than raising, and that NULL is what ends the
+     * loop.
+     */
+    public static async int32 acceptLoop(Server core) {
+        int32 n = 0;
+        boolean going = true;
+        while (going) {
+            TcpStream conn #= core.acceptNext();
+            if (conn == null) {
+                going = false;      // listener closed — the test is finished
+            } else {
+                // `dispatch` SPAWNS the connection fiber and returns at
+                // once (Server.dispatch), so accepts overlap and a scenario
+                // that needs two connections in flight still works.
+                //
+                // Do NOT wrap this call in a `try`: a try block is a scope
+                // frame, and a statement-position spawn is joined at its
+                // enclosing frame's exit. Wrapping it therefore joins each
+                // connection before the next accept — serializing them, and
+                // deadlocking any scenario whose first handler is waiting on
+                // something the second one delivers. Measured: it wedged
+                // `timeoutReleasesLease` until the deadline elapsed.
+                core.dispatch(#conn);
+                n = n + 1;
+            }
+        }
+        return n;
     }
 
     static #String respText(HttpResponse resp) {
@@ -384,10 +424,13 @@ public final class ClientBuilderTests {
             HttpServer srv #= ClientBuilderTests.echoServer();
             Server core = srv.server;
             int32 port = core.listener.boundPort();
-            Task<int32> s1 = spawn acceptAndDispatch(core);
+            Task<int32> s1 = spawn acceptLoop(core);
             Task<int32> t1 = spawn defaultHeaderPair(port);
             c.eqInt((int64) await t1, 1,
                     "default header rides the wire; caller override wins");
+            // Close first: the NULL from `acceptNext` is what
+            // ends the accept loop.
+            core.listener.close();
             c.eqInt((int64) await s1, 1, "header pair rode one connection");
         }
     }
@@ -397,9 +440,12 @@ public final class ClientBuilderTests {
             HttpServer srv #= ClientBuilderTests.echoServer();
             Server core = srv.server;
             int32 port = core.listener.boundPort();
-            Task<int32> s1 = spawn acceptAndDispatch(core);
+            Task<int32> s1 = spawn acceptLoop(core);
             Task<int32> t1 = spawn pinnedVersion(port);
             c.eqInt((int64) await t1, 1, "version pin is what hits the wire");
+            // Close first: the NULL from `acceptNext` is what
+            // ends the accept loop.
+            core.listener.close();
             c.eqInt((int64) await s1, 1, "pinned exchange accepted once");
         }
     }
@@ -410,15 +456,18 @@ public final class ClientBuilderTests {
             Server core = srv.server;
             int32 port = core.listener.boundPort();
 
-            Task<int32> s1 = spawn acceptAndDispatch(core);
+            // ONE accept loop for every leg in this scope. A fresh
+            // single-accept server per leg hung as soon as a leg dialled
+            // twice; the total below still pins one connection per leg.
+            Task<int32> s = spawn acceptLoop(core);
             Task<int32> t1 = spawn twoHopsUnderCapTwo(port);
             c.eqInt((int64) await t1, 1, "redirectLimit(2) follows a 2-hop chain");
-            c.eqInt((int64) await s1, 1, "under-cap chain rode one connection");
 
-            Task<int32> s2 = spawn acceptAndDispatch(core);
             Task<int32> t2 = spawn twoHopsOverCapOne(port);
             c.eqInt((int64) await t2, 1, "redirectLimit(1) trips on hop two");
-            c.eqInt((int64) await s2, 1, "over-cap chain rode one connection");
+            // Close first: the NULL from `acceptNext` ends the loop.
+            core.listener.close();
+            c.eqInt((int64) await s, 2, "each redirect-cap leg rode one connection");
         }
     }
 
@@ -427,10 +476,13 @@ public final class ClientBuilderTests {
             HttpServer srv #= ClientBuilderTests.echoServer();
             Server core = srv.server;
             int32 port = core.listener.boundPort();
-            Task<int32> s1 = spawn acceptAndDispatch(core);
+            Task<int32> s1 = spawn acceptLoop(core);
             Task<int32> t1 = spawn absoluteThroughProxy(port);
             c.eqInt((int64) await t1, 1,
                     "http-via-proxy sends the absolute-form target");
+            // Close first: the NULL from `acceptNext` is what
+            // ends the accept loop.
+            core.listener.close();
             c.eqInt((int64) await s1, 1, "proxied exchange accepted once");
         }
     }

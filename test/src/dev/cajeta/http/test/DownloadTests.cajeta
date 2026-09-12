@@ -127,10 +127,51 @@ public final class DownloadTests {
         return HttpResponse.notFound();
     }
 
-    public static async int32 acceptAndDispatch(Server core) {
-        TcpStream conn #= core.acceptNext();
-        core.dispatch(#conn);
-        return 1;
+    /**
+     * Accept and dispatch until the listener closes; returns how many
+     * connections were served.
+     *
+     * The single-accept version this replaces returned after ONE connection,
+     * so the moment a client dialled a second nobody accepted it and the
+     * client waited forever for a response that could not come — an infinite
+     * hang where a plain failure belonged. MEASURED on Windows: one client
+     * fiber cycling PARKED -> READY -> PARKED forever inside
+     * `Reactor.pollPark`, every carrier asleep — a healthy scheduler
+     * faithfully running a wait nothing would ever satisfy.
+     *
+     * Looping keeps the client unblocked; the returned COUNT keeps the
+     * guarantee. A suite that means "these legs rode one connection each"
+     * still asserts exactly that, and a regression reports the number
+     * instead of wedging the run.
+     *
+     * Await it only AFTER closing the listener: `acceptNext` answers NULL on
+     * a closed listener rather than raising, and that NULL is what ends the
+     * loop.
+     */
+    public static async int32 acceptLoop(Server core) {
+        int32 n = 0;
+        boolean going = true;
+        while (going) {
+            TcpStream conn #= core.acceptNext();
+            if (conn == null) {
+                going = false;      // listener closed — the test is finished
+            } else {
+                // `dispatch` SPAWNS the connection fiber and returns at
+                // once (Server.dispatch), so accepts overlap and a scenario
+                // that needs two connections in flight still works.
+                //
+                // Do NOT wrap this call in a `try`: a try block is a scope
+                // frame, and a statement-position spawn is joined at its
+                // enclosing frame's exit. Wrapping it therefore joins each
+                // connection before the next accept — serializing them, and
+                // deadlocking any scenario whose first handler is waiting on
+                // something the second one delivers. Measured: it wedged
+                // `timeoutReleasesLease` until the deadline elapsed.
+                core.dispatch(#conn);
+                n = n + 1;
+            }
+        }
+        return n;
     }
 
     // ---- 1: known-length download ----------------------------------------
@@ -159,15 +200,15 @@ public final class DownloadTests {
             Server core = srv.server;
             int32 port = core.listener.boundPort();
 
-            Task<int32> svc = spawn acceptAndDispatch(core);
+            Task<int32> svc = spawn acceptLoop(core);
             Task<int32> t #= spawn dlKnown(port, "build/test/dl-known.bin", want);
             c.eqInt((int64) await t, 1,
                 "downloadTo: digest and re-hashed file both match the payload");
-            c.eqInt((int64) await svc, 1, "download rode one connection");
 
             boolean drained = core.drainInflight(Duration.ofSeconds(5));
             c.that(drained, "download connection drained");
             core.listener.close();
+            c.eqInt((int64) await svc, 1, "download rode one connection");
         }
     }
 
@@ -197,15 +238,15 @@ public final class DownloadTests {
             Server core = srv.server;
             int32 port = core.listener.boundPort();
 
-            Task<int32> svc = spawn acceptAndDispatch(core);
+            Task<int32> svc = spawn acceptLoop(core);
             Task<int32> t = spawn dlHop(port, "build/test/dl-hop.bin", want);
             c.eqInt((int64) await t, 1,
                 "downloadTo follows the redirect and streams only the final body");
-            c.eqInt((int64) await svc, 1, "redirect download rode one connection");
 
             boolean drained = core.drainInflight(Duration.ofSeconds(5));
             c.that(drained, "redirect-download connection drained");
             core.listener.close();
+            c.eqInt((int64) await svc, 1, "redirect download rode one connection");
         }
     }
 
@@ -300,14 +341,14 @@ public final class DownloadTests {
             Server core = srv.server;
             int32 port = core.listener.boundPort();
 
-            Task<int32> svc = spawn acceptAndDispatch(core);
+            Task<int32> svc = spawn acceptLoop(core);
             Task<int32> t = spawn dlMissing(port, "build/test/dl-missing.bin");
             c.eqInt((int64) await t, 1, "downloadTo raises HttpException on 404");
-            c.eqInt((int64) await svc, 1, "404 exchange served");
 
             boolean drained = core.drainInflight(Duration.ofSeconds(5));
             c.that(drained, "404 connection drained");
             core.listener.close();
+            c.eqInt((int64) await svc, 1, "404 exchange served");
         }
     }
 
@@ -348,15 +389,15 @@ public final class DownloadTests {
             Server core = srv.server;
             int32 port = core.listener.boundPort();
 
-            Task<int32> svc = spawn acceptAndDispatch(core);
+            Task<int32> svc = spawn acceptLoop(core);
             Task<int32> t = spawn upStreamed(port, want);
             c.eqInt((int64) await t, 1,
                 "streamed chunked upload arrives intact (digest + framing echo)");
-            c.eqInt((int64) await svc, 1, "upload rode one connection");
 
             boolean drained = core.drainInflight(Duration.ofSeconds(5));
             c.that(drained, "upload connection drained");
             core.listener.close();
+            c.eqInt((int64) await svc, 1, "upload rode one connection");
         }
     }
 }

@@ -135,16 +135,50 @@ public final class ClientPoolTests {
     }
 
     /**
-     * Accept one connection and dispatch it, on a FIBER — because
-     * `Server.dispatch`'s spawn is joined at its scope exit (structured
-     * concurrency), dispatch only returns when the connection fiber
-     * ends. A handler that parks mid-request would therefore wedge the
-     * caller: keep that join off the test's main thread.
+     * Accept and dispatch until the listener closes; returns how many
+     * connections were served.
+     *
+     * The single-accept version this replaces returned after ONE connection,
+     * so the moment a client dialled a second nobody accepted it and the
+     * client waited forever for a response that could not come — an infinite
+     * hang where a plain failure belonged. MEASURED on Windows: one client
+     * fiber cycling PARKED -> READY -> PARKED forever inside
+     * `Reactor.pollPark`, every carrier asleep — a healthy scheduler
+     * faithfully running a wait nothing would ever satisfy.
+     *
+     * Looping keeps the client unblocked; the returned COUNT keeps the
+     * guarantee. A suite that means "these legs rode one connection each"
+     * still asserts exactly that, and a regression reports the number
+     * instead of wedging the run.
+     *
+     * Await it only AFTER closing the listener: `acceptNext` answers NULL on
+     * a closed listener rather than raising, and that NULL is what ends the
+     * loop.
      */
-    public static async int32 acceptAndDispatch(Server core) {
-        TcpStream conn #= core.acceptNext();
-        core.dispatch(#conn);
-        return 1;
+    public static async int32 acceptLoop(Server core) {
+        int32 n = 0;
+        boolean going = true;
+        while (going) {
+            TcpStream conn #= core.acceptNext();
+            if (conn == null) {
+                going = false;      // listener closed — the test is finished
+            } else {
+                // `dispatch` SPAWNS the connection fiber and returns at
+                // once (Server.dispatch), so accepts overlap and a scenario
+                // that needs two connections in flight still works.
+                //
+                // Do NOT wrap this call in a `try`: a try block is a scope
+                // frame, and a statement-position spawn is joined at its
+                // enclosing frame's exit. Wrapping it therefore joins each
+                // connection before the next accept — serializing them, and
+                // deadlocking any scenario whose first handler is waiting on
+                // something the second one delivers. Measured: it wedged
+                // `timeoutReleasesLease` until the deadline elapsed.
+                core.dispatch(#conn);
+                n = n + 1;
+            }
+        }
+        return n;
     }
 
     /**
@@ -173,8 +207,8 @@ public final class ClientPoolTests {
             int32 port = core.listener.boundPort();
 
             // Dispatch on a fiber — the gated handler parks mid-request,
-            // and dispatch joins the connection fiber (see acceptAndDispatch).
-            Task<int32> svc = spawn acceptAndDispatch(core);
+            // and dispatch joins the connection fiber (see acceptLoop).
+            Task<int32> svc = spawn acceptLoop(core);
 
             scope {
                 HttpClient client #= heap HttpClient();
@@ -198,11 +232,11 @@ public final class ClientPoolTests {
             // The client (and its pool) dropped at the inner brace — the
             // pooled socket closed, so the connection fiber can end and
             // the dispatcher join resolves.
-            c.eqInt((int64) await svc, (int64) 1, "single accepted connection served both");
 
             boolean drained = core.drainInflight(Duration.ofSeconds(5));
             c.that(drained, "cap-test connection drains");
             core.listener.close();
+            c.eqInt((int64) await svc, (int64) 1, "single accepted connection served both");
         }
     }
 
