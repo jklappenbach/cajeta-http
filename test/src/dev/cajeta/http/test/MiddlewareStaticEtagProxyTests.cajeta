@@ -91,6 +91,20 @@ public final class MiddlewareStaticEtagProxyTests {
         }
     }
 
+    /**
+     * Whether the escaping symlink actually got built. The runtime's
+     * `__cajeta_path_symlink` is a hard `return -1` under `_WIN32`
+     * (MinGW ships no `symlink(2)`), so on Windows the escape vehicle
+     * cannot be created and there is nothing for the jail to catch —
+     * the request just 404s on a path that isn't there. That is a host
+     * capability gap, not a StaticFile defect, so the check is skipped
+     * rather than failed.
+     */
+    static boolean escapeLinkExists(String root) {
+        Path link #= Path.of(root + "/evil");
+        return link.exists();
+    }
+
     static void serving(Check c) {
         String root = "build/test/sfroot";
         MiddlewareStaticEtagProxyTests.setupRoot(root);
@@ -125,8 +139,13 @@ public final class MiddlewareStaticEtagProxyTests {
         HttpResponse rEnc #= app(HttpRequest.of("GET", "/%2e%2e/sfsecret.txt"));
         c.eqInt((int64) rEnc.statusCode(), 403, "serve: encoded traversal → 403");
 
-        HttpResponse rLink #= app(HttpRequest.of("GET", "/evil"));
-        c.eqInt((int64) rLink.statusCode(), 403, "serve: symlink escaping root → 403");
+        if (MiddlewareStaticEtagProxyTests.escapeLinkExists(root)) {
+            HttpResponse rLink #= app(HttpRequest.of("GET", "/evil"));
+            c.eqInt((int64) rLink.statusCode(), 403, "serve: symlink escaping root → 403");
+        } else {
+            c.skip("serve: symlink escaping root → 403",
+                   "this host cannot create symlinks (no symlink(2) on MinGW)");
+        }
 
         HttpResponse rPost #= app(HttpRequest.of("POST", "/a.txt"));
         c.eqInt((int64) rPost.statusCode(), 599, "serve: non-GET falls through to next");

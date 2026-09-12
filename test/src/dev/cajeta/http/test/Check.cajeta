@@ -5,10 +5,24 @@ package dev.cajeta.http.test;
 public final class Check {
     public int32 failures;
     public int32 passes;
+    public int32 skips;
 
     public Check() {
         this.failures = 0;
         this.passes = 0;
+        this.skips = 0;
+    }
+
+    /**
+     * A check this host cannot perform, because a capability the check
+     * needs is missing here rather than because the product is wrong.
+     * Counted apart from passes and printed, so a platform gap is never
+     * silently absorbed into a green run: the suite still passes, but the
+     * report says exactly what went unexercised and why.
+     */
+    public void skip(String label, String why) {
+        this.skips = this.skips + 1;
+        System.stdout.println("  SKIP {} — {}", label, why);
     }
 
     public void that(boolean cond, String label) {

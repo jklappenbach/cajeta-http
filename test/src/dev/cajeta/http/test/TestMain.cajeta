@@ -73,8 +73,8 @@ public final class TestMain {
         if (sel.want("SseClientLoopbackTests")) { SseClientLoopbackTests.run(c); }
 
         System.stdout.println("");
-        System.stdout.println("=== {} passed, {} failed ===",
-                              c.passes, c.failures);
+        System.stdout.println("=== {} passed, {} failed, {} skipped ===",
+                              c.passes, c.failures, c.skips);
         if (c.failures > 0) {
             return 1;
         }
