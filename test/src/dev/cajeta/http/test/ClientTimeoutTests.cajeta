@@ -200,7 +200,40 @@ public final class ClientTimeoutTests {
 
     // ---- 3: POST never auto-retries --------------------------------------
 
+    /**
+     * How long ONE refused dial costs on this host, with retries off. The
+     * refusal latency is an OS property, not a client property, and it is not
+     * small everywhere: measured, a dial to a dead loopback port reports
+     * refused in ~0.05 ms on Linux and ~2030 ms on Windows, which retransmits
+     * the SYN before answering. Returns -1 if the dial unexpectedly connects.
+     */
+    public static async int64 refusalFloorMs(int32 port) {
+        HttpClient probe #= heap HttpClient();
+        probe.retryPolicy(0, 0);
+        Uri uri #= Uri.builder()
+            .scheme("http").host("127.0.0.1").port(port).path("/probe")
+            .build();
+        HttpRequest req #= HttpRequest.fromUri("GET", uri);
+        Instant t0 = Clock.now();
+        try {
+            HttpResponse resp #= probe.send(uri, req);
+            return (int64) -1;
+        } catch (NetException e) {
+            Instant t1 = Clock.now();
+            return t1.toEpochMilli() - t0.toEpochMilli();
+        }
+    }
+
     public static async int32 postRefused(int32 port) {
+        // What this proves is that a POST does not auto-retry. A retry adds two
+        // 400 ms backoffs AND two more dials, so it cannot hide inside the
+        // floor — but the floor itself has to be measured, not assumed. The
+        // original fixed 350 ms bound only worked where refusal is instant; on
+        // Windows a single non-retried dial already costs ~2 s, so the test
+        // reported a retry that never happened.
+        int64 floorMs = await spawn refusalFloorMs(port);
+        if (floorMs < (int64) 0) { return -3; }     // something is listening
+
         HttpClient client #= heap HttpClient();
         client.retryPolicy(2, 400);            // a retry would cost >= 400ms
         Uri uri #= Uri.builder()
@@ -216,7 +249,7 @@ public final class ClientTimeoutTests {
         } catch (NetException e) {
             Instant t1 = Clock.now();
             int64 ms = t1.toEpochMilli() - t0.toEpochMilli();
-            if (ms >= (int64) 350) { return -2; }   // it slept — it retried
+            if (ms >= floorMs + (int64) 350) { return -2; }  // it slept — it retried
             return 1;
         }
     }
@@ -284,7 +317,8 @@ public final class ClientTimeoutTests {
     // ---- 5: a dial that raises frees its permit (1.4a gap) ---------------
 
     public static async int32 dialFailThenSucceed(int32 port,
-                                                  Channel<int32> bound) {
+                                                  Channel<int32> bound,
+                                                  Channel<int32> failed) {
         HttpClient client #= heap HttpClient();
         client.poolLimits(1, 60000);
         client.retryPolicy(0, 0);              // no auto-retry — raw raise
@@ -294,10 +328,18 @@ public final class ClientTimeoutTests {
         HttpRequest r1 #= HttpRequest.fromUri("GET", uri);
         try {
             HttpResponse a #= client.send(uri, r1);
+            failed.send(0);                     // unblock the driver either way
             return -1;                          // nothing listens yet
         } catch (NetException e) {
             // expected: refused. The single permit must be free again.
         }
+        // Tell the driver the dial is DONE. It used to sleep 60 ms and assume
+        // so, which is only true where refusal is instant: on Windows the dial
+        // takes ~2 s, so the driver bound a real server on that port while the
+        // SYN was still being retransmitted — and the "dead" dial then
+        // CONNECTED, which is the -1 above rather than the refusal this test
+        // is about.
+        failed.send(1);
         Optional<int32> ok #= bound.receive();   // wait for the server
         HttpRequest r2 #= HttpRequest.fromUri("GET", uri);
         HttpResponse b #= client.send(uri, r2);
@@ -308,9 +350,10 @@ public final class ClientTimeoutTests {
     static void dialRaiseFreesPermit(Check c) {
         int32 port = ClientTimeoutTests.deadPort();
         Channel<int32> bound = heap Channel<int32>(1);
+        Channel<int32> failed = heap Channel<int32>(1);
         scope {
-            Task<int32> t = spawn dialFailThenSucceed(port, bound);
-            Tasks.sleepMillis((int64) 60);      // let the dead dial fail
+            Task<int32> t = spawn dialFailThenSucceed(port, bound, failed);
+            Optional<int32> gone #= failed.receive();   // the dead dial has failed
 
             HttpServerBuilder b #= HttpServer.builder();
             b.bind("127.0.0.1:" + port);
