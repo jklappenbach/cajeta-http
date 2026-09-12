@@ -8,68 +8,69 @@ public final class TestMain {
     public static int32 main(String[] args) {
         System.stdout.println("=== cajeta-http tests ===");
         Check c = heap Check();
+        Shard sel #= heap Shard(args);
 
         String v = Http.version();
         c.eqStr(v, "0.2.0", "Http.version()");   // keep in lockstep with cajeta.json details.version
 
-        CoreTypeTests.run(c);
-        BodyTests.run(c);
-        FormTests.run(c);
-        StreamTests.run(c);
-        MultipartTests.run(c);
-        MessageBodyTests.run(c);
-        ClientPoolTests.run(c);
-        CodecTests.run(c);
-        ServerTests.run(c);
-        RouterTests.run(c);
-        MiddlewareTests.run(c);
-        MiddlewareBundleTests.run(c);
-        MiddlewareTimeoutCorsTests.run(c);
-        MiddlewareCompressionTests.run(c);
-        MiddlewareAuthRateTests.run(c);
-        MiddlewareStaticEtagProxyTests.run(c);
-        MiddlewareLoopbackTests.run(c);
-        ClientTests.run(c);
-        RedirectTests.run(c);
-        ClientTimeoutTests.run(c);
-        DownloadTests.run(c);
-        CodingTests.run(c);
-        ClientCodingTests.run(c);
-        ClientBuilderTests.run(c);
-        ClientCookieTests.run(c);
-        ServerDeadlineTests.run(c);
-        ServerSizeLimitTests.run(c);
-        StreamingCodingTests.run(c);
-        ServerTlsTests.run(c);
-        ServerStreamingTests.run(c);
-        ServerAcceptControlTests.run(c);
-        WsTests.run(c);
-        HpackPrimitiveTests.run(c);
-        HpackTableTests.run(c);
-        HpackDecoderTests.run(c);
-        HpackEncoderTests.run(c);
-        Http2FrameTests.run(c);
-        Http2FixedFrameTests.run(c);
-        Http2ContentFrameTests.run(c);
-        Http2SettingsTests.run(c);
-        Http2StreamTests.run(c);
-        Http2FlowTests.run(c);
-        Http2ConnTests.run(c);
-        Http2ConcurrencyTests.run(c);
-        Http2FlowParkTests.run(c);
-        Http2RstCancelTests.run(c);
-        Http2ClientTests.run(c);
-        Http2AlpnTests.run(c);
-        Http2PriorKnowledgeTests.run(c);
-        Http2PushTests.run(c);
-        WsPerMessageDeflateTests.run(c);
-        WsConnectTests.run(c);
-        WsHandlerTests.run(c);
-        SseTests.run(c);
-        SseServerTests.run(c);
-        SseServerLoopbackTests.run(c);
-        SseClientTests.run(c);
-        SseClientLoopbackTests.run(c);
+        if (sel.want("CoreTypeTests")) { CoreTypeTests.run(c); }
+        if (sel.want("BodyTests")) { BodyTests.run(c); }
+        if (sel.want("FormTests")) { FormTests.run(c); }
+        if (sel.want("StreamTests")) { StreamTests.run(c); }
+        if (sel.want("MultipartTests")) { MultipartTests.run(c); }
+        if (sel.want("MessageBodyTests")) { MessageBodyTests.run(c); }
+        if (sel.want("ClientPoolTests")) { ClientPoolTests.run(c); }
+        if (sel.want("CodecTests")) { CodecTests.run(c); }
+        if (sel.want("ServerTests")) { ServerTests.run(c); }
+        if (sel.want("RouterTests")) { RouterTests.run(c); }
+        if (sel.want("MiddlewareTests")) { MiddlewareTests.run(c); }
+        if (sel.want("MiddlewareBundleTests")) { MiddlewareBundleTests.run(c); }
+        if (sel.want("MiddlewareTimeoutCorsTests")) { MiddlewareTimeoutCorsTests.run(c); }
+        if (sel.want("MiddlewareCompressionTests")) { MiddlewareCompressionTests.run(c); }
+        if (sel.want("MiddlewareAuthRateTests")) { MiddlewareAuthRateTests.run(c); }
+        if (sel.want("MiddlewareStaticEtagProxyTests")) { MiddlewareStaticEtagProxyTests.run(c); }
+        if (sel.want("MiddlewareLoopbackTests")) { MiddlewareLoopbackTests.run(c); }
+        if (sel.want("ClientTests")) { ClientTests.run(c); }
+        if (sel.want("RedirectTests")) { RedirectTests.run(c); }
+        if (sel.want("ClientTimeoutTests")) { ClientTimeoutTests.run(c); }
+        if (sel.want("DownloadTests")) { DownloadTests.run(c); }
+        if (sel.want("CodingTests")) { CodingTests.run(c); }
+        if (sel.want("ClientCodingTests")) { ClientCodingTests.run(c); }
+        if (sel.want("ClientBuilderTests")) { ClientBuilderTests.run(c); }
+        if (sel.want("ClientCookieTests")) { ClientCookieTests.run(c); }
+        if (sel.want("ServerDeadlineTests")) { ServerDeadlineTests.run(c); }
+        if (sel.want("ServerSizeLimitTests")) { ServerSizeLimitTests.run(c); }
+        if (sel.want("StreamingCodingTests")) { StreamingCodingTests.run(c); }
+        if (sel.want("ServerTlsTests")) { ServerTlsTests.run(c); }
+        if (sel.want("ServerStreamingTests")) { ServerStreamingTests.run(c); }
+        if (sel.want("ServerAcceptControlTests")) { ServerAcceptControlTests.run(c); }
+        if (sel.want("WsTests")) { WsTests.run(c); }
+        if (sel.want("HpackPrimitiveTests")) { HpackPrimitiveTests.run(c); }
+        if (sel.want("HpackTableTests")) { HpackTableTests.run(c); }
+        if (sel.want("HpackDecoderTests")) { HpackDecoderTests.run(c); }
+        if (sel.want("HpackEncoderTests")) { HpackEncoderTests.run(c); }
+        if (sel.want("Http2FrameTests")) { Http2FrameTests.run(c); }
+        if (sel.want("Http2FixedFrameTests")) { Http2FixedFrameTests.run(c); }
+        if (sel.want("Http2ContentFrameTests")) { Http2ContentFrameTests.run(c); }
+        if (sel.want("Http2SettingsTests")) { Http2SettingsTests.run(c); }
+        if (sel.want("Http2StreamTests")) { Http2StreamTests.run(c); }
+        if (sel.want("Http2FlowTests")) { Http2FlowTests.run(c); }
+        if (sel.want("Http2ConnTests")) { Http2ConnTests.run(c); }
+        if (sel.want("Http2ConcurrencyTests")) { Http2ConcurrencyTests.run(c); }
+        if (sel.want("Http2FlowParkTests")) { Http2FlowParkTests.run(c); }
+        if (sel.want("Http2RstCancelTests")) { Http2RstCancelTests.run(c); }
+        if (sel.want("Http2ClientTests")) { Http2ClientTests.run(c); }
+        if (sel.want("Http2AlpnTests")) { Http2AlpnTests.run(c); }
+        if (sel.want("Http2PriorKnowledgeTests")) { Http2PriorKnowledgeTests.run(c); }
+        if (sel.want("Http2PushTests")) { Http2PushTests.run(c); }
+        if (sel.want("WsPerMessageDeflateTests")) { WsPerMessageDeflateTests.run(c); }
+        if (sel.want("WsConnectTests")) { WsConnectTests.run(c); }
+        if (sel.want("WsHandlerTests")) { WsHandlerTests.run(c); }
+        if (sel.want("SseTests")) { SseTests.run(c); }
+        if (sel.want("SseServerTests")) { SseServerTests.run(c); }
+        if (sel.want("SseServerLoopbackTests")) { SseServerLoopbackTests.run(c); }
+        if (sel.want("SseClientTests")) { SseClientTests.run(c); }
+        if (sel.want("SseClientLoopbackTests")) { SseClientLoopbackTests.run(c); }
 
         System.stdout.println("");
         System.stdout.println("=== {} passed, {} failed ===",

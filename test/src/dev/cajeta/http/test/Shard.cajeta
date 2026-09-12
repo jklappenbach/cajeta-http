@@ -1,0 +1,87 @@
+package dev.cajeta.http.test;
+
+/**
+ * Suite selection for the test binary.
+ *
+ * The suite list in [`TestMain`](TestMain.cajeta) is a fixed sequence of
+ * calls, and the whole battery is network-bound — most sections bind a live
+ * server and some deliberately wait out idle/timeout windows — so a single
+ * process serialises work that has no reason to be serial. This lets the same
+ * binary run a slice:
+ *
+ *     http-tests                  every suite (unchanged default)
+ *     http-tests --shard=0/4      suites 0,4,8,...  — run 4 of these in parallel
+ *     http-tests --only=ClientPool  just the suites whose name contains that
+ *
+ * Servers bind 127.0.0.1:0, so parallel shards take ephemeral ports and do not
+ * collide.
+ *
+ * **Keep the width modest.** Several suites assert on wall-clock deadlines
+ * (`ServerDeadlineTests`' request budget, the h2 ALPN exchange), and running
+ * four shards on one box starves them into spurious failures — measured at
+ * roughly 1 bad run in 24 shard-runs at width 4, each time a different
+ * deadline-sensitive check, and never reproducible serially or with a shard
+ * running alone. A red shard is worth re-running on its own before it is
+ * believed.
+ */
+public final class Shard {
+    int32 index;      // this shard's ordinal, or -1 when not sharding
+    int32 total;      // shard count, or 0 when not sharding
+    String only;      // substring filter, or null
+    int32 seen;       // suites considered so far — drives the round-robin
+
+    public Shard(String[] args) {
+        this.index = -1;
+        this.total = 0;
+        this.only = null;
+        this.seen = 0;
+        int32 i = 0;
+        while (i < args.count()) {
+            String a = args[i];
+            if (a.startsWith("--shard=")) {
+                String spec #= a.substring(8, a.byteLength());
+                int64 slash = spec.indexOf("/");
+                if (slash > 0L) {
+                    String li #= spec.substring(0, (int32) slash);
+                    String ln #= spec.substring((int32) slash + 1, spec.byteLength());
+                    this.index = Shard.digits(li);
+                    this.total = Shard.digits(ln);
+                }
+            }
+            if (a.startsWith("--only=")) {
+                this.only #= a.substring(7, a.byteLength());
+            }
+            i = i + 1;
+        }
+    }
+
+    /** Parse a small non-negative decimal; -1 on anything unexpected. */
+    static int32 digits(String s) {
+        int32 n = 0;
+        int32 i = 0;
+        int32 len = s.byteLength();
+        if (len == 0) { return -1; }
+        while (i < len) {
+            int8 ch = s.byteAt(i);
+            if (ch < (int8) 48 || ch > (int8) 57) { return -1; }
+            n = n * 10 + (int32) (ch - (int8) 48);
+            i = i + 1;
+        }
+        return n;
+    }
+
+    /** True when `name` belongs to this shard (and matches `--only`). */
+    public boolean want(String name) {
+        if (this.only != null && !name.contains(this.only)) {
+            this.seen = this.seen + 1;
+            return false;
+        }
+        if (this.total <= 0) {
+            this.seen = this.seen + 1;
+            return true;
+        }
+        int32 mine = this.seen % this.total;
+        this.seen = this.seen + 1;
+        return mine == this.index;
+    }
+}
