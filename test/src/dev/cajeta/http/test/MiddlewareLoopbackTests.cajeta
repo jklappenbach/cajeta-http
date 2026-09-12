@@ -98,6 +98,11 @@ public final class MiddlewareLoopbackTests {
             HttpResponse resp #= client.get(MiddlewareLoopbackTests.url(port, path));
             return resp.statusCode();
         } catch (Exception e) {
+            // A bare sentinel reported that SOMETHING threw and destroyed
+            // the only evidence of what. Print the cause: these paths
+            // fail intermittently on Windows and the message is the
+            // whole diagnosis.
+            System.stdout.println("  (cStatus threw: {})", e.getMessage());
             return -3;
         }
     }
@@ -110,6 +115,11 @@ public final class MiddlewareLoopbackTests {
             HttpResponse resp #= client.get(MiddlewareLoopbackTests.url(port, path));
             return resp.statusCode();
         } catch (Exception e) {
+            // A bare sentinel reported that SOMETHING threw and destroyed
+            // the only evidence of what. Print the cause: these paths
+            // fail intermittently on Windows and the message is the
+            // whole diagnosis.
+            System.stdout.println("  (cStatusHdr threw: {})", e.getMessage());
             return -3;
         }
     }
@@ -124,6 +134,11 @@ public final class MiddlewareLoopbackTests {
             HttpResponse resp #= client.get(MiddlewareLoopbackTests.url(port, path));
             return resp.statusCode();
         } catch (Exception e) {
+            // A bare sentinel reported that SOMETHING threw and destroyed
+            // the only evidence of what. Print the cause: these paths
+            // fail intermittently on Windows and the message is the
+            // whole diagnosis.
+            System.stdout.println("  (cStatusAuthXff threw: {})", e.getMessage());
             return -3;
         }
     }
@@ -140,6 +155,11 @@ public final class MiddlewareLoopbackTests {
             }
             return 0;
         } catch (Exception e) {
+            // A bare sentinel reported that SOMETHING threw and destroyed
+            // the only evidence of what. Print the cause: these paths
+            // fail intermittently on Windows and the message is the
+            // whole diagnosis.
+            System.stdout.println("  (cBodyEq threw: {})", e.getMessage());
             return -3;
         }
     }
@@ -156,6 +176,11 @@ public final class MiddlewareLoopbackTests {
             }
             return 0;
         } catch (Exception e) {
+            // A bare sentinel reported that SOMETHING threw and destroyed
+            // the only evidence of what. Print the cause: these paths
+            // fail intermittently on Windows and the message is the
+            // whole diagnosis.
+            System.stdout.println("  (cHdrPresent threw: {})", e.getMessage());
             return -3;
         }
     }
@@ -176,6 +201,11 @@ public final class MiddlewareLoopbackTests {
             HttpResponse r2 #= c2.get(MiddlewareLoopbackTests.url(port, path));
             return r2.statusCode();
         } catch (Exception e) {
+            // A bare sentinel reported that SOMETHING threw and destroyed
+            // the only evidence of what. Print the cause: these paths
+            // fail intermittently on Windows and the message is the
+            // whole diagnosis.
+            System.stdout.println("  (cEtagFlow threw: {})", e.getMessage());
             return -3;
         }
     }
@@ -196,6 +226,11 @@ public final class MiddlewareLoopbackTests {
             }
             return 0;
         } catch (Exception e) {
+            // A bare sentinel reported that SOMETHING threw and destroyed
+            // the only evidence of what. Print the cause: these paths
+            // fail intermittently on Windows and the message is the
+            // whole diagnosis.
+            System.stdout.println("  (cPreflight threw: {})", e.getMessage());
             return -3;
         }
     }
@@ -220,6 +255,11 @@ public final class MiddlewareLoopbackTests {
             }
             return 0;
         } catch (Exception e) {
+            // A bare sentinel reported that SOMETHING threw and destroyed
+            // the only evidence of what. Print the cause: these paths
+            // fail intermittently on Windows and the message is the
+            // whole diagnosis.
+            System.stdout.println("  (cPostGzip threw: {})", e.getMessage());
             return -3;
         }
     }

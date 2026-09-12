@@ -129,6 +129,11 @@ public final class MiddlewareBundleTests {
             HttpResponse resp #= client.get("http://127.0.0.1:" + port + path);
             return resp.statusCode();
         } catch (Exception e) {
+            // A bare sentinel reported that SOMETHING threw and destroyed
+            // the only evidence of what. Print the cause: these paths
+            // fail intermittently on Windows and the message is the
+            // whole diagnosis.
+            System.stdout.println("  (statusOf threw: {})", e.getMessage());
             return -3;
         }
     }
@@ -145,6 +150,11 @@ public final class MiddlewareBundleTests {
             }
             return 0;
         } catch (Exception e) {
+            // A bare sentinel reported that SOMETHING threw and destroyed
+            // the only evidence of what. Print the cause: these paths
+            // fail intermittently on Windows and the message is the
+            // whole diagnosis.
+            System.stdout.println("  (hasGenId threw: {})", e.getMessage());
             return -3;
         }
     }
