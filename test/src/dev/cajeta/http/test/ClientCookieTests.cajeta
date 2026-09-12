@@ -96,11 +96,44 @@ public final class ClientCookieTests {
         return HttpResponse.notFound();
     }
 
-    /** Accept one connection and dispatch it (local copy — bare-spawn rule). */
-    public static async int32 acceptAndDispatch(Server core) {
-        TcpStream conn #= core.acceptNext();
-        core.dispatch(#conn);
-        return 1;
+    /**
+     * Accept and dispatch until the listener closes; returns how many
+     * connections were served.
+     *
+     * The single-accept version this replaces turned any change in connection
+     * REUSE into an infinite hang rather than a failure. It returned after one
+     * connection, so the moment a client dialled a second, nobody accepted it
+     * and the client waited forever for a response that could not come.
+     * MEASURED on Windows: one client fiber cycling PARKED -> READY -> PARKED
+     * forever inside `Reactor.pollPark`, every carrier asleep, the parked list
+     * and timer wheel alternately empty — a healthy scheduler faithfully
+     * running a wait that nothing would ever satisfy. Four suites wedged this
+     * way, all sharing this shape.
+     *
+     * Looping keeps the client unblocked; the COUNT keeps the guarantee. A
+     * suite that means "these legs rode one connection" still asserts exactly
+     * that, and a regression reports the number instead of hanging the run.
+     */
+    public static async int32 acceptLoop(Server core) {
+        int32 n = 0;
+        boolean going = true;
+        while (going) {
+            // `acceptNext` answers NULL on a closed listener rather than
+            // raising, exactly as `Server.serve` documents; catching an
+            // exception here instead handed `dispatch` a null and crashed.
+            TcpStream conn #= core.acceptNext();
+            if (conn == null) {
+                going = false;      // listener closed — the test is finished
+            } else {
+                // `dispatch` runs the connection to completion before it
+                // returns, which is what these suites want: the client drives
+                // its legs sequentially over one keep-alive connection, and a
+                // second dial is accepted only once the first is finished.
+                core.dispatch(#conn);
+                n = n + 1;
+            }
+        }
+        return n;
     }
 
     static #String respText(HttpResponse resp) {
@@ -245,9 +278,13 @@ public final class ClientCookieTests {
             HttpServer srv #= ClientCookieTests.cookieServer();
             Server core = srv.server;
             int32 port = core.listener.boundPort();
-            Task<int32> s1 = spawn acceptAndDispatch(core);
+            Task<int32> s1 = spawn acceptLoop(core);
             Task<int32> t1 = spawn noJar(port);
-            c.eqInt((int64) await t1, 1, "no jar: nothing echoed back");
+            c.eqInt((int64) await t1, 1,
+                    "no jar: nothing echoed back");
+            // Unblock the accept loop only once the client is done, so a
+            // second dial is SERVED and then counted rather than hanging.
+            core.listener.close();
             c.eqInt((int64) await s1, 1, "no-jar pair rode one connection");
         }
     }
@@ -257,10 +294,13 @@ public final class ClientCookieTests {
             HttpServer srv #= ClientCookieTests.cookieServer();
             Server core = srv.server;
             int32 port = core.listener.boundPort();
-            Task<int32> s1 = spawn acceptAndDispatch(core);
+            Task<int32> s1 = spawn acceptLoop(core);
             Task<int32> t1 = spawn roundTrip(port);
             c.eqInt((int64) await t1, 1,
                     "jar returns stored cookies across exchanges");
+            // Unblock the accept loop only once the client is done, so a
+            // second dial is SERVED and then counted rather than hanging.
+            core.listener.close();
             c.eqInt((int64) await s1, 1, "round-trip rode one connection");
         }
     }
@@ -270,9 +310,13 @@ public final class ClientCookieTests {
             HttpServer srv #= ClientCookieTests.cookieServer();
             Server core = srv.server;
             int32 port = core.listener.boundPort();
-            Task<int32> s1 = spawn acceptAndDispatch(core);
+            Task<int32> s1 = spawn acceptLoop(core);
             Task<int32> t1 = spawn pathScoped(port);
-            c.eqInt((int64) await t1, 1, "Path attribute scopes the send");
+            c.eqInt((int64) await t1, 1,
+                    "Path attribute scopes the send");
+            // Unblock the accept loop only once the client is done, so a
+            // second dial is SERVED and then counted rather than hanging.
+            core.listener.close();
             c.eqInt((int64) await s1, 1, "path-scope legs rode one connection");
         }
     }
@@ -282,10 +326,13 @@ public final class ClientCookieTests {
             HttpServer srv #= ClientCookieTests.cookieServer();
             Server core = srv.server;
             int32 port = core.listener.boundPort();
-            Task<int32> s1 = spawn acceptAndDispatch(core);
+            Task<int32> s1 = spawn acceptLoop(core);
             Task<int32> t1 = spawn expiryDrops(port);
             c.eqInt((int64) await t1, 1,
                     "Max-Age=0 deletes; Expires stores future, drops past");
+            // Unblock the accept loop only once the client is done, so a
+            // second dial is SERVED and then counted rather than hanging.
+            core.listener.close();
             c.eqInt((int64) await s1, 1, "expiry legs rode one connection");
         }
     }
@@ -295,10 +342,13 @@ public final class ClientCookieTests {
             HttpServer srv #= ClientCookieTests.cookieServer();
             Server core = srv.server;
             int32 port = core.listener.boundPort();
-            Task<int32> s1 = spawn acceptAndDispatch(core);
+            Task<int32> s1 = spawn acceptLoop(core);
             Task<int32> t1 = spawn secureAndForeign(port);
             c.eqInt((int64) await t1, 1,
                     "Secure withheld over http; foreign Domain rejected");
+            // Unblock the accept loop only once the client is done, so a
+            // second dial is SERVED and then counted rather than hanging.
+            core.listener.close();
             c.eqInt((int64) await s1, 1, "withheld legs rode one connection");
         }
     }
