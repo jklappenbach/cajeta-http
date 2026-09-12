@@ -1,6 +1,7 @@
 package dev.cajeta.http.middleware;
 
 import cajeta.lang.String;
+import cajeta.lang.System;
 import cajeta.io.file.File;
 import cajeta.io.file.Path;
 import dev.cajeta.http.HttpRequest;
@@ -158,7 +159,22 @@ public class StaticFile {
         }
     }
 
-    /** True iff `file` is `root` itself or a path strictly beneath it. */
+    /**
+     * True iff `file` is `root` itself or a path strictly beneath it.
+     *
+     * Both operands are CANONICAL, so the separator to look for is the one
+     * `Path.canonical()` emits — and that is platform-dependent. On Windows it
+     * returns pure-backslash paths (measured: `Path.of("src/probe").canonical()`
+     * is `C:\...\src\probe`, zero forward slashes), so testing only `/` made
+     * this return false for EVERY real file and the middleware answered 403 to
+     * every request. Static serving was entirely non-functional there.
+     *
+     * Accepting both bytes unconditionally would fix Windows and open a hole on
+     * POSIX, where `\` is an ordinary filename character: with root
+     * `/srv/www`, a sibling file canonicalizing to `/srv/www\x` would pass the
+     * prefix test and then be read as "inside the jail". So the separator is
+     * chosen per host instead.
+     */
     static boolean underRoot(String file, String root) {
         if (!file.startsWith(root)) {
             return false;
@@ -167,7 +183,22 @@ public class StaticFile {
         if (file.byteLength() == rn) {
             return true;
         }
-        return file.byteAt(rn) == (int8) 47;
+        return file.byteAt(rn) == StaticFile.pathSeparator();
+    }
+
+    /**
+     * The byte `Path.canonical()` separates components with on this host —
+     * `\` on Windows, `/` everywhere else. The runtime publishes the host
+     * triple as `cajeta.host.triple` and fixes it to `x86_64-w64-mingw32`
+     * there; that is the platform signal already used elsewhere in the
+     * toolchain, and it needs no new runtime surface.
+     */
+    static int8 pathSeparator() {
+        String triple = System.property.get("cajeta.host.triple");
+        if (triple != null && triple.contains("mingw32")) {
+            return (int8) 92;
+        }
+        return (int8) 47;
     }
 
     /** Media type for the file's extension, or `application/octet-stream`. */
