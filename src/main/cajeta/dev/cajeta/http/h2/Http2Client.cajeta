@@ -63,6 +63,11 @@ public final class Http2Client {
         boolean sawHeaders = false;
         HpackFieldList respFields = null;
         boolean done = false;
+        // Receive-window octets consumed since the last WINDOW_UPDATE, held
+        // separately for the connection and the stream because §6.9 charges
+        // every DATA frame against both.
+        int32 pendConn = 0;
+        int32 pendStream = 0;
 
         try {
         while (!done) {
@@ -112,7 +117,22 @@ public final class Http2Client {
                         bodyLen = bodyLen + 1;
                         j = j + 1;
                     }
-                    if ((flags & Http2.FLAG_END_STREAM) != 0) {
+                    // §6.9.1 charges the WHOLE frame length, padding
+                    // included, not just the octets we kept.
+                    boolean last = (flags & Http2.FLAG_END_STREAM) != 0;
+                    pendConn = pendConn + len;
+                    pendStream = pendStream + len;
+                    if (pendConn >= Http2Client.WINDOW_REPLENISH) {
+                        Http2Client.sendWindowUpdate(writer, 0, pendConn);
+                        pendConn = 0;
+                    }
+                    // Nothing more will arrive on a stream that just ended, so
+                    // crediting it back would be a frame the peer discards.
+                    if (!last && pendStream >= Http2Client.WINDOW_REPLENISH) {
+                        Http2Client.sendWindowUpdate(writer, sid, pendStream);
+                        pendStream = 0;
+                    }
+                    if (last) {
                         done = true;
                     }
                 } else if (type == Http2.FRAME_PUSH_PROMISE) {
@@ -144,6 +164,31 @@ public final class Http2Client {
             resp.body(body, bodyLen);
         }
         return #resp;
+    }
+
+    /**
+     * Half the default receive window. Replenishing on every DATA frame would
+     * be one control frame per data frame; waiting for the window to empty
+     * stalls the peer. Half is the usual compromise.
+     */
+    static final int32 WINDOW_REPLENISH = 32768;
+
+    /**
+     * Give the peer back `inc` octets of receive window (RFC 9113 §6.9).
+     * `streamId` 0 is the connection-level window.
+     *
+     * Without this a response larger than the initial window stops dead: the
+     * peer spends its credit, stops sending because it correctly has none
+     * left, and both ends sit idle forever. Measured against a 351 MB GitHub
+     * release asset, which stopped after one 65535-octet window.
+     */
+    static void sendWindowUpdate(AsyncWriter writer, int32 streamId,
+                                 int32 inc) {
+        Http2FrameWriter fw = heap Http2FrameWriter();
+        Http2Frames.writeWindowUpdate(fw, streamId, inc);
+        int8[] b #= fw.toBytes();
+        writer.writeAll(b, 0, (int32) b.count());
+        writer.flush();
     }
 
     static void sendSettingsAck(AsyncWriter writer) {
