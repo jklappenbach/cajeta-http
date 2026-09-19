@@ -6,6 +6,7 @@ import cajeta.io.net.AsyncWriter;
 import cajeta.io.net.NetException;
 import cajeta.io.net.tls.TlsException;
 import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.server.ServerLimits;
 import dev.cajeta.http.HttpResponse;
 
 /**
@@ -50,6 +51,12 @@ public final class Http2Connection {
     // Receive-window octets consumed since the last connection-level
     // WINDOW_UPDATE was sent.
     int32 pendConnRecv;
+    // The largest request body this connection will accumulate. h1 has
+    // honoured `ServerLimits.maxBodyBytes` all along; h2 did not, and only
+    // survived because it never granted receive-window credit, so an upload
+    // stalled at the initial 65535 octets. Granting credit without this cap
+    // turns that accidental stall into an unbounded grow.
+    int64 maxBody;
     Http2StreamTable streams;
     HeaderBlockAssembler assembler;
 
@@ -81,6 +88,7 @@ public final class Http2Connection {
         this.local.maxConcurrentStreams = (int64) 100;
         this.remote = heap Http2Settings();
         this.pendConnRecv = 0;
+        this.maxBody = ServerLimits.DEFAULT_MAX_BODY_BYTES;
         this.flow = heap Http2FlowController(Http2.DEFAULT_INITIAL_WINDOW_SIZE,
                                              Http2.DEFAULT_INITIAL_WINDOW_SIZE);
         this.streams = heap Http2StreamTable();
@@ -100,7 +108,16 @@ public final class Http2Connection {
     /** Serve one HTTP/2 connection to completion (server role). */
     public static void serve(AsyncReader reader, AsyncWriter writer,
                              (HttpRequest) -> #HttpResponse handler) {
+        Http2Connection.serve(reader, writer, #handler,
+                              ServerLimits.DEFAULT_MAX_BODY_BYTES);
+    }
+
+    /** As {@link #serve}, with the caller's body cap (`ServerLimits`). */
+    public static void serve(AsyncReader reader, AsyncWriter writer,
+                             (HttpRequest) -> #HttpResponse handler,
+                             int64 maxBodyBytes) {
         Http2Connection c = heap Http2Connection(reader, writer, #handler);   // forward the title that arrived (cajeta ownership 5.13)
+        c.maxBody = maxBodyBytes;
         try {
             c.run();
         } catch (Http2Exception e) {
@@ -311,8 +328,15 @@ public final class Http2Connection {
         }
         this.streams.recvData(sid, endStream);
         this.flow.afterReceive(len);
-        this.replenish(sid, len, endStream);
         Http2Payload reg #= Http2ContentFrames.parseData(payload, len, flags, sid);
+        // Check BEFORE crediting the peer: granting window for octets we are
+        // about to refuse invites more of them.
+        if ((int64) this.curBodyLen + (int64) reg.length > this.maxBody) {
+            throw heap Http2Exception(
+                "request body exceeds maxBodyBytes (" + this.maxBody + ")",
+                Http2.ENHANCE_YOUR_CALM);
+        }
+        this.replenish(sid, len, endStream);
         this.appendBody(payload, reg.offset, reg.length);
         if (endStream) {
             HttpRequest req #= this.curRequest;

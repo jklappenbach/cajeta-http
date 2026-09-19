@@ -139,6 +139,7 @@ public final class Http2ConnTests {
         // Read frames until the response stream ends.
         HpackDecoder dec = heap HpackDecoder(Http2.DEFAULT_HEADER_TABLE_SIZE);
         int32 status = -1;
+        Http2ConnTests.windowUpdates = 0;
         int8[] body = heap int8[256];
         int32 bodyLen = 0;
         int32 bodyCap = 256;
@@ -159,7 +160,9 @@ public final class Http2ConnTests {
             if (len > 0) {
                 Http2ConnTests.readExactWithin(reader, pl, len, 4000);
             }
-            if (type == Http2.FRAME_SETTINGS) {
+            if (type == Http2.FRAME_WINDOW_UPDATE) {
+                Http2ConnTests.windowUpdates = Http2ConnTests.windowUpdates + 1;
+            } else if (type == Http2.FRAME_SETTINGS) {
                 if ((flags & Http2.FLAG_ACK) == 0) {
                     Http2FrameWriter afw = heap Http2FrameWriter();
                     Http2Frames.writeSettingsAck(afw);
@@ -227,6 +230,120 @@ public final class Http2ConnTests {
         c.that(bodyOk, "h2 exchange body");
     }
 
+    /** WINDOW_UPDATE frames the server sent during the last exchange. */
+    static int32 windowUpdates;
+
+    /**
+     * A body larger than one receive window, sent as several DATA frames.
+     *
+     * The server must hand receive-window credit back as it consumes them. It
+     * did not until 2026-09-19: `writeWindowUpdate` had no callers on either
+     * side, so a real peer that respects flow control stopped after 65535
+     * octets and both ends waited forever. This raw client ignores the window,
+     * so it cannot reproduce that stall — what it pins is that the server now
+     * EMITS the frames, which is the half that was missing.
+     */
+    static void largeBody(Check c) {
+        scope {
+            IpAddress la #= IpAddress.loopbackV4();
+            SocketAddress bindAddr #= SocketAddress.of(#la, 0);
+            TcpListener listener #= TcpListener.bind(bindAddr);
+            int32 port = listener.boundPort();
+            Task<int32> sv = spawn h2Server(#listener);
+            Http2ConnTests.bigClient(c, port);
+            int32 r = await sv;
+        }
+    }
+
+    // 8 frames of 16384 = 131072 octets, two full default windows, and each
+    // frame is within SETTINGS_MAX_FRAME_SIZE.
+    static final int32 BIG_FRAME = 16384;
+    static final int32 BIG_FRAMES = 8;
+
+    static void bigClient(Check c, int32 port) {
+        IpAddress ca #= IpAddress.loopbackV4();
+        SocketAddress connAddr #= SocketAddress.of(#ca, port);
+        TcpStream sock #= TcpStream.connectAsync(#connAddr);
+        AsyncReader reader = heap AsyncReader(sock);
+        AsyncWriter writer = heap AsyncWriter(sock);
+
+        int8[] pf #= Http2.preface();
+        writer.writeAll(pf, 0, 24);
+
+        Http2FrameWriter fw = heap Http2FrameWriter();
+        Http2SettingsList empty = heap Http2SettingsList();
+        Http2Frames.writeSettings(fw, empty);
+
+        HpackEncoder enc = heap HpackEncoder(Http2.DEFAULT_HEADER_TABLE_SIZE, true);
+        HpackFieldList fl = heap HpackFieldList();
+        // A SMALL-response path on purpose. Echoing 131 KB back would make the
+        // server spend its own send window and park for a WINDOW_UPDATE this
+        // raw client never sends, since it has the very defect being fixed.
+        // The RECEIVE half is what this test pins.
+        fl.put(Http2ConnTests.own(":method"), Http2ConnTests.own("POST"));
+        fl.put(Http2ConnTests.own(":path"), Http2ConnTests.own("/hello"));
+        fl.put(Http2ConnTests.own(":scheme"), Http2ConnTests.own("http"));
+        fl.put(Http2ConnTests.own(":authority"), Http2ConnTests.own("127.0.0.1"));
+        int8[] block #= enc.encode(fl);
+        Http2ContentFrames.writeHeaders(fw, 1, block, (int32) block.count(),
+                                        false, true, 0);
+        int8[] chunk = heap int8[Http2ConnTests.BIG_FRAME];
+        int32 i = 0;
+        while (i < Http2ConnTests.BIG_FRAME) {
+            chunk[i] = (int8) 0x7a;
+            i = i + 1;
+        }
+        int32 f = 0;
+        while (f < Http2ConnTests.BIG_FRAMES) {
+            boolean last = f == Http2ConnTests.BIG_FRAMES - 1;
+            Http2ContentFrames.writeData(fw, 1, chunk,
+                                         Http2ConnTests.BIG_FRAME, last, 0);
+            f = f + 1;
+        }
+        int8[] out #= fw.toBytes();
+        writer.writeAll(out, 0, (int32) out.count());
+        writer.flush();
+
+        Http2ConnTests.windowUpdates = 0;
+        boolean sawEnd = false;
+        boolean timedOut = false;
+        while (!sawEnd && !timedOut) {
+            int8[] hdr = heap int8[9];
+            if (!Http2ConnTests.readExactWithin(reader, hdr, 9, 6000)) {
+                timedOut = true;
+            } else {
+                Http2FrameHeader h #= Http2FrameHeader(hdr);
+                int32 type = h.typeCode();
+                int32 flags = h.flags();
+                int32 len = h.length();
+                int8[] pl = heap int8[len];
+                if (len > 0) {
+                    Http2ConnTests.readExactWithin(reader, pl, len, 6000);
+                }
+                if (type == Http2.FRAME_WINDOW_UPDATE) {
+                    Http2ConnTests.windowUpdates =
+                        Http2ConnTests.windowUpdates + 1;
+                } else if (type == Http2.FRAME_SETTINGS) {
+                    if ((flags & Http2.FLAG_ACK) == 0) {
+                        Http2FrameWriter afw = heap Http2FrameWriter();
+                        Http2Frames.writeSettingsAck(afw);
+                        int8[] ab #= afw.toBytes();
+                        writer.writeAll(ab, 0, (int32) ab.count());
+                        writer.flush();
+                    }
+                } else if (type == Http2.FRAME_DATA) {
+                    if ((flags & Http2.FLAG_END_STREAM) != 0) { sawEnd = true; }
+                } else if (type == Http2.FRAME_GOAWAY) {
+                    sawEnd = true;
+                }
+            }
+        }
+        sock.close();
+        c.that(!timedOut, "h2 large body: exchange completed");
+        c.that(Http2ConnTests.windowUpdates > 0,
+               "h2 large body: server returned receive-window credit");
+    }
+
     static void oneExchange(Check c, String method, String path, int8[] reqBody,
                             int32 reqBodyLen, boolean hasReqBody, int32 expStatus,
                             String expBody) {
@@ -252,5 +369,7 @@ public final class Http2ConnTests {
                                    "ping");
         Http2ConnTests.oneExchange(c, "GET", "/nope", none, 0, false, 404,
                                    "nope");
+        System.stdout.println("-- h2 conn: body past one window --");
+        Http2ConnTests.largeBody(c);
     }
 }

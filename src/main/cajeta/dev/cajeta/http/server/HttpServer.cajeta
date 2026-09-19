@@ -534,7 +534,7 @@ public class HttpServer {
         if (HttpServer.alpnIsH2(tls)) {
             AsyncReader reader = heap AsyncReader(tls);
             AsyncWriter writer = heap AsyncWriter(tls);
-            Http2Connection.serve(reader, writer, handler);
+            Http2Connection.serve(reader, writer, handler, limits.maxBodyBytes);
             tls.close();
             return 1;
         }
@@ -873,7 +873,7 @@ public class HttpServer {
             reader.stage(got, n);
         }
         if (n == 24) {
-            Http2Connection.serve(reader, writer, handler);
+            Http2Connection.serve(reader, writer, handler, limits.maxBodyBytes);
         } else {
             HttpServer.serveLoopWithLimits(handler, parseLimits, limits,
                                            reader, writer);
