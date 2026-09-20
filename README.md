@@ -25,7 +25,7 @@ cajeta-http provides the **imperative HTTP engine** (`HttpClient`, `HttpServer`,
 `Router`, `WebSocket`). Annotation-driven endpoints and automatic
 serialization-to-object-model are **primavera's** job, layered on top.
 
-## Status — v0.2.0
+## Status — v0.3.0
 
 | Capability | State |
 |---|---|
@@ -35,6 +35,15 @@ serialization-to-object-model are **primavera's** job, layered on top.
 | Middleware (logging, CORS, auth, compression, rate-limit, …) | ✓ (`dev.cajeta.http.middleware`) |
 | Server-Sent Events | ✓ (`dev.cajeta.http.sse`) client + server |
 | HTTP/3 over QUIC (UDP) | not planned for this line — requires QUIC in `cajeta.io.net`; intentionally not advertised |
+
+v0.3.0 is the long-connection release. HTTP/2 now returns receive-window credit,
+so a transfer is no longer capped at one window per round trip. Request bodies
+are capped on h2 as h1 already capped them. Per-request state is reclaimed, so a
+connection can serve without growing. HTTPS reads honour their deadline.
+
+One known gap. Reclaiming the Task behind each request's handler fiber needs a
+compiler newer than the pinned v0.28.0, so against that toolchain a connection
+still retains one allocation per request served.
 
 See [`docs/http-spec.md`](docs/http-spec.md) for the design,
 [`plan/http-plan.md`](plan/http-plan.md) for the build order, and
