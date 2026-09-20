@@ -38,7 +38,13 @@ public final class Http2Client {
         // client does not surface pushes, so a promise is a protocol violation.
         Http2SettingsList st = heap Http2SettingsList();
         st.add(Http2.SETTINGS_ENABLE_PUSH, (int64) 0);
+        st.add(Http2.SETTINGS_INITIAL_WINDOW_SIZE,
+               (int64) Http2Client.RECV_WINDOW);
         Http2Frames.writeSettings(fw, st);
+        // SETTINGS sizes streams only. The connection window moves by
+        // WINDOW_UPDATE alone (RFC 9113 6.9.2).
+        Http2Frames.writeWindowUpdate(fw, 0,
+                Http2Client.RECV_WINDOW - Http2.DEFAULT_INITIAL_WINDOW_SIZE);
 
         HpackEncoder enc = heap HpackEncoder(Http2.DEFAULT_HEADER_TABLE_SIZE, true);
         HpackFieldList fl #= Http2Requests.requestFields(req, scheme, authority);
@@ -100,23 +106,19 @@ public final class Http2Client {
                 } else if (type == Http2.FRAME_DATA) {
                     Http2Payload reg #= Http2ContentFrames.parseData(pl, len,
                                                                    flags, sid);
-                    int32 j = 0;
-                    while (j < reg.length) {
-                        if (bodyLen >= bodyCap) {
-                            int32 nc = bodyCap * 2;
-                            int8[] nb = heap int8[nc];
-                            int32 m = 0;
-                            while (m < bodyLen) {
-                                nb[m] = body[m];
-                                m = m + 1;
-                            }
-                            body = #nb;
-                            bodyCap = nc;
+                    if (bodyLen + reg.length > bodyCap) {
+                        int32 nc = bodyCap;
+                        while (nc < bodyLen + reg.length) {
+                            nc = nc * 2;
                         }
-                        body[bodyLen] = pl[reg.offset + j];
-                        bodyLen = bodyLen + 1;
-                        j = j + 1;
+                        int8[] nb = heap int8[nc];
+                        Http2.blit(nb, 0, body, 0, (int64) bodyLen);
+                        body = #nb;
+                        bodyCap = nc;
                     }
+                    Http2.blit(body, (int64) bodyLen, pl,
+                                     (int64) reg.offset, (int64) reg.length);
+                    bodyLen = bodyLen + reg.length;
                     // §6.9.1 charges the WHOLE frame length, padding
                     // included, not just the octets we kept.
                     boolean last = (flags & Http2.FLAG_END_STREAM) != 0;
@@ -167,11 +169,13 @@ public final class Http2Client {
     }
 
     /**
-     * Half the default receive window. Replenishing on every DATA frame would
-     * be one control frame per data frame; waiting for the window to empty
-     * stalls the peer. Half is the usual compromise.
+     * The receive window this client advertises, connection and stream alike.
+     * The 65535 default caps a transfer at one window per round trip.
      */
-    static final int32 WINDOW_REPLENISH = 32768;
+    static final int32 RECV_WINDOW = 8388608;
+
+    /** Hand back consumed octets once half the advertised window is spent. */
+    static final int32 WINDOW_REPLENISH = 4194304;
 
     /**
      * Give the peer back `inc` octets of receive window (RFC 9113 §6.9).

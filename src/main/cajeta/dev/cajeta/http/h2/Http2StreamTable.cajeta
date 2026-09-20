@@ -7,9 +7,11 @@ package dev.cajeta.http.h2;
  * **odd and non-zero** and **strictly greater** than every client id seen so
  * far (a re-used or decreasing id is `PROTOCOL_ERROR`).
  *
- * Closed streams are retained (v1) so late frames resolve to a real stream and
- * hit the state machine's `STREAM_CLOSED` path rather than being mistaken for
- * an idle stream; the connection loop caps live concurrency separately.
+ * Closed streams are retained so late frames resolve to a real stream and hit
+ * the state machine's `STREAM_CLOSED` path rather than being mistaken for an
+ * idle stream. Retention is bounded: [`reap`](#reap) keeps the most recent
+ * `RETAIN_CLOSED` and drops the rest, and `wasClosed` answers for a stream
+ * dropped that way, since `lastRemoteId` outlives the stream itself.
  */
 public final class Http2StreamTable {
     Http2Stream[] streams;
@@ -50,6 +52,9 @@ public final class Http2StreamTable {
                                       Http2.PROTOCOL_ERROR);
         }
         this.lastRemoteId = id;
+        if (this.count == this.cap) {
+            this.reap();
+        }
         if (this.count == this.cap) {
             this.grow();
         }
@@ -117,13 +122,22 @@ public final class Http2StreamTable {
         this.streams[this.indexOf(id)].onRecvRst();
     }
 
-    /** Whether the stream with `id` is closed (false if untracked). */
+    /** Whether the stream with `id` is closed (false if never opened). */
     public boolean isClosed(int32 id) {
         int32 i = this.indexOf(id);
         if (i < 0) {
-            return false;
+            return this.wasClosed(id);
         }
         return this.streams[i].isClosed();
+    }
+
+    /**
+     * Whether `id` names a client stream that was opened and has since been
+     * dropped by [`reap`](#reap). Distinguishes a late frame on a closed
+     * stream from one on an idle stream, which are different errors.
+     */
+    public boolean wasClosed(int32 id) {
+        return id <= this.lastRemoteId && this.indexOf(id) < 0;
     }
 
     /** Number of streams not yet closed (live concurrency). */
@@ -138,6 +152,44 @@ public final class Http2StreamTable {
         }
         return n;
     }
+
+    /**
+     * Drop closed streams beyond the most recent `RETAIN_CLOSED`. A connection
+     * serving without bound would otherwise hold every stream it ever opened,
+     * and each lookup here is a scan.
+     */
+    void reap() {
+        int32 closed = 0;
+        int32 i = 0;
+        while (i < this.count) {
+            if (this.streams[i].isClosed()) {
+                closed = closed + 1;
+            }
+            i = i + 1;
+        }
+        int32 drop = closed - Http2StreamTable.RETAIN_CLOSED;
+        if (drop <= 0) {
+            return;
+        }
+        Http2Stream[] ne = heap Http2Stream[this.cap];
+        int32 w = 0;
+        int32 r = 0;
+        while (r < this.count) {
+            if (drop > 0 && this.streams[r].isClosed()) {
+                drop = drop - 1;
+            } else {
+                ne[w] #= this.streams[r];
+                w = w + 1;
+            }
+            r = r + 1;
+        }
+        this.streams #= ne;
+        this.count = w;
+    }
+
+    // Closed streams kept for late frames. Oldest-first, so what survives is
+    // what a straggler is most likely to name.
+    static final int32 RETAIN_CLOSED = 32;
 
     void grow() {
         int32 nc = this.cap * 2;

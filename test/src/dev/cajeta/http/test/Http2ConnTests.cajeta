@@ -232,16 +232,21 @@ public final class Http2ConnTests {
 
     /** WINDOW_UPDATE frames the server sent during the last exchange. */
     static int32 windowUpdates;
+    static int32 streamWindowUpdates;
 
     /**
      * A body larger than one receive window, sent as several DATA frames.
      *
      * The server must hand receive-window credit back as it consumes them. It
-     * did not until 2026-09-19: `writeWindowUpdate` had no callers on either
-     * side, so a real peer that respects flow control stopped after 65535
-     * octets and both ends waited forever. This raw client ignores the window,
-     * so it cannot reproduce that stall — what it pins is that the server now
-     * EMITS the frames, which is the half that was missing.
+     * did not: `writeWindowUpdate` had no callers on either side, so a real
+     * peer that respects flow control stopped after 65535 octets and both ends
+     * waited forever. This raw client ignores the window, so it cannot
+     * reproduce that stall. What it pins is that the server now EMITS the
+     * frames, which is the half that was missing.
+     *
+     * The body must cross `WINDOW_REPLENISH`, or the only WINDOW_UPDATE on the
+     * wire is the one the server sends at connection start to raise its
+     * connection window, and the assertion passes without `replenish` running.
      */
     static void largeBody(Check c) {
         scope {
@@ -255,10 +260,10 @@ public final class Http2ConnTests {
         }
     }
 
-    // 8 frames of 16384 = 131072 octets, two full default windows, and each
-    // frame is within SETTINGS_MAX_FRAME_SIZE.
+    // 64 frames of 16384 = 1048576 octets: past the server's replenish
+    // threshold, and each frame is within SETTINGS_MAX_FRAME_SIZE.
     static final int32 BIG_FRAME = 16384;
-    static final int32 BIG_FRAMES = 8;
+    static final int32 BIG_FRAMES = 64;
 
     static void bigClient(Check c, int32 port) {
         IpAddress ca #= IpAddress.loopbackV4();
@@ -305,6 +310,7 @@ public final class Http2ConnTests {
         writer.flush();
 
         Http2ConnTests.windowUpdates = 0;
+        Http2ConnTests.streamWindowUpdates = 0;
         boolean sawEnd = false;
         boolean timedOut = false;
         while (!sawEnd && !timedOut) {
@@ -323,6 +329,12 @@ public final class Http2ConnTests {
                 if (type == Http2.FRAME_WINDOW_UPDATE) {
                     Http2ConnTests.windowUpdates =
                         Http2ConnTests.windowUpdates + 1;
+                    // Only `replenish` sends stream-level credit. The
+                    // connection-level one at startup is stream 0.
+                    if (h.streamId() != 0) {
+                        Http2ConnTests.streamWindowUpdates =
+                            Http2ConnTests.streamWindowUpdates + 1;
+                    }
                 } else if (type == Http2.FRAME_SETTINGS) {
                     if ((flags & Http2.FLAG_ACK) == 0) {
                         Http2FrameWriter afw = heap Http2FrameWriter();
@@ -342,6 +354,8 @@ public final class Http2ConnTests {
         c.that(!timedOut, "h2 large body: exchange completed");
         c.that(Http2ConnTests.windowUpdates > 0,
                "h2 large body: server returned receive-window credit");
+        c.that(Http2ConnTests.streamWindowUpdates > 0,
+               "h2 large body: server returned stream-level credit");
     }
 
     static void oneExchange(Check c, String method, String path, int8[] reqBody,

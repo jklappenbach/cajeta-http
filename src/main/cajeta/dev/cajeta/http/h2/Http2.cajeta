@@ -72,6 +72,22 @@ public final class Http2 {
         return p.toBytes();
     }
 
+    /**
+     * Copy `len` bytes `src[s..]` into `dst[d..]`, eight at a time with a
+     * scalar tail. The buffers must not overlap.
+     */
+    static void blit(int8[] dst, int64 d, int8[] src, int64 s, int64 len) {
+        int64 k = 0;
+        while (k + 8 <= len) {
+            Cajeta.storeU64(dst, d + k, Cajeta.loadU64(src, s + k));
+            k = k + 8;
+        }
+        while (k < len) {
+            dst[d + k] = src[s + k];
+            k = k + 1;
+        }
+    }
+
     /** Whether `buf[offset..offset+PREFACE_SIZE)` is the client preface. */
     public static boolean matchesPreface(int8[] buf, int32 offset, int32 len) {
         if (len < Http2.PREFACE_SIZE) {

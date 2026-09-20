@@ -4,6 +4,7 @@ import dev.cajeta.http.h2.Http2;
 import dev.cajeta.http.h2.Http2FlowWindow;
 import dev.cajeta.http.h2.Http2FlowController;
 import dev.cajeta.http.h2.Http2Exception;
+import dev.cajeta.http.h2.Http2SendGate;
 
 /**
  * http:3.3c — HTTP/2 **flow control** (RFC 9113 §5.2, §6.9): the directional
@@ -19,6 +20,80 @@ public final class Http2FlowTests {
         Http2FlowTests.window(c);
         System.stdout.println("-- h2 flow: controller --");
         Http2FlowTests.controller(c);
+        System.stdout.println("-- h2 flow: receive credit stays bounded --");
+        Http2FlowTests.recvCredit(c);
+        System.stdout.println("-- h2 flow: send-gate slots are reused --");
+        Http2FlowTests.gateSlots(c);
+    }
+
+    /**
+     * Receive credit must be accounted as it is consumed. Handing it back
+     * without consuming it walks the window past MAX_WINDOW_SIZE, where
+     * `increase` throws, so a long-lived connection dies on a FLOW_CONTROL_ERROR
+     * of its own making.
+     */
+    static void recvCredit(Check c) {
+        int32 chunk = 32768;
+
+        // Consume then credit, which is what replenish does: bounded forever.
+        Http2FlowWindow w = heap Http2FlowWindow(65535);
+        int32 i = 0;
+        while (i < 200000) {
+            w.consume(chunk);
+            w.increase(chunk, 0);
+            i = i + 1;
+        }
+        c.eqInt(w.available(), (int64) 65535, "credit returns to the window");
+
+        // Crediting without consuming is the defect, and it is fatal.
+        Http2FlowWindow u = heap Http2FlowWindow(65535);
+        boolean blew = false;
+        int32 k = 0;
+        while (k < 200000 && !blew) {
+            try {
+                u.increase(chunk, 0);
+            } catch (Http2Exception e) {
+                blew = e.errorCode == Http2.FLOW_CONTROL_ERROR;
+            }
+            k = k + 1;
+        }
+        c.that(blew, "unaccounted credit overflows the window");
+    }
+
+    /** A gate slot is released with its stream and reused by the next one. */
+    static void gateSlots(Check c) {
+        Http2SendGate g = heap Http2SendGate(65535);
+        g.openStream(1, 65535);
+        g.openStream(3, 65535);
+        c.eqInt((int64) g.slotCount(), (int64) 2, "two live streams, two slots");
+
+        g.closeStream(1);
+        g.closeStream(3);
+        int32 id = 5;
+        int32 n = 0;
+        while (n < 500) {
+            g.openStream(id, 65535);
+            g.closeStream(id);
+            id = id + 2;
+            n = n + 1;
+        }
+        c.eqInt((int64) g.slotCount(), (int64) 2, "500 more streams reuse them");
+
+        // A released stream is unknown to the gate, so a late grant is a no-op
+        // rather than credit handed to whoever took the slot.
+        g.grantStream(1, 1000);
+        c.that(!g.isCancelled(1), "a released stream is not tracked");
+
+        // Live streams still hold their own slots.
+        Http2SendGate h = heap Http2SendGate(65535);
+        int32 j = 1;
+        int32 m = 0;
+        while (m < 40) {
+            h.openStream(j, 65535);
+            j = j + 2;
+            m = m + 1;
+        }
+        c.eqInt((int64) h.slotCount(), (int64) 40, "live streams keep slots");
     }
 
     static void window(Check c) {

@@ -51,6 +51,8 @@ public final class Http2Connection {
     // Receive-window octets consumed since the last connection-level
     // WINDOW_UPDATE was sent.
     int32 pendConnRecv;
+    int32 pendStreamRecv;
+    int32 pendStreamId;
     // The largest request body this connection will accumulate. h1 has
     // honoured `ServerLimits.maxBodyBytes` all along; h2 did not, and only
     // survived because it never granted receive-window credit, so an upload
@@ -86,11 +88,14 @@ public final class Http2Connection {
         this.hdec = heap HpackDecoder(Http2.DEFAULT_HEADER_TABLE_SIZE);
         this.local = heap Http2Settings();
         this.local.maxConcurrentStreams = (int64) 100;
+        this.local.initialWindowSize = (int64) Http2Connection.RECV_WINDOW;
         this.remote = heap Http2Settings();
         this.pendConnRecv = 0;
+        this.pendStreamRecv = 0;
+        this.pendStreamId = 0;
         this.maxBody = ServerLimits.DEFAULT_MAX_BODY_BYTES;
         this.flow = heap Http2FlowController(Http2.DEFAULT_INITIAL_WINDOW_SIZE,
-                                             Http2.DEFAULT_INITIAL_WINDOW_SIZE);
+                                             Http2Connection.RECV_WINDOW);
         this.streams = heap Http2StreamTable();
         this.assembler = heap HeaderBlockAssembler();
         this.curStreamId = 0;
@@ -285,10 +290,13 @@ public final class Http2Connection {
     }
 
     /**
-     * Half the default receive window, the point at which consumed octets are
-     * handed back. See {@link #replenish}.
+     * The receive window this server advertises, connection and stream alike.
+     * The 65535 default caps an upload at one window per round trip.
      */
-    static final int32 WINDOW_REPLENISH = 32768;
+    static final int32 RECV_WINDOW = 1048576;
+
+    /** Hand back consumed octets once half the advertised window is spent. */
+    static final int32 WINDOW_REPLENISH = 524288;
 
     /**
      * Give the peer back receive-window credit it has spent (RFC 9113 §6.9).
@@ -300,7 +308,15 @@ public final class Http2Connection {
      * window.
      */
     void replenish(int32 sid, int32 len, boolean endStream) {
-        // §6.9.1 charges the WHOLE frame length, padding included.
+        // §6.9.1 charges the WHOLE frame length, padding included. Accounting
+        // the octets is what keeps the window bounded: crediting without
+        // consuming walks it past MAX_WINDOW_SIZE and throws there instead.
+        this.flow.connRecv.consume(len);
+        if (this.flow.connRecv.available() < 0) {
+            throw heap Http2Exception(
+                "peer exceeded the connection receive window",
+                Http2.FLOW_CONTROL_ERROR);
+        }
         this.pendConnRecv = this.pendConnRecv + len;
         if (this.pendConnRecv >= Http2Connection.WINDOW_REPLENISH) {
             Http2FrameWriter fw = heap Http2FrameWriter();
@@ -310,19 +326,34 @@ public final class Http2Connection {
             this.pendConnRecv = 0;
         }
         // Nothing more arrives on a stream that just ended, so crediting it
-        // back would be a frame the peer discards. Per-stream credit is sent
-        // per frame rather than accumulated: streams here are short-lived and
-        // tracking a pending count per stream would need a second table.
-        if (!endStream && len > 0) {
+        // back would be a frame the peer discards. Bodies arrive one at a
+        // time here, so a single pending pair covers the live stream.
+        if (this.pendStreamId != sid) {
+            this.pendStreamId = sid;
+            this.pendStreamRecv = 0;
+        }
+        if (endStream) {
+            this.pendStreamRecv = 0;
+            return;
+        }
+        this.pendStreamRecv = this.pendStreamRecv + len;
+        if (this.pendStreamRecv >= Http2Connection.WINDOW_REPLENISH) {
             Http2FrameWriter sw = heap Http2FrameWriter();
-            Http2Frames.writeWindowUpdate(sw, sid, len);
+            Http2Frames.writeWindowUpdate(sw, sid, this.pendStreamRecv);
             this.ws.writeControl(sw);
+            this.pendStreamRecv = 0;
         }
     }
 
     void onData(int32 flags, int32 sid, int8[] payload, int32 len) {
         boolean endStream = (flags & Http2.FLAG_END_STREAM) != 0;
         if (!this.streams.has(sid)) {
+            // A reaped stream is closed, not idle, and they are different
+            // errors (RFC 9113 5.1).
+            if (this.streams.wasClosed(sid)) {
+                throw heap Http2Exception("DATA on closed stream",
+                                          Http2.STREAM_CLOSED);
+            }
             throw heap Http2Exception("DATA on unknown stream",
                                       Http2.PROTOCOL_ERROR);
         }
@@ -427,6 +458,7 @@ public final class Http2Connection {
                                                resp.pushBodyAt(pi), plen,
                                                maxFrame);
                 }
+                gate.closeStream(promId);
                 pi = pi + 1;
             }
         }
@@ -438,6 +470,7 @@ public final class Http2Connection {
             Http2Connection.streamBody(ws, gate, sid, resp.body,
                                        resp.bodyLength(), maxFrame);
         }
+        gate.closeStream(sid);
         return sid;
     }
 
@@ -480,6 +513,10 @@ public final class Http2Connection {
         Http2FrameWriter fw = heap Http2FrameWriter();
         Http2SettingsList l #= this.local.toList();
         Http2Frames.writeSettings(fw, l);
+        // SETTINGS sizes streams only. The connection window moves by
+        // WINDOW_UPDATE alone (RFC 9113 6.9.2).
+        Http2Frames.writeWindowUpdate(fw, 0,
+                Http2Connection.RECV_WINDOW - Http2.DEFAULT_INITIAL_WINDOW_SIZE);
         this.ws.writeControl(fw);
     }
 
@@ -506,25 +543,27 @@ public final class Http2Connection {
     // -- small utilities -----------------------------------------------------
 
     void appendBody(int8[] src, int32 off, int32 len) {
-        int32 i = 0;
-        while (i < len) {
-            if (this.curBodyLen >= this.curBodyCap) {
-                this.growBody();
-            }
-            this.curBody[this.curBodyLen] = src[off + i];
-            this.curBodyLen = this.curBodyLen + 1;
-            i = i + 1;
+        if (len <= 0) {
+            return;
         }
+        if (this.curBodyLen + len > this.curBodyCap) {
+            this.growBody(this.curBodyLen + len);
+        }
+        Http2.blit(this.curBody, (int64) this.curBodyLen, src, (int64) off,
+                   (int64) len);
+        this.curBodyLen = this.curBodyLen + len;
     }
 
-    void growBody() {
-        int32 nc = this.curBodyCap * 2;
-        int8[] dst = heap int8[nc];
-        int32 i = 0;
-        while (i < this.curBodyLen) {
-            dst[i] = this.curBody[i];
-            i = i + 1;
+    void growBody(int32 need) {
+        int32 nc = this.curBodyCap;
+        if (nc < 1) {
+            nc = 256;
         }
+        while (nc < need) {
+            nc = nc * 2;
+        }
+        int8[] dst = heap int8[nc];
+        Http2.blit(dst, 0, this.curBody, 0, (int64) this.curBodyLen);
         this.curBody = #dst;
         this.curBodyCap = nc;
     }

@@ -76,16 +76,48 @@ public final class Http2SendGate {
     public void openStream(int32 sid, int32 initialWindow) {
         Cajeta.lockAcquire(this.handle);
         if (this.idx(sid) < 0) {
-            if (this.count == this.cap) {
-                this.grow();
+            int32 i = this.idx(Http2SendGate.FREE);
+            if (i < 0) {
+                if (this.count == this.cap) {
+                    this.grow();
+                }
+                i = this.count;
+                this.count = this.count + 1;
             }
-            this.ids[this.count] = sid;
-            this.wins[this.count] = (int64) initialWindow;
-            this.cancelledFlag[this.count] = false;
-            this.count = this.count + 1;
+            this.ids[i] = sid;
+            this.wins[i] = (int64) initialWindow;
+            this.cancelledFlag[i] = false;
         }
         Cajeta.lockRelease(this.handle);
     }
+
+    /**
+     * Release a stream's slot once its response is written, so a later stream
+     * reuses it. Called by the handler fiber, which is the only one that parks
+     * on the slot and is done with it by then.
+     */
+    public void closeStream(int32 sid) {
+        Cajeta.lockAcquire(this.handle);
+        int32 i = this.idx(sid);
+        if (i >= 0) {
+            this.ids[i] = Http2SendGate.FREE;
+            this.wins[i] = 0;
+            this.cancelledFlag[i] = false;
+        }
+        Cajeta.lockRelease(this.handle);
+    }
+
+    /** Slots tracked, live and released (test/diagnostic surface). */
+    public int32 slotCount() {
+        Cajeta.lockAcquire(this.handle);
+        int32 n = this.count;
+        Cajeta.lockRelease(this.handle);
+        return n;
+    }
+
+    // A released slot. Stream 0 is the connection, never a real stream id
+    // (§5.1.1), so it can never collide with a live registration.
+    static final int32 FREE = 0;
 
     // -- handler-side consume (may park) -------------------------------------
 
