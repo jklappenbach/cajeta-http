@@ -56,6 +56,15 @@ import dev.cajeta.http.h2.HpackFieldList;
  *
  * The Task half needs a compiler carrying the runtime fix. Against the pinned
  * v0.28.0 this still grows by one allocation per request.
+ *
+ * The residual RSS above that is NOT a leak, measured rather than assumed. With
+ * [`scripts/mallprobe`](../../../../../../scripts/mallprobe/README.md)
+ * interposing on the allocator: 1013974 allocations against 1013374 frees over
+ * 20000 requests, live blocks steady at 590-622, live bytes steady at 2.18 MB,
+ * and `smaps_rollup` Anonymous 2016 kB, which is the whole heap. `malloc_trim`
+ * reclaims nothing because there is nothing to reclaim. What grows is the
+ * binary's own text and the libc and libcrypto pages, faulted in as execution
+ * reaches them.
  */
 public final class Http2SoakTests {
 
