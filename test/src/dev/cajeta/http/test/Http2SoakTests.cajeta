@@ -31,19 +31,31 @@ import dev.cajeta.http.h2.HpackFieldList;
  * without being consumed so it walked toward MAX_WINDOW_SIZE. All three grow
  * with requests served, not with requests in flight.
  *
- * With those fixed the connection no longer stalls, and 20000 streams down one
- * connection all complete. It still grows by roughly 160 bytes per request,
- * measured with the client in a SEPARATE process so the number belongs to one
- * side: the client stayed flat at 8616 kB while the server went 9244 to 11348.
+ * With those fixed the connection no longer stalls and 20000 streams down one
+ * connection all complete, but it still grew by two live allocations per
+ * request. `Cajeta.liveCount` reads that directly and exactly, where RSS only
+ * suggests it.
  *
- * Ruled out as the cause, each by its own check rather than by reading:
- * `scope` and `spawn` (see [`ScopeProbeTests`](ScopeProbeTests.cajeta), which
- * reproduces the serving loop's spawn-and-drop and shows no retention), the
- * stream table and the send gate (bounded, and unit tested both ways), and the
- * HPACK dynamic tables on both sides, which do evict per RFC 7541 4.4. What is
- * left is the per-request object graph, meaning HttpRequest, Headers and the
- * response, and confirming that needs allocation instrumentation rather than
- * RSS.
+ * Both are now fixed and this run is flat. They were:
+ *
+ *   - The Task of a statement-position `spawn`, held by the serving scope
+ *     until the connection closed. Fixed in the runtime, which now reaps
+ *     finished tasks from a scope frame.
+ *   - The `Http2Stream` itself. `reap` keyed on `isClosed`, and this server
+ *     never records its own send side, so a served stream stops at
+ *     HALF_CLOSED_REMOTE and `isClosed` is false forever. It reclaimed
+ *     nothing. The predicate is now `isPeerDone`.
+ *
+ * Ruled out on the way, each by its own measurement rather than by reading:
+ * the scope and spawn constructs themselves, every spelling in the request
+ * hand-off, the closure-call return, HPACK encode and decode including both
+ * dynamic tables, `fromFields`, the response path, and the send gate. The
+ * probes that did it are [`HandoffProbeTests`](HandoffProbeTests.cajeta),
+ * [`RequestPathProbeTests`](RequestPathProbeTests.cajeta) and
+ * [`ScopeProbeTests`](ScopeProbeTests.cajeta), all opt-in.
+ *
+ * The Task half needs a compiler carrying the runtime fix. Against the pinned
+ * v0.28.0 this still grows by one allocation per request.
  */
 public final class Http2SoakTests {
 
@@ -96,7 +108,14 @@ public final class Http2SoakTests {
         return 1;
     }
 
+    static int32 served;
+
     static #HttpResponse reply(HttpRequest req) {
+        Http2SoakTests.served = Http2SoakTests.served + 1;
+        if (Http2SoakTests.served % 500 == 0) {
+            System.stdout.println("   server served " + Http2SoakTests.served
+                + "  live " + Cajeta.liveCount());
+        }
         String b = "hello, h2";
         HttpResponse resp #= HttpResponse.ok();
         resp.body(b.toBytes(), b.byteLength());

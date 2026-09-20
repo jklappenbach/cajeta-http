@@ -30,6 +30,20 @@ public final class Http2Stream {
         this.state = Http2Stream.IDLE;
     }
 
+    /**
+     * Whether the PEER is finished with this stream, so no further HEADERS or
+     * DATA may arrive on it. That is CLOSED, and also HALF_CLOSED_REMOTE once
+     * the peer sent END_STREAM.
+     *
+     * This is the reaping predicate rather than `isClosed`. A server that never
+     * records its own send side leaves every stream at HALF_CLOSED_REMOTE, so
+     * `isClosed` is false forever and nothing is ever reclaimed.
+     */
+    public boolean isPeerDone() {
+        return this.state == Http2Stream.CLOSED
+            || this.state == Http2Stream.HALF_CLOSED_REMOTE;
+    }
+
     public boolean isClosed() {
         return this.state == Http2Stream.CLOSED;
     }

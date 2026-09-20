@@ -1,0 +1,194 @@
+package dev.cajeta.http.test;
+
+import cajeta.lang.String;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.h2.Http2;
+import dev.cajeta.http.h2.Http2Requests;
+import dev.cajeta.http.h2.HpackEncoder;
+import dev.cajeta.http.h2.HpackDecoder;
+import dev.cajeta.http.h2.HpackFieldList;
+
+/**
+ * Opt-in probe: which stage of the per-request path retains?
+ *
+ * The h2 server leaks exactly two tracked allocations per request, and the
+ * fiber hand-off is not the cause. This walks the same stages the server walks,
+ * one encoder and one decoder for the whole run as on a real connection, and
+ * counts live objects across each.
+ */
+public final class RequestPathProbeTests {
+
+    public static void run(Check c, int32 rounds) {
+        System.stdout.println("-- request path probe: " + rounds + " rounds per stage --");
+        RequestPathProbeTests.report("1 build the field list only      ",
+                                     RequestPathProbeTests.fieldsOnly(rounds), rounds);
+        RequestPathProbeTests.report("2 encode                         ",
+                                     RequestPathProbeTests.encodeOnly(rounds), rounds);
+        RequestPathProbeTests.report("3 encode + decode                ",
+                                     RequestPathProbeTests.roundTrip(rounds), rounds);
+        RequestPathProbeTests.report("4 encode + decode + fromFields   ",
+                                     RequestPathProbeTests.toRequest(rounds), rounds);
+        RequestPathProbeTests.report("5 response + responseFields      ",
+                                     RequestPathProbeTests.responsePath(rounds), rounds);
+        RequestPathProbeTests.report("6 response + fields + encode     ",
+                                     RequestPathProbeTests.responseEncode(rounds), rounds);
+        RequestPathProbeTests.report("7 request through the handoff chain",
+                                     RequestPathProbeTests.requestHandoff(rounds), rounds);
+        RequestPathProbeTests.report("8 request, dropped in place        ",
+                                     RequestPathProbeTests.requestInPlace(rounds), rounds);
+    }
+
+    HttpRequest ready;
+
+    // markReady's spelling: a plain `=` store of a transferred formal.
+    void stash(#HttpRequest r) {
+        this.ready = #r;
+    }
+
+    // handleStream's spelling: take the transferred formal into a local.
+    static int32 consume(#HttpRequest r) {
+        HttpRequest q #= r;
+        return q.bodyLength();
+    }
+
+    /** The server's exact chain: build, stash in a field, take back, transfer on. */
+    static int64 requestHandoff(int32 rounds) {
+        RequestPathProbeTests h = heap RequestPathProbeTests();
+        HpackEncoder enc = heap HpackEncoder(Http2.DEFAULT_HEADER_TABLE_SIZE, true);
+        HpackDecoder dec = heap HpackDecoder(Http2.DEFAULT_HEADER_TABLE_SIZE);
+        int64 before = 0;
+        int32 i = 0;
+        while (i < rounds) {
+            HpackFieldList fl #= RequestPathProbeTests.requestFields();
+            int8[] block #= enc.encode(fl);
+            HpackFieldList out #= dec.decode(block, (int32) block.count());
+            HttpRequest req #= Http2Requests.fromFields(out);
+            h.stash(#req);
+            HttpRequest got #= h.ready;
+            h.ready = null;
+            int32 n = RequestPathProbeTests.consume(#got);
+            i = i + 1;
+            if (i == 50) { before = Cajeta.liveCount(); }
+        }
+        return Cajeta.liveCount() - before;
+    }
+
+    /** The same request, never handed off: the control for stage 7. */
+    static int64 requestInPlace(int32 rounds) {
+        HpackEncoder enc = heap HpackEncoder(Http2.DEFAULT_HEADER_TABLE_SIZE, true);
+        HpackDecoder dec = heap HpackDecoder(Http2.DEFAULT_HEADER_TABLE_SIZE);
+        int64 before = 0;
+        int32 i = 0;
+        while (i < rounds) {
+            HpackFieldList fl #= RequestPathProbeTests.requestFields();
+            int8[] block #= enc.encode(fl);
+            HpackFieldList out #= dec.decode(block, (int32) block.count());
+            HttpRequest req #= Http2Requests.fromFields(out);
+            int32 n = req.bodyLength();
+            i = i + 1;
+            if (i == 50) { before = Cajeta.liveCount(); }
+        }
+        return Cajeta.liveCount() - before;
+    }
+
+    static void report(String label, int64 delta, int32 rounds) {
+        int64 span = (int64) (rounds - 50);
+        System.stdout.println("   " + label + "  live delta " + delta
+                              + "  (" + (delta / span) + " per round)");
+    }
+
+    static #HpackFieldList requestFields() {
+        HpackFieldList fl = heap HpackFieldList();
+        fl.put(Http2ConnTests.own(":method"), Http2ConnTests.own("GET"));
+        fl.put(Http2ConnTests.own(":path"), Http2ConnTests.own("/hello"));
+        fl.put(Http2ConnTests.own(":scheme"), Http2ConnTests.own("http"));
+        fl.put(Http2ConnTests.own(":authority"), Http2ConnTests.own("127.0.0.1"));
+        return #fl;
+    }
+
+    static int64 fieldsOnly(int32 rounds) {
+        int64 before = 0;
+        int32 i = 0;
+        while (i < rounds) {
+            HpackFieldList fl #= RequestPathProbeTests.requestFields();
+            i = i + 1;
+            if (i == 50) { before = Cajeta.liveCount(); }
+        }
+        return Cajeta.liveCount() - before;
+    }
+
+    static int64 encodeOnly(int32 rounds) {
+        HpackEncoder enc = heap HpackEncoder(Http2.DEFAULT_HEADER_TABLE_SIZE, true);
+        int64 before = 0;
+        int32 i = 0;
+        while (i < rounds) {
+            HpackFieldList fl #= RequestPathProbeTests.requestFields();
+            int8[] block #= enc.encode(fl);
+            i = i + 1;
+            if (i == 50) { before = Cajeta.liveCount(); }
+        }
+        return Cajeta.liveCount() - before;
+    }
+
+    static int64 roundTrip(int32 rounds) {
+        HpackEncoder enc = heap HpackEncoder(Http2.DEFAULT_HEADER_TABLE_SIZE, true);
+        HpackDecoder dec = heap HpackDecoder(Http2.DEFAULT_HEADER_TABLE_SIZE);
+        int64 before = 0;
+        int32 i = 0;
+        while (i < rounds) {
+            HpackFieldList fl #= RequestPathProbeTests.requestFields();
+            int8[] block #= enc.encode(fl);
+            HpackFieldList out #= dec.decode(block, (int32) block.count());
+            i = i + 1;
+            if (i == 50) { before = Cajeta.liveCount(); }
+        }
+        return Cajeta.liveCount() - before;
+    }
+
+    static int64 toRequest(int32 rounds) {
+        HpackEncoder enc = heap HpackEncoder(Http2.DEFAULT_HEADER_TABLE_SIZE, true);
+        HpackDecoder dec = heap HpackDecoder(Http2.DEFAULT_HEADER_TABLE_SIZE);
+        int64 before = 0;
+        int32 i = 0;
+        while (i < rounds) {
+            HpackFieldList fl #= RequestPathProbeTests.requestFields();
+            int8[] block #= enc.encode(fl);
+            HpackFieldList out #= dec.decode(block, (int32) block.count());
+            HttpRequest req #= Http2Requests.fromFields(out);
+            i = i + 1;
+            if (i == 50) { before = Cajeta.liveCount(); }
+        }
+        return Cajeta.liveCount() - before;
+    }
+
+    static int64 responsePath(int32 rounds) {
+        int64 before = 0;
+        int32 i = 0;
+        while (i < rounds) {
+            String b = "hello, h2";
+            HttpResponse resp #= HttpResponse.ok();
+            resp.body(b.toBytes(), b.byteLength());
+            HpackFieldList fl #= Http2Requests.responseFields(resp);
+            i = i + 1;
+            if (i == 50) { before = Cajeta.liveCount(); }
+        }
+        return Cajeta.liveCount() - before;
+    }
+
+    static int64 responseEncode(int32 rounds) {
+        HpackEncoder enc = heap HpackEncoder(Http2.DEFAULT_HEADER_TABLE_SIZE, true);
+        int64 before = 0;
+        int32 i = 0;
+        while (i < rounds) {
+            String b = "hello, h2";
+            HttpResponse resp #= HttpResponse.ok();
+            resp.body(b.toBytes(), b.byteLength());
+            HpackFieldList fl #= Http2Requests.responseFields(resp);
+            int8[] block #= enc.encode(fl);
+            i = i + 1;
+            if (i == 50) { before = Cajeta.liveCount(); }
+        }
+        return Cajeta.liveCount() - before;
+    }
+}

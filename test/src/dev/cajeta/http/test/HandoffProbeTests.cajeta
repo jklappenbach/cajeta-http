@@ -1,0 +1,480 @@
+package dev.cajeta.http.test;
+
+import cajeta.lang.String;
+
+/**
+ * Opt-in probe: which spelling in the h2 request hand-off retains?
+ *
+ * The server leaks exactly two tracked allocations per request. `completeRequest`
+ * builds an owned `HttpRequest`, hands it to `markReady`, which stores it in a
+ * field, and the serving loop takes it back out and spawns a fiber with it.
+ * Three spellings on that path could each be the one that drops the title, so
+ * this reproduces the shape with a two-allocation payload and counts.
+ */
+public final class HandoffProbeTests {
+
+    /** Two tracked allocations: the object and its array. */
+    public static final class Cell {
+        public static int32 made;
+        public static int32 gone;
+        public int8[] data;
+        public Cell() {
+            this.data = heap int8[64];
+            Cell.made = Cell.made + 1;
+        }
+        public ~Cell() {
+            Cell.gone = Cell.gone + 1;
+        }
+    }
+
+    Cell ready;
+    boolean has;
+
+    public HandoffProbeTests() {
+        this.ready = null;
+        this.has = false;
+    }
+
+    // The h2 spelling: a plain `=` store of a transferred formal.
+    void markReadyPlain(#Cell c) {
+        this.ready = #c;
+        this.has = true;
+    }
+
+    // The mode-carrying store the ownership note calls the slot spelling.
+    void markReadySharp(#Cell c) {
+        this.ready #= #c;
+        this.has = true;
+    }
+
+    // Mirrors handleStream's shape: two borrowed refs, a closure, four
+    // scalars, one owned.
+    public static async int32 consume8(Cell a, Cell b, (Cell) -> int32 f,
+                                       int32 s1, int32 s2, boolean s3,
+                                       int32 s4, #Cell c) {
+        Cell q #= c;
+        return f(q) + s1 + s2 + s4;
+    }
+
+    // The same arity with the closure replaced by a plain borrowed ref.
+    public static async int32 consume8NoFn(Cell a, Cell b, Cell d,
+                                           int32 s1, int32 s2, boolean s3,
+                                           int32 s4, #Cell c) {
+        Cell q #= c;
+        return (int32) q.data.count() + s1 + s2 + s4;
+    }
+
+    // A closure argument, nothing else.
+    public static async int32 consumeFn((Cell) -> int32 f, #Cell c) {
+        Cell q #= c;
+        return f(q);
+    }
+
+    public static async int32 consume(#Cell c) {
+        Cell q #= c;
+        return (int32) q.data.count();
+    }
+
+    static int32 sink(#Cell c) {
+        Cell q #= c;
+        return (int32) q.data.count();
+    }
+
+    public static void run(Check c, int32 rounds) {
+        System.stdout.println("-- handoff probe: " + rounds + " rounds per variant --");
+        HandoffProbeTests.report(c, "1 field plain= + take #= + spawn #",
+                                 HandoffProbeTests.fieldPlainSpawn(rounds), rounds);
+        HandoffProbeTests.report(c, "2 field #=     + take #= + spawn #",
+                                 HandoffProbeTests.fieldSharpSpawn(rounds), rounds);
+        HandoffProbeTests.report(c, "3 no field              + spawn #",
+                                 HandoffProbeTests.noFieldSpawn(rounds), rounds);
+        HandoffProbeTests.report(c, "4 no field, no spawn             ",
+                                 HandoffProbeTests.noSpawn(rounds), rounds);
+        HandoffProbeTests.report(c, "5 field plain= + take #= + spawn #, NO await",
+                                 HandoffProbeTests.fieldPlainSpawnNoAwait(rounds), rounds);
+        HandoffProbeTests.report(c, "6 no field              + spawn #, NO await",
+                                 HandoffProbeTests.noFieldSpawnNoAwait(rounds), rounds);
+        HandoffProbeTests.report(c, "7 spawn with a closure argument             ",
+                                 HandoffProbeTests.spawnWithClosure(rounds), rounds);
+        HandoffProbeTests.report(c, "8 spawn, handleStream arity, NO closure     ",
+                                 HandoffProbeTests.spawn8NoFn(rounds), rounds);
+        HandoffProbeTests.report(c, "9 spawn, handleStream arity, WITH closure   ",
+                                 HandoffProbeTests.spawn8(rounds), rounds);
+        HandoffProbeTests.report(c, "10 BARE spawn statement, no Task binding    ",
+                                 HandoffProbeTests.bareSpawn(rounds), rounds);
+        HandoffProbeTests.report(c, "11 BARE spawn, handleStream arity + closure ",
+                                 HandoffProbeTests.bareSpawn8(rounds), rounds);
+        HandoffProbeTests.report(c, "12 #=     from a DIRECT call returning #  ",
+                                 HandoffProbeTests.directReturn(rounds), rounds);
+        HandoffProbeTests.report(c, "13 plain= from a CLOSURE call returning #  ",
+                                 HandoffProbeTests.closureReturn(rounds), rounds);
+        HandoffProbeTests.report(c, "14 #= from a CLOSURE call returning #      ",
+                                 HandoffProbeTests.closureReturnSharp(rounds), rounds);
+        HandoffProbeTests.reportDrops("15 array dropped: elements freed?  ",
+                                      HandoffProbeTests.arrayDrop(rounds), rounds * 2);
+        HandoffProbeTests.reportDrops("16 slot overwritten: old freed?     ",
+                                      HandoffProbeTests.slotOverwrite(rounds), rounds);
+        HandoffProbeTests.reportDrops("17 slot nulled: old freed?          ",
+                                      HandoffProbeTests.slotNull(rounds), rounds);
+        HandoffProbeTests.reportDrops("18 reap idiom: compact into a new array",
+                                      HandoffProbeTests.reapIdiom(rounds), rounds * 2);
+        int64 ctl = HandoffProbeTests.deliberateLeak(rounds);
+        HandoffProbeTests.report(c, "C control: a retained Cell per round        ",
+                                 ctl, rounds);
+        // A probe that reads 0 everywhere may simply be blind. The control
+        // retains one Cell (object + array) per round, so it must read 2.
+        c.that(ctl / (int64) (rounds - 50) == (int64) 2,
+               "handoff probe: the control leak is seen as 2 per round");
+    }
+
+    // The baseline is taken at round 50, so the measured span is rounds - 50.
+    // `undropped` is the direct question: was the payload's destructor run?
+    static void report(Check c, String label, int64 delta, int32 rounds) {
+        int64 span = (int64) (rounds - 50);
+        int32 undropped = Cell.made - Cell.gone;
+        System.stdout.println("   " + label + "   live delta " + delta
+                              + "  (" + (delta / span) + " per round)"
+                              + "  undropped " + undropped);
+        Cell.made = 0;
+        Cell.gone = 0;
+    }
+
+    static int64 fieldPlainSpawn(int32 rounds) {
+        HandoffProbeTests h = heap HandoffProbeTests();
+        int64 before = 0;
+        int64 after = 0;
+        scope {
+            int32 i = 0;
+            while (i < rounds) {
+                Cell c = heap Cell();
+                h.markReadyPlain(#c);
+                Cell got #= h.ready;
+                h.ready = null;
+                h.has = false;
+                Task<int32> t = spawn consume(#got);
+                int32 n = await t;
+                i = i + 1;
+                if (i == 50) { before = Cajeta.liveCount(); }
+            }
+            after = Cajeta.liveCount();
+        }
+        return after - before;
+    }
+
+    static int64 fieldSharpSpawn(int32 rounds) {
+        HandoffProbeTests h = heap HandoffProbeTests();
+        int64 before = 0;
+        int64 after = 0;
+        scope {
+            int32 i = 0;
+            while (i < rounds) {
+                Cell c = heap Cell();
+                h.markReadySharp(#c);
+                Cell got #= h.ready;
+                h.ready = null;
+                h.has = false;
+                Task<int32> t = spawn consume(#got);
+                int32 n = await t;
+                i = i + 1;
+                if (i == 50) { before = Cajeta.liveCount(); }
+            }
+            after = Cajeta.liveCount();
+        }
+        return after - before;
+    }
+
+    static int64 noFieldSpawn(int32 rounds) {
+        int64 before = 0;
+        int64 after = 0;
+        scope {
+            int32 i = 0;
+            while (i < rounds) {
+                Cell c = heap Cell();
+                Task<int32> t = spawn consume(#c);
+                int32 n = await t;
+                i = i + 1;
+                if (i == 50) { before = Cajeta.liveCount(); }
+            }
+            after = Cajeta.liveCount();
+        }
+        return after - before;
+    }
+
+    static int64 fieldPlainSpawnNoAwait(int32 rounds) {
+        HandoffProbeTests h = heap HandoffProbeTests();
+        int64 before = 0;
+        int64 after = 0;
+        scope {
+            int32 i = 0;
+            while (i < rounds) {
+                Cell c = heap Cell();
+                h.markReadyPlain(#c);
+                Cell got #= h.ready;
+                h.ready = null;
+                h.has = false;
+                Task<int32> t = spawn consume(#got);
+                i = i + 1;
+                if (i == 50) { before = Cajeta.liveCount(); }
+            }
+            after = Cajeta.liveCount();
+        }
+        return after - before;
+    }
+
+    static int64 noFieldSpawnNoAwait(int32 rounds) {
+        int64 before = 0;
+        int64 after = 0;
+        scope {
+            int32 i = 0;
+            while (i < rounds) {
+                Cell c = heap Cell();
+                Task<int32> t = spawn consume(#c);
+                i = i + 1;
+                if (i == 50) { before = Cajeta.liveCount(); }
+            }
+            after = Cajeta.liveCount();
+        }
+        return after - before;
+    }
+
+    (Cell) -> int32 handler;
+
+    static int64 spawnWithClosure(int32 rounds) {
+        HandoffProbeTests h = heap HandoffProbeTests();
+        (Cell) -> int32 mk = (x) -> (int32) x.data.count();
+        h.handler = mk;
+        int64 before = 0;
+        scope {
+            int32 i = 0;
+            while (i < rounds) {
+                Cell c = heap Cell();
+                (Cell) -> int32 hl = h.handler;
+                Task<int32> t = spawn consumeFn(hl, #c);
+                i = i + 1;
+                if (i == 50) { before = Cajeta.liveCount(); }
+            }
+            return Cajeta.liveCount() - before;
+        }
+    }
+
+    static int64 spawn8NoFn(int32 rounds) {
+        HandoffProbeTests h = heap HandoffProbeTests();
+        Cell a = heap Cell();
+        Cell b = heap Cell();
+        Cell d = heap Cell();
+        int64 before = 0;
+        scope {
+            int32 i = 0;
+            while (i < rounds) {
+                Cell c = heap Cell();
+                Task<int32> t = spawn consume8NoFn(a, b, d, 1, 2, true, 4, #c);
+                i = i + 1;
+                if (i == 50) { before = Cajeta.liveCount(); }
+            }
+            return Cajeta.liveCount() - before;
+        }
+    }
+
+    static int64 spawn8(int32 rounds) {
+        HandoffProbeTests h = heap HandoffProbeTests();
+        (Cell) -> int32 mk = (x) -> (int32) x.data.count();
+        h.handler = mk;
+        Cell a = heap Cell();
+        Cell b = heap Cell();
+        int64 before = 0;
+        scope {
+            int32 i = 0;
+            while (i < rounds) {
+                Cell c = heap Cell();
+                (Cell) -> int32 hl = h.handler;
+                Task<int32> t = spawn consume8(a, b, hl, 1, 2, true, 4, #c);
+                i = i + 1;
+                if (i == 50) { before = Cajeta.liveCount(); }
+            }
+            return Cajeta.liveCount() - before;
+        }
+    }
+
+    static int64 bareSpawn(int32 rounds) {
+        int64 before = 0;
+        scope {
+            int32 i = 0;
+            while (i < rounds) {
+                Cell c = heap Cell();
+                spawn consume(#c);
+                i = i + 1;
+                if (i == 50) { before = Cajeta.liveCount(); }
+            }
+            return Cajeta.liveCount() - before;
+        }
+    }
+
+    static int64 bareSpawn8(int32 rounds) {
+        HandoffProbeTests h = heap HandoffProbeTests();
+        (Cell) -> int32 mk = (x) -> (int32) x.data.count();
+        h.handler = mk;
+        Cell a = heap Cell();
+        Cell b = heap Cell();
+        int64 before = 0;
+        scope {
+            int32 i = 0;
+            while (i < rounds) {
+                Cell c = heap Cell();
+                (Cell) -> int32 hl = h.handler;
+                spawn consume8(a, b, hl, 1, 2, true, 4, #c);
+                i = i + 1;
+                if (i == 50) { before = Cajeta.liveCount(); }
+            }
+            return Cajeta.liveCount() - before;
+        }
+    }
+
+    static #Cell makeCell() {
+        Cell c = heap Cell();
+        return #c;
+    }
+
+    // `HttpResponse resp = fn(r);` in handleStream is this shape: a plain-typed
+    // local taking the result of a CLOSURE call whose return is `#`.
+    static int64 directReturn(int32 rounds) {
+        int64 before = 0;
+        int32 i = 0;
+        while (i < rounds) {
+            Cell c #= HandoffProbeTests.makeCell();
+            i = i + 1;
+            if (i == 50) { before = Cajeta.liveCount(); }
+        }
+        return Cajeta.liveCount() - before;
+    }
+
+    static int64 closureReturn(int32 rounds) {
+        () -> #Cell fn = () -> HandoffProbeTests.makeCell();
+        int64 before = 0;
+        int32 i = 0;
+        while (i < rounds) {
+            Cell c = fn();
+            i = i + 1;
+            if (i == 50) { before = Cajeta.liveCount(); }
+        }
+        return Cajeta.liveCount() - before;
+    }
+
+    static int64 closureReturnSharp(int32 rounds) {
+        () -> #Cell fn = () -> HandoffProbeTests.makeCell();
+        int64 before = 0;
+        int32 i = 0;
+        while (i < rounds) {
+            Cell c #= fn();
+            i = i + 1;
+            if (i == 50) { before = Cajeta.liveCount(); }
+        }
+        return Cajeta.liveCount() - before;
+    }
+
+    static void reportDrops(String label, int32 freed, int32 expected) {
+        System.stdout.println("   " + label + "  freed " + freed
+                              + " of " + expected);
+    }
+
+    /** Does dropping an array free the elements it owns? */
+    static int32 arrayDrop(int32 rounds) {
+        int32 before = Cell.gone;
+        int32 i = 0;
+        while (i < rounds) {
+            {
+                Cell[] a = heap Cell[2];
+                Cell c0 = heap Cell();
+                Cell c1 = heap Cell();
+                a[0] #= c0;
+                a[1] #= c1;
+            }
+            i = i + 1;
+        }
+        return Cell.gone - before;
+    }
+
+    /** Does storing over an owned slot free what was there? */
+    static int32 slotOverwrite(int32 rounds) {
+        Cell[] a = heap Cell[1];
+        int32 before = Cell.gone;
+        int32 i = 0;
+        while (i < rounds) {
+            Cell c = heap Cell();
+            a[0] #= c;
+            i = i + 1;
+        }
+        return Cell.gone - before;
+    }
+
+    /** Does nulling an owned slot free what was there? */
+    static int32 slotNull(int32 rounds) {
+        Cell[] a = heap Cell[1];
+        int32 before = Cell.gone;
+        int32 i = 0;
+        while (i < rounds) {
+            Cell c = heap Cell();
+            a[0] #= c;
+            a[0] = null;
+            i = i + 1;
+        }
+        return Cell.gone - before;
+    }
+
+    /**
+     * Exactly what Http2StreamTable.reap does: move the survivors into a fresh
+     * array with `#=` from an element read, then replace the old array. Each
+     * round should free the two it did NOT move.
+     */
+    static int32 reapIdiom(int32 rounds) {
+        int32 before = Cell.gone;
+        int32 i = 0;
+        while (i < rounds) {
+            Cell[] a = heap Cell[4];
+            int32 k = 0;
+            while (k < 4) {
+                Cell c = heap Cell();
+                a[k] #= c;
+                k = k + 1;
+            }
+            Cell[] ne = heap Cell[4];
+            ne[0] #= a[0];
+            ne[1] #= a[1];
+            a #= ne;
+            i = i + 1;
+        }
+        return Cell.gone - before;
+    }
+
+    static Cell[] keep;
+    static int32 keptN;
+
+    // Deliberate retention, to prove the probe is not blind.
+    static int64 deliberateLeak(int32 rounds) {
+        HandoffProbeTests.keep = heap Cell[rounds + 8];
+        HandoffProbeTests.keptN = 0;
+        int64 before = 0;
+        int32 i = 0;
+        while (i < rounds) {
+            Cell c = heap Cell();
+            HandoffProbeTests.keep[HandoffProbeTests.keptN] #= c;
+            HandoffProbeTests.keptN = HandoffProbeTests.keptN + 1;
+            i = i + 1;
+            if (i == 50) { before = Cajeta.liveCount(); }
+        }
+        return Cajeta.liveCount() - before;
+    }
+
+    static int64 noSpawn(int32 rounds) {
+        int64 before = 0;
+        int64 after = 0;
+        int32 i = 0;
+        while (i < rounds) {
+            Cell c = heap Cell();
+            int32 n = HandoffProbeTests.sink(#c);
+            i = i + 1;
+            if (i == 50) { before = Cajeta.liveCount(); }
+        }
+        after = Cajeta.liveCount();
+        return after - before;
+    }
+}

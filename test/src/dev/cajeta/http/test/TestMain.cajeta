@@ -78,6 +78,10 @@ public final class TestMain {
         if (soak > 0) { Http2SoakTests.run(c, soak); }
         int32 sp = TestMain.flagValue(args, "--scopeprobe=");
         if (sp > 0) { ScopeProbeTests.run(c, sp); }
+        int32 hp = TestMain.flagValue(args, "--handoffprobe=");
+        if (hp > 0) { HandoffProbeTests.run(c, hp); }
+        int32 rp = TestMain.flagValue(args, "--reqpathprobe=");
+        if (rp > 0) { RequestPathProbeTests.run(c, rp); }
         int32 serve = TestMain.flagValue(args, "--soakserve=");
         if (serve > 0) { Http2SoakTests.serveOnly(serve); }
         int32 drive = TestMain.flagValue(args, "--soakdrive=");

@@ -59,7 +59,10 @@ public final class Http2StreamTable {
             this.grow();
         }
         Http2Stream s = heap Http2Stream(id);
-        this.streams[this.count] = #s;
+        // `#=` is the slot spelling: it records the title, so the array owns
+        // the stream and drops it. A plain `=` stored the pointer and left the
+        // title behind, so nothing ever freed it (cajeta ownership 1, 2.3).
+        this.streams[this.count] #= s;
         this.count = this.count + 1;
         return this.streams[this.count - 1];
     }
@@ -154,15 +157,20 @@ public final class Http2StreamTable {
     }
 
     /**
-     * Drop closed streams beyond the most recent `RETAIN_CLOSED`. A connection
-     * serving without bound would otherwise hold every stream it ever opened,
-     * and each lookup here is a scan.
+     * Drop finished streams beyond the most recent `RETAIN_CLOSED`. A
+     * connection serving without bound would otherwise hold every stream it
+     * ever opened, and each lookup here is a scan.
+     *
+     * The predicate is `isPeerDone`, not `isClosed`. This server never records
+     * its own send side, so a served stream stops at HALF_CLOSED_REMOTE and
+     * `isClosed` never becomes true. Reaping on `isClosed` reclaimed nothing
+     * and leaked one stream per request.
      */
     void reap() {
         int32 closed = 0;
         int32 i = 0;
         while (i < this.count) {
-            if (this.streams[i].isClosed()) {
+            if (this.streams[i].isPeerDone()) {
                 closed = closed + 1;
             }
             i = i + 1;
@@ -175,7 +183,7 @@ public final class Http2StreamTable {
         int32 w = 0;
         int32 r = 0;
         while (r < this.count) {
-            if (drop > 0 && this.streams[r].isClosed()) {
+            if (drop > 0 && this.streams[r].isPeerDone()) {
                 drop = drop - 1;
             } else {
                 ne[w] #= this.streams[r];
