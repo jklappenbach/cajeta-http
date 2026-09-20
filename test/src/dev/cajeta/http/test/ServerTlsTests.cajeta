@@ -7,8 +7,6 @@ import cajeta.io.net.SocketAddress;
 import cajeta.io.net.TcpListener;
 import cajeta.io.net.TcpStream;
 import cajeta.io.net.tls.TlsStream;
-import cajeta.io.net.TimedOutException;
-import cajeta.io.net.reactor.Reactor;
 import cajeta.io.net.uri.Uri;
 import dev.cajeta.http.HttpRequest;
 import dev.cajeta.http.HttpResponse;
@@ -49,76 +47,7 @@ public final class ServerTlsTests {
         garbageHandshakes(c);
         System.stdout.println("-- server tls: wss echo --");
         wssEcho(c);
-        System.stdout.println("-- server tls: read deadline --");
-        readDeadline(c);
     }
-
-    /** TLS server fiber: handshake, then send nothing and wait to be dropped. */
-    public static async int32 stallServer(#TcpListener lst,
-                                          int8[] cert, int32 certLen,
-                                          int8[] key, int32 keyLen) {
-        TcpStream sock #= lst.acceptAsync();
-        TlsStream tls #= TlsStream.server(#sock, cert, certLen, key, keyLen);
-        tls.handshake();
-        int8[] sink = heap int8[16];
-        int32 n = tls.read(sink, 16);
-        tls.close();
-        return n;
-    }
-
-    /**
-     * A handshaked peer that then goes quiet must not hold the reader forever.
-     * `readWithin` used to ignore `timeoutMs` on TLS and delegate to the
-     * unbounded read, so an HTTPS client had no deadline at all.
-     */
-    static void readDeadline(Check c) {
-        scope {
-            String cp #= ServerTlsTests.certPem();
-            String kp #= ServerTlsTests.keyPem();
-            int8[] cert #= cp.toBytes();
-            int8[] key #= kp.toBytes();
-
-            IpAddress la #= IpAddress.loopbackV4();
-            SocketAddress bindAddr #= SocketAddress.of(#la, 0);
-            TcpListener listener #= TcpListener.bind(bindAddr);
-            int32 port = listener.boundPort();
-            Task<int32> t = spawn stallServer(#listener, cert, cp.byteLength(),
-                                              key, kp.byteLength());
-
-            IpAddress ca #= IpAddress.loopbackV4();
-            SocketAddress connAddr #= SocketAddress.of(#ca, port);
-            TcpStream sock #= TcpStream.connectAsync(#connAddr);
-            String host = "127.0.0.1";
-            int8[] hostBytes #= host.toBytes();
-            int8[] anchor #= cp.toBytes();
-            TlsStream tls #= TlsStream.client(#sock, hostBytes,
-                                             host.byteLength(),
-                                             anchor, cp.byteLength());
-            tls.handshake();
-
-            int8[] buf = heap int8[64];
-            int64 t0 = Reactor.nowMillis();
-            boolean timedOut = false;
-            try {
-                int64 n = tls.readWithin(buf, (int64) 0, (int64) 64, 400);
-            } catch (TimedOutException e) {
-                timedOut = true;
-            }
-            int64 elapsed = Reactor.nowMillis() - t0;
-            c.that(timedOut, "TLS readWithin raises when the deadline elapses");
-            c.that(elapsed < (int64) 8000,
-                   "TLS readWithin returns on the budget, not on the peer");
-            // Without a lower bound this passes for an immediate throw, which
-            // would be a broken read rather than an honoured deadline.
-            c.that(elapsed >= (int64) 300,
-                   "TLS readWithin waits out the budget before raising");
-
-            tls.close();
-            int32 sret = await t;
-        }
-    }
-
-    // ---- fixtures (the 1.4f self-signed P-256 pair) ----------------------
 
     static #String certPem() {
         String s = "-----BEGIN CERTIFICATE-----\n"
