@@ -1,0 +1,46 @@
+package dev.cajeta.http.test;
+
+import cajeta.lang.String;
+
+/**
+ * Opt-in probe: does a long-lived `scope` retain memory per `spawn`?
+ *
+ * The h2 serving loop spawns one handler fiber per stream into a scope that
+ * only exits when the CONNECTION closes, so anything retained per spawn grows
+ * for the life of the connection. The soak measures a whole HTTP exchange and
+ * cannot say which side of it grows. This isolates the construct: no sockets,
+ * no protocol, one scope and N trivial fibers.
+ */
+public final class ScopeProbeTests {
+
+    public static async int32 noop(int32 i) {
+        return i;
+    }
+
+    public static void run(Check c, int32 rounds) {
+        System.stdout.println("-- scope probe: " + rounds + " spawns in one scope --");
+        int64 before = Http2SoakTests.residentKb();
+        int64 mid = 0;
+        int32 sum = 0;
+        // Spawn and DROP the handle without awaiting, which is what the h2
+        // serving loop does. Awaiting each one lets the scope release it
+        // immediately and hides anything the unawaited path retains.
+        scope {
+            int32 i = 0;
+            while (i < rounds) {
+                Task<int32> t = spawn noop(i);
+                i = i + 1;
+                if (i == rounds / 2) {
+                    mid = Http2SoakTests.residentKb();
+                }
+            }
+            sum = rounds;
+        }
+        int64 after = Http2SoakTests.residentKb();
+        System.stdout.println("   rss before " + before + " kB, half " + mid
+                              + " kB, end " + after + " kB  (sum " + sum + ")");
+        c.that(before > 0, "scope probe: the resident-memory probe is alive");
+        c.that(after - before < 4096,
+               "scope probe: a scope does not retain megabytes per spawn");
+    }
+}

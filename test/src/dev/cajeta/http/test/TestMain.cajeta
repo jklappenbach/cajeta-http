@@ -72,11 +72,43 @@ public final class TestMain {
         if (sel.want("SseClientTests")) { SseClientTests.run(c); }
         if (sel.want("SseClientLoopbackTests")) { SseClientLoopbackTests.run(c); }
 
+        // Opt-in only. The soak answers whether a connection survives being
+        // used, which takes minutes, so it never runs as part of the battery.
+        int32 soak = TestMain.soakRounds(args);
+        if (soak > 0) { Http2SoakTests.run(c, soak); }
+        int32 sp = TestMain.flagValue(args, "--scopeprobe=");
+        if (sp > 0) { ScopeProbeTests.run(c, sp); }
+        int32 serve = TestMain.flagValue(args, "--soakserve=");
+        if (serve > 0) { Http2SoakTests.serveOnly(serve); }
+        int32 drive = TestMain.flagValue(args, "--soakdrive=");
+        int32 dport = TestMain.flagValue(args, "--soakport=");
+        if (drive > 0 && dport > 0) { Http2SoakTests.driveOnly(c, dport, drive); }
+
         System.stdout.println("");
         System.stdout.println("=== {} passed, {} failed, {} skipped ===",
                               c.passes, c.failures, c.skips);
         if (c.failures > 0) {
             return 1;
+        }
+        return 0;
+    }
+
+    /** `--soak=N` rounds, or 0 when the flag is absent. */
+    static int32 soakRounds(String[] args) {
+        return TestMain.flagValue(args, "--soak=");
+    }
+
+    /** The decimal after `prefix` in any arg, or 0 when absent. */
+    static int32 flagValue(String[] args, String prefix) {
+        int32 i = 0;
+        while (i < args.count()) {
+            String a = args[i];
+            if (a.startsWith(prefix)) {
+                String v #= a.substring(prefix.byteLength(), a.byteLength());
+                int32 n = Shard.digits(v);
+                if (n > 0) { return n; }
+            }
+            i = i + 1;
         }
         return 0;
     }

@@ -1,0 +1,303 @@
+package dev.cajeta.http.test;
+
+import cajeta.lang.String;
+import cajeta.io.net.IpAddress;
+import cajeta.io.net.SocketAddress;
+import cajeta.io.net.TcpListener;
+import cajeta.io.net.TcpStream;
+import cajeta.io.net.AsyncReader;
+import cajeta.io.net.AsyncWriter;
+import cajeta.io.file.File;
+import cajeta.io.file.FileReader;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.h2.Http2Connection;
+import dev.cajeta.http.h2.Http2;
+import dev.cajeta.http.h2.Http2FrameHeader;
+import dev.cajeta.http.h2.Http2FrameWriter;
+import dev.cajeta.http.h2.Http2Frames;
+import dev.cajeta.http.h2.Http2SettingsList;
+import dev.cajeta.http.h2.Http2ContentFrames;
+import dev.cajeta.http.h2.HpackEncoder;
+import dev.cajeta.http.h2.HpackFieldList;
+
+/**
+ * Opt-in soak: many streams down ONE connection, watching resident memory.
+ *
+ * The functional suite says nothing about whether a connection survives being
+ * used. Three defects said it did not, and each of them needed a long-lived
+ * connection to show: the stream table kept every stream ever opened, the send
+ * gate never released a slot, and the connection receive window was credited
+ * without being consumed so it walked toward MAX_WINDOW_SIZE. All three grow
+ * with requests served, not with requests in flight.
+ *
+ * With those fixed the connection no longer stalls, and 20000 streams down one
+ * connection all complete. It still grows by roughly 160 bytes per request,
+ * measured with the client in a SEPARATE process so the number belongs to one
+ * side: the client stayed flat at 8616 kB while the server went 9244 to 11348.
+ *
+ * Ruled out as the cause, each by its own check rather than by reading:
+ * `scope` and `spawn` (see [`ScopeProbeTests`](ScopeProbeTests.cajeta), which
+ * reproduces the serving loop's spawn-and-drop and shows no retention), the
+ * stream table and the send gate (bounded, and unit tested both ways), and the
+ * HPACK dynamic tables on both sides, which do evict per RFC 7541 4.4. What is
+ * left is the per-request object graph, meaning HttpRequest, Headers and the
+ * response, and confirming that needs allocation instrumentation rather than
+ * RSS.
+ */
+public final class Http2SoakTests {
+
+    public static void run(Check c, int32 rounds) {
+        System.stdout.println("-- h2 soak: " + rounds + " streams, one connection --");
+        Http2SoakTests.soak(c, rounds);
+    }
+
+    /**
+     * Serve one connection on `port` until it closes. Split out so the client
+     * can run in a SEPARATE process: in-process both sides share one RSS, and
+     * a growth number cannot be attributed to either.
+     */
+    public static void serveOnly(int32 port) {
+        scope {
+            IpAddress la #= IpAddress.loopbackV4();
+            SocketAddress bindAddr #= SocketAddress.of(#la, port);
+            TcpListener listener #= TcpListener.bind(bindAddr);
+            System.stdout.println("soak server listening on " + listener.boundPort());
+            Task<int32> sv = spawn soakServer(#listener);
+            int32 r = await sv;
+        }
+    }
+
+    /** Drive `rounds` streams at an already-running server. */
+    public static void driveOnly(Check c, int32 port, int32 rounds) {
+        System.stdout.println("-- h2 soak client: " + rounds + " streams --");
+        Http2SoakTests.drive(c, port, rounds);
+    }
+
+    static void soak(Check c, int32 rounds) {
+        scope {
+            IpAddress la #= IpAddress.loopbackV4();
+            SocketAddress bindAddr #= SocketAddress.of(#la, 0);
+            TcpListener listener #= TcpListener.bind(bindAddr);
+            int32 port = listener.boundPort();
+            Task<int32> sv = spawn soakServer(#listener);
+            Http2SoakTests.drive(c, port, rounds);
+            int32 r = await sv;
+        }
+    }
+
+    public static async int32 soakServer(#TcpListener listener) {
+        TcpStream sock #= listener.acceptAsync();
+        AsyncReader reader = heap AsyncReader(sock);
+        AsyncWriter writer = heap AsyncWriter(sock);
+        (HttpRequest) -> #HttpResponse h = (req) -> Http2SoakTests.reply(req);
+        Http2Connection.serve(reader, writer, h);
+        sock.close();
+        return 1;
+    }
+
+    static #HttpResponse reply(HttpRequest req) {
+        String b = "hello, h2";
+        HttpResponse resp #= HttpResponse.ok();
+        resp.body(b.toBytes(), b.byteLength());
+        return #resp;
+    }
+
+    static void drive(Check c, int32 port, int32 rounds) {
+        IpAddress ca #= IpAddress.loopbackV4();
+        SocketAddress connAddr #= SocketAddress.of(#ca, port);
+        TcpStream sock #= TcpStream.connectAsync(#connAddr);
+        AsyncReader reader = heap AsyncReader(sock);
+        AsyncWriter writer = heap AsyncWriter(sock);
+
+        int8[] pf #= Http2.preface();
+        writer.writeAll(pf, 0, 24);
+        Http2FrameWriter pw = heap Http2FrameWriter();
+        Http2SettingsList empty = heap Http2SettingsList();
+        Http2Frames.writeSettings(pw, empty);
+        int8[] pb #= pw.toBytes();
+        writer.writeAll(pb, 0, (int32) pb.count());
+        writer.flush();
+
+        HpackEncoder enc = heap HpackEncoder(Http2.DEFAULT_HEADER_TABLE_SIZE, true);
+        int64 baseline = 0;
+        int64 peak = 0;
+        int32 completed = 0;
+        int32 sid = 1;
+        int32 n = 0;
+        Http2SoakTests.pendConn = 0;
+        boolean stalled = false;
+        while (n < rounds) {
+            Http2FrameWriter fw = heap Http2FrameWriter();
+            HpackFieldList fl = heap HpackFieldList();
+            fl.put(Http2ConnTests.own(":method"), Http2ConnTests.own("GET"));
+            fl.put(Http2ConnTests.own(":path"), Http2ConnTests.own("/hello"));
+            fl.put(Http2ConnTests.own(":scheme"), Http2ConnTests.own("http"));
+            fl.put(Http2ConnTests.own(":authority"),
+                   Http2ConnTests.own("127.0.0.1"));
+            int8[] block #= enc.encode(fl);
+            Http2ContentFrames.writeHeaders(fw, sid, block,
+                                            (int32) block.count(), true, true, 0);
+            int8[] out #= fw.toBytes();
+            writer.writeAll(out, 0, (int32) out.count());
+            writer.flush();
+
+            if (Http2SoakTests.awaitStreamEnd(reader, writer, sid)) {
+                completed = completed + 1;
+            } else {
+                stalled = true;
+                n = rounds;
+            }
+            sid = sid + 2;
+            n = n + 1;
+            if (n % 5000 == 0) {
+                System.stdout.println("   " + n + " streams, rss "
+                                      + Http2SoakTests.residentKb() + " kB");
+            }
+
+            // Let the first rounds settle before taking the baseline: early
+            // growth is warm-up, and comparing against a cold sample reads
+            // arena reservation as a leak.
+            if (n == 200) {
+                baseline = Http2SoakTests.residentKb();
+            }
+            if (n > 200) {
+                int64 now = Http2SoakTests.residentKb();
+                if (now > peak) {
+                    peak = now;
+                }
+            }
+        }
+        sock.close();
+
+        System.stdout.println("   completed " + completed + "/" + rounds
+                              + "  rss baseline " + baseline + " kB"
+                              + "  peak " + peak + " kB");
+        c.that(!stalled, "h2 soak: the connection never stalled");
+        c.eqInt((int64) completed, (int64) rounds, "h2 soak: every stream answered");
+        // A dead instrument reads exactly like a clean result, so prove it is
+        // alive before believing what it says.
+        c.that(baseline > 0, "h2 soak: the resident-memory probe is alive");
+        if (baseline > 0) {
+            int64 growth = peak - baseline;
+            c.that(growth < baseline / 2,
+                   "h2 soak: resident memory does not grow with streams served");
+        }
+    }
+
+    // Receive-window octets consumed since the last WINDOW_UPDATE we sent.
+    static int32 pendConn;
+
+    /**
+     * Read frames until END_STREAM lands on `sid`, behaving as a real peer:
+     * ack SETTINGS, and hand back receive-window credit.
+     *
+     * The credit is not optional. Without it the server spends its 65535-octet
+     * send window and correctly parks, which is what a first version of this
+     * harness did. It stalled around stream 7281, one window divided by the
+     * nine-byte body, and looked like a server defect.
+     */
+    static boolean awaitStreamEnd(AsyncReader reader, AsyncWriter writer,
+                                  int32 sid) {
+        boolean done = false;
+        while (!done) {
+            int8[] hdr = heap int8[9];
+            boolean got = false;
+            try {
+                got = Http2ConnTests.readExactWithin(reader, hdr, 9, 10000);
+            } catch (Exception e) {
+                return false;
+            }
+            if (!got) {
+                return false;
+            }
+            Http2FrameHeader h #= Http2FrameHeader(hdr);
+            int32 type = h.typeCode();
+            int32 flags = h.flags();
+            int32 len = h.length();
+            int8[] pl = heap int8[len];
+            if (len > 0) {
+                try {
+                    if (!Http2ConnTests.readExactWithin(reader, pl, len, 10000)) {
+                        return false;
+                    }
+                } catch (Exception e) {
+                    return false;
+                }
+            }
+            if (type == Http2.FRAME_DATA) {
+                Http2SoakTests.pendConn = Http2SoakTests.pendConn + len;
+                if (Http2SoakTests.pendConn >= 16384) {
+                    Http2FrameWriter wu = heap Http2FrameWriter();
+                    Http2Frames.writeWindowUpdate(wu, 0,
+                                                  Http2SoakTests.pendConn);
+                    int8[] wb #= wu.toBytes();
+                    writer.writeAll(wb, 0, (int32) wb.count());
+                    writer.flush();
+                    Http2SoakTests.pendConn = 0;
+                }
+            }
+            if (type == Http2.FRAME_SETTINGS) {
+                if ((flags & Http2.FLAG_ACK) == 0) {
+                    Http2FrameWriter afw = heap Http2FrameWriter();
+                    Http2Frames.writeSettingsAck(afw);
+                    int8[] ab #= afw.toBytes();
+                    writer.writeAll(ab, 0, (int32) ab.count());
+                    writer.flush();
+                }
+            } else if (type == Http2.FRAME_GOAWAY) {
+                return false;
+            } else if (h.streamId() == sid) {
+                if ((flags & Http2.FLAG_END_STREAM) != 0) {
+                    done = true;
+                }
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Resident set in kB from `/proc/self/statm`, or 0 where it is absent.
+     * Read through a `FileReader` rather than `readAllBytes`: a proc file
+     * reports `st_size` 0, so the size-first path hands back nothing.
+     */
+    static int64 residentKb() {
+        String p = "/proc/self/statm";
+        int8[] b = heap int8[128];
+        int32 n = 0;
+        try {
+            FileReader r #= File.openRead(p);
+            n = r.read(b, 128);
+            r.close();
+        } catch (Exception e) {
+            return 0;
+        }
+        if (n <= 0) {
+            return 0;
+        }
+        // "size resident shared ..." in pages; the second field is the one.
+        int32 i = 0;
+        while (i < n && b[i] != (int8) 32) {
+            i = i + 1;
+        }
+        while (i < n && b[i] == (int8) 32) {
+            i = i + 1;
+        }
+        int64 pages = 0;
+        boolean any = false;
+        while (i < n) {
+            int8 ch = b[i];
+            if (ch < (int8) 48 || ch > (int8) 57) {
+                i = n;
+            } else {
+                pages = pages * 10 + (int64) (ch - (int8) 48);
+                any = true;
+                i = i + 1;
+            }
+        }
+        if (!any) {
+            return 0;
+        }
+        return pages * 4;
+    }
+}
