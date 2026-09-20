@@ -203,9 +203,8 @@ public final class Http2Client {
         writer.flush();
     }
 
-    // A generous per-read deadline so a stalled/half-open peer surfaces as a
-    // clean error rather than an unbounded block (plaintext only; TLS v1 has no
-    // real readWithin and falls back to a blocking read).
+    // A generous per-read deadline so a stalled or half-open peer surfaces as
+    // a clean error rather than an unbounded block. TLS honours it too.
     static final int32 READ_TIMEOUT_MS = 15000;
 
     static boolean readFully(AsyncReader reader, int8[] buf, int32 n) {
