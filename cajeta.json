@@ -95,16 +95,23 @@
         // auto-extract native/ from a classpath .cja); a plain `cajeta test`
         // still builds and falls back to the pure-cajeta DEFLATE path.
         //
-        // The peg stays at 0.8.2 through the v0.29.0 raise. 0.8.2 is what Olla
-        // serves, and a peg to anything it does not serve makes this package
-        // unresolvable for every consumer. It is also the same code: the sibling
-        // checkout's 0.8.3 is a rebuild-only cut whose src/main is byte for byte
-        // 0.8.2's, so the re-check a v0.29.0 consumer runs over the archive's
-        // own sources has nothing new to find. Measured, not assumed:
-        // scripts/ci-checks.sh is green on v0.29.0 resolving 0.8.2 out of the
-        // store, which is the path CI takes.
+        // The peg held at 0.8.2 for one reason only, and that reason has
+        // expired. It held because 0.8.2 was what Olla served, and a peg to a
+        // version the registry does not serve makes this package unresolvable
+        // for every consumer. Olla has served 0.8.3 since 2026-09-21T11:04:45Z,
+        // sha256 986183e9b259b6dc, checked against /v2/resolve rather than
+        // assumed from the sibling checkout's manifest.
+        //
+        // 0.8.3 rather than 0.8.2 because resolving is not the whole bar. A
+        // consumer's compiler re-checks a dependency archive's OWN sources, so
+        // the archive has to be one this toolchain cut, and 0.8.2 predates
+        // v0.29.0 while 0.8.3 is the v0.29.0 rebuild of the same src/main.
+        // Measured, not assumed: scripts/ci-checks.sh is green on the released
+        // v0.29.0 binary resolving 0.8.3 out of $OLLA_HOME, with
+        // .cajeta/cache/artifact cleared first and the sibling checkout taken
+        // out of the lookup, which is the path CI takes.
         "dependencies": {
-            "dev.cajeta.codec": "0.8.2"
+            "dev.cajeta.codec": "0.8.3"
         },
 
         // Empty: the suite is a self-checking binary under test/src, not a
