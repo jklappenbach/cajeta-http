@@ -52,7 +52,28 @@ jobs:
       # assumed: the released binary is downloaded and the suite run against it
       # before the pin moves. Raise it the same way -- this line has already
       # shipped a pin that could not build the sources beneath it once.
-      cajeta-version: v0.28.0
+      #
+      # Raised to v0.29.0, a correctness requirement for the fourth time, and
+      # this one closes the gap the 0.3.0 README had to name rather than fix.
+      # `Http2Connection.run` spawns one handler fiber per stream in statement
+      # position inside a scope that only exits when the CONNECTION closes, so
+      # on v0.28.0 the scope frame kept the task and its entry for the whole
+      # life of the connection. cajeta 4bcaef62 and 95cdac83 reap finished tasks
+      # at registration, both in runtime/native/cajeta_rt_concurrent_sync.c, and
+      # both are in v0.29.0.
+      #
+      # Measured on the released binary rather than read off those commits.
+      # 3000 streams down one connection, watching the soak server's own
+      # live-object print every 500. v0.28.0 climbs 883, 1371, 1891, 2379, 2867,
+      # 3387, which is one object per request served. v0.29.0 is flat at 387,
+      # 375, 395, 383, 371, 391. Same sources, same codec archive, only the
+      # compiler differs, so the instrument fires on the old toolchain and does
+      # not on the new one.
+      #
+      # scripts/ci-checks.sh is green on that binary with .cajeta/cache cleared
+      # first: 1445 suite tests, 150 tour checks, 128 of 128 public types
+      # covered. Raise it the same way.
+      cajeta-version: v0.29.0
       # Suite + tour + tour-coverage gate, chained in scripts/ci-checks.sh.
       # (`./run-tests.sh` rather than `cajeta test` because the suite needs the
       # codec's native zlib backend extracted out of its .cja with

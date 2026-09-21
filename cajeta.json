@@ -49,9 +49,26 @@
         // f02c1f6 the sources call `JsonValue.array()/object()`, the v0.22
         // stdlib rename, which 0.10.0 has no spelling for -- it declares
         // `asArray`/`asObject` and cannot compile this tree at all. The floor
-        // is therefore v0.22. This pin names 0.28.0, which the tree needs for a
-        // second reason: nine `Task<T> t #= spawn f()` bindings across the suite
-        // and the tour double-free their Task on every release before it.
+        // is therefore v0.22. 0.28.0 was the pin before this one, and the tree
+        // needed it for a second reason: nine `Task<T> t #= spawn f()` bindings
+        // across the suite and the tour double-free their Task on every release
+        // before it.
+        //
+        // This pin now names 0.29.0, and again a correctness requirement rather
+        // than a preference. The h2 serving loop spawns one handler fiber per
+        // stream in statement position inside a scope that only exits when the
+        // CONNECTION closes (Http2Connection.cajeta:170), so on 0.28.0 every
+        // request left a task and a scope-frame entry behind for the life of
+        // that connection. The 0.3.0 README named it as the one known gap.
+        // cajeta 4bcaef62 and 95cdac83 reap finished tasks at registration,
+        // both in runtime/native/cajeta_rt_concurrent_sync.c, and both are in
+        // v0.29.0. Measured on this tree rather than taken from the commit
+        // message: 3000 streams down one connection, reading the soak server's
+        // own live-object print every 500. On 0.28.0 it climbs 883, 1371, 1891,
+        // 2379, 2867, 3387, which is one object per request served. On 0.29.0 it
+        // is flat at 387, 375, 395, 383, 371, 391. The fix is entirely runtime
+        // side, so a consumer already on v0.29.0 gets it from its own toolchain
+        // rather than from this archive.
         //
         // Keep this in step with `cajeta-version` in
         // .github/workflows/release.yml. They are separate knobs -- this one is
@@ -61,7 +78,7 @@
         // actually installs. A stale value here is a false claim about what
         // builds, which is exactly how the workflow pin came to be wrong.
         "toolchain": {
-            "version": "0.28.0"
+            "version": "0.29.0"
         },
 
         // Uses the network transport stack (sockets + TLS via cajeta.io.net).
@@ -77,6 +94,15 @@
         // the extract-bridge in ./run-tests.sh (the toolchain does not yet
         // auto-extract native/ from a classpath .cja); a plain `cajeta test`
         // still builds and falls back to the pure-cajeta DEFLATE path.
+        //
+        // The peg stays at 0.8.2 through the v0.29.0 raise. 0.8.2 is what Olla
+        // serves, and a peg to anything it does not serve makes this package
+        // unresolvable for every consumer. It is also the same code: the sibling
+        // checkout's 0.8.3 is a rebuild-only cut whose src/main is byte for byte
+        // 0.8.2's, so the re-check a v0.29.0 consumer runs over the archive's
+        // own sources has nothing new to find. Measured, not assumed:
+        // scripts/ci-checks.sh is green on v0.29.0 resolving 0.8.2 out of the
+        // store, which is the path CI takes.
         "dependencies": {
             "dev.cajeta.codec": "0.8.2"
         },
