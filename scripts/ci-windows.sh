@@ -22,6 +22,19 @@
 # A developer box with a sibling cajeta-codec checkout does not need any of
 # this: run-tests.sh builds that checkout's own native tree. This is the CI
 # path, where no checkout exists.
+#
+# That premise expired at the 0.8.3 peg, and this leg is now redundant rather
+# than load-bearing. cajeta b07545c3 bakes every PROVISIONED native platform
+# instead of only the build host's, and 0.8.3 is the first codec cut from a
+# toolchain carrying it. Counted out of the two archives rather than read off
+# that commit: 0.8.2 holds one `.a`, `linux-x64`, and 0.8.3 holds six, which are
+# linux-x64, linux-arm64, linux-riscv64, macos-x64, macos-arm64 and windows-x64.
+# So the extract-bridge in run-tests.sh would now find windows-x64 on its own.
+#
+# It stays anyway, and deliberately. Nothing here can run a Windows leg, so
+# deleting it would trade a path that works for one that only looks like it
+# should, and the externally supplied CAJETA_NATIVE_PATH still wins over the
+# bridge either way. Retire it on a green Windows run, not on this note.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
