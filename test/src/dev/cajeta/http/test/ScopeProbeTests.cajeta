@@ -10,6 +10,13 @@ import cajeta.lang.String;
  * for the life of the connection. The soak measures a whole HTTP exchange and
  * cannot say which side of it grows. This isolates the construct: no sockets,
  * no protocol, one scope and N trivial fibers.
+ *
+ * RSS is the only instrument that works here. `Cajeta.liveCount` is blind to
+ * the retained Task: on v0.28.0, which retains one per spawn, it reads 10 at
+ * spawn 200 and 8 at spawn 3000. Transferring a tracked heap object into the
+ * spawn target does not help either, 11 and 8, because the fiber runs and frees
+ * it while the frame keeps only the Task. Read the live count off the h2 soak
+ * server instead, where it does move.
  */
 public final class ScopeProbeTests {
 

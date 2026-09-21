@@ -54,8 +54,10 @@ import dev.cajeta.http.h2.HpackFieldList;
  * [`RequestPathProbeTests`](RequestPathProbeTests.cajeta) and
  * [`ScopeProbeTests`](ScopeProbeTests.cajeta), all opt-in.
  *
- * The Task half needs a compiler carrying the runtime fix. Against the pinned
- * v0.28.0 this still grows by one allocation per request.
+ * The Task half needs a compiler carrying the runtime fix, and the pin now
+ * names one. Measured over 3000 streams on one connection, reading the server's
+ * live count every 500: v0.28.0 gives 883, 1371, 1891, 2379, 2867, 3387, and
+ * v0.29.0 gives 387, 375, 395, 383, 371, 391.
  *
  * The residual RSS above that is NOT a leak, measured rather than assumed. With
  * [`scripts/mallprobe`](../../../../../../scripts/mallprobe/README.md)
