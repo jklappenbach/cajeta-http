@@ -30,20 +30,19 @@ cd "$(dirname "$0")"
 
 CAJETA_BIN="${CAJETA_BIN:-cajeta}"
 
-# GzipCompressChannel keeps a borrow of its source reader in a field, and
-# CAJETA_ERROR_CAPTURED_BORROW_PARAM rejects that outright. The code is
-# CORRECT: GzipCompressBody.of owns both the body and the channel, hands the
-# channel a `b.source.reader()` borrow, and the two die together -- the
-# deliberate non-owning alias of the ownership guide 3. The checker cannot
-# prove the borrow's owner outlives the borrower when a single parent owns
-# both, and there is no spelling that says so: making the parameter `#T`
-# fails at the call site instead, because `reader()` returns a borrow and
-# there is no title to transfer.
+# This used to force CAJETA_CAPTURED_BORROW=warn, because
+# CAJETA_ERROR_CAPTURED_BORROW_PARAM rejected GzipCompressChannel keeping its
+# source reader in a field. It is gone because it suppresses nothing any more:
+# the constructor now stores `this.src #= src`, which is the container spelling
+# the diagnostic itself names, so the tree builds clean with the check at full
+# strength. A standing suppression that catches nothing only hides the next
+# real one.
 #
-# So warn rather than error, the same warn-first switch cajeta-llm and cabra
-# already carry for this migration. Drop it when the checker learns
-# co-ownership.
-export CAJETA_CAPTURED_BORROW="${CAJETA_CAPTURED_BORROW:-warn}"
+# Measured on cajeta v0.29.0 with .cajeta/cache cleared before each build.
+# Unset, and at an explicit `error`, the library and the suite compile with no
+# CAPTURED_BORROW diagnostic at all, and so does v0.28.0. The check is not
+# merely quiet: a three-file probe that stores a plain parameter in a field
+# fails on the same binary with CAJETA_ERROR_CAPTURED_BORROW_PARAM.
 
 # --- artifact discovery -------------------------------------------------
 # Where a checkout's .cja is. Prefers `cajeta artifact-path`, which reads
