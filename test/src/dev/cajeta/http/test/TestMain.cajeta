@@ -11,7 +11,7 @@ public final class TestMain {
         Shard sel #= heap Shard(args);
 
         String v = Http.version();
-        c.eqStr(v, "0.3.0", "Http.version()");   // keep in lockstep with cajeta.json details.version
+        c.eqStr(v, "0.3.1", "Http.version()");   // keep in lockstep with cajeta.json details.version
 
         if (sel.want("CoreTypeTests")) { CoreTypeTests.run(c); }
         if (sel.want("BodyTests")) { BodyTests.run(c); }
