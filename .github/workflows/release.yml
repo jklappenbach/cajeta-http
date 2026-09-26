@@ -73,7 +73,12 @@ jobs:
       # scripts/ci-checks.sh is green on that binary with .cajeta/cache cleared
       # first: 1445 suite tests, 150 tour checks, 128 of 128 public types
       # covered. Raise it the same way.
-      cajeta-version: v0.29.0
+      #
+      # Raised to v0.30.0 for the ByteBuffer channel operations the 0.4.0 view
+      # model reads and writes through. scripts/ci-checks.sh is green on the
+      # released binary with .cajeta/cache cleared: 1445 suite tests, 150 tour
+      # checks, 128 of 128 public types covered.
+      cajeta-version: v0.30.0
       # Suite + tour + tour-coverage gate, chained in scripts/ci-checks.sh.
       # (`./run-tests.sh` rather than `cajeta test` because the suite needs the
       # codec's native zlib backend extracted out of its .cja with
