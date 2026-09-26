@@ -42,7 +42,7 @@ import dev.cajeta.http.MediaType;
  * buffer — is future work; parsing is already incremental (see
  * [`MultipartParser`](MultipartParser.cajeta)).
  */
-public final class MultipartBody extends Body {
+public final class MultipartBody implements Body {
 
     /** Per-process counter so two bodies built in the same millisecond differ. */
     static int64 boundarySeq = (int64) 0;
@@ -360,5 +360,9 @@ public final class MultipartBody extends Body {
     public AsyncReader reader() {
         this.ensureEncoded();
         return this.rdr;
+    }
+
+    /** Nothing to stop: the content is produced on demand. */
+    public void abort() {
     }
 }

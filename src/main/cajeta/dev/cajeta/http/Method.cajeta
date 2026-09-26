@@ -1,6 +1,7 @@
 package dev.cajeta.http;
 
 import cajeta.lang.String;
+import cajeta.lang.Slice;
 
 /**
  * An HTTP **request method** (RFC 9110 §9) — the nine registered tokens
@@ -62,6 +63,20 @@ public enum Method {
     }
 
     /** True iff `token` names one of the nine registered methods (verbatim). */
+    /** The method named by a byte window, or EXTENSION when unregistered. */
+    public static Method ofBytes(Slice<int8> t) {
+        if (Bytes.equals(t, "GET")) { return Method.GET; }
+        if (Bytes.equals(t, "POST")) { return Method.POST; }
+        if (Bytes.equals(t, "HEAD")) { return Method.HEAD; }
+        if (Bytes.equals(t, "PUT")) { return Method.PUT; }
+        if (Bytes.equals(t, "DELETE")) { return Method.DELETE; }
+        if (Bytes.equals(t, "PATCH")) { return Method.PATCH; }
+        if (Bytes.equals(t, "OPTIONS")) { return Method.OPTIONS; }
+        if (Bytes.equals(t, "CONNECT")) { return Method.CONNECT; }
+        if (Bytes.equals(t, "TRACE")) { return Method.TRACE; }
+        return Method.EXTENSION;
+    }
+
     public static boolean isRegistered(String token) {
         if (token == null) { return false; }
         return Method.of(token) != Method.EXTENSION;

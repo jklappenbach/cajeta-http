@@ -13,7 +13,7 @@ import dev.cajeta.http.MediaType;
  * reader is valid for as long as the body lives. A new `reader()` call
  * replaces the body-owned channel — treat any earlier reader as done.
  */
-public final class BytesBody extends Body {
+public final class BytesBody implements Body {
 
     int8[] data;
     int32 len;
@@ -66,5 +66,9 @@ public final class BytesBody extends Body {
 
     public AsyncReader reader() {
         return this.rdr;
+    }
+
+    /** Nothing to stop: the content is produced on demand. */
+    public void abort() {
     }
 }

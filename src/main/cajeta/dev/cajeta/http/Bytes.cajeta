@@ -1,0 +1,213 @@
+package dev.cajeta.http;
+
+import cajeta.lang.String;
+import cajeta.lang.Slice;
+
+/** Allocation-free reads over byte windows: comparison, tokens and number parsing. */
+public final class Bytes {
+    static int32 lower(int8 b) {
+        int32 c = ((int32) b) & 255;
+        if (c >= 65 && c <= 90) {
+            return c + 32;
+        }
+        return c;
+    }
+
+    /** Byte-exact equality of a window and a string. */
+    public static boolean equals(Slice<int8> s, String text) {
+        int32 n = text.byteLength();
+        if (s.count() != (int64) n) {
+            return false;
+        }
+        int32 i = 0;
+        while (i < n) {
+            if (s[(int64) i] != text.byteAt(i)) {
+                return false;
+            }
+            i = i + 1;
+        }
+        return true;
+    }
+
+    /** ASCII case-insensitive equality of a window and a string. */
+    public static boolean equalsIgnoreCase(Slice<int8> s, String text) {
+        int32 n = text.byteLength();
+        if (s.count() != (int64) n) {
+            return false;
+        }
+        int32 i = 0;
+        while (i < n) {
+            if (Bytes.lower(s[(int64) i]) != Bytes.lower(text.byteAt(i))) {
+                return false;
+            }
+            i = i + 1;
+        }
+        return true;
+    }
+
+    /** ASCII case-insensitive equality of two windows. */
+    public static boolean sameIgnoreCase(Slice<int8> a, Slice<int8> b) {
+        int64 n = a.count();
+        if (b.count() != n) {
+            return false;
+        }
+        int64 i = 0;
+        while (i < n) {
+            if (Bytes.lower(a[i]) != Bytes.lower(b[i])) {
+                return false;
+            }
+            i = i + 1;
+        }
+        return true;
+    }
+
+    /** True when the window starts with `prefix`, byte-exact. */
+    public static boolean startsWith(Slice<int8> s, String prefix) {
+        int32 n = prefix.byteLength();
+        if (s.count() < (int64) n) {
+            return false;
+        }
+        int32 i = 0;
+        while (i < n) {
+            if (s[(int64) i] != prefix.byteAt(i)) {
+                return false;
+            }
+            i = i + 1;
+        }
+        return true;
+    }
+
+    static boolean isListDelim(int32 c) {
+        return c == 44 || c == 32 || c == 9;
+    }
+
+    /**
+     * True when `token` is a whole comma, space or tab delimited element of
+     * the window, compared case-insensitively.
+     */
+    public static boolean hasToken(Slice<int8> s, String token) {
+        int64 n = s.count();
+        int64 t = (int64) token.byteLength();
+        if (t == 0 || t > n) {
+            return false;
+        }
+        int64 i = 0;
+        while (i + t <= n) {
+            boolean left = i == 0 || Bytes.isListDelim(((int32) s[i - 1]) & 255);
+            if (left) {
+                int64 j = 0;
+                boolean same = true;
+                while (j < t && same) {
+                    same = Bytes.lower(s[i + j]) == Bytes.lower(token.byteAt((int32) j));
+                    j = j + 1;
+                }
+                if (same) {
+                    int64 after = i + t;
+                    if (after == n || Bytes.isListDelim(((int32) s[after]) & 255)) {
+                        return true;
+                    }
+                }
+            }
+            i = i + 1;
+        }
+        return false;
+    }
+
+    /** A non-negative decimal integer, or `fallback` when the window is not one. */
+    public static int64 parseInt64(Slice<int8> s, int64 fallback) {
+        int64 n = s.count();
+        if (n == 0 || n > 18) {
+            return fallback;
+        }
+        int64 v = 0;
+        int64 i = 0;
+        while (i < n) {
+            int32 d = (((int32) s[i]) & 255) - 48;
+            if (d < 0 || d > 9) {
+                return fallback;
+            }
+            v = v * 10 + (int64) d;
+            i = i + 1;
+        }
+        return v;
+    }
+
+    public static int32 hexValue(int32 c) {
+        if (c >= 48 && c <= 57) {
+            return c - 48;
+        }
+        if (c >= 65 && c <= 70) {
+            return c - 55;
+        }
+        if (c >= 97 && c <= 102) {
+            return c - 87;
+        }
+        return -1;
+    }
+
+    /** An owned copy of the window with `%XX` escapes decoded. A malformed escape is kept as sent. */
+    public static #String percentDecode(Slice<int8> s) {
+        int32 n = (int32) s.count();
+        int8[] out = heap int8[n];
+        int32 o = 0;
+        int32 i = 0;
+        while (i < n) {
+            int32 c = ((int32) s[(int64) i]) & 255;
+            if (c == 37 && i + 2 < n) {
+                int32 hi = Bytes.hexValue(((int32) s[(int64) (i + 1)]) & 255);
+                int32 lo = Bytes.hexValue(((int32) s[(int64) (i + 2)]) & 255);
+                if (hi >= 0 && lo >= 0) {
+                    out[o] = (int8) (hi * 16 + lo);
+                    o = o + 1;
+                    i = i + 3;
+                    continue;
+                }
+            }
+            out[o] = s[(int64) i];
+            o = o + 1;
+            i = i + 1;
+        }
+        return heap String(#out, o);
+    }
+
+    /** A decimal integer with an optional leading minus, or `fallback`. */
+    public static int64 parseSignedInt64(Slice<int8> s, int64 fallback) {
+        int64 n = s.count();
+        if (n == 0) {
+            return fallback;
+        }
+        if (s[0] != (int8) 45) {
+            return Bytes.parseInt64(s, fallback);
+        }
+        int64 v = Bytes.parseInt64(s[1:n], (int64) -1);
+        if (v < 0) {
+            return fallback;
+        }
+        return 0 - v;
+    }
+
+    /** Index of the first `b` in the window, or -1. */
+    public static int64 indexOf(Slice<int8> s, int8 b) {
+        int64 n = s.count();
+        int64 i = 0;
+        while (i < n) {
+            if (s[i] == b) {
+                return i;
+            }
+            i = i + 1;
+        }
+        return -1;
+    }
+
+    /** An owned copy of the window as a `String`. This is the copy-out. */
+    public static #String toString(Slice<int8> s) {
+        int32 n = (int32) s.count();
+        int8[] out = heap int8[n];
+        int32 i = 0;
+        while (i < n) {
+            out[i] = s[(int64) i];
+            i = i + 1;
+        }
+        return heap String(#out, n);
+    }
+}

@@ -22,7 +22,7 @@ import dev.cajeta.http.body.GzipCompressChannel;
  * this; the body itself declares no media type (the response's `Content-Type`
  * was already stamped from the original body).
  */
-public final class GzipCompressBody extends Body {
+public final class GzipCompressBody implements Body {
     Body source;
     GzipCompressChannel channel;
     AsyncReader rdr;
@@ -60,5 +60,9 @@ public final class GzipCompressBody extends Body {
 
     public AsyncReader reader() {
         return this.rdr;
+    }
+
+    /** Nothing to stop: the content is produced on demand. */
+    public void abort() {
     }
 }

@@ -1,0 +1,137 @@
+package dev.cajeta.http;
+
+import cajeta.lang.String;
+import cajeta.lang.Slice;
+
+/**
+ * The header fields of one inbound message, held as windows into the
+ * message's byte store. Lookup is case-insensitive over the bytes and
+ * allocates nothing. The table is reused from message to message.
+ */
+public final class HeaderTable {
+    int8[] none;
+    int8[] src;
+    int32[] spans;
+    int32 used;
+    int32 limit;
+
+    /** A table that holds at most `limit` fields. */
+    public HeaderTable(int32 limit) {
+        this.limit = limit;
+        this.spans = heap int32[limit * 4];
+        this.used = 0;
+        this.none = heap int8[0];
+        this.src #= this.none;
+    }
+
+    void reset(int8[] store) {
+        this.src #= store;
+        this.used = 0;
+    }
+
+    /** Records one field. False when the table is already full. */
+    boolean add(int32 nameOff, int32 nameLen, int32 valueOff, int32 valueLen) {
+        if (this.used >= this.limit) {
+            return false;
+        }
+        int32 k = this.used * 4;
+        this.spans[k] = nameOff;
+        this.spans[k + 1] = nameLen;
+        this.spans[k + 2] = valueOff;
+        this.spans[k + 3] = valueLen;
+        this.used = this.used + 1;
+        return true;
+    }
+
+    /** Number of fields, repeated names counted separately. */
+    public int32 count() {
+        return this.used;
+    }
+
+    /** The name of field `i`, as sent. */
+    public Slice<int8> nameAt(int32 i) {
+        int32 k = i * 4;
+        int32 off = this.spans[k];
+        return this.src[off:off + this.spans[k + 1]];
+    }
+
+    /** The value of field `i`, with surrounding whitespace removed. */
+    public Slice<int8> valueAt(int32 i) {
+        int32 k = i * 4;
+        int32 off = this.spans[k + 2];
+        return this.src[off:off + this.spans[k + 3]];
+    }
+
+    /** Index of the first field named `name` at or after `from`, or -1. */
+    public int32 find(String name, int32 from) {
+        int32 i = from;
+        while (i < this.used) {
+            if (Bytes.equalsIgnoreCase(this.nameAt(i), name)) {
+                return i;
+            }
+            i = i + 1;
+        }
+        return -1;
+    }
+
+    /** True when a field named `name` is present. */
+    public boolean has(String name) {
+        return this.find(name, 0) >= 0;
+    }
+
+    /** The first value named `name`, or an empty window when absent. */
+    public Slice<int8> get(String name) {
+        int32 i = this.find(name, 0);
+        if (i < 0) {
+            return this.src[0:0];
+        }
+        return this.valueAt(i);
+    }
+
+    /** Number of fields named `name`. */
+    public int32 countOf(String name) {
+        int32 n = 0;
+        int32 i = this.find(name, 0);
+        while (i >= 0) {
+            n = n + 1;
+            i = this.find(name, i + 1);
+        }
+        return n;
+    }
+
+    /** True when the first value named `name` equals `value`, ignoring case. */
+    public boolean is(String name, String value) {
+        int32 i = this.find(name, 0);
+        return i >= 0 && Bytes.equalsIgnoreCase(this.valueAt(i), value);
+    }
+
+    /** True when any field named `name` lists `token`, ignoring case. */
+    public boolean hasToken(String name, String token) {
+        int32 i = this.find(name, 0);
+        while (i >= 0) {
+            if (Bytes.hasToken(this.valueAt(i), token)) {
+                return true;
+            }
+            i = this.find(name, i + 1);
+        }
+        return false;
+    }
+
+    /** The first value named `name` as a non-negative integer, or `fallback`. */
+    public int64 int64Of(String name, int64 fallback) {
+        int32 i = this.find(name, 0);
+        if (i < 0) {
+            return fallback;
+        }
+        return Bytes.parseInt64(this.valueAt(i), fallback);
+    }
+
+    /** An owned copy of the first value named `name`, or null when absent. */
+    public #String copy(String name) {
+        int32 i = this.find(name, 0);
+        if (i < 0) {
+            return null;
+        }
+        return Bytes.toString(this.valueAt(i));
+    }
+}

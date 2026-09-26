@@ -8,456 +8,159 @@ import cajeta.io.net.TcpStream;
 import cajeta.io.net.TcpListener;
 import cajeta.io.net.ConnectionLimits;
 import cajeta.io.net.ConnectionLimiter;
-import cajeta.io.net.AsyncReader;
-import cajeta.io.net.AsyncWriter;
-import cajeta.io.net.TimedOutException;
+import cajeta.io.net.BufferPool;
+import cajeta.io.net.ByteBuffer;
+import cajeta.io.net.ByteChannel;
+import cajeta.io.net.tls.TlsStream;
 import cajeta.error.Exception;
+import cajeta.time.Duration;
 import dev.cajeta.http.HttpRequest;
 import dev.cajeta.http.HttpResponse;
-import dev.cajeta.http.body.Body;
-import dev.cajeta.http.body.StreamBody;
-import dev.cajeta.http.h1.HttpParser;
+import dev.cajeta.http.Http1Connection;
 import dev.cajeta.http.h1.HttpParserLimits;
-import dev.cajeta.http.server.ServerLimits;
-import dev.cajeta.http.server.ExpectContinue;
-import dev.cajeta.http.PayloadTooLargeException;
-import dev.cajeta.http.h1.BodyReader;
-import dev.cajeta.http.h1.BodyFraming;
-import dev.cajeta.http.h1.HttpSerializer;
-import dev.cajeta.http.h1.KeepAlive;
-import dev.cajeta.http.HttpException;
-import dev.cajeta.http.server.Exchange;
-import cajeta.io.net.tls.TlsStream;
-import dev.cajeta.http.h2.Http2;
-import dev.cajeta.http.h2.Http2Connection;
-import cajeta.time.Duration;
-import cajeta.time.Clock;
-import cajeta.time.Instant;
-import cajeta.concurrent.Tasks;
 
 /**
- * The **HTTP/1.1 server** — plan item **NET-9.1**. It layers a typed
- * request/response **handler** loop over the NET-4 TCP
- * [`Server`](../Server.cajeta) core: per accepted connection it reads +
- * parses requests ([`HttpParser`](HttpParser.cajeta), NET-7.3 /
- * [`BodyReader`](BodyReader.cajeta), NET-7.4), dispatches each to the
- * handler, writes the response ([`HttpSerializer`](HttpSerializer.cajeta),
- * NET-7.5), and **keeps the connection alive** for the next request when
- * the [`KeepAlive`](KeepAlive.cajeta) policy (NET-7.6) permits — closing
- * it otherwise. A per-request fault is mapped to a status response rather
- * than tearing the connection (or the server) down.
+ * An HTTP/1.1 server. Each connection takes an input and an output buffer
+ * from the server's pool, serves every request on it through one
+ * `Http1Connection`, and returns both buffers when it closes.
+ *
+ * The handler receives the request as a view over the input buffer and a
+ * response that writes into the output buffer:
  *
  * ```cajeta
- * HttpServer srv = HttpServer.bind("0.0.0.0:8080", (req) -> {
- *     // Do NOT chain over the owned temporary: `header`/`body` return a
- *     // view of the receiver, so the chain's value is a borrow and the
- *     // handler's `#HttpResponse` return would dangle. Bind, then transfer.
- *     HttpResponse resp #= HttpResponse.ok();
- *     resp.header("Content-Type", "text/plain");
- *     resp.body(req.body, req.bodyLength());     // echo
- *     return #resp;
- * });
- * scope {
- *     spawn srv.runAsync();
- *     // ... later:
- *     srv.shutdown(Duration.ofSeconds(30));
- * }
- * ```
- *
- * ## Where this sits
- *
- * The accept loop, the fiber-per-connection dispatch, the in-flight
- * accounting, and graceful drain are **all** the
- * [`Server`](../Server.cajeta) core's job (NET-4.1); `HttpServer` supplies
- * the per-connection `(TcpStream) -> void` handler that core runs — the
- * HTTP **protocol** loop. Selecting the *accept model* (fiber-per-conn vs
- * shared-pool) is **NET-9.2** — this server runs unchanged on **either**
- * NET-4 accept stack, picked via a [`ServerModel`](../ServerModel.cajeta)
- * passed to [`bindWithModel`](#bindWithModel) (or the fluent
- * [`builder`](#builder)). The router (`/users/{id}` path params) is
- * NET-9.3; incremental streaming bodies are NET-9.4; TLS termination is
- * NET-9.5. **Request limits + hardening are NET-9.6** — the
- * [`serverLimits`](#serverLimits) ([`ServerLimits`](ServerLimits.cajeta))
- * carry the head/body read deadlines (slowloris mitigation), the max body
- * size (`413`), and the `Expect: 100-continue` policy
- * ([`ExpectContinue`](ExpectContinue.cajeta)); the live loop
- * ([`serveConnectionWithLimits`](#serveConnectionWithLimits)) enforces the
- * deadlines + interim `100 Continue`, and the pure byte path
- * ([`handleRequestWithLimits`](#handleRequestWithLimits)) the size cap +
- * expect short-circuits (`413`/`417`) so they golden-test without a socket.
- *
- * ## Both accept models (NET-9.2)
- *
- * Because the per-connection protocol loop
- * ([`serveConnection`](#serveConnection)) is a model-agnostic
- * `(TcpStream) -> void` callback, the **same** handler runs on Model A
- * (fiber-per-connection, [`Server`](../Server.cajeta), NET-4.2) or Model B
- * (event-driven shared-pool, [`SharedPoolServer`](../SharedPoolServer.cajeta),
- * NET-4.3) with no protocol change — only the accept stack underneath
- * differs. The chosen stack is materialized by
- * [`ServerModel.bindServer`](../ServerModel.cajeta#bindServer), which
- * returns a [`Server`](../Server.cajeta) (Model B's `SharedPoolServer`
- * **extends** `Server`), so [`serve`](#serve) / [`shutdown`](#shutdown)
- * polymorphically drive whichever model was selected:
- *
- * ```cajeta
- * // Model A (default): a fiber per connection.
- * HttpServer a = HttpServer.bind("0.0.0.0:8080", handler);
- * // Model B: an 8-worker shared pool.
- * HttpServer b = HttpServer.builder()
- *     .bind("0.0.0.0:8080")
- *     .model(ServerModel.sharedPool(8))
- *     .handler(handler)
+ * HttpServer srv #= HttpServer.builder()
+ *     .bind("127.0.0.1:8080")
+ *     .handler((HttpRequest q, HttpResponse r) -> r.body("hello"))
  *     .build();
+ * srv.serve();
  * ```
- *
- * ## The handler contract
- *
- * The handler is `(HttpRequest) -> #HttpResponse`: it receives the fully
- * parsed request (head + buffered body) and returns the response to send.
- * A handler that **throws** does not crash the connection — the loop maps
- * the throw to a `500 Internal Server Error` and (since the request body
- * was already consumed) continues the keep-alive loop. The buffered-body
- * model is the NET-7.1/9.1 baseline; the streaming handler variant
- * (write-a-chunk-at-a-time, read-an-upload-without-buffering) is NET-9.4.
- *
- * ## The connection loop (per [`serveConnection`](#serveConnection))
- *
- * For each request on the connection:
- *
- *   1. **Read + parse the head.** Feed bytes from the
- *      [`AsyncReader`](../AsyncReader.cajeta) (NET-3.5) into a fresh
- *      [`HttpParser.forRequest`](HttpParser.cajeta) until the head
- *      terminates. An EOF *before any byte* of a new request is the
- *      clean end of the connection (the peer closed between requests) —
- *      the loop simply returns. An EOF *mid-head* is an
- *      [`UnexpectedEofException`](UnexpectedEofException.cajeta) the
- *      reader surfaces.
- *   2. **Read the body** per the parser's
- *      [`BodyFraming`](BodyFraming.cajeta) decision, seeding the
- *      [`BodyReader`](BodyReader.cajeta) with the parser's leftover bytes
- *      then pulling more from the reader until the body completes. The
- *      decoded body is attached to the request.
- *   3. **Dispatch** to the handler, catching a handler throw → `500`.
- *   4. **Serialize + write** the response through the
- *      [`AsyncWriter`](../AsyncWriter.cajeta), stamping the `Connection`
- *      header to match the keep-alive decision so the peer sees the
- *      server's intent on the wire.
- *   5. **Decide keep-alive** ([`KeepAlive.canReuse`](KeepAlive.cajeta)):
- *      reuse the connection for the next request iff both the request and
- *      the response permit it; otherwise close.
- *
- * The error→response mapping (step 1/2 parse faults, step 3 handler
- * faults) is the [`errorResponse`](#errorResponse) table. A parse fault
- * always closes the connection after the error response (the byte stream
- * is no longer reliably framed); a handler `500` keeps the connection if
- * the request itself parsed clean.
- *
- * ## Testability
- *
- * The protocol logic is factored so it tests **without a live socket**:
- * [`handleRequestBytes`](#handleRequestBytes) is a pure function from raw
- * request bytes + the handler to the response **wire bytes** + the
- * keep-alive decision — it drives the same parser / body reader /
- * serializer / keep-alive path the live loop does, over an in-memory
- * buffer, exactly the feed-then-drain discipline
- * [`BodyReader`](BodyReader.cajeta) and [`HttpParser`](HttpParser.cajeta)
- * use for their golden-vector tests. The socket-facing
- * [`serveConnection`](#serveConnection) is the thin
- * [`AsyncReader`](../AsyncReader.cajeta)/[`AsyncWriter`](../AsyncWriter.cajeta)
- * shim over it.
  */
 public class HttpServer {
-    /**
-     * The HTTP request handler: invoked once per parsed request, returns
-     * the response to write. Field index 1 (after the vtable).
-     */
-    public (HttpRequest) -> #HttpResponse handler;
-
-    /**
-     * The underlying TCP accept core (NET-4.1). `null` until
-     * [`bind`](#bind) wires it; the pure-logic
-     * [`handleRequestBytes`](#handleRequestBytes) path does not need it.
-     */
+    public (HttpRequest, HttpResponse) -> void handler;
     public Server server;
-
-    /**
-     * Abuse ceilings for the per-request head parser (header count, line
-     * length, total head bytes). Defaults to
-     * [`HttpParserLimits`](HttpParserLimits.cajeta)'s defaults.
-     */
     public HttpParserLimits limits;
-
-    /**
-     * Request limits + hardening knobs (**NET-9.6**): the head-read /
-     * body-read deadlines (slowloris mitigation), the max body size, and the
-     * `Expect: 100-continue` policy. Defaults to
-     * [`ServerLimits`](ServerLimits.cajeta)'s conservative public-server
-     * defaults. The deadlines are applied by the socket-facing
-     * [`serveConnectionWithLimits`](#serveConnectionWithLimits) (via
-     * [`AsyncReader.readWithin`](../AsyncReader.cajeta#readWithin)); the
-     * body-size + expect ceilings are enforced on the pure byte path
-     * ([`handleRequestWithLimits`](#handleRequestWithLimits)), so they
-     * golden-test without a socket.
-     */
     public ServerLimits serverLimits;
-
-    /**
-     * The accept model this server was bound on (**NET-9.2**) — Model A
-     * (fiber-per-connection) or Model B (shared-pool). Recorded so
-     * [`model`](#serverModel) can report it; the live dispatch difference is
-     * already baked into the [`server`](#server) the
-     * [`ServerModel.bindServer`](../ServerModel.cajeta#bindServer) seam
-     * materialized. Defaults to
-     * [`ServerModel.fiberPerConnection`](../ServerModel.cajeta#fiberPerConnection)
-     * for a directly-built instance.
-     */
     public ServerModel model;
-
-    /**
-     * Internal ctor. User code goes through [`bind`](#bind) /
-     * [`bindWithModel`](#bindWithModel) / the [`builder`](#builder); a
-     * directly built instance carries the handler + default limits + the
-     * default (fiber-per-connection) model and a `null` server (the
-     * pure-logic test path).
-     */
-    /**
-     * TLS-termination state (http:1.8), meaningful when
-     * [`isTls`](#isTls): the PLAIN listener the TLS server accepts on
-     * (each accepted socket is handshaked in its own worker fiber —
-     * never on the accept path, where one hostile peer would stall the
-     * acceptor) plus the PEM material every worker presents.
-     */
+    public ConnectionBuffers buffers;
     public TcpListener tlsListener;
     int8[] tlsCert;
     int32 tlsCertLen;
     int8[] tlsKey;
     int32 tlsKeyLen;
-    /** True iff this server terminates TLS (built via `.tls(...)`). */
     public boolean isTls;
-
-    /**
-     * Accept control (http:1.5c), meaningful when built with
-     * `.connectionLimits(...)`: the admission limiter every connection
-     * passes and the limits it was built from. `null` = uncapped (the
-     * default posture).
-     */
     public ConnectionLimiter limiter;
     public ConnectionLimits connLimits;
 
-    /**
-     * True iff this plaintext server sniffs the HTTP/2 connection preface on
-     * each new connection (RFC 9113 §3.3 "prior knowledge") and serves h2 when
-     * it matches, degrading to the h1 loop otherwise. Opt-in via the builder;
-     * `false` = plain h1. (h2 over TLS is selected by ALPN, independently.)
-     */
-    public boolean h2Prior;
+    /** Default size of each connection buffer, which bounds a request head and a held body. */
+    public static final int32 DEFAULT_BUFFER_BYTES = 65536;
 
-    public HttpServer((HttpRequest) -> #HttpResponse handler) {
-        this.handler #= handler;   // a keeper stores with `#=`: a lambda literal moves in, a name lends (cajeta ownership 5.13)
+    /** A server running `handler`, not yet bound. */
+    public HttpServer((HttpRequest, HttpResponse) -> void handler) {
+        this.handler #= handler;
         this.server = null;
         this.limits = heap HttpParserLimits();
         this.serverLimits = heap ServerLimits();
-        this.model #= ServerModel.fiberPerConnection();
-        this.tlsListener = null;
-        int8[] e = heap int8[0];
-        this.tlsCert = #e;
-        this.tlsCertLen = 0;
-        int8[] e2 = heap int8[0];
-        this.tlsKey = #e2;
-        this.tlsKeyLen = 0;
+        this.buffers = heap ConnectionBuffers(heap BufferPool(HttpServer.DEFAULT_BUFFER_BYTES, 64));
         this.isTls = false;
-        this.limiter = null;
-        this.connLimits = null;
-        this.h2Prior = false;
     }
 
-    // ----- bind / lifecycle ------------------------------------------------
-
-    /**
-     * Bind an HTTP server on `addr` (a `host:port` string parsed via
-     * [`SocketAddress.parse`](../SocketAddress.cajeta)) with the given
-     * request `handler`, on the **default** accept model (Model A —
-     * fiber-per-connection). Wires the NET-4 [`Server`](../Server.cajeta)
-     * core with a per-connection callback that runs this server's
-     * [`serveConnection`](#serveConnection) loop. To pick the shared-pool
-     * model use [`bindWithModel`](#bindWithModel) (or the
-     * [`builder`](#builder)).
-     *
-     * @EntryPoint
-     */
-    public static #HttpServer bind(String addr, (HttpRequest) -> #HttpResponse handler) {
-        return HttpServer.bindAddress(SocketAddress.parse(addr), handler);
+    /** Binds `addr` with one fiber per connection. */
+    public static #HttpServer bind(String addr, (HttpRequest, HttpResponse) -> void handler) {
+        return HttpServer.bindAddressWithModel(SocketAddress.parse(addr),
+            ServerModel.fiberPerConnection(), #handler);
     }
 
-    /**
-     * Bind on an already-parsed [`SocketAddress`](../SocketAddress.cajeta),
-     * on the **default** accept model (Model A — fiber-per-connection). The
-     * per-connection seam captures this server's handler + limits and hands
-     * the accepted [`TcpStream`](../TcpStream.cajeta) to the static
-     * [`serveConnection`](#serveConnection) worker (no captured `this`
-     * beyond the two values the loop needs — the
-     * [`Server.serveConnection`](../Server.cajeta) convention).
-     */
-    public static #HttpServer bindAddress(#SocketAddress addr,
-                                          (HttpRequest) -> #HttpResponse handler) {
-        return HttpServer.bindAddressWithModel(#addr, ServerModel.fiberPerConnection(),
-                                               handler);
+    /** Binds `addr` with one fiber per connection. */
+    public static #HttpServer bindAddress(#SocketAddress addr, (HttpRequest, HttpResponse) -> void handler) {
+        return HttpServer.bindAddressWithModel(#addr, ServerModel.fiberPerConnection(), #handler);
     }
 
-    /**
-     * Bind an HTTP server on `addr` (a `host:port` string) running on the
-     * accept stack `model` selects — **NET-9.2**: Model A
-     * ([`ServerModel.fiberPerConnection`](../ServerModel.cajeta#fiberPerConnection))
-     * or Model B
-     * ([`ServerModel.sharedPool`](../ServerModel.cajeta#sharedPool)). The
-     * HTTP protocol loop is identical on both; only the underlying accept
-     * dispatch differs.
-     *
-     * @EntryPoint
-     */
+    /** Binds `addr` under `model`. */
     public static #HttpServer bindWithModel(String addr, ServerModel model,
-                                            (HttpRequest) -> #HttpResponse handler) {
-        return HttpServer.bindAddressWithModel(SocketAddress.parse(addr), model, handler);
+                                            (HttpRequest, HttpResponse) -> void handler) {
+        return HttpServer.bindAddressWithModel(SocketAddress.parse(addr), model, #handler);
     }
 
-    /**
-     * **The NET-9.2 model-aware bind.** Bind on an already-parsed
-     * [`SocketAddress`](../SocketAddress.cajeta), materializing the accept
-     * stack `model` names via
-     * [`ServerModel.bindServer`](../ServerModel.cajeta#bindServer): a
-     * fiber-per-connection [`Server`](../Server.cajeta) (Model A) or a
-     * shared-pool [`SharedPoolServer`](../SharedPoolServer.cajeta) (Model B).
-     *
-     * The per-connection seam is the **same** `(TcpStream) -> void`
-     * callback for both models — it captures this server's handler + limits
-     * and runs the static [`serveConnection`](#serveConnection) loop, with
-     * no captured `this` beyond the two values the loop needs (the
-     * [`Server.serveConnection`](../Server.cajeta) spawn convention). The
-     * model only changes how the accept loop *dispatches* that callback
-     * (a fiber per connection vs a bounded worker pool), so the HTTP
-     * server's request handling is byte-for-byte identical across models —
-     * the `HttpServerTests.bothModelsServeSameHandler` acceptance.
-     *
-     * The resulting [`Server`](../Server.cajeta) is stored in
-     * [`server`](#server) as the base type (Model B's `SharedPoolServer`
-     * extends it), so [`serve`](#serve) / [`shutdown`](#shutdown) /
-     * [`localAddress`](#localAddress) polymorphically reach the selected
-     * model's overrides.
-     */
-    public static #HttpServer bindAddressWithModel(#SocketAddress addr,
-                                                   ServerModel model,
-                                                   (HttpRequest) -> #HttpResponse handler) {
-        return HttpServer.bindAddressWithModelAndLimits(#addr, model, handler,
-                                                        null, null, false);
+    /** Binds `addr` under `model`. */
+    public static #HttpServer bindAddressWithModel(#SocketAddress addr, ServerModel model,
+                                                   (HttpRequest, HttpResponse) -> void handler) {
+        return HttpServer.bindAddressWithModelAndLimits(#addr, model, #handler, null, null, null);
     }
 
-    /**
-     * [`bindAddressWithModel`](#bindAddressWithModel) with an explicit
-     * [`ServerLimits`](ServerLimits.cajeta) installed BEFORE the accept
-     * closure captures it (http:1.5a) — the connection closure binds the
-     * server's `serverLimits` by value, so a post-bind swap would never
-     * reach an already-accepted connection. `null` keeps the defaults.
-     */
-    public static #HttpServer bindAddressWithModelAndLimits(
-            #SocketAddress addr, ServerModel model,
-            (HttpRequest) -> #HttpResponse handler, #ServerLimits limits,
-            #ConnectionLimits climits, boolean h2Prior) {
-        HttpServer srv = heap HttpServer(#handler);   // forward the title that arrived (cajeta ownership 5.13)
-        srv.model = model;
-        srv.h2Prior = h2Prior;
+    void applyLimits(#ServerLimits limits, #BufferPool pool) {
         if (limits != null) {
             ServerLimits l #= limits;
-            srv.serverLimits #= l;
-            // http:1.5b — the ServerLimits-surfaced head caps become the
-            // parser's ceilings, BEFORE the accept closure captures
-            // `srv.limits` by value below.
-            HttpParserLimits pl #= srv.serverLimits.toParserLimits();
-            srv.limits #= pl;
+            this.serverLimits #= l;
+            HttpParserLimits pl #= this.serverLimits.toParserLimits();
+            this.limits #= pl;
         }
-        (HttpRequest) -> #HttpResponse h = srv.handler;
-        HttpParserLimits lim = srv.limits;
-        // NET-9.6: the per-connection seam runs the hardened loop, threading
-        // the server's ServerLimits (head/body deadlines, max body size,
-        // 100-continue) so a bound server enforces them. The plain
-        // serveConnection stays the no-limits primitive for tests/callers.
-        ServerLimits slim = srv.serverLimits;
+        if (pool != null) {
+            BufferPool p #= pool;
+            this.buffers = heap ConnectionBuffers(#p);
+        }
+    }
+
+    /**
+     * Binds `addr` under `model` with optional server limits, connection
+     * limits and buffer pool. A null argument keeps the default.
+     */
+    public static #HttpServer bindAddressWithModelAndLimits(
+            #SocketAddress addr, ServerModel model, (HttpRequest, HttpResponse) -> void handler,
+            #ServerLimits limits, #ConnectionLimits climits, #BufferPool pool) {
+        HttpServer srv = heap HttpServer(#handler);
+        srv.model = model;
+        srv.applyLimits(#limits, #pool);
+        HttpServer self = srv;
         if (climits != null) {
-            // http:1.5c — accept control: the kernel backlog from the
-            // limits, and every connection ADMITTED through the shared
-            // ConnectionLimiter before it is served (REFUSE closes the
-            // surplus at once; BLOCK parks the connection fiber for a
-            // permit). The limiter lives on the server so the capturing
-            // accept closure outlives this frame.
             ConnectionLimits cls #= climits;
             int32 backlog = cls.listenBacklog;
             ConnectionLimiter climiter #= ConnectionLimiter.fromLimits(cls);
             srv.limiter #= climiter;
             srv.connLimits #= cls;
-            ConnectionLimiter lm = srv.limiter;
-            Server score #= model.bindServerWithBacklog(#addr, backlog,
-                (conn) -> HttpServer.serveConnectionAdmitted(h, lim, slim,
-                                                             lm, conn));
-            srv.server = #score;
+            Server admitted #= model.bindServerWithBacklog(#addr, backlog,
+                (conn) -> self.serveAdmitted(conn));
+            srv.server = #admitted;
             return #srv;
         }
-        if (h2Prior) {
-            // RFC 9113 prior knowledge: sniff the preface, serve h2 on a match.
-            Server h2core #= model.bindServer(#addr,
-                (conn) -> HttpServer.serveConnectionSniffH2(h, lim, slim, conn));
-            srv.server = #h2core;
-            return #srv;
-        }
-        Server core #= model.bindServer(#addr,
-            (conn) -> HttpServer.serveConnectionWithLimits(h, lim, slim, conn));
+        Server core #= model.bindServer(#addr, (conn) -> self.serveChannel(conn));
         srv.server = #core;
         return #srv;
     }
 
-    /**
-     * The admission-gated per-connection seam (http:1.5c): take a
-     * permit per the shed policy — [`LoadShedPolicy.REFUSE`](../LoadShedPolicy.cajeta)
-     * closes the surplus connection without a byte, `BLOCK` parks this
-     * connection's fiber until a permit frees — then run the hardened
-     * loop and release the permit on every exit path.
-     */
-    static void serveConnectionAdmitted((HttpRequest) -> #HttpResponse handler,
-                                        HttpParserLimits parseLimits,
-                                        ServerLimits limits,
-                                        ConnectionLimiter limiter,
-                                        TcpStream conn) {
-        if (!limiter.admit()) {
+    void serveAdmitted(TcpStream conn) {
+        if (!this.limiter.admit()) {
             conn.close();
             return;
         }
         try {
-            HttpServer.serveConnectionWithLimits(handler, parseLimits, limits,
-                                                 conn);
+            this.serveChannel(conn);
         } catch (Exception e) {
         }
-        limiter.release();
+        this.limiter.release();
     }
 
-    /**
-     * Bind a **TLS-terminating** HTTP server (http:1.8): a plain
-     * [`TcpListener`](../TcpListener.cajeta) on `addr` (the TLS
-     * handshake runs per connection in [`tlsWorker`](#tlsWorker), never
-     * on the accept path), the PEM material copied for the workers, and
-     * the same limits install the plaintext bind performs. ALPN
-     * advertises `http/1.1` (3.4 adds `h2`).
-     */
-    public static #HttpServer bindTlsAddress(#SocketAddress addr,
-                                             (HttpRequest) -> #HttpResponse handler,
-                                             #ServerLimits limits,
-                                             int8[] cert, int32 certLen,
-                                             int8[] key, int32 keyLen) {
-        HttpServer srv = heap HttpServer(#handler);   // forward the title that arrived (cajeta ownership 5.13)
-        if (limits != null) {
-            ServerLimits l #= limits;
-            srv.serverLimits #= l;
-            HttpParserLimits pl #= srv.serverLimits.toParserLimits();
-            srv.limits #= pl;
+    /** Serves every request on `ch` until it closes. */
+    public void serveChannel(ByteChannel ch) {
+        ByteBuffer in #= this.buffers.take();
+        ByteBuffer out #= this.buffers.take();
+        ServerLimits sl = this.serverLimits;
+        Http1Connection conn = heap Http1Connection(ch, in, out, this.limits,
+            sl.headReadTimeoutMs, sl.bodyReadTimeoutMs, sl.maxBodyBytes,
+            sl.expectContinueEnabled, this.handler);
+        try {
+            conn.serve();
+        } catch (Exception e) {
         }
+        this.buffers.give(#in);
+        this.buffers.give(#out);
+    }
+
+    /** Binds `addr` for HTTPS with the PEM `cert` and `key`. */
+    public static #HttpServer bindTlsAddress(#SocketAddress addr, (HttpRequest, HttpResponse) -> void handler,
+                                             #ServerLimits limits, int8[] cert, int32 certLen,
+                                             int8[] key, int32 keyLen) {
+        HttpServer srv = heap HttpServer(#handler);
+        srv.applyLimits(#limits, null);
         int8[] certCopy = heap int8[certLen];
         int32 i = 0;
         while (i < certLen) {
@@ -480,12 +183,7 @@ public class HttpServer {
         return #srv;
     }
 
-    /**
-     * Accept the next connection on the TLS port — still a PLAIN
-     * [`TcpStream`](../TcpStream.cajeta); the handshake belongs to the
-     * worker [`dispatchTls`](#dispatchTls) spawns. `null` once the
-     * listener has been closed by shutdown.
-     */
+    /** The next TLS connection, or null once the listener is closed. */
     public #TcpStream acceptTlsNext() {
         try {
             return this.tlsListener.acceptAsync();
@@ -494,98 +192,47 @@ public class HttpServer {
         }
     }
 
-    /**
-     * Spawn the TLS worker fiber for an accepted connection — handshake
-     * plus the hardened h1 loop, every failure isolated to the fiber.
-     * The discarded spawn is scope-owned (joined at the enclosing
-     * `scope` brace), the `Server.dispatch` convention.
-     */
+    /** Serves `conn` over TLS on its own fiber. */
     public void dispatchTls(#TcpStream conn) {
-        spawn tlsWorker(this.handler, this.limits, this.serverLimits,
-                        this.tlsCert, this.tlsCertLen,
-                        this.tlsKey, this.tlsKeyLen, #conn);
+        spawn tlsWorker(this, #conn);
     }
 
-    /**
-     * One TLS connection end to end: wrap, advertise `http/1.1`,
-     * handshake — a failure (a plaintext speaker, garbage, a cipher
-     * mismatch) closes THIS connection and nothing else — then the
-     * exact hardened keep-alive loop the plaintext server runs, via
-     * [`serveTlsStream`](#serveTlsStream). Returns 0 on a failed
-     * handshake, 1 after a served connection.
-     */
-    static async int32 tlsWorker((HttpRequest) -> #HttpResponse handler,
-                                 HttpParserLimits parseLimits,
-                                 ServerLimits limits,
-                                 int8[] cert, int32 certLen,
-                                 int8[] key, int32 keyLen,
-                                 #TcpStream conn) {
-        TlsStream tls #= TlsStream.server(#conn, cert, certLen, key, keyLen);
-        int8[] alpn #= HttpServer.alpnH2Http11();
-        tls.supportAlpn(alpn, 12);
+    static async int32 tlsWorker(HttpServer srv, #TcpStream conn) {
+        TlsStream tls #= TlsStream.server(#conn, srv.tlsCert, srv.tlsCertLen, srv.tlsKey, srv.tlsKeyLen);
+        int8[] alpn #= HttpServer.alpnHttp11();
+        tls.supportAlpn(alpn, 9);
         try {
             tls.handshake();
         } catch (Exception e) {
             tls.close();
             return 0;
         }
-        // ALPN chose the protocol; `h2` gets the HTTP/2 engine, everything
-        // else (including no ALPN) stays on the hardened h1 keep-alive loop.
-        if (HttpServer.alpnIsH2(tls)) {
-            AsyncReader reader = heap AsyncReader(tls);
-            AsyncWriter writer = heap AsyncWriter(tls);
-            Http2Connection.serve(reader, writer, handler, limits.maxBodyBytes);
-            tls.close();
-            return 1;
+        try {
+            srv.serveChannel(tls);
+        } catch (Exception e) {
         }
-        HttpServer.serveTlsStream(handler, parseLimits, limits, #tls);
+        try {
+            tls.close();
+        } catch (Exception e) {
+        }
         return 1;
     }
 
-    /** Whether the TLS handshake negotiated the `h2` ALPN protocol. */
-    static boolean alpnIsH2(TlsStream tls) {
-        int8[] sel = heap int8[16];
-        int32 n = tls.negotiatedAlpn(sel, 16);
-        return n == 2 && sel[0] == (int8) 104 && sel[1] == (int8) 50;   // "h2"
-    }
-
-    /**
-     * The length-prefixed ALPN list advertising `h2` then `http/1.1` (12
-     * bytes). Order is server preference: HTTP/2 first, h1 fallback.
-     */
-    static #int8[] alpnH2Http11() {
-        int8[] a = heap int8[12];
-        a[0] = (int8) 2;
-        a[1] = (int8) 104;   // 'h'
-        a[2] = (int8) 50;    // '2'
-        a[3] = (int8) 8;
-        a[4] = (int8) 104;   // 'h'
-        a[5] = (int8) 116;   // 't'
-        a[6] = (int8) 116;   // 't'
-        a[7] = (int8) 112;   // 'p'
-        a[8] = (int8) 47;    // '/'
-        a[9] = (int8) 49;    // '1'
-        a[10] = (int8) 46;   // '.'
-        a[11] = (int8) 49;   // '1'
-        return #a;
-    }
-
-    /** The length-prefixed `http/1.1` ALPN protocol list (9 bytes). */
     static #int8[] alpnHttp11() {
         int8[] a = heap int8[9];
         a[0] = (int8) 8;
-        a[1] = (int8) 104;   // 'h'
-        a[2] = (int8) 116;   // 't'
-        a[3] = (int8) 116;   // 't'
-        a[4] = (int8) 112;   // 'p'
-        a[5] = (int8) 47;    // '/'
-        a[6] = (int8) 49;    // '1'
-        a[7] = (int8) 46;    // '.'
-        a[8] = (int8) 49;    // '1'
+        a[1] = (int8) 104;
+        a[2] = (int8) 116;
+        a[3] = (int8) 116;
+        a[4] = (int8) 112;
+        a[5] = (int8) 47;
+        a[6] = (int8) 49;
+        a[7] = (int8) 46;
+        a[8] = (int8) 49;
         return #a;
     }
 
-    /** Run the accept loop synchronously (TLS mode runs its own). */
+    /** Accepts and serves connections until `shutdown`. */
     public void serve() {
         if (this.isTls) {
             scope {
@@ -599,1296 +246,50 @@ public class HttpServer {
         this.server.serve();
     }
 
-    /**
-     * One TLS-mode accept + dispatch; `false` once the listener closed.
-     * A helper so the owned accepted stream never lives across the
-     * accept loop's backedge (the use-after-move analysis rejects a
-     * moved-out `#=` local re-entered by a loop).
-     */
     boolean acceptOneTls() {
         TcpStream conn #= this.acceptTlsNext();
         if (conn == null) {
-            return false;               // listener closed by shutdown
+            return false;
         }
         this.dispatchTls(#conn);
         return true;
     }
 
-    /**
-     * The async sibling of [`serve`](#serve) — `spawn` this so the accept
-     * loop runs on its own fiber while the caller keeps control to later
-     * [`shutdown`](#shutdown). Returns `0` (the spawn-target convention).
-     */
+    /** `serve` as a task. */
     public async int32 runAsync() {
-        this.server.serve();
+        this.serve();
         return 0;
     }
 
-    /**
-     * Graceful shutdown: stop accepting + drain in-flight connections with
-     * `deadline` (delegates to [`Server.shutdown`](../Server.cajeta#shutdown)).
-     * Returns `true` if every connection drained within the deadline.
-     */
+    /** Stops accepting and waits up to `deadline` for open connections. */
     public boolean shutdown(Duration deadline) {
         if (this.isTls) {
-            // TLS mode: stop accepting; in-flight workers are
-            // scope-joined by serve()'s brace (drain accounting like
-            // the plaintext core's is a 1.5c-tier follow-up).
             this.tlsListener.close();
             return true;
         }
         return this.server.shutdown(deadline);
     }
 
-    /** The bound local address (carries the ephemeral port for a `:0` bind). */
+    /** The bound address. */
     public #SocketAddress localAddress() {
+        if (this.isTls) {
+            return this.tlsListener.localAddress();
+        }
         return this.server.localAddress();
     }
 
-    /**
-     * The accept model (**NET-9.2**) this server was bound on — Model A
-     * (fiber-per-connection) or Model B (shared-pool). Advisory: the live
-     * dispatch is already determined by the [`server`](#server) core the
-     * model materialized.
-     */
+    /** The server model. */
     public ServerModel serverModel() {
         return this.model;
     }
 
-    // ----- builder ---------------------------------------------------------
+    /** The lifetime count of fresh connection buffers, for allocation checks. */
+    public int32 bufferAllocations() {
+        return this.buffers.allocations();
+    }
 
-    /**
-     * A fluent **builder** for an `HttpServer` (**NET-9.2**) — the
-     * `HttpServer.builder().bind(addr).model(...).handler(...).serve()`
-     * surface [`docs/Net.md` §HTTP server](../../../../../docs/Net.md#http-server)
-     * shows, minus the `.route(...)` step (the minimal router is NET-9.3 —
-     * this builder carries bind + model + a single handler). Defaults: the
-     * fiber-per-connection model, no address (must be set), the identity-`500`
-     * handler until one is supplied.
-     *
-     * @EntryPoint
-     */
+    /** A builder. */
     public static #HttpServerBuilder builder() {
         return heap HttpServerBuilder();
-    }
-
-    // ----- the per-connection loop (socket-facing) -------------------------
-
-    /**
-     * Serve one accepted connection: loop reading + handling requests
-     * while keep-alive permits, then close the stream. This is the
-     * `(TcpStream) -> void` body the NET-4 core dispatches per connection.
-     *
-     * Static + the per-fiber state passed explicitly (`handler`, `limits`,
-     * the `conn`) — the [`Server.serveConnection`](../Server.cajeta) spawn
-     * convention (no captured `this`). Wraps `conn` in a buffered
-     * [`AsyncReader`](../AsyncReader.cajeta) + [`AsyncWriter`](../AsyncWriter.cajeta)
-     * and runs [`serveLoop`](#serveLoop).
-     *
-     * The `conn` is **borrowed**: the NET-4 [`Server`](../Server.cajeta)
-     * core owns the accepted [`TcpStream`](../TcpStream.cajeta) and closes
-     * it when its per-connection worker frame drops (the
-     * [`AsyncReader`](../AsyncReader.cajeta)/[`AsyncWriter`](../AsyncWriter.cajeta)
-     * both borrow it too) — so this loop must not close it (no
-     * double-close). On a write fault mid-response
-     * ([`BrokenPipeException`](../BrokenPipeException.cajeta) from the
-     * flush) the exception propagates out of the loop and the connection
-     * fiber unwinds, dropping the stream — the connection ends.
-     */
-    public static void serveConnection((HttpRequest) -> #HttpResponse handler,
-                                        HttpParserLimits limits,
-                                        TcpStream conn) {
-        AsyncReader reader = heap AsyncReader(conn);
-        AsyncWriter writer = heap AsyncWriter(conn);
-        HttpServer.serveLoop(handler, limits, reader, writer);
-    }
-
-    /**
-     * The keep-alive request loop over a buffered reader/writer. Reads one
-     * request at a time; for each, [`readExchange`](#readExchange) parses
-     * the head + body, the handler (or the error map) produces a response,
-     * [`writeExchange`](#writeExchange) flushes it, and the loop continues
-     * iff the exchange permitted reuse. A clean EOF before the next
-     * request (peer closed between requests) ends the loop.
-     *
-     * The reader/writer are the test seam: a unit test stages request
-     * bytes into an [`AsyncReader`](../AsyncReader.cajeta) and asserts EOF,
-     * with no live socket (the [`AsyncReader.stage`](../AsyncReader.cajeta#stage)
-     * discipline) — though a flushing writer still needs a socket, which is
-     * why the byte-level golden path is [`handleRequestBytes`](#handleRequestBytes).
-     */
-    public static void serveLoop((HttpRequest) -> #HttpResponse handler,
-                                 HttpParserLimits limits,
-                                 AsyncReader reader, AsyncWriter writer) {
-        boolean keepAlive = true;
-        while (keepAlive) {
-            Exchange ex #= HttpServer.readExchange(handler, limits, reader);
-            if (ex == null) {
-                return;                 // clean EOF between requests
-            }
-            HttpServer.writeExchange(writer, ex.response, ex.keepAlive);
-            keepAlive = ex.keepAlive;
-        }
-    }
-
-    /**
-     * Read + parse one request off `reader`, dispatch it (or map a fault),
-     * and return the [`Exchange`](Exchange.cajeta) (response + reuse
-     * decision) — or `null` for a clean inter-request EOF (the peer closed
-     * with no partial request pending).
-     */
-    static #Exchange readExchange((HttpRequest) -> #HttpResponse handler,
-                                  HttpParserLimits limits, AsyncReader reader) {
-        HttpParser parser #= HttpParser.forRequestWithLimits(limits);
-        boolean sawAnyByte = false;
-        int8[] one = heap int8[1];
-
-        // --- read the head, a byte at a time, until terminated.
-        try {
-            while (!parser.isComplete()) {
-                int32 n = reader.read(one, 0, 1);
-                if (n == 0) {
-                    if (!sawAnyByte) {
-                        return null;            // clean EOF between requests
-                    }
-                    parser.endInput();          // mid-head EOF -> UnexpectedEof
-                    break;
-                }
-                sawAnyByte = true;
-                parser.feed(one, 1);
-            }
-        } catch (HttpException e) {
-            // A malformed / oversized head: respond + close.
-            HttpResponse resp #= HttpServer.errorResponse(e);
-            return heap Exchange(#resp, false);
-        }
-
-        HttpRequest request = parser.getRequest();
-        BodyFraming framing = parser.getFraming();
-
-        // --- read the body per the framing decision.
-        try {
-            HttpServer.readBody(request, parser, framing, reader);
-        } catch (HttpException e) {
-            HttpResponse resp #= HttpServer.errorResponse(e);
-            return heap Exchange(#resp, false);
-        }
-
-        // --- dispatch; a handler throw maps to 500 but keeps the conn.
-        HttpResponse response #= HttpServer.dispatch(handler, request);
-
-        boolean keepAlive = HttpServer.decideReuse(request, response);
-        return heap Exchange(#response, keepAlive);
-    }
-
-    /**
-     * Drive a [`BodyReader`](BodyReader.cajeta) for `framing`: seed it with
-     * the parser's leftover bytes (body bytes that arrived in the same read
-     * as the head terminator) then pull more from `reader` until the body
-     * is complete, attaching the decoded bytes to `request`. A bodyless
-     * framing (`KIND_NONE`) attaches nothing.
-     *
-     * Bytes the body reader sees **past** the body boundary — the start of
-     * the next pipelined request on a keep-alive connection — are
-     * **pushed back** into the reader's staging ring
-     * ([`AsyncReader.stage`](../AsyncReader.cajeta#stage)) so the next loop
-     * iteration parses them, rather than being dropped. (A pipelined run
-     * longer than the ring's free space is the streaming concern NET-9.4
-     * addresses; v1 re-stages what fits, the common single-pipelined case.)
-     */
-    static void readBody(HttpRequest request, HttpParser parser,
-                         BodyFraming framing, AsyncReader reader) {
-        BodyReader body #= BodyReader.forFraming(framing);
-        int8[] leftover #= parser.leftover();
-        int32 leftoverLen = parser.leftoverLength();
-        if (leftoverLen > 0) {
-            body.feed(leftover, leftoverLen);
-        }
-        int8[] chunk = heap int8[2048];
-        while (!body.isComplete()) {
-            int32 n = reader.read(chunk, 0, 2048);
-            if (n == 0) {
-                body.endInput();        // KIND_CLOSE completes; others -> UnexpectedEof
-                break;
-            }
-            body.feed(chunk, n);
-        }
-        int8[] decoded #= body.drain();
-        int32 decodedLen = decoded.count();
-        if (decodedLen > 0) {
-            request.body(decoded, decodedLen);
-        }
-        // Re-stage any post-body bytes (the next pipelined request).
-        int32 tailLen = body.leftoverLength();
-        if (tailLen > 0) {
-            int8[] tail #= body.leftover();
-            reader.stage(tail, tailLen);
-        }
-    }
-
-    // ----- NET-9.6: limits + hardening (live socket loop) ------------------
-
-    /**
-     * **The NET-9.6 hardened per-connection loop.** The
-     * [`serveConnection`](#serveConnection) sibling that threads a
-     * [`ServerLimits`](ServerLimits.cajeta) through the head/body reads: the
-     * head is read under [`headReadTimeoutMs`](ServerLimits.cajeta) (the
-     * slowloris guard — a peer that never completes the head is timed out and
-     * the connection closed), the body under
-     * [`bodyReadTimeoutMs`](ServerLimits.cajeta), the body size is capped at
-     * [`maxBodyBytes`](ServerLimits.cajeta), and `Expect: 100-continue` is
-     * honoured per [`ExpectContinue`](ExpectContinue.cajeta) (an interim
-     * `100 Continue` is flushed before the body, or a `413`/`417` is returned
-     * without reading it). This is the `(TcpStream) -> void` body
-     * [`bindAddressWithModel`](#bindAddressWithModel) dispatches when a
-     * server carries server limits.
-     */
-    public static void serveConnectionWithLimits((HttpRequest) -> #HttpResponse handler,
-                                                 HttpParserLimits parseLimits,
-                                                 ServerLimits limits,
-                                                 TcpStream conn) {
-        AsyncReader reader = heap AsyncReader(conn);
-        AsyncWriter writer = heap AsyncWriter(conn);
-        HttpServer.serveLoopWithLimits(handler, parseLimits, limits, reader, writer);
-    }
-
-    /**
-     * Prior-knowledge (RFC 9113 §3.3) per-connection worker: peek the first
-     * bytes of the connection and, if they are the 24-octet HTTP/2 client
-     * preface, run the h2 engine; anything else is served by the hardened h1
-     * loop with the peeked bytes intact. The preface is sniffed off the raw
-     * `TcpStream` (one byte at a time, stopping at the first non-matching
-     * position) *before* the buffered [`AsyncReader`](../AsyncReader.cajeta)
-     * wraps it, then re-staged into the reader's empty ring so order is
-     * preserved for whichever protocol wins.
-     */
-    static void serveConnectionSniffH2((HttpRequest) -> #HttpResponse handler,
-                                       HttpParserLimits parseLimits,
-                                       ServerLimits limits, TcpStream conn) {
-        int8[] got = heap int8[24];
-        int32 n = HttpServer.sniffPreface(conn, got);
-        AsyncReader reader = heap AsyncReader(conn);
-        AsyncWriter writer = heap AsyncWriter(conn);
-        if (n > 0) {
-            reader.stage(got, n);
-        }
-        if (n == 24) {
-            Http2Connection.serve(reader, writer, handler, limits.maxBodyBytes);
-        } else {
-            HttpServer.serveLoopWithLimits(handler, parseLimits, limits,
-                                           reader, writer);
-        }
-    }
-
-    // Read up to the 24-byte h2 preface from `conn` into `got`, stopping at the
-    // first byte that diverges (or EOF). Returns the count read; `== 24` iff the
-    // full preface matched. Reads raw (pre-buffer) so nothing is over-consumed.
-    static int32 sniffPreface(TcpStream conn, int8[] got) {
-        int8[] pf #= Http2.preface();
-        int32 n = 0;
-        boolean matching = true;
-        while (n < 24 && matching) {
-            int64 g = conn.readAsync(got, (int64) n, (int64) 1);
-            if (g <= (int64) 0) {
-                matching = false;
-            } else if (got[n] != pf[n]) {
-                n = n + 1;
-                matching = false;
-            } else {
-                n = n + 1;
-            }
-        }
-        return n;
-    }
-
-    // ----- NET-9.5: HTTPS (TLS termination) --------------------------------
-
-    /**
-     * **The NET-9.5 HTTPS per-connection worker.** Serve one already-accepted,
-     * already-handshaked [`TlsStream`](../tls/TlsStream.cajeta) (from
-     * [`TlsListener.accept`](../tls/TlsListener.cajeta#accept)) with the exact
-     * same hardened keep-alive HTTP loop the plaintext server runs — TLS is
-     * pure *termination*, invisible above the [`ByteChannel`](../ByteChannel.cajeta)
-     * seam: the buffered [`AsyncReader`](../AsyncReader.cajeta) /
-     * [`AsyncWriter`](../AsyncWriter.cajeta) drive the encrypted transport with
-     * no protocol change. After the loop ends (the keep-alive policy closed the
-     * connection, or a stalled peer timed out) a clean TLS `close_notify` is
-     * flushed and the socket closed.
-     *
-     * Takes ownership of `tls` (the per-connection worker owns the accepted
-     * connection, mirroring the plaintext core's per-fiber stream ownership).
-     * The `http/1.1` ALPN selection is handled at
-     * [`TlsListener`](../tls/TlsListener.cajeta) bind time
-     * (`supportAlpn`).
-     */
-    public static void serveTlsStream((HttpRequest) -> #HttpResponse handler,
-                                      HttpParserLimits parseLimits,
-                                      ServerLimits limits,
-                                      #TlsStream tls) {
-        AsyncReader reader = heap AsyncReader(tls);
-        AsyncWriter writer = heap AsyncWriter(tls);
-        try {
-            HttpServer.serveLoopWithLimits(handler, parseLimits, limits,
-                                           reader, writer);
-        } catch (Exception e) {
-            // A transport fault mid-exchange (peer reset) — this connection is
-            // done; the worker must not crash on it.
-        }
-        try {
-            tls.close();
-        } catch (Exception e) {
-            // Peer vanished before the TLS close handshake; nothing to flush.
-        }
-    }
-
-    /**
-     * The hardened keep-alive loop: like [`serveLoop`](#serveLoop) but each
-     * exchange is read through [`readExchangeWithLimits`](#readExchangeWithLimits)
-     * (deadlines + size cap + expect-continue), with the interim
-     * `100 Continue` flushed through `writer` mid-exchange when the policy
-     * calls for it. A [`TimedOutException`](../TimedOutException.cajeta) from
-     * a head/body read (a stalled peer) ends the loop — the connection is
-     * dropped, evicting the slowloris.
-     */
-    public static void serveLoopWithLimits((HttpRequest) -> #HttpResponse handler,
-                                           HttpParserLimits parseLimits,
-                                           ServerLimits limits,
-                                           AsyncReader reader, AsyncWriter writer) {
-        boolean keepAlive = true;
-        while (keepAlive) {
-            Exchange ex = null;
-            try {
-                ex #= HttpServer.readExchangeWithLimits(handler, parseLimits, limits,
-                                                       reader, writer);
-            } catch (TimedOutException t) {
-                // Slowloris / stalled peer: a response is still possible
-                // (nothing of ours is on the wire yet), so say WHY before
-                // closing — 408 Request Timeout, best-effort (the peer may
-                // already be gone; the close happens regardless).
-                try {
-                    HttpResponse rto #= HttpServer.statusResponse(408);
-                    HttpServer.writeExchange(writer, rto, false);
-                } catch (Exception we) {
-                }
-                return;
-            } catch (Exception e) {
-                // Any other per-connection fault (peer reset, a mid-head
-                // EOF's UnexpectedEofException, a write to a half-closed
-                // socket) ENDS THIS CONNECTION — it must never escape the
-                // connection fiber and tear the accept loop down. Nothing
-                // of ours is guaranteed on the wire, so close silently.
-                return;
-            }
-            if (ex == null) {
-                return;                 // clean EOF between requests
-            }
-            if (ex.written) {
-                return;                 // budget cut: 503 already flushed; close
-            }
-            HttpServer.writeExchange(writer, ex.response, ex.keepAlive);
-            keepAlive = ex.keepAlive;
-        }
-    }
-
-    /**
-     * Read + harden one request: read the head under the head deadline, apply
-     * the [`ExpectContinue`](ExpectContinue.cajeta) decision (flushing an
-     * interim `100 Continue` through `writer`, or short-circuiting to a
-     * `413`/`417`), read the body under the body deadline + size cap, then
-     * dispatch — returning the [`Exchange`](Exchange.cajeta) (or `null` for a
-     * clean inter-request EOF). Raises
-     * [`TimedOutException`](../TimedOutException.cajeta) when a head/body read
-     * exceeds its deadline (the caller drops the connection).
-     */
-    static #Exchange readExchangeWithLimits((HttpRequest) -> #HttpResponse handler,
-                                            HttpParserLimits parseLimits,
-                                            ServerLimits limits,
-                                            AsyncReader reader, AsyncWriter writer) {
-        HttpParser parser #= HttpParser.forRequestWithLimits(parseLimits);
-        boolean sawAnyByte = false;
-        int8[] one = heap int8[1];
-        int32 headMs = limits.headReadTimeoutMs;
-
-        // --- read the head under the WHOLE-HEAD deadline (http:1.5a). ---
-        // `headMs` bounds the idle wait for a request's FIRST byte (the
-        // pre-1.5a behavior, doubling as the keep-alive idle timeout);
-        // from that byte on, an ABSOLUTE deadline caps the whole head —
-        // per-byte reads each succeeding no longer saves a slowloris.
-        // The whole-request budget (when armed) starts on the same byte
-        // and also caps every read. A spent deadline degrades the next
-        // read to a 1 ms grace, whose TimedOutException is the cut.
-        int64 headDeadline = 0;
-        int64 reqDeadline = 0;
-        try {
-            while (!parser.isComplete()) {
-                int32 ms = headMs;
-                if (sawAnyByte) {
-                    int64 left = HttpServer.remainingMs(headDeadline, reqDeadline);
-                    if (left >= 0) {
-                        ms = HttpServer.clampReadMs(left);
-                    }
-                }
-                int32 n = reader.readWithin(one, 0, 1, ms);
-                if (n == 0) {
-                    // EOF reading the head. Whether the peer hung up
-                    // cleanly BETWEEN requests (no bytes yet) or mid-head
-                    // (a partial request abandoned), the socket is already
-                    // gone — there is no peer left to answer, so CLOSE the
-                    // connection. (Earlier this raised UnexpectedEof on the
-                    // mid-head case; throwing for a peer disconnect is both
-                    // wrong — nothing to respond to — and, on the real
-                    // serve() accept loop, the exception unwind through this
-                    // frame's heap locals tripped a double-drop SIGSEGV.)
-                    return null;
-                }
-                if (!sawAnyByte) {
-                    sawAnyByte = true;
-                    Instant t0 = Clock.now();
-                    int64 now = t0.toEpochMilli();
-                    if (headMs > 0) {
-                        headDeadline = now + (int64) headMs;
-                    }
-                    if (limits.requestBudgetMs > 0) {
-                        reqDeadline = now + (int64) limits.requestBudgetMs;
-                    }
-                }
-                parser.feed(one, 1);
-            }
-        } catch (HttpException e) {
-            return HttpServer.rejectExchange(HttpServer.errorResponse(e));
-        }
-
-        HttpRequest request = parser.getRequest();
-        BodyFraming framing = parser.getFraming();
-
-        // --- NET-9.6 expect/size gate, BEFORE the body. ---
-        int32 action = ExpectContinue.decide(request, framing, limits);
-        if (action == ExpectContinue.ACTION_REJECT_TOO_LARGE) {
-            return HttpServer.rejectExchange(HttpServer.statusResponse(413));
-        }
-        if (action == ExpectContinue.ACTION_EXPECTATION_FAILED) {
-            return HttpServer.rejectExchange(HttpServer.statusResponse(417));
-        }
-        if (framing.isContentLength() && !limits.bodyWithinCap(framing.length)) {
-            return HttpServer.rejectExchange(HttpServer.statusResponse(413));
-        }
-        if (action == ExpectContinue.ACTION_SEND_CONTINUE) {
-            int8[] cont #= HttpServer.continueResponse();
-            writer.writeAll(cont, 0, cont.count());
-            writer.flush();
-        }
-
-        // --- STREAMING request leg (http:1.3e, opt-in): hand the body
-        // to the handler un-buffered, drain the remainder on return so
-        // the keep-alive framing survives. Inline dispatch only (see
-        // ServerLimits.streamRequestBody's doc for the budget note).
-        if (limits.streamRequestBody) {
-            RequestBodyStream rbs #= RequestBodyStream.forRequest(parser, reader);
-            // The handler-facing Body: the stdlib AsyncReader over the
-            // RequestBodyChannel bridge, wrapped by the body package's
-            // own StreamBody (a server-package Body SUBCLASS sends the
-            // compiler into unbounded recursion on a clean build —
-            // cross-package subclassing wrinkle, noted in the plan).
-            // `chan` stays frame-local: `ar` borrows it and this frame
-            // outlives the inline dispatch below.
-            RequestBodyChannel chan = heap RequestBodyChannel(rbs);
-            AsyncReader ar = heap AsyncReader(chan);
-            StreamBody sb #= StreamBody.of(#ar);
-            request.bodyModel #= sb;
-            HttpResponse response #= HttpServer.dispatch(handler, request);
-            try {
-                HttpServer.drainRequestStream(rbs);
-            } catch (HttpException e) {
-                // A mid-body EOF/parse fault while draining: answer the
-                // handler's response but never reuse the connection.
-                boolean ka = false;
-                return heap Exchange(#response, ka);
-            }
-            boolean keepAlive = HttpServer.decideReuse(request, response);
-            return heap Exchange(#response, keepAlive);
-        }
-
-        // --- read the body under the body deadline + size cap. ---
-        try {
-            HttpServer.readBodyWithLimits(request, parser, framing, limits,
-                                          reader, reqDeadline);
-        } catch (HttpException e) {
-            return HttpServer.rejectExchange(HttpServer.errorResponse(e));
-        }
-
-        if (reqDeadline > (int64) 0) {
-            return HttpServer.dispatchBudgeted(handler, request, reqDeadline,
-                                               writer);
-        }
-        HttpResponse response #= HttpServer.dispatch(handler, request);
-        boolean keepAlive = HttpServer.decideReuse(request, response);
-        return heap Exchange(#response, keepAlive);
-    }
-
-    /**
-     * Consume whatever the handler left of a streamed request body
-     * (http:1.3e's implicit drain-on-return) and re-stage the pipelined
-     * tail — the connection's framing is settled when this returns.
-     */
-    static void drainRequestStream(RequestBodyStream rbs) {
-        while (!rbs.isComplete()) {
-            int8[] junk #= rbs.read();
-            if (junk.count() == (int64) 0) {
-                return;
-            }
-        }
-        rbs.drainToReader();
-    }
-
-    /**
-     * Milliseconds left until the nearest ACTIVE absolute deadline
-     * (`0` = inactive), floored at zero; `-1` when neither is armed.
-     */
-    static int64 remainingMs(int64 dlA, int64 dlB) {
-        if (dlA == (int64) 0 && dlB == (int64) 0) {
-            return (int64) -1;
-        }
-        int64 dl = dlA;
-        if (dl == (int64) 0 || (dlB != (int64) 0 && dlB < dl)) {
-            dl = dlB;
-        }
-        Instant t = Clock.now();
-        int64 left = dl - t.toEpochMilli();
-        if (left < (int64) 0) {
-            return (int64) 0;
-        }
-        return left;
-    }
-
-    /**
-     * A remaining budget as a `readWithin` timeout: at least 1 ms (a
-     * spent budget gets a 1 ms grace read whose `TimedOutException` IS
-     * the cut — `<= 0` would mean "unbounded"), capped to int32.
-     */
-    static int32 clampReadMs(int64 left) {
-        if (left < (int64) 1) {
-            return 1;
-        }
-        if (left > (int64) 2147483000) {
-            return 2147483000;
-        }
-        return (int32) left;
-    }
-
-    /**
-     * The [`readBody`](#readBody) twin that reads under
-     * [`bodyReadTimeoutMs`](ServerLimits.cajeta) and enforces the running
-     * [`maxBodyBytes`](ServerLimits.cajeta) cap on the decoded total —
-     * raising [`PayloadTooLargeException`](PayloadTooLargeException.cajeta)
-     * the moment a `chunked` stream (whose size is unknown up front) crosses
-     * the ceiling, so an over-large upload can never force unbounded
-     * buffering. Re-stages post-body pipelined bytes exactly like
-     * [`readBody`](#readBody).
-     */
-    static void readBodyWithLimits(HttpRequest request, HttpParser parser,
-                                   BodyFraming framing, ServerLimits limits,
-                                   AsyncReader reader, int64 reqDeadline) {
-        BodyReader body #= BodyReader.forFraming(framing);
-        int8[] leftover #= parser.leftover();
-        int32 leftoverLen = parser.leftoverLength();
-        if (leftoverLen > 0) {
-            body.feed(leftover, leftoverLen);
-        }
-        int32 bodyMs = limits.bodyReadTimeoutMs;
-        int8[] chunk = heap int8[2048];
-        int64 total = (int64) 0;
-        // Account for the seed bytes already decoded.
-        total = (int64) body.decodedLength();
-        if (!limits.bodyWithinCap(total)) {
-            throw heap PayloadTooLargeException(
-                "request body exceeds the configured maximum",
-                limits.maxBodyBytes, total);
-        }
-        while (!body.isComplete()) {
-            // Per-read: the INTER-READ body budget (each arriving piece
-            // resets it — a live trickle survives, a stall is cut), also
-            // capped by what remains of the whole-request budget.
-            int32 ms = bodyMs;
-            int64 left = HttpServer.remainingMs((int64) 0, reqDeadline);
-            if (left >= (int64) 0) {
-                int32 cap = HttpServer.clampReadMs(left);
-                if (ms <= 0 || cap < ms) {
-                    ms = cap;
-                }
-            }
-            int32 n = reader.readWithin(chunk, 0, 2048, ms);
-            if (n == 0) {
-                body.endInput();        // KIND_CLOSE completes; others -> UnexpectedEof
-                break;
-            }
-            body.feed(chunk, n);
-            total = (int64) body.decodedLength();
-            if (!limits.bodyWithinCap(total)) {
-                throw heap PayloadTooLargeException(
-                    "request body exceeds the configured maximum",
-                    limits.maxBodyBytes, total);
-            }
-        }
-        int8[] decoded #= body.drain();
-        int32 decodedLen = decoded.count();
-        if (decodedLen > 0) {
-            request.body(decoded, decodedLen);
-        }
-        int32 tailLen = body.leftoverLength();
-        if (tailLen > 0) {
-            int8[] tail #= body.leftover();
-            reader.stage(tail, tailLen);
-        }
-    }
-
-    /**
-     * Invoke the handler, mapping a handler throw to a
-     * `500 Internal Server Error` (the request already parsed clean, so the
-     * connection can stay alive). Any non-`HttpException` failure surfaced
-     * from user code lands here as a `500` too.
-     */
-    static #HttpResponse dispatch((HttpRequest) -> #HttpResponse handler,
-                                  HttpRequest request) {
-        try {
-            HttpResponse r = handler(request);
-            if (r == null) {
-                return HttpServer.statusResponse(500);
-            }
-            return #r;
-        } catch (Exception e) {
-            return HttpServer.statusResponse(500);
-        }
-    }
-
-    /** The handler fiber of a budgeted dispatch: run, deposit, done. */
-    static async int32 runHandler((HttpRequest) -> #HttpResponse handler,
-                                  HttpRequest request, HandlerRun run) {
-        HttpResponse r #= HttpServer.dispatch(handler, request);
-        run.put(#r);
-        return 1;
-    }
-
-    /**
-     * [`dispatch`](#dispatch) under the whole-request budget (http:1.5a):
-     * the handler runs on its OWN fiber depositing into a
-     * [`HandlerRun`](HandlerRun.cajeta); this fiber polls (5 ms grain)
-     * against `reqDeadline`. In time → the normal exchange. Overrun →
-     * the cut is written HERE — `503` + `Connection: close`, flushed at
-     * the deadline so the client sees it on time — and only then is the
-     * stray handler fiber awaited (it cannot be cancelled: parked fibers
-     * never observe `taskCancel`, and an abandoned Task's drop would
-     * join it anyway). The connection closes after the drain; the
-     * returned Exchange carries `written = true` so the loop writes
-     * nothing further.
-     */
-    static #Exchange dispatchBudgeted((HttpRequest) -> #HttpResponse handler,
-                                      HttpRequest request, int64 reqDeadline,
-                                      AsyncWriter writer) {
-        HandlerRun run = heap HandlerRun();
-        Task<int32> t = spawn runHandler(handler, request, run);
-        while (run.pending()) {
-            int64 left = HttpServer.remainingMs((int64) 0, reqDeadline);
-            if (left == (int64) 0) {
-                HttpResponse cut #= HttpServer.statusResponse(503);
-                HttpServer.writeExchange(writer, cut, false);
-                int32 drained = await t;
-                Exchange ex = heap Exchange(#cut, false);
-                ex.written = true;
-                return #ex;
-            }
-            Tasks.sleepMillis((int64) 5);
-        }
-        int32 done = await t;
-        HttpResponse response #= run.take();
-        boolean keepAlive = HttpServer.decideReuse(request, response);
-        return heap Exchange(#response, keepAlive);
-    }
-
-    // ----- response writing ------------------------------------------------
-
-    /**
-     * Stamp the `Connection` header to match `keepAlive` (so the peer sees
-     * the server's reuse intent), serialize `response` to its wire bytes
-     * ([`HttpSerializer.response`](HttpSerializer.cajeta), `Content-Length`
-     * framing), write them through `writer`, and flush so the response is
-     * on the wire before the loop reads the next request (or closes).
-     */
-    static void writeExchange(AsyncWriter writer, HttpResponse response,
-                              boolean keepAlive) {
-        // The STREAMED response leg (http:1.3e): an unknown-length Body
-        // (`bodyModel` set, raw path empty — known-length bodies drained
-        // into the raw path at attach) frames CHUNKED on the wire
-        // through ResponseBodyWriter. The Body's source must outlive the
-        // handler frame — this pump runs AFTER the handler returned.
-        Body b = response.bodyModel;
-        if (b != null && !response.hasBody) {
-            ResponseBodyWriter w #= ResponseBodyWriter.begin(writer, response,
-                                                            keepAlive);
-            AsyncReader r = b.reader();
-            int8[] scratch = heap int8[8192];
-            boolean going = true;
-            try {
-                while (going) {
-                    int32 got = r.read(scratch, 0, 8192);
-                    if (got <= 0) {
-                        going = false;
-                    } else {
-                        w.write(scratch, got);
-                    }
-                }
-                w.finish();
-            } catch (Exception e) {
-                // The peer went away mid-stream (a body chunk failed to
-                // write, or the read side faulted). Tell the body so an
-                // open-ended producer (e.g. SSE) ends its fiber, then let
-                // the connection tear down.
-                b.abort();
-            }
-            return;
-        }
-        KeepAlive.applyConnectionHeader(response.getHeaders(),
-                                        response.getVersion(), keepAlive);
-        int8[] bytes #= HttpSerializer.response(response);
-        writer.writeAll(bytes, 0, bytes.count());
-        writer.flush();
-    }
-
-    // ----- pure-logic byte path (golden-testable, no socket) ---------------
-
-    /**
-     * Pure request→response over **byte buffers** — the golden-vector test
-     * entry point and the exact protocol path
-     * [`serveLoop`](#serveLoop) runs, minus the socket. Parse `requestBytes`
-     * (`length` of them) as one HTTP/1.1 request, read its body, dispatch
-     * to `handler` (or map a fault), stamp the keep-alive `Connection`
-     * header, and return the **response wire bytes** via
-     * [`HttpSerializer`](HttpSerializer.cajeta). The keep-alive decision is
-     * inspected through the structured [`handleRequest`](#handleRequest) on
-     * the same inputs (which returns the [`Exchange`](Exchange.cajeta)).
-     *
-     * This drives the identical parser → body-reader → handler →
-     * serializer → keep-alive chain as the live loop, so a golden test that
-     * pins the response bytes pins the server's wire behavior.
-     */
-    public static #int8[] handleRequestBytes((HttpRequest) -> #HttpResponse handler,
-                                             int8[] requestBytes, int32 length) {
-        Exchange ex #= HttpServer.handleRequest(heap HttpParserLimits(),
-                                               handler, requestBytes, length);
-        int8[] bytes #= HttpSerializer.response(ex.response);
-        return #bytes;
-    }
-
-    /**
-     * The structured form of [`handleRequestBytes`](#handleRequestBytes):
-     * parse + body-read + dispatch + keep-alive over an in-memory request
-     * buffer, returning the [`Exchange`](Exchange.cajeta) (the response,
-     * with its `Connection` header already stamped, plus the reuse
-     * decision). The response is **not** serialized — a caller inspects the
-     * [`HttpResponse`](HttpResponse.cajeta) fields directly, or serializes
-     * it itself.
-     */
-    public static #Exchange handleRequest(HttpParserLimits limits,
-                                          (HttpRequest) -> #HttpResponse handler,
-                                          int8[] requestBytes, int32 length) {
-        HttpParser parser #= HttpParser.forRequestWithLimits(limits);
-        try {
-            parser.feed(requestBytes, length);
-            if (!parser.isComplete()) {
-                parser.endInput();      // truncated head -> UnexpectedEof
-            }
-        } catch (HttpException e) {
-            HttpResponse resp #= HttpServer.errorResponse(e);
-            KeepAlive.applyConnectionHeader(resp.getHeaders(),
-                                            resp.getVersion(), false);
-            return heap Exchange(#resp, false);
-        }
-
-        HttpRequest request = parser.getRequest();
-        BodyFraming framing = parser.getFraming();
-
-        // Body bytes for the byte path are entirely in the parser leftover
-        // (the whole request was fed in one buffer); drive the reader off
-        // that, asserting EOF so a truncated Content-Length body is caught.
-        BodyReader body #= BodyReader.forFraming(framing);
-        int8[] leftover #= parser.leftover();
-        int32 leftoverLen = parser.leftoverLength();
-        try {
-            if (leftoverLen > 0) {
-                body.feed(leftover, leftoverLen);
-            }
-            if (!body.isComplete()) {
-                body.endInput();        // KIND_CLOSE completes; others throw
-            }
-        } catch (HttpException e) {
-            HttpResponse resp #= HttpServer.errorResponse(e);
-            KeepAlive.applyConnectionHeader(resp.getHeaders(),
-                                            resp.getVersion(), false);
-            return heap Exchange(#resp, false);
-        }
-        int8[] decoded #= body.drain();
-        int32 decodedLen = decoded.count();
-        if (decodedLen > 0) {
-            request.body(decoded, decodedLen);
-        }
-
-        HttpResponse response #= HttpServer.dispatch(handler, request);
-        boolean keepAlive = HttpServer.decideReuse(request, response);
-        KeepAlive.applyConnectionHeader(response.getHeaders(),
-                                        response.getVersion(), keepAlive);
-        return heap Exchange(#response, keepAlive);
-    }
-
-    // ----- NET-9.6: limits + hardening (pure byte path) --------------------
-
-    /**
-     * **The NET-9.6 hardened byte path.** The [`handleRequest`](#handleRequest)
-     * sibling that additionally enforces the [`ServerLimits`](ServerLimits.cajeta)
-     * **body-size cap** and the **`Expect: 100-continue`** policy
-     * ([`ExpectContinue`](ExpectContinue.cajeta)) before the body is read.
-     * Returns the [`Exchange`](Exchange.cajeta) just as
-     * [`handleRequest`](#handleRequest) does — but the response may be a
-     * short-circuit `413 Payload Too Large` / `417 Expectation Failed`
-     * produced **without** dispatching the handler, and the connection is
-     * closed (`keepAlive == false`) on any such hardening rejection (a
-     * declined body leaves the byte stream un-framed for reuse).
-     *
-     * Pinned by the golden tests over in-memory request buffers — no socket
-     * — so the size-cap + expect logic is verified the same feed-then-drain
-     * way the rest of the server's protocol path is.
-     */
-    public static #Exchange handleRequestWithLimits(HttpParserLimits parseLimits,
-                                                    ServerLimits limits,
-                                                    (HttpRequest) -> #HttpResponse handler,
-                                                    int8[] requestBytes, int32 length) {
-        HttpParser parser #= HttpParser.forRequestWithLimits(parseLimits);
-        try {
-            parser.feed(requestBytes, length);
-            if (!parser.isComplete()) {
-                parser.endInput();      // truncated head -> UnexpectedEof
-            }
-        } catch (HttpException e) {
-            return HttpServer.rejectExchange(HttpServer.errorResponse(e));
-        }
-
-        HttpRequest request = parser.getRequest();
-        BodyFraming framing = parser.getFraming();
-
-        // --- NET-9.6 hardening gate, BEFORE the body is read. ---
-        int32 action = ExpectContinue.decide(request, framing, limits);
-        if (action == ExpectContinue.ACTION_REJECT_TOO_LARGE) {
-            return HttpServer.rejectExchange(HttpServer.statusResponse(413));
-        }
-        if (action == ExpectContinue.ACTION_EXPECTATION_FAILED) {
-            return HttpServer.rejectExchange(HttpServer.statusResponse(417));
-        }
-        // A declared Content-Length over the cap (even with no Expect) → 413
-        // up front, before buffering a single body byte.
-        if (framing.isContentLength() && !limits.bodyWithinCap(framing.length)) {
-            return HttpServer.rejectExchange(HttpServer.statusResponse(413));
-        }
-
-        // --- read the body, enforcing the cap on a streaming/chunked total. ---
-        BodyReader body #= BodyReader.forFraming(framing);
-        int8[] leftover #= parser.leftover();
-        int32 leftoverLen = parser.leftoverLength();
-        try {
-            if (leftoverLen > 0) {
-                body.feed(leftover, leftoverLen);
-            }
-            if (!body.isComplete()) {
-                body.endInput();        // KIND_CLOSE completes; others throw
-            }
-        } catch (HttpException e) {
-            return HttpServer.rejectExchange(HttpServer.errorResponse(e));
-        }
-        int8[] decoded #= body.drain();
-        int32 decodedLen = decoded.count();
-        if (!limits.bodyWithinCap((int64) decodedLen)) {
-            return HttpServer.rejectExchange(HttpServer.statusResponse(413));
-        }
-        if (decodedLen > 0) {
-            request.body(decoded, decodedLen);
-        }
-
-        HttpResponse response #= HttpServer.dispatch(handler, request);
-        boolean keepAlive = HttpServer.decideReuse(request, response);
-        KeepAlive.applyConnectionHeader(response.getHeaders(),
-                                        response.getVersion(), keepAlive);
-        return heap Exchange(#response, keepAlive);
-    }
-
-    /**
-     * Wrap a short-circuit (error / hardening) response into a
-     * connection-closing [`Exchange`](Exchange.cajeta): stamp
-     * `Connection: close` (a rejected or mis-framed request cannot reliably
-     * reuse the connection) and report `keepAlive == false`. The single exit
-     * for every NET-9.6 rejection (`413` / `417`) and every parse-fault path.
-     */
-    static #Exchange rejectExchange(#HttpResponse response) {
-        KeepAlive.applyConnectionHeader(response.getHeaders(),
-                                        response.getVersion(), false);
-        return heap Exchange(#response, false);
-    }
-
-    /**
-     * The [`ExpectContinue`](ExpectContinue.cajeta) action for a request
-     * head under `limits` — the **interim-response** decision the live loop
-     * acts on: when it is
-     * [`ACTION_SEND_CONTINUE`](ExpectContinue.cajeta#ACTION_SEND_CONTINUE)
-     * the server writes [`continueResponse`](#continueResponse)'s
-     * `100 Continue` wire bytes before reading the body. Exposed so a
-     * golden test can assert the action chosen for a given head + limits
-     * without driving a socket.
-     */
-    public static int32 expectAction(HttpParserLimits parseLimits,
-                                     ServerLimits limits,
-                                     int8[] requestBytes, int32 length) {
-        HttpParser parser #= HttpParser.forRequestWithLimits(parseLimits);
-        parser.feed(requestBytes, length);
-        if (!parser.isComplete()) {
-            parser.endInput();
-        }
-        HttpRequest request = parser.getRequest();
-        BodyFraming framing = parser.getFraming();
-        return ExpectContinue.decide(request, framing, limits);
-    }
-
-    /**
-     * The interim **`100 Continue`** response wire bytes the server flushes
-     * before reading a body when the [`ExpectContinue`](ExpectContinue.cajeta)
-     * policy says
-     * [`ACTION_SEND_CONTINUE`](ExpectContinue.cajeta#ACTION_SEND_CONTINUE).
-     * A bare status line + the terminating blank line (a `1xx` carries no
-     * headers or body here) — `"HTTP/1.1 100 Continue\r\n\r\n"`. The client
-     * reads this, then sends the body, and the server reads it normally and
-     * sends the **final** response after.
-     */
-    public static #int8[] continueResponse() {
-        HttpResponse r #= HttpResponse.of(100);
-        int8[] bytes #= HttpSerializer.response(r);
-        return #bytes;
-    }
-
-    // ----- keep-alive + error mapping --------------------------------------
-
-    /**
-     * The connection-reuse decision for a request/response exchange:
-     * reusable iff both the request and the response permit it
-     * ([`KeepAlive.canReuse`](KeepAlive.cajeta), NET-7.6). Either side's
-     * `Connection: close`, or either side's HTTP/1.0-without-keep-alive
-     * default, ends reuse.
-     */
-    static boolean decideReuse(HttpRequest request, HttpResponse response) {
-        return KeepAlive.canReuse(request.getVersion(), request.getHeaders(),
-                                  response.getVersion(), response.getHeaders());
-    }
-
-    /**
-     * Map an [`HttpException`](HttpException.cajeta) raised while reading a
-     * request to the status response to send before closing the connection:
-     *
-     *   - [`HeadersTooLargeException`](HeadersTooLargeException.cajeta)
-     *     → `431 Request Header Fields Too Large`.
-     *   - [`MalformedMessageException`](MalformedMessageException.cajeta)
-     *     → `400 Bad Request`.
-     *   - [`UnexpectedEofException`](UnexpectedEofException.cajeta) (the
-     *     peer truncated the request) → `400 Bad Request`.
-     *   - any other [`HttpException`](HttpException.cajeta) (e.g. an
-     *     invalid chunk encoding) → `400 Bad Request`.
-     *
-     * Each error response carries `Connection: close` (stamped by the
-     * caller) — a mis-framed byte stream cannot be reliably reused.
-     *
-     * The status is read off the fault's **virtual**
-     * [`HttpException.httpStatus`](HttpException.cajeta) (NET-7.7): the
-     * family default is `400`, `HeadersTooLarge` overrides to `431` — so
-     * the mapping is dynamic dispatch on the concrete leaf, with no RTTI.
-     */
-    static #HttpResponse errorResponse(HttpException e) {
-        return HttpServer.statusResponse(e.httpStatus());
-    }
-
-    /**
-     * Build a bodyless status-only response on `HTTP/1.1` with the standard
-     * reason phrase for `status` (via [`HttpResponse.of`](HttpResponse.cajeta)).
-     * The `431` reason ("Request Header Fields Too Large") is filled
-     * explicitly since it is outside [`HttpResponse.reasonFor`](HttpResponse.cajeta)'s
-     * table.
-     */
-    static #HttpResponse statusResponse(int32 status) {
-        HttpResponse r #= HttpResponse.of(status);
-        if (status == 431 && r.getReason().byteLength() == 0) {
-            r.reason("Request Header Fields Too Large");
-        }
-        // 417 (NET-9.6 expect-continue rejection) is outside HttpResponse's
-        // reason table — fill its standard phrase explicitly.
-        if (status == 417 && r.getReason().byteLength() == 0) {
-            r.reason("Expectation Failed");
-        }
-        return #r;
-    }
-}
-
-/**
- * Fluent builder for an [`HttpServer`](HttpServer.cajeta) — see
- * [`HttpServer.builder`](HttpServer.cajeta#builder) (**NET-9.2**). It
- * accumulates the bind address, the accept
- * [`model`](../ServerModel.cajeta), and the request handler, then
- * [`build`](#build) materializes the server on the selected accept stack:
- *
- * ```cajeta
- * HttpServer srv = HttpServer.builder()
- *     .bind("0.0.0.0:8080")
- *     .model(ServerModel.sharedPool(16))      // or .fiberPerConnection()
- *     .handler((req) -> HttpResponse.of(200))
- *     .build();
- * ```
- *
- * [`serve`](#serve) is the one-shot `...build().serve()` convenience the
- * spec's `HttpServer.builder()...serve()` example uses. The `.route(...)`
- * step the doc shows on top of this is the **minimal router (NET-9.3)** —
- * deliberately not part of NET-9.2, which is exactly "run the existing
- * handler-based server on both accept models."
- */
-public class HttpServerBuilder {
-    /**
-     * The bind address as a `host:port` string, or `null` until
-     * [`bind`](#bind) sets it. Held as a `String` (not a parsed
-     * [`SocketAddress`](../SocketAddress.cajeta)) so the builder owns no
-     * heap-address it would have to move out at [`build`](#build) time — the
-     * address is parsed afresh there, mirroring the
-     * [`UriBuilder`](../uri/Uri.cajeta) clone-at-build discipline.
-     */
-    private String addr;
-
-    /**
-     * The accept model to build on — defaults to
-     * [`ServerModel.fiberPerConnection`](../ServerModel.cajeta#fiberPerConnection)
-     * (Model A), the documented default.
-     */
-    private ServerModel model;
-
-    /**
-     * The request handler, or `null` until [`handler`](#handler) sets it
-     * ([`build`](#build) substitutes a `500`-returning placeholder if none
-     * was supplied, so a mis-configured builder still produces a server
-     * rather than a null handler).
-     */
-    private (HttpRequest) -> #HttpResponse handler;
-
-    /**
-     * The [`ServerLimits`](ServerLimits.cajeta) to install at
-     * [`build`](#build), or `null` to keep the server's defaults
-     * (http:1.5a).
-     */
-    private ServerLimits slim;
-
-    /** TLS PEM material (http:1.8); the server terminates TLS when set. */
-    private int8[] bCert;
-    private int32 bCertLen;
-    private int8[] bKey;
-    private int32 bKeyLen;
-    private boolean bTls;
-    private boolean bH2Prior;
-
-    /** Accept control (http:1.5c), or `null` for the uncapped default. */
-    private ConnectionLimits bClimits;
-
-    /**
-     * Start with the default (fiber-per-connection) model and no address/handler.
-     *
-     * @EntryPoint
-     */
-    public HttpServerBuilder() {
-        this.addr = null;
-        this.model #= ServerModel.fiberPerConnection();
-        this.handler = null;
-        this.slim = null;
-        int8[] e = heap int8[0];
-        this.bCert = #e;
-        this.bCertLen = 0;
-        int8[] e2 = heap int8[0];
-        this.bKey = #e2;
-        this.bKeyLen = 0;
-        this.bTls = false;
-        this.bH2Prior = false;
-        this.bClimits = null;
-    }
-
-    /**
-     * Enable RFC 9113 **prior-knowledge** HTTP/2 on this plaintext server: each
-     * new connection is sniffed for the h2 connection preface and served over
-     * HTTP/2 when it matches, degrading cleanly to the h1 keep-alive loop
-     * otherwise. Off by default. (h2 over TLS is negotiated by ALPN and needs
-     * no flag.) Returns `this` to chain.
-     */
-    public HttpServerBuilder h2PriorKnowledge() {
-        this.bH2Prior = true;
-        return this;
-    }
-
-    /**
-     * Set the bind address from a `host:port` string (parsed at
-     * [`build`](#build) time via
-     * [`SocketAddress.parse`](../SocketAddress.cajeta)). Returns `this` to
-     * chain.
-     */
-    public HttpServerBuilder bind(String addr) {
-        // Clone so the builder owns the address bytes independently of the
-        // caller's argument (bare assignment is a borrow in this model — the
-        // UriBuilder discipline), so a builder outliving the call site stays
-        // valid.
-        this.addr #= addr.substring(0, addr.byteLength());
-        return this;
-    }
-
-    /**
-     * Pick the accept [`model`](../ServerModel.cajeta) (**NET-9.2**) — Model
-     * A ([`ServerModel.fiberPerConnection`](../ServerModel.cajeta#fiberPerConnection))
-     * or Model B ([`ServerModel.sharedPool`](../ServerModel.cajeta#sharedPool)).
-     * Returns `this` to chain.
-     */
-    public HttpServerBuilder model(ServerModel model) {
-        // `#=` (ownership 3.3.3): the builder holds this past the call, so the
-        // store records the caller's mode rather than silently keeping a
-        // borrow. It also matters for the usual call shape — `.model(
-        // ServerModel.fiberPerConnection())` hands over a fresh value, and a
-        // plain store kept no title over it.
-        this.model #= model;
-        return this;
-    }
-
-    /**
-     * Shorthand for [`model(ServerModel.fiberPerConnection())`](#model) —
-     * the default Model A. Returns `this` to chain.
-     */
-    public HttpServerBuilder fiberPerConnection() {
-        this.model #= ServerModel.fiberPerConnection();
-        return this;
-    }
-
-    /**
-     * Shorthand for [`model(ServerModel.sharedPool(poolSize))`](#model) —
-     * Model B with `poolSize` worker fibers. Returns `this` to chain.
-     */
-    public HttpServerBuilder sharedPool(int32 poolSize) {
-        this.model #= ServerModel.sharedPool(poolSize);
-        return this;
-    }
-
-    /** Set the request handler `(HttpRequest) -> #HttpResponse`. Returns `this`. */
-    public HttpServerBuilder handler((HttpRequest) -> #HttpResponse handler) {
-        this.handler #= handler;   // a keeper stores with `#=`: a lambda literal moves in, a name lends (cajeta ownership 5.13)
-        return this;
-    }
-
-    /**
-     * Adopt the [`ServerLimits`](ServerLimits.cajeta) the built server
-     * enforces (http:1.5a — the fluent path to the deadline/size/budget
-     * knobs). Unset, the server keeps its conservative defaults.
-     * Returns `this` to chain.
-     */
-    public HttpServerBuilder serverLimits(#ServerLimits l) {
-        this.slim = #l;
-        return this;
-    }
-
-    /**
-     * Adopt the [`ConnectionLimits`](../ConnectionLimits.cajeta) the
-     * built server enforces (http:1.5c): the kernel `listen` backlog,
-     * the concurrent-connection cap, and the
-     * [`LoadShedPolicy`](../LoadShedPolicy.cajeta) for the surplus
-     * (`REFUSE` closes it at once; `BLOCK` parks it for a permit).
-     * Plaintext servers only in v1 — the TLS accept path (`.tls`) runs
-     * its own loop and ignores this. Returns `this` to chain.
-     */
-    public HttpServerBuilder connectionLimits(#ConnectionLimits l) {
-        this.bClimits = #l;
-        return this;
-    }
-
-    /**
-     * Terminate TLS on the built server (http:1.8) with this
-     * certificate + private key (PEM bytes, copied). The accept path
-     * handshakes each connection in its own worker fiber and ALPN
-     * advertises `http/1.1`. Returns `this` to chain.
-     */
-    public HttpServerBuilder tls(int8[] cert, int32 certLen,
-                                 int8[] key, int32 keyLen) {
-        int8[] certCopy = heap int8[certLen];
-        int32 i = 0;
-        while (i < certLen) {
-            certCopy[i] = cert[i];
-            i = i + 1;
-        }
-        this.bCert = #certCopy;
-        this.bCertLen = certLen;
-        int8[] keyCopy = heap int8[keyLen];
-        i = 0;
-        while (i < keyLen) {
-            keyCopy[i] = key[i];
-            i = i + 1;
-        }
-        this.bKey = #keyCopy;
-        this.bKeyLen = keyLen;
-        this.bTls = true;
-        return this;
-    }
-
-    /**
-     * The accept [`model`](../ServerModel.cajeta) this builder will
-     * materialize on [`build`](#build) — the documented default (Model A —
-     * fiber-per-connection) until [`model`](#model) / [`sharedPool`](#sharedPool)
-     * / [`fiberPerConnection`](#fiberPerConnection) picks one. Lets the model
-     * selection be inspected without [`build`](#build)ing (which binds a live
-     * socket).
-     */
-    public ServerModel selectedModel() {
-        return this.model;
-    }
-
-    /**
-     * Materialize the [`HttpServer`](HttpServer.cajeta) on the accumulated
-     * address + model + handler, via
-     * [`HttpServer.bindAddressWithModel`](HttpServer.cajeta#bindAddressWithModel)
-     * — so the configured model's accept stack (Model A or B) is what backs
-     * the returned server. A builder with no handler set falls back to a
-     * `500`-returning placeholder rather than a null handler.
-     */
-    public #HttpServer build() {
-        (HttpRequest) -> #HttpResponse h = this.handler;
-        if (h == null) {
-            h = (HttpRequest req) -> HttpResponse.of(500);
-        }
-        ServerLimits l = null;
-        if (this.slim != null) {
-            ServerLimits moved #= this.slim;
-            this.slim = null;
-            l = #moved;
-        }
-        if (this.bTls) {
-            return HttpServer.bindTlsAddress(
-                SocketAddress.parse(this.addr), h, #l,
-                this.bCert, this.bCertLen, this.bKey, this.bKeyLen);
-        }
-        ConnectionLimits cl = null;
-        if (this.bClimits != null) {
-            ConnectionLimits cmoved #= this.bClimits;
-            this.bClimits = null;
-            cl = #cmoved;
-        }
-        return HttpServer.bindAddressWithModelAndLimits(
-            SocketAddress.parse(this.addr), this.model, h, #l, #cl,
-            this.bH2Prior);
-    }
-
-    /**
-     * [`build`](#build) the server, then run its accept loop synchronously
-     * (the `...builder()...serve()` one-shot the spec shows). Blocks the
-     * calling fiber until the server is shut down.
-     */
-    public void serve() {
-        HttpServer srv #= this.build();
-        srv.serve();
     }
 }

@@ -1,0 +1,157 @@
+package dev.cajeta.http.server;
+
+import cajeta.lang.String;
+import cajeta.io.net.ServerModel;
+import cajeta.io.net.SocketAddress;
+import cajeta.io.net.ConnectionLimits;
+import cajeta.io.net.BufferPool;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+
+/** Collects a server's address, model, handler, limits, buffers and TLS material. */
+public class HttpServerBuilder {
+    private String addr;
+    private ServerModel model;
+    private (HttpRequest, HttpResponse) -> void handler;
+    private ServerLimits slim;
+    private BufferPool bPool;
+    private int8[] bCert;
+    private int32 bCertLen;
+    private int8[] bKey;
+    private int32 bKeyLen;
+    private boolean bTls;
+    private ConnectionLimits bClimits;
+
+    /** A builder with one fiber per connection and default limits. */
+    public HttpServerBuilder() {
+        this.addr = null;
+        this.model #= ServerModel.fiberPerConnection();
+        this.handler = null;
+        this.slim = null;
+        this.bPool = null;
+        this.bCert = heap int8[0];
+        this.bCertLen = 0;
+        this.bKey = heap int8[0];
+        this.bKeyLen = 0;
+        this.bTls = false;
+        this.bClimits = null;
+    }
+
+    /** The address to bind, such as "127.0.0.1:8080". */
+    public HttpServerBuilder bind(String addr) {
+        this.addr #= addr.substring(0, addr.byteLength());
+        return this;
+    }
+
+    /** The server model. */
+    public HttpServerBuilder model(ServerModel model) {
+        this.model #= model;
+        return this;
+    }
+
+    /** One fiber per connection. */
+    public HttpServerBuilder fiberPerConnection() {
+        this.model #= ServerModel.fiberPerConnection();
+        return this;
+    }
+
+    /** A fixed pool of `poolSize` worker fibers. */
+    public HttpServerBuilder sharedPool(int32 poolSize) {
+        this.model #= ServerModel.sharedPool(poolSize);
+        return this;
+    }
+
+    /** The handler every request runs. */
+    public HttpServerBuilder handler((HttpRequest, HttpResponse) -> void handler) {
+        this.handler #= handler;
+        return this;
+    }
+
+    /** Timeouts, body cap and head limits. */
+    public HttpServerBuilder serverLimits(#ServerLimits l) {
+        this.slim = #l;
+        return this;
+    }
+
+    /** Admission limits on concurrent connections. */
+    public HttpServerBuilder connectionLimits(#ConnectionLimits l) {
+        this.bClimits = #l;
+        return this;
+    }
+
+    /**
+     * The pool connection buffers come from. Its buffer size bounds a request
+     * head plus a held body, and a response before it is flushed in pieces.
+     */
+    public HttpServerBuilder bufferPool(#BufferPool pool) {
+        this.bPool = #pool;
+        return this;
+    }
+
+    /** Serves HTTPS with the PEM `cert` and `key`, which are copied. */
+    public HttpServerBuilder tls(int8[] cert, int32 certLen, int8[] key, int32 keyLen) {
+        int8[] certCopy = heap int8[certLen];
+        int32 i = 0;
+        while (i < certLen) {
+            certCopy[i] = cert[i];
+            i = i + 1;
+        }
+        this.bCert = #certCopy;
+        this.bCertLen = certLen;
+        int8[] keyCopy = heap int8[keyLen];
+        i = 0;
+        while (i < keyLen) {
+            keyCopy[i] = key[i];
+            i = i + 1;
+        }
+        this.bKey = #keyCopy;
+        this.bKeyLen = keyLen;
+        this.bTls = true;
+        return this;
+    }
+
+    /** The selected model. */
+    public ServerModel selectedModel() {
+        return this.model;
+    }
+
+    /** Binds and returns the server. A missing handler answers every request with 500. */
+    public #HttpServer build() {
+        (HttpRequest, HttpResponse) -> void h = this.handler;
+        if (h == null) {
+            h = (HttpRequest q, HttpResponse r) -> {
+                r.status(500);
+            };
+        }
+        ServerLimits l = null;
+        if (this.slim != null) {
+            ServerLimits moved #= this.slim;
+            this.slim = null;
+            l = #moved;
+        }
+        BufferPool p = null;
+        if (this.bPool != null) {
+            BufferPool pmoved #= this.bPool;
+            this.bPool = null;
+            p = #pmoved;
+        }
+        if (this.bTls) {
+            return HttpServer.bindTlsAddress(SocketAddress.parse(this.addr), h, #l,
+                this.bCert, this.bCertLen, this.bKey, this.bKeyLen);
+        }
+        ConnectionLimits cl = null;
+        if (this.bClimits != null) {
+            ConnectionLimits cmoved #= this.bClimits;
+            this.bClimits = null;
+            cl = #cmoved;
+        }
+        return HttpServer.bindAddressWithModelAndLimits(SocketAddress.parse(this.addr),
+            this.model, h, #l, #cl, #p);
+    }
+
+    /** Builds and serves until shutdown. */
+    public void serve() {
+        HttpServer srv #= this.build();
+        srv.serve();
+    }
+}

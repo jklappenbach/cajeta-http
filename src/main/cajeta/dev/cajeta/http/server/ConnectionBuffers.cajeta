@@ -1,0 +1,40 @@
+package dev.cajeta.http.server;
+
+import cajeta.io.net.BufferPool;
+import cajeta.io.net.ByteBuffer;
+import cajeta.concurrent.Lock;
+import cajeta.concurrent.LockGuard;
+
+/**
+ * The buffer pool a server's connections share, behind a lock. Buffers
+ * are taken when a connection opens and returned when it closes, so the
+ * lock is never on the per-request path.
+ */
+public final class ConnectionBuffers {
+    BufferPool pool;
+    Lock gate;
+
+    /** Shares `pool` among connections. */
+    public ConnectionBuffers(#BufferPool pool) {
+        this.pool #= pool;
+        this.gate = heap Lock();
+    }
+
+    /** A cleared buffer from the pool. */
+    public #ByteBuffer take() {
+        LockGuard g #= this.gate.acquire();
+        return this.pool.acquire();
+    }
+
+    /** Returns `b` to the pool. */
+    public void give(#ByteBuffer b) {
+        LockGuard g #= this.gate.acquire();
+        this.pool.release(#b);
+    }
+
+    /** The pool's lifetime count of fresh buffers. */
+    public int32 allocations() {
+        LockGuard g #= this.gate.acquire();
+        return this.pool.allocations();
+    }
+}

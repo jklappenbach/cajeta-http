@@ -22,7 +22,7 @@ import dev.cajeta.http.MediaType;
  * [`reader`](#reader) hands back the same reader every call and never
  * rewinds — once drained (or partially consumed) it stays where it is.
  */
-public final class StreamBody extends Body {
+public final class StreamBody implements Body {
 
     AsyncReader rdr;
     int64 len;
@@ -78,5 +78,9 @@ public final class StreamBody extends Body {
     /** The wrapped reader — same instance every call, never rewound. */
     public AsyncReader reader() {
         return this.rdr;
+    }
+
+    /** Nothing to stop: the content is produced on demand. */
+    public void abort() {
     }
 }

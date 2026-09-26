@@ -1,0 +1,125 @@
+package tour.views;
+
+import cajeta.lang.String;
+import cajeta.io.net.TcpStream;
+
+/**
+ * A minimal HTTP/1.1 client over a plain socket, so the tour shows the exact
+ * bytes on the wire. It sends one request and reads exactly one response,
+ * sized by its Content-Length, into a buffer it reuses.
+ */
+public final class Wire {
+    TcpStream sock;
+    int8[] buf;
+    int32 len;
+
+    /** A client on the connected socket `sock`. */
+    public Wire(#TcpStream sock) {
+        this.sock #= sock;
+        this.buf = heap int8[16384];
+        this.len = 0;
+    }
+
+    /** Sends the request bytes `req` and reads the response into this client's buffer. */
+    public void send(int8[] req, int32 n) {
+        this.sock.writeAllAsync(req, 0, (int64) n);
+        this.len = 0;
+        int32 headEnd = -1;
+        int32 total = -1;
+        while (total < 0 || this.len < total) {
+            int64 got = this.sock.readAsync(this.buf, (int64) this.len, (int64) (this.buf.count() - this.len));
+            if (got <= 0) {
+                return;
+            }
+            this.len = this.len + (int32) got;
+            if (headEnd < 0) {
+                headEnd = Wire.findHeadEnd(this.buf, this.len);
+                if (headEnd > 0) {
+                    total = headEnd + Wire.contentLength(this.buf, headEnd);
+                }
+            }
+        }
+    }
+
+    static int32 findHeadEnd(int8[] a, int32 n) {
+        int32 i = 3;
+        while (i < n) {
+            if (a[i] == (int8) 10 && a[i - 1] == (int8) 13 && a[i - 2] == (int8) 10 && a[i - 3] == (int8) 13) {
+                return i + 1;
+            }
+            i = i + 1;
+        }
+        return -1;
+    }
+
+    static int32 contentLength(int8[] a, int32 headEnd) {
+        String key = "content-length: ";
+        int32 k = key.byteLength();
+        int32 i = 0;
+        while (i + k < headEnd) {
+            int32 j = 0;
+            while (j < k && (a[i + j] | (int8) 32) == (key.byteAt(j) | (int8) 32)) {
+                j = j + 1;
+            }
+            if (j == k) {
+                int32 v = 0;
+                int32 p = i + k;
+                while (a[p] >= (int8) 48 && a[p] <= (int8) 57) {
+                    v = v * 10 + (int32) (a[p] - (int8) 48);
+                    p = p + 1;
+                }
+                return v;
+            }
+            i = i + 1;
+        }
+        return 0;
+    }
+
+    /** The last response, as text. */
+    public #String response() {
+        int8[] copy = heap int8[this.len];
+        int32 i = 0;
+        while (i < this.len) {
+            copy[i] = this.buf[i];
+            i = i + 1;
+        }
+        return heap String(#copy, this.len);
+    }
+
+    /** True when the last response starts with `prefix`. */
+    public boolean startsWith(String prefix) {
+        int32 n = prefix.byteLength();
+        if (this.len < n) {
+            return false;
+        }
+        int32 i = 0;
+        while (i < n) {
+            if (this.buf[i] != prefix.byteAt(i)) {
+                return false;
+            }
+            i = i + 1;
+        }
+        return true;
+    }
+
+    /** True when the last response ends with `suffix`. */
+    public boolean endsWith(String suffix) {
+        int32 n = suffix.byteLength();
+        if (this.len < n) {
+            return false;
+        }
+        int32 i = 0;
+        while (i < n) {
+            if (this.buf[this.len - n + i] != suffix.byteAt(i)) {
+                return false;
+            }
+            i = i + 1;
+        }
+        return true;
+    }
+
+    /** Closes the socket. */
+    public void close() {
+        this.sock.close();
+    }
+}

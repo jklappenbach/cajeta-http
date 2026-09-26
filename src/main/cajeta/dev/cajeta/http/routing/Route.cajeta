@@ -1,205 +1,122 @@
 package dev.cajeta.http.routing;
 
 import cajeta.lang.String;
+import cajeta.lang.Slice;
+import cajeta.error.UnrecoverableException;
+import dev.cajeta.http.Bytes;
 import dev.cajeta.http.HttpRequest;
 import dev.cajeta.http.HttpResponse;
-import dev.cajeta.http.PathParams;
 import dev.cajeta.http.middleware.MiddlewareChain;
-import cajeta.io.net.uri.PercentCodec;
-import cajeta.io.net.uri.MalformedUriException;
 
 /**
- * One **compiled route** in the [`Router`](Router.cajeta) (plan item
- * **NET-9.3**) — a `(method, path-pattern, handler)` triple, with the
- * pattern pre-split into match segments so dispatch is a per-request
- * segment walk rather than a re-parse.
+ * One registered route: a method, a path pattern parsed once at
+ * registration, and the handler with its middleware already composed.
  *
- * A **path pattern** is the registered template, e.g. `/users/{id}` or
- * `/`. It is split once at construction on `/` into **segments**; each
- * segment is either:
- *
- *   - a **literal** (`users`) — matches a request segment iff the bytes
- *     are equal, or
- *   - a **parameter** (`{id}`) — matches *any* single non-empty request
- *     segment, binding the captured (percent-decoded) value to the
- *     parameter name (`id`).
- *
- * The pattern is **case-sensitive** in its literal segments (paths are,
- * RFC 3986 §6.2.2.1) and the method token is taken verbatim
- * (`HttpRequest.method` is case-sensitive, RFC 7230 §3.1.1).
- *
- * This minimal form deliberately has **no** wildcard / catch-all / regex /
- * optional segments — a pattern and a request path match iff they have the
- * **same segment count** and every segment pairwise matches. "Deliberately
- * not a web framework" (Net.md §HTTP-server). The [`Router`](Router.cajeta)
- * layers method-vs-path 404/405 resolution over a list of these.
+ * A pattern segment is a literal, `{name}` or `{name:type}` with type one of
+ * string, int64, int32, int16, int8, uint32, uint16, uint8, bool or `*`, or
+ * a final `{name:**}` that takes the rest of the path. Matching reads the
+ * request's path segments in place and allocates nothing.
  */
 public class Route {
-    /** The HTTP method token this route answers (verbatim, e.g. `"GET"`). */
     public String method;
-
-    /** The raw registered pattern (`"/users/{id}"`), kept for diagnostics. */
     public String pattern;
-
-    /**
-     * The pattern's path segments, in order. `"/users/{id}"` splits to
-     * `["users", "{id}"]`; the root `"/"` splits to the empty list (zero
-     * segments). A literal segment carries its text; a parameter segment
-     * carries the `{name}` form verbatim and is identified at match time
-     * by [`isParam`](#isParam).
-     */
-    public String[] segments;
-
-    /** Number of valid entries in [`segments`](#segments). */
+    String[] lits;
+    int32[] kinds;
+    int32[] types;
+    int32[] slots;
     public int32 segmentCount;
-
-    /**
-     * True iff the **last** segment is a `**` catch-all (`{rest:**}`) — a
-     * variable-length match that binds the remaining path (http:1.7b). A
-     * `**` in any non-final position is rejected at registration
-     * ([`Router.patternError`](Router.cajeta)), so a `**` recorded here is
-     * always terminal.
-     */
     public boolean hasDoubleStar;
-
-    /**
-     * An optional **per-route body cap** in bytes (http:1.7d), or `0` when
-     * unset (the route inherits only the server's global
-     * `ServerLimits.maxBodyBytes`). When positive, [`Router.dispatch`](Router.cajeta)
-     * answers `413 Payload Too Large` before the handler runs for any
-     * request whose body — declared `Content-Length` or buffered bytes —
-     * exceeds it. A per-route cap only **tightens**: the global cap is the
-     * server-side pre-buffer gate; this refines it downward for one route
-     * (e.g. a login endpoint that accepts at most 1 KiB). Set via
-     * [`Router.routeLimited`](Router.cajeta#routeLimited).
-     */
+    String[] names;
+    int32 paramCount;
     public int64 maxBodyBytes;
-
-    /**
-     * Optional **per-route middleware** (http:2.1), or `null` when none.
-     * When set, [`Router.dispatch`](Router.cajeta) composes this chain around
-     * [`handler`](#handler) at dispatch — **inside** any global (server-level)
-     * chain — so route-specific concerns (a per-route auth, rate limit, or
-     * body decode) wrap only this route. Set via
-     * [`Router.routeMw`](Router.cajeta#routeMw).
-     */
     public MiddlewareChain mw;
+    (HttpRequest, HttpResponse) -> void terminal;
 
-    /** The handler to invoke when this route matches. */
-    public (HttpRequest) -> #HttpResponse handler;
+    static int32 LITERAL = 0;
+    static int32 TYPED = 1;
+    static int32 ANY = 2;
+    static int32 REST = 3;
 
-    /**
-     * Compile a route from a method token, a path pattern, and a handler.
-     * Splits `pattern` into [`segments`](#segments) once; an empty path or
-     * `"/"` yields zero segments (the root route).
-     */
-    public Route(String method, String pattern,
-                 (HttpRequest) -> #HttpResponse handler) {
+    /** A route for `method` and `pattern` that runs `handler`. */
+    public Route(String method, String pattern, (HttpRequest, HttpResponse) -> void handler) {
         this.method #= method.substring(0, method.byteLength());
         this.pattern #= pattern.substring(0, pattern.byteLength());
-        this.handler #= handler;   // a keeper stores with `#=`: a lambda literal moves in, a name lends (cajeta ownership 5.13)
+        this.terminal #= handler;
         this.maxBodyBytes = 0;
         this.mw = null;
-        this.splitPattern(pattern);
-        this.hasDoubleStar = this.computeDoubleStar();
-    }
-
-    /**
-     * Whether the final segment is a `**` catch-all. Only the last segment
-     * is inspected: a `**` elsewhere is a registration error the
-     * [`Router`](Router.cajeta) rejects, so treating a non-final `**` as an
-     * ordinary (never-matching) typed param here is a safe fallback.
-     */
-    boolean computeDoubleStar() {
-        if (this.segmentCount == 0) {
-            return false;
-        }
-        int32 last = this.segmentCount - 1;
-        if (!this.isParam(last)) {
-            return false;
-        }
-        String t #= this.paramType(last);
-        return t.equals("**");
-    }
-
-    /**
-     * Split `pattern` on `/` into [`segments`](#segments). A leading `/`
-     * (the conventional absolute path) produces no empty leading segment;
-     * internal empty segments (a `//`) are skipped, matching the lenient
-     * normalization a request path receives in [`Router.dispatch`](Router.cajeta).
-     */
-    void splitPattern(String pattern) {
-        this.segments = heap String[8];
+        this.lits = heap String[32];
+        this.kinds = heap int32[32];
+        this.types = heap int32[32];
+        this.slots = heap int32[32];
+        this.names = heap String[16];
+        this.paramCount = 0;
         this.segmentCount = 0;
+        this.parse(pattern);
+        this.hasDoubleStar = this.segmentCount > 0 && this.kinds[this.segmentCount - 1] == Route.REST;
+    }
+
+    /** Wraps the handler in `chain`. The route keeps the chain for its lifetime. */
+    public void wrap(#MiddlewareChain chain) {
+        this.mw #= chain;
+        this.mw.build(this.terminal);
+    }
+
+    /** Runs the route's handler, through its middleware when it has any. */
+    public void run(HttpRequest q, HttpResponse r) {
+        if (this.mw != null) {
+            this.mw.run(q, r);
+            return;
+        }
+        (HttpRequest, HttpResponse) -> void h = this.terminal;
+        h(q, r);
+    }
+
+    /** The error in `pattern`, or null when it is valid. */
+    public static #String patternError(String pattern) {
         int32 n = pattern.byteLength();
-        int32 segStart = 0;
+        int32 start = 0;
         int32 i = 0;
+        int32 params = 0;
+        int32 segs = 0;
+        boolean restSeen = false;
         while (i <= n) {
-            boolean atEnd = (i == n);
-            boolean slash = (!atEnd) && (((int32) pattern.byteAt(i) & 0xff) == 47);
-            if (atEnd || slash) {
-                if (i > segStart) {
-                    this.appendSegment(pattern.substring(segStart, i));
+            if (i == n || pattern.byteAt(i) == (int8) 47) {
+                if (i > start) {
+                    if (restSeen) {
+                        return "router: '**' catch-all must be the last segment in pattern '" + pattern + "'";
+                    }
+                    segs = segs + 1;
+                    String seg #= pattern.substring(start, i);
+                    if (Route.isParamText(seg)) {
+                        params = params + 1;
+                        String type #= Route.typeText(seg);
+                        if (type.equals("**")) {
+                            restSeen = true;
+                        } else if (!type.equals("*") && Route.typeCode(type) < 0) {
+                            return "router: unknown path-param type '" + type + "' in pattern '" + pattern + "'";
+                        }
+                    }
                 }
-                segStart = i + 1;
+                start = i + 1;
             }
             i = i + 1;
         }
-    }
-
-    /** Append one compiled segment, growing the backing array on demand. */
-    void appendSegment(#String seg) {
-        if (this.segmentCount >= this.segments.count()) {
-            int32 newCap = this.segments.count() * 2;
-            String[] grown = heap String[newCap];
-            int32 j = 0;
-            while (j < this.segmentCount) {
-                grown[j] = this.segments[j];
-                j = j + 1;
-            }
-            this.segments = grown;
+        if (segs > 32 || params > 16) {
+            return "router: pattern '" + pattern + "' has more than 32 segments or 16 parameters";
         }
-        this.segments[this.segmentCount] = #seg;
-        this.segmentCount = this.segmentCount + 1;
+        return null;
     }
 
-    /** The number of pattern segments. */
-    public int32 patternSegmentCount() {
-        return this.segmentCount;
-    }
-
-    /** True iff this route's method token equals `m` (case-sensitive). */
-    public boolean methodMatches(String m) {
-        return this.method.equals(m);
-    }
-
-    /**
-     * Does pattern segment `i` denote a path **parameter** (`{name}`)?
-     * A segment is a parameter iff it is at least two bytes and is wrapped
-     * in `{` … `}`.
-     */
-    public boolean isParam(int32 i) {
-        String seg = this.segments[i];
+    static boolean isParamText(String seg) {
         int32 len = seg.byteLength();
-        if (len < 2) {
-            return false;
-        }
-        boolean open = (((int32) seg.byteAt(0) & 0xff) == 123);          // '{'
-        boolean close = (((int32) seg.byteAt(len - 1) & 0xff) == 125);   // '}'
-        return open && close;
+        return len >= 2 && seg.byteAt(0) == (int8) 123 && seg.byteAt(len - 1) == (int8) 125;
     }
 
-    /**
-     * The byte index of the `:` inside param segment `i` that separates the
-     * name from its type (`{id:int64}`), or `-1` when the segment is an
-     * untyped `{name}`. Only the braces' interior is scanned.
-     */
-    int32 paramColon(int32 i) {
-        String seg = this.segments[i];
+    static int32 colonOf(String seg) {
         int32 len = seg.byteLength();
-        int32 k = 1;                                 // skip '{'
-        while (k < len - 1) {                        // stop before '}'
-            if ((((int32) seg.byteAt(k)) & 0xff) == 58) {    // ':'
+        int32 k = 1;
+        while (k < len - 1) {
+            if (seg.byteAt(k) == (int8) 58) {
                 return k;
             }
             k = k + 1;
@@ -207,169 +124,207 @@ public class Route {
         return -1;
     }
 
-    /**
-     * The parameter name of segment `i` — the text between `{` and either
-     * the type separator `:` (`{id:int64}` → `id`) or the closing `}`
-     * (`{id}` → `id`).
-     */
-    public #String paramName(int32 i) {
-        String seg = this.segments[i];
-        int32 len = seg.byteLength();
-        int32 colon = this.paramColon(i);
-        int32 end = colon < 0 ? (len - 1) : colon;
+    static #String typeText(String seg) {
+        int32 c = Route.colonOf(seg);
+        if (c < 0) {
+            return "string".substring(0, 6);
+        }
+        return seg.substring(c + 1, seg.byteLength() - 1);
+    }
+
+    static #String nameText(String seg) {
+        int32 c = Route.colonOf(seg);
+        int32 end = c < 0 ? seg.byteLength() - 1 : c;
         return seg.substring(1, end);
     }
 
-    /**
-     * The declared type token of param segment `i` — the text between `:`
-     * and `}` (`{id:int64}` → `int64`), or `"string"` for an untyped
-     * `{name}`. See [`PathParams.matchesType`](../PathParams.cajeta) for the
-     * per-type match rules.
-     */
-    public #String paramType(int32 i) {
-        String seg = this.segments[i];
-        int32 len = seg.byteLength();
-        int32 colon = this.paramColon(i);
-        if (colon < 0) {
-            return "string".substring(0, 6);
-        }
-        return seg.substring(colon + 1, len - 1);
+    static int32 typeCode(String t) {
+        if (t.equals("string")) { return 0; }
+        if (t.equals("int64")) { return 1; }
+        if (t.equals("int32")) { return 2; }
+        if (t.equals("int16")) { return 3; }
+        if (t.equals("int8")) { return 4; }
+        if (t.equals("uint32")) { return 5; }
+        if (t.equals("uint16")) { return 6; }
+        if (t.equals("uint8")) { return 7; }
+        if (t.equals("bool")) { return 8; }
+        return -1;
     }
 
-    /** The literal text of segment `i` (only meaningful when not a param). */
-    public String literal(int32 i) {
-        return this.segments[i];
-    }
-
-    /**
-     * Attempt to match this route's pattern against the request `path`
-     * segments (`pathSegs[0..pathLen)`), populating `out` with the
-     * captured, percent-decoded parameter bindings.
-     *
-     * Returns `true` iff the segment counts are equal and every segment
-     * matches (literals byte-equal, parameters capture any non-empty
-     * segment). On a non-match `out` is left in whatever partial state the
-     * walk reached — the caller discards it (each dispatch uses a fresh
-     * [`PathParams`](PathParams.cajeta) per candidate route).
-     *
-     * A captured segment that carries a malformed `%XX` escape (so
-     * [`PercentCodec.decode`](../uri/PercentCodec.cajeta) throws) is
-     * treated as a **non-match** (the path is not a valid reference to the
-     * resource) rather than an error propagated to the caller.
-     */
-    public boolean tryMatch(String[] pathSegs, int32 pathLen, PathParams out) {
-        return this.matchAndScore(pathSegs, pathLen, out) >= (int64) 0;
-    }
-
-    /**
-     * Match this route's pattern against the request `path` segments and, on
-     * a match, return a **specificity score** (higher = more specific) while
-     * binding the captured params into `out`; return `-1` on a non-match.
-     *
-     * The score packs a per-position **class** — literal (5) > param /
-     * typed (4) > single wildcard `*` (3) > a `**`-absorbed segment (1) —
-     * into 3 bits each, most-significant first, with a terminal class
-     * appended (exact end 6, `**` end 0). Comparing two matching routes'
-     * scores as integers therefore reproduces the plan's precedence
-     * **literal > param > `*` > `**`** decided at the earliest differing
-     * segment (the [`Router`](Router.cajeta) picks the highest-scoring
-     * route, ties broken by registration order). Precedence is exact for
-     * paths up to ~20 segments; deeper paths that tie on the packable
-     * prefix fall back to registration order.
-     *
-     * A non-`**` pattern matches iff the segment counts are equal; a `**`
-     * pattern matches iff the path has at least the fixed (pre-`**`)
-     * segments, and its `**` binds the remaining segments joined by `/`
-     * (the raw rest, separators preserved; **empty** when the path stops at
-     * the prefix). A captured segment whose `%XX` escape is malformed, or a
-     * typed segment whose value is out of range, is a **non-match** (so the
-     * router resolves it to 404, never 405).
-     */
-    public int64 matchAndScore(String[] pathSegs, int32 pathLen, PathParams out) {
-        int32 fixed = this.hasDoubleStar ? (this.segmentCount - 1)
-                                         : this.segmentCount;
-        if (this.hasDoubleStar) {
-            if (pathLen < fixed) {
-                return (int64) -1;
-            }
-        } else {
-            if (pathLen != this.segmentCount) {
-                return (int64) -1;
-            }
-        }
-
-        int64 score = 0;
+    void parse(String pattern) {
+        int32 n = pattern.byteLength();
+        int32 start = 0;
         int32 i = 0;
-        while (i < fixed) {
-            String reqSeg = pathSegs[i];
-            int32 cls;
-            if (this.isParam(i)) {
-                if (reqSeg.byteLength() == 0) {
-                    return (int64) -1;
-                }
-                String type #= this.paramType(i);
-                if (type.equals("*")) {
-                    // Single wildcard: binds any one (decoded) segment.
-                    String wName #= this.paramName(i);
-                    try {
-                        String wDecoded #= PercentCodec.decode(reqSeg);
-                        out.put(#wName, #wDecoded);
-                    } catch (MalformedUriException e) {
-                        return (int64) -1;
-                    }
-                    cls = 3;
-                } else {
-                    // Typed / string param: value must satisfy the type.
-                    String pName #= this.paramName(i);
-                    try {
-                        String pDecoded #= PercentCodec.decode(reqSeg);
-                        if (!PathParams.matchesType(type, pDecoded)) {
-                            return (int64) -1;       // type mismatch -> 404
+        while (i <= n) {
+            if (i == n || pattern.byteAt(i) == (int8) 47) {
+                if (i > start) {
+                    String seg #= pattern.substring(start, i);
+                    int32 k = this.segmentCount;
+                    if (Route.isParamText(seg)) {
+                        String type #= Route.typeText(seg);
+                        this.names[this.paramCount] #= Route.nameText(seg);
+                        this.slots[k] = this.paramCount;
+                        this.paramCount = this.paramCount + 1;
+                        if (type.equals("**")) {
+                            this.kinds[k] = Route.REST;
+                        } else if (type.equals("*")) {
+                            this.kinds[k] = Route.ANY;
+                        } else {
+                            this.kinds[k] = Route.TYPED;
+                            this.types[k] = Route.typeCode(type);
                         }
-                        out.put(#pName, #pDecoded);
-                    } catch (MalformedUriException e) {
-                        return (int64) -1;
+                    } else {
+                        this.kinds[k] = Route.LITERAL;
+                        this.slots[k] = -1;
                     }
-                    cls = 4;
+                    this.lits[k] = #seg;
+                    this.segmentCount = k + 1;
                 }
-            } else {
-                String lit = this.segments[i];
-                if (!lit.equals(reqSeg)) {
-                    return (int64) -1;
-                }
-                cls = 5;
+                start = i + 1;
             }
-            score = Route.packClass(score, pathLen, i, cls);
             i = i + 1;
         }
-
-        if (this.hasDoubleStar) {
-            String restName #= this.paramName(this.segmentCount - 1);
-            String rest #= Route.joinRest(pathSegs, fixed, pathLen);
-            out.put(#restName, #rest);
-            int32 p = fixed;
-            while (p < pathLen) {
-                score = Route.packClass(score, pathLen, p, 1);
-                p = p + 1;
-            }
-            score = Route.packClass(score, pathLen, pathLen, 0);   // terminal
-        } else {
-            score = Route.packClass(score, pathLen, pathLen, 6);   // exact end
-        }
-        return score;
     }
 
-    /**
-     * Fold `cls` (0..7) into `score` at element `elemIndex` of a
-     * `pathLen`-segment path — 3 bits per element, most-significant first so
-     * earlier segments dominate. Elements whose bit offset exceeds the int64
-     * width (a path deeper than ~20 segments) are dropped, degrading
-     * precedence to registration order there without affecting the
-     * match/no-match decision.
-     */
-    static int64 packClass(int64 score, int32 pathLen, int32 elemIndex,
-                           int32 cls) {
-        int32 shift = 3 * (pathLen - elemIndex);
+    /** True when the route's method is exactly `m`. */
+    public boolean methodMatches(Slice<int8> m) {
+        return Bytes.equals(m, this.method);
+    }
+
+    static int32 escapeWidth(Slice<int8> s, int64 i) {
+        if (s[i] != (int8) 37) {
+            return 1;
+        }
+        if (i + 2 >= s.count()) {
+            return -1;
+        }
+        int32 hi = Bytes.hexValue(((int32) s[i + 1]) & 255);
+        int32 lo = Bytes.hexValue(((int32) s[i + 2]) & 255);
+        if (hi < 0 || lo < 0) {
+            return -1;
+        }
+        return 3;
+    }
+
+    static int32 decodedAt(Slice<int8> s, int64 i, int32 width) {
+        if (width == 1) {
+            return ((int32) s[i]) & 255;
+        }
+        return Bytes.hexValue(((int32) s[i + 1]) & 255) * 16 + Bytes.hexValue(((int32) s[i + 2]) & 255);
+    }
+
+    static boolean escapesValid(Slice<int8> s) {
+        int64 i = 0;
+        while (i < s.count()) {
+            int32 w = Route.escapeWidth(s, i);
+            if (w < 0) {
+                return false;
+            }
+            i = i + (int64) w;
+        }
+        return true;
+    }
+
+    static String posLimit(int32 type) {
+        if (type == 1) { return "9223372036854775807"; }
+        if (type == 2) { return "2147483647"; }
+        if (type == 3) { return "32767"; }
+        if (type == 4) { return "127"; }
+        if (type == 5) { return "4294967295"; }
+        if (type == 6) { return "65535"; }
+        return "255";
+    }
+
+    static String negLimit(int32 type) {
+        if (type == 1) { return "9223372036854775808"; }
+        if (type == 2) { return "2147483648"; }
+        if (type == 3) { return "32768"; }
+        return "128";
+    }
+
+    static boolean decimalFits(Slice<int8> s, int32 type) {
+        boolean signed = type >= 1 && type <= 4;
+        int64 i = 0;
+        int64 n = s.count();
+        boolean neg = false;
+        if (n > 0) {
+            int32 w0 = Route.escapeWidth(s, 0);
+            if (signed && Route.decodedAt(s, 0, w0) == 45) {
+                neg = true;
+                i = (int64) w0;
+            }
+        }
+        String max = neg ? Route.negLimit(type) : Route.posLimit(type);
+        int32 digits = 0;
+        int32 first = -1;
+        int64 p = i;
+        while (p < n) {
+            int32 w = Route.escapeWidth(s, p);
+            int32 d = Route.decodedAt(s, p, w) - 48;
+            if (d < 0 || d > 9) {
+                return false;
+            }
+            if (digits == 0) {
+                first = d;
+            }
+            digits = digits + 1;
+            p = p + (int64) w;
+        }
+        if (digits == 0) {
+            return false;
+        }
+        if (first == 0) {
+            return digits == 1 && !neg;
+        }
+        int32 maxLen = max.byteLength();
+        if (digits != maxLen) {
+            return digits < maxLen;
+        }
+        p = i;
+        int32 j = 0;
+        while (p < n) {
+            int32 w = Route.escapeWidth(s, p);
+            int32 cv = Route.decodedAt(s, p, w);
+            int32 cm = ((int32) max.byteAt(j)) & 255;
+            if (cv != cm) {
+                return cv < cm;
+            }
+            j = j + 1;
+            p = p + (int64) w;
+        }
+        return true;
+    }
+
+    static boolean decodedEquals(Slice<int8> s, String text) {
+        int64 i = 0;
+        int32 j = 0;
+        int32 n = text.byteLength();
+        while (i < s.count()) {
+            int32 w = Route.escapeWidth(s, i);
+            if (j >= n || Route.decodedAt(s, i, w) != (((int32) text.byteAt(j)) & 255)) {
+                return false;
+            }
+            j = j + 1;
+            i = i + (int64) w;
+        }
+        return j == n;
+    }
+
+    static boolean typeMatches(Slice<int8> s, int32 type) {
+        if (!Route.escapesValid(s)) {
+            return false;
+        }
+        if (type == 0) {
+            return s.count() > 0;
+        }
+        if (type == 8) {
+            return Route.decodedEquals(s, "true") || Route.decodedEquals(s, "false");
+        }
+        return Route.decimalFits(s, type);
+    }
+
+    static int64 pack(int64 score, int32 pathLen, int32 index, int32 cls) {
+        int32 shift = 3 * (pathLen - index);
         if (shift < 0 || shift >= 63) {
             return score;
         }
@@ -377,38 +332,71 @@ public class Route {
     }
 
     /**
-     * Join `segs[start..pathLen)` with `/` — the value a `**` catch-all
-     * binds (the raw remaining path, separators preserved). An empty range
-     * (the path stopped at the prefix) yields the empty string.
+     * The match score of the request's split path against this route, or
+     * -1 when it does not match. A higher score is a more specific route.
      */
-    static #String joinRest(String[] segs, int32 start, int32 pathLen) {
-        int32 total = 0;
-        int32 i = start;
-        while (i < pathLen) {
-            if (i > start) {
-                total = total + 1;                   // the '/' separator
+    public int64 score(HttpRequest q, int32 pathLen) {
+        int32 fixed = this.hasDoubleStar ? this.segmentCount - 1 : this.segmentCount;
+        if (this.hasDoubleStar) {
+            if (pathLen < fixed) {
+                return -1;
             }
-            total = total + segs[i].byteLength();
+        } else if (pathLen != this.segmentCount) {
+            return -1;
+        }
+        int64 score = 0;
+        int32 i = 0;
+        while (i < fixed) {
+            Slice<int8> seg = q.segment(i);
+            int32 kind = this.kinds[i];
+            int32 cls = 5;
+            if (kind == Route.LITERAL) {
+                if (!Bytes.equals(seg, this.lits[i])) {
+                    return -1;
+                }
+            } else if (kind == Route.ANY) {
+                if (seg.count() == 0 || !Route.escapesValid(seg)) {
+                    return -1;
+                }
+                cls = 3;
+            } else {
+                if (!Route.typeMatches(seg, this.types[i])) {
+                    return -1;
+                }
+                cls = 4;
+            }
+            score = Route.pack(score, pathLen, i, cls);
             i = i + 1;
         }
-        int8[] out = heap int8[total];
-        int32 dst = 0;
-        i = start;
-        while (i < pathLen) {
-            if (i > start) {
-                out[dst] = (int8) 47;                // '/'
-                dst = dst + 1;
+        if (this.hasDoubleStar) {
+            int32 p = fixed;
+            while (p < pathLen) {
+                score = Route.pack(score, pathLen, p, 1);
+                p = p + 1;
             }
-            String s = segs[i];
-            int32 n = s.byteLength();
-            int32 j = 0;
-            while (j < n) {
-                out[dst] = s.byteAt(j);
-                dst = dst + 1;
-                j = j + 1;
+            return Route.pack(score, pathLen, pathLen, 0);
+        }
+        return Route.pack(score, pathLen, pathLen, 6);
+    }
+
+    /** Binds this route's parameters on a request whose path it matched. */
+    public void bind(HttpRequest q, int32 pathLen) {
+        q.bindParams(this.names, this.paramCount);
+        int32 i = 0;
+        while (i < this.segmentCount) {
+            int32 slot = this.slots[i];
+            if (slot >= 0) {
+                if (this.kinds[i] == Route.REST) {
+                    if (i < pathLen) {
+                        q.bindRest(slot, i);
+                    } else {
+                        q.bindEmpty(slot);
+                    }
+                } else {
+                    q.bindSegment(slot, i);
+                }
             }
             i = i + 1;
         }
-        return heap String(#out, total);
     }
 }

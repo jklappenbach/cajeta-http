@@ -1,461 +1,531 @@
 package dev.cajeta.http;
 
 import cajeta.lang.String;
-import cajeta.io.net.AsyncReader;
-import cajeta.io.net.Headers;
+import cajeta.lang.Slice;
+import cajeta.io.net.ByteBuffer;
+import cajeta.io.net.ByteChannel;
 import dev.cajeta.http.body.Body;
-import dev.cajeta.http.body.BytesBody;
-import dev.cajeta.http.Status;
-import dev.cajeta.http.Version;
-import dev.cajeta.http.MediaType;
-import dev.cajeta.http.HeaderValues;
 
 /**
- * An HTTP/1.1 **response** message — the status-line triple
- * (*HTTP-version*, *status-code*, *reason-phrase*), a
- * [`Headers`](../Headers.cajeta) map, and an optional in-memory
- * **body**.
+ * The response a handler fills, written straight into the connection's
+ * output buffer.
  *
- * The response half of the NET-7.1 message model, and the mirror of
- * [`HttpRequest`](HttpRequest.cajeta): a **pure data type** with no
- * I/O, tested directly over the JIT. The incremental parser (NET-7.3),
- * body framing (NET-7.4), and serializer (NET-7.5) read and write
- * *through* it.
- *
- * ## The status line
- *
- * ```
- * status-line = HTTP-version SP status-code SP reason-phrase CRLF
- * ```
- *
- *   - **`version`** — the protocol version string, default
- *     `"HTTP/1.1"`.
- *   - **`status`** — the numeric status code (`200`, `404`, …) as an
- *     `int32`. The classifier helpers (`isSuccess`, `isRedirect`,
- *     `isClientError`, `isServerError`, `isInformational`) read the
- *     standard 1xx–5xx ranges off it.
- *   - **`reason`** — the human-readable reason phrase. The
- *     [`of`](#) factory fills the **standard** phrase for the
- *     well-known codes (RFC 7231) and an empty phrase for the rest;
- *     a caller may override it. The reason phrase is advisory — a
- *     client keys off the numeric code, not the text.
- *
- * ## The body handle
- *
- * As with the request, NET-7.1 carries the body **in memory** (`body`
- * + `hasBody`); the streaming `BodyReader` (NET-7.4) layers over the
- * same field later. `hasBody == false` is "no body" (e.g. a `204` or a
- * `304`); a zero-length buffer with `hasBody == true` is a
- * present-empty body.
- *
- * ## Builder shape
- *
- * Fluent, mirroring [`HttpRequest`](HttpRequest.cajeta): an
- * [`of`](#) / [`ok`](#) / [`notFound`](#) factory yields a base
- * response, then chainable mutators (`header`, `body`, `reason`,
- * `version`) layer fields on, each returning the borrowed `this`:
- *
- * Because each mutator hands back a borrow, the VALUE OF A CHAIN IS A
- * BORROW. That is fine while the response stays in the scope that built it:
- *
- * ```cajeta
- * HttpResponse resp #= HttpResponse.ok();
- * resp.header("Content-Type", "text/plain");
- * resp.body(payload, payload.count());
- * ```
- *
- * It is NOT fine when the response must leave that scope. A handler declared
- * `#HttpResponse` would return a borrow of a temporary it owns and frees, and
- * the ownership guard rejects the transfer at the caller. Bind the title
- * first, mutate through it, then transfer:
- *
- * ```cajeta
- * public static #HttpResponse handle(HttpRequest req) {
- *     HttpResponse resp #= HttpResponse.ok();
- *     resp.header("Content-Type", "text/plain");
- *     resp.body(payload, payload.count());
- *     return #resp;
- * }
- * ```
+ * The body lands behind reserved head room, and the head is composed in
+ * front of it when the handler returns, so a response that fits is one
+ * write. A body that outgrows the buffer is flushed in bounded pieces, as
+ * chunks unless the handler declared a Content-Length. Header names and
+ * values are copied in, so nothing the handler passes is retained.
  */
-public class HttpResponse {
-    /** HTTP-version string (`"HTTP/1.1"`). */
-    public String version;
-    /** Numeric status code (`200`, `404`, …). */
-    public int32 status;
-    /** Reason phrase (`"OK"`, `"Not Found"`, possibly empty). */
-    public String reason;
-
-    /** The header map. Never null after construction. */
-    public Headers headers;
-
-    /**
-     * In-memory message body, meaningful only when `hasBody` is true.
-     * (See [`HttpRequest`](HttpRequest.cajeta) for the present-empty
-     * vs absent distinction.)
-     */
-    public int8[] body;
-    /** True iff this response carries a message body. */
-    public boolean hasBody;
-
-    /** The typed body model (http:1.3e), or null. */
-    public Body bodyModel;
+public final class HttpResponse {
+    ByteBuffer out;
+    ByteChannel ch;
+    int8[] fields;
+    int32[] spans;
+    int32 fieldsUsed;
+    int32 count;
+    int32 maxFields;
+    int32 room;
+    int32 code;
+    int32 bodyLen;
+    int64 sent;
+    boolean committed;
+    boolean chunked;
+    boolean omitBody;
+    boolean reuse;
+    Version peer;
+    Body stream;
 
     /**
-     * HTTP/2 server-push promises (http:3.5), or `null` until the first
-     * [`push`](#push). Each [`PushEntry`](PushEntry.cajeta) becomes a
-     * `PUSH_PROMISE` + a pushed response on an h2 connection when the peer
-     * allows push; ignored over HTTP/1.1.
+     * A writer over `out` with `fieldBytes` of header space and at most
+     * `maxFields` fields. `ch` receives flushes and may be null when the
+     * response must fit in the buffer.
      */
-    public PushEntry[] pushes;
-    int32 pushLen;
-    int32 pushCap;
-
-    /**
-     * Field-pinning constructor. Defaults to a `200`/`OK`/`HTTP/1.1`
-     * response with an empty header map and no body, so a
-     * partially-built instance never carries dangling state. The
-     * factories are the ergonomic entry points.
-     */
-    public HttpResponse() {
-        int8[] v = heap int8[8];
-        v[0] = (int8) 72;   // 'H'
-        v[1] = (int8) 84;   // 'T'
-        v[2] = (int8) 84;   // 'T'
-        v[3] = (int8) 80;   // 'P'
-        v[4] = (int8) 47;   // '/'
-        v[5] = (int8) 49;   // '1'
-        v[6] = (int8) 46;   // '.'
-        v[7] = (int8) 49;   // '1'
-        this.version = heap String(#v, 8);
-        this.status = 200;
-        int8[] r = heap int8[2];
-        r[0] = (int8) 79;   // 'O'
-        r[1] = (int8) 75;   // 'K'
-        this.reason = heap String(#r, 2);
-        this.headers = heap Headers();
-        int8[] e = heap int8[0];
-        this.body = #e;
-        this.hasBody = false;
-        this.bodyModel = null;
-        this.pushes = null;
-        this.pushLen = 0;
-        this.pushCap = 0;
+    public HttpResponse(ByteBuffer out, ByteChannel ch, int32 fieldBytes, int32 maxFields) {
+        this.out #= out;
+        this.ch #= ch;
+        this.fields = heap int8[fieldBytes];
+        this.spans = heap int32[maxFields * 5];
+        this.maxFields = maxFields;
+        this.room = fieldBytes + 128;
+        this.reset();
     }
 
-    // -- HTTP/2 server push (http:3.5) --------------------------------------
+    /** Clears status, headers and body for the next response on the connection. */
+    public void reset() {
+        this.code = 200;
+        this.fieldsUsed = 0;
+        this.count = 0;
+        this.bodyLen = 0;
+        this.sent = 0;
+        this.committed = false;
+        this.chunked = false;
+        this.omitBody = false;
+        this.reuse = true;
+        this.peer = Version.HTTP_1_1;
+        this.stream = null;
+    }
 
-    /**
-     * Declare an HTTP/2 server push: promise `GET path` and carry the pushed
-     * response as `status` + `body[0 .. bodyLen)`. Copied in, so the caller's
-     * buffers are theirs to reuse. Returns `this` to chain. On an HTTP/2
-     * connection whose peer left `SETTINGS_ENABLE_PUSH` on, this becomes a
-     * `PUSH_PROMISE` + a pushed response on a reserved stream; over h1 it is
-     * ignored.
-     */
-    public HttpResponse push(String path, int32 status, int8[] body,
-                             int32 bodyLen) {
-        if (this.pushes == null) {
-            this.pushes = heap PushEntry[4];
-            this.pushCap = 4;
-        } else if (this.pushLen == this.pushCap) {
-            this.growPushes();
-        }
-        String p #= path.substring(0, path.byteLength());
-        int8[] b = heap int8[bodyLen];
-        int32 i = 0;
-        while (i < bodyLen) {
-            b[i] = body[i];
-            i = i + 1;
-        }
-        this.pushes[this.pushLen] = heap PushEntry(#p, status, #b, bodyLen);
-        this.pushLen = this.pushLen + 1;
+    /** Sets the status code. */
+    public HttpResponse status(int32 status) {
+        this.code = status;
         return this;
     }
 
-    /** Number of server-push promises attached. */
-    public int32 pushCount() {
-        return this.pushLen;
+    /** The status code, 200 unless set. */
+    public int32 status() {
+        return this.code;
     }
 
-    /** The promised request path of push `i` (borrowed). */
-    public String pushPathAt(int32 i) {
-        return this.pushes[i].path;
+    /** True once the head has been written to the channel. */
+    public boolean isCommitted() {
+        return this.committed;
     }
 
-    /** The pushed response status of push `i`. */
-    public int32 pushStatusAt(int32 i) {
-        return this.pushes[i].status;
-    }
-
-    /** The pushed response body of push `i` (borrowed). */
-    public int8[] pushBodyAt(int32 i) {
-        return this.pushes[i].body;
-    }
-
-    /** The pushed response body length of push `i`. */
-    public int32 pushBodyLenAt(int32 i) {
-        return this.pushes[i].bodyLen;
-    }
-
-    void growPushes() {
-        int32 nc = this.pushCap * 2;
-        PushEntry[] ne = heap PushEntry[nc];
-        int32 i = 0;
-        while (i < this.pushLen) {
-            ne[i] #= this.pushes[i];
-            i = i + 1;
+    void requireOpen() {
+        if (this.committed) {
+            throw heap HttpException("response head already sent");
         }
-        this.pushes #= ne;
-        this.pushCap = nc;
     }
 
-    // -- factories ----------------------------------------------------------
-
-    /**
-     * A bodyless response with the given status code on `HTTP/1.1`,
-     * its reason phrase set to the **standard** phrase for the code
-     * ([`reasonFor`](#)) — or empty for an unrecognized code.
-     */
-    public static #HttpResponse of(int32 status) {
-        HttpResponse r = heap HttpResponse();
-        r.status = status;
-        r.reason #= HttpResponse.reasonFor(status);
-        return #r;
-    }
-
-    /** A `200 OK` response. */
-    public static #HttpResponse ok() {
-        return HttpResponse.of(200);
-    }
-
-    /** A `404 Not Found` response. */
-    public static #HttpResponse notFound() {
-        return HttpResponse.of(404);
-    }
-
-    /**
-     * The standard reason phrase for a status code, or an **empty**
-     * string for an unregistered code. Delegates to the consolidated
-     * RFC 9110 §15 registry on [`Status`](Status.cajeta) (http:1.2b) —
-     * this type's own table is gone, and codes the old table lacked
-     * (203, 205, 300, 410, 422, …) now carry their canonical phrase.
-     * The phrase is advisory; clients key off the code.
-     */
-    public static #String reasonFor(int32 status) {
-        return Status.reasonFor(status);
-    }
-
-    // -- chainable mutators -------------------------------------------------
-
-    /**
-     * Append a `(name, value)` header (multi-value, order-preserving)
-     * and return the borrowed `this`. Use [`setHeader`](#) for
-     * last-write-wins.
-     */
-    public HttpResponse header(String name, String value) {
-        this.headers.add(name, value);
-        return this;
-    }
-
-    /** Set a header last-write-wins and return `this`. */
-    public HttpResponse setHeader(String name, String value) {
-        this.headers.set(name, value);
-        return this;
-    }
-
-    /**
-     * Attach an in-memory body (a fresh owned copy of `data`'s
-     * `length` bytes) and return `this`. Sets `hasBody`. The
-     * serializer (NET-7.5) frames this as `Content-Length: length`.
-     */
-    public HttpResponse body(int8[] data, int32 length) {
-        int8[] copy = heap int8[length];
-        int32 i = 0;
-        while (i < length) {
-            copy[i] = data[i];
-            i = i + 1;
+    int32 reserve(int32 n) {
+        if (this.fieldsUsed + n > this.fields.count() || this.count >= this.maxFields) {
+            throw heap HeadersTooLargeException("response header space exhausted",
+                (int64) this.fields.count(), (int64) (this.fieldsUsed + n));
         }
-        this.body = #copy;
-        this.hasBody = true;
-        return this;
+        int32 at = this.fieldsUsed;
+        this.fieldsUsed = this.fieldsUsed + n;
+        return at;
     }
 
-    /** Override the reason phrase and return `this`. */
-    public HttpResponse reason(String phrase) {
-        this.reason #= phrase.substring(0, phrase.byteLength());
-        return this;
-    }
-
-    /** Override the HTTP-version string and return `this`. */
-    public HttpResponse version(String v) {
-        this.version #= v.substring(0, v.byteLength());
-        return this;
-    }
-
-    // -- accessors + classifiers --------------------------------------------
-
-    /** The HTTP-version string. */
-    public String getVersion() {
-        return this.version;
-    }
-
-    /** The numeric status code. */
-    public int32 statusCode() {
-        return this.status;
-    }
-
-    /** The reason phrase (possibly empty). */
-    public String getReason() {
-        return this.reason;
-    }
-
-    /** The header map (live; mutating it mutates the response). */
-    public Headers getHeaders() {
-        return this.headers;
-    }
-
-    // -- typed views (http:1.2b) --------------------------------------------
-
-    /**
-     * The status as a [`Status`](Status.cajeta) — code plus this
-     * response's actual reason phrase (which may differ from the
-     * registry's if it was overridden via [`reason`](#reason)).
-     */
-    public #Status statusType() {
-        return Status.of(this.status, this.reason);
-    }
-
-    /** The [`Version`](Version.cajeta) for the HTTP-version string. */
-    public Version versionType() {
-        return Version.of(this.version);
-    }
-
-    /**
-     * The `Content-Type` header as a [`MediaType`](MediaType.cajeta), or
-     * `null` when absent/malformed. See
-     * [`HeaderValues.contentType`](HeaderValues.cajeta).
-     */
-    public #MediaType contentType() {
-        return HeaderValues.contentType(this.headers);
-    }
-
-    /**
-     * The `Content-Length` value, or `-1` when absent or not a pure digit
-     * run. See [`HeaderValues.contentLength`](HeaderValues.cajeta).
-     */
-    public int64 contentLength() {
-        return HeaderValues.contentLength(this.headers);
-    }
-
-    /** Length of the in-memory body, or 0 when `hasBody` is false. */
-    public int32 bodyLength() {
-        if (!this.hasBody) {
-            return 0;
-        }
-        return this.body.count();
-    }
-
-    /** 1xx — informational. */
-    public boolean isInformational() {
-        return this.status >= 100 && this.status < 200;
-    }
-
-    /** 2xx — success. */
-    public boolean isSuccess() {
-        return this.status >= 200 && this.status < 300;
-    }
-
-    /** 3xx — redirection. */
-    public boolean isRedirect() {
-        return this.status >= 300 && this.status < 400;
-    }
-
-    /** 4xx — client error. */
-    public boolean isClientError() {
-        return this.status >= 400 && this.status < 500;
-    }
-
-    /** 5xx — server error. */
-    public boolean isServerError() {
-        return this.status >= 500 && this.status < 600;
-    }
-
-    // -- Body model (http:1.3e) --------------------------------------------
-
-    /**
-     * Attach a [`Body`](body/Body.cajeta) and return `this` — the
-     * response twin of
-     * [`HttpRequest.body`](HttpRequest.cajeta#body). The body's media
-     * type becomes `Content-Type` (parameters included) unless one is
-     * already set; a known-length body is drained into the raw byte path
-     * so existing serializer paths work unchanged, while an
-     * unknown-length body is carried for the chunked writer.
-     */
-    public HttpResponse body(#Body b) {
-        MediaType t #= b.contentType();
-        if (t != null && !this.headers.contains("content-type")) {
-            String tv #= t.format();
-            this.headers.set("Content-Type", tv);
-        }
-        int64 n = b.contentLength();
-        if (n >= (int64) 0) {
-            int8[] drained #= HttpResponse.drainBody(b, (int32) n);
-            this.body = #drained;
-            this.hasBody = true;
-        }
-        this.bodyModel = #b;
-        return this;
-    }
-
-    /** The attached [`Body`](body/Body.cajeta), or null (borrow). */
-    public Body getBody() {
-        return this.bodyModel;
-    }
-
-    /**
-     * This message's body as a [`Body`](body/Body.cajeta) — a fresh
-     * [`BytesBody`](body/BytesBody.cajeta) over the received bytes, so a
-     * client can read a parsed response through the same uniform
-     * surface. Null when the response carries no body, or when a body
-     * model is already attached (reach it via [`getBody`](#getBody)).
-     */
-    public #Body asBody() {
-        if (this.bodyModel != null) {
-            return null;
-        }
-        if (!this.hasBody) {
-            return null;
-        }
-        int32 n = this.bodyLength();
-        int8[] copy = heap int8[n];
+    void putText(int32 at, String text) {
+        int32 n = text.byteLength();
         int32 i = 0;
         while (i < n) {
-            copy[i] = this.body[i];
+            this.fields[at + i] = text.byteAt(i);
             i = i + 1;
         }
-        MediaType t #= this.contentType();
-        BytesBody bb #= BytesBody.of(#copy, n, #t);
-        Body out = #bb;
-        return #out;
     }
 
-    /** Drain a known-length `Body` into a fresh exactly-sized buffer. */
-    static #int8[] drainBody(Body b, int32 len) {
-        int8[] out = heap int8[len];
-        if (len == 0) {
-            return #out;
+    void addSpan(int32 nameAt, int32 nameLen, int32 valueAt, int32 valueLen) {
+        int32 k = this.count * 5;
+        this.spans[k] = nameAt;
+        this.spans[k + 1] = nameLen;
+        this.spans[k + 2] = valueAt;
+        this.spans[k + 3] = valueLen;
+        this.spans[k + 4] = 1;
+        this.count = this.count + 1;
+    }
+
+    /** Adds a header field, keeping any earlier field of the same name. */
+    public HttpResponse header(String name, String value) {
+        this.requireOpen();
+        int32 nl = name.byteLength();
+        int32 vl = value.byteLength();
+        int32 at = this.reserve(nl + vl);
+        this.putText(at, name);
+        this.putText(at + nl, value);
+        this.addSpan(at, nl, at + nl, vl);
+        return this;
+    }
+
+    /** Adds a header field whose value is a byte window. */
+    public HttpResponse headerBytes(String name, Slice<int8> value) {
+        this.requireOpen();
+        int32 nl = name.byteLength();
+        int32 vl = (int32) value.count();
+        int32 at = this.reserve(nl + vl);
+        this.putText(at, name);
+        int32 i = 0;
+        while (i < vl) {
+            this.fields[at + nl + i] = value[(int64) i];
+            i = i + 1;
         }
-        AsyncReader r = b.reader();
-        int32 o = 0;
-        while (o < len) {
-            int32 got = r.read(out, o, len - o);
-            if (got <= 0) {
-                o = len;
-            } else {
-                o = o + got;
+        this.addSpan(at, nl, at + nl, vl);
+        return this;
+    }
+
+    /** Adds a header field whose value is a decimal integer. */
+    public HttpResponse headerInt(String name, int64 value) {
+        this.requireOpen();
+        int32 digits = HttpResponse.decimalWidth(value);
+        int32 nl = name.byteLength();
+        int32 at = this.reserve(nl + digits);
+        this.putText(at, name);
+        HttpResponse.putDecimal(this.fields, at + nl, digits, value);
+        this.addSpan(at, nl, at + nl, digits);
+        return this;
+    }
+
+    /** Replaces every field named `name` with one field. */
+    public HttpResponse setHeader(String name, String value) {
+        this.removeHeader(name);
+        return this.header(name, value);
+    }
+
+    /** Removes every field named `name`. */
+    public HttpResponse removeHeader(String name) {
+        this.requireOpen();
+        int32 i = 0;
+        while (i < this.count) {
+            if (this.spans[i * 5 + 4] == 1 && Bytes.equalsIgnoreCase(this.nameAt(i), name)) {
+                this.spans[i * 5 + 4] = 0;
             }
+            i = i + 1;
         }
-        return #out;
+        return this;
+    }
+
+    Slice<int8> nameAt(int32 i) {
+        int32 k = i * 5;
+        return this.fields[this.spans[k]:this.spans[k] + this.spans[k + 1]];
+    }
+
+    Slice<int8> valueAt(int32 i) {
+        int32 k = i * 5;
+        return this.fields[this.spans[k + 2]:this.spans[k + 2] + this.spans[k + 3]];
+    }
+
+    int32 findField(String name) {
+        int32 i = 0;
+        while (i < this.count) {
+            if (this.spans[i * 5 + 4] == 1 && Bytes.equalsIgnoreCase(this.nameAt(i), name)) {
+                return i;
+            }
+            i = i + 1;
+        }
+        return -1;
+    }
+
+    /** True when a field named `name` is set. */
+    public boolean hasHeader(String name) {
+        return this.findField(name) >= 0;
+    }
+
+    /** The first value named `name`, or an empty window. */
+    public Slice<int8> header(String name) {
+        int32 i = this.findField(name);
+        if (i < 0) {
+            return this.fields[0:0];
+        }
+        return this.valueAt(i);
+    }
+
+    /** True when the first value named `name` lists `token`, ignoring case. */
+    public boolean headerHasToken(String name, String token) {
+        int32 i = this.findField(name);
+        return i >= 0 && Bytes.hasToken(this.valueAt(i), token);
+    }
+
+    int32 capacity() {
+        return this.out.capacity() - this.room - 8;
+    }
+
+    /** Replaces the body with the bytes of `text`. */
+    public HttpResponse body(String text) {
+        this.bodyLen = 0;
+        return this.write(text);
+    }
+
+    /** Replaces the body with `data[0 .. length)`. */
+    public HttpResponse body(int8[] data, int32 length) {
+        this.bodyLen = 0;
+        return this.write(data, 0, length);
+    }
+
+    /** Replaces the body with the bytes of a window. */
+    public HttpResponse bodyBytes(Slice<int8> data) {
+        this.bodyLen = 0;
+        return this.writeBytes(data);
+    }
+
+    /** Streams the body from `b` after the handler returns. */
+    public HttpResponse body(#Body b) {
+        this.bodyLen = 0;
+        this.stream #= b;
+        return this;
+    }
+
+    /** Appends the bytes of `text` to the body. */
+    public HttpResponse write(String text) {
+        int32 n = text.byteLength();
+        int32 i = 0;
+        while (i < n) {
+            if (this.bodyLen >= this.capacity()) {
+                this.spill();
+            }
+            this.out.array()[this.room + this.bodyLen] = text.byteAt(i);
+            this.bodyLen = this.bodyLen + 1;
+            i = i + 1;
+        }
+        return this;
+    }
+
+    /** Appends `data[offset .. offset + length)` to the body. */
+    public HttpResponse write(int8[] data, int32 offset, int32 length) {
+        int32 i = 0;
+        int8[] a = this.out.array();
+        while (i < length) {
+            if (this.bodyLen >= this.capacity()) {
+                this.spill();
+            }
+            a[this.room + this.bodyLen] = data[offset + i];
+            this.bodyLen = this.bodyLen + 1;
+            i = i + 1;
+        }
+        return this;
+    }
+
+    /** Appends the bytes of a window to the body. */
+    public HttpResponse writeBytes(Slice<int8> data) {
+        int64 n = data.count();
+        int64 i = 0;
+        int8[] a = this.out.array();
+        while (i < n) {
+            if (this.bodyLen >= this.capacity()) {
+                this.spill();
+            }
+            a[this.room + this.bodyLen] = data[i];
+            this.bodyLen = this.bodyLen + 1;
+            i = i + 1;
+        }
+        return this;
+    }
+
+    /** The body not yet flushed, as a window into the output buffer. */
+    public Slice<int8> body() {
+        int8[] a = this.out.array();
+        return a[this.room:this.room + this.bodyLen];
+    }
+
+    /** Length of the body not yet flushed. */
+    public int32 bodyLength() {
+        return this.bodyLen;
+    }
+
+    /** The streamed body, or null. */
+    public Body bodyStream() {
+        return this.stream;
+    }
+
+    static int32 decimalWidth(int64 v) {
+        int32 d = 1;
+        int64 x = v;
+        while (x >= 10) {
+            x = x / 10;
+            d = d + 1;
+        }
+        return d;
+    }
+
+    static void putDecimal(int8[] a, int32 at, int32 digits, int64 v) {
+        int64 x = v;
+        int32 i = digits - 1;
+        while (i >= 0) {
+            a[at + i] = (int8) (48 + (int32) (x % 10));
+            x = x / 10;
+            i = i - 1;
+        }
+    }
+
+    boolean bodyless() {
+        return (this.code >= 100 && this.code < 200) || this.code == 204 || this.code == 304;
+    }
+
+    public static int32 put(int8[] a, int32 at, String text) {
+        int32 n = text.byteLength();
+        int32 i = 0;
+        while (i < n) {
+            a[at + i] = text.byteAt(i);
+            i = i + 1;
+        }
+        return at + n;
+    }
+
+    static int32 putBytes(int8[] a, int32 at, Slice<int8> s) {
+        int64 n = s.count();
+        int64 i = 0;
+        while (i < n) {
+            a[at + (int32) i] = s[i];
+            i = i + 1;
+        }
+        return at + (int32) n;
+    }
+
+    int32 headLength(boolean withLength, int64 length) {
+        String reason = Status.reasonLiteral(this.code);
+        int32 n = 9 + 3 + 1 + reason.byteLength() + 2;
+        int32 i = 0;
+        while (i < this.count) {
+            int32 k = i * 5;
+            if (this.spans[k + 4] == 1) {
+                n = n + this.spans[k + 1] + 2 + this.spans[k + 3] + 2;
+            }
+            i = i + 1;
+        }
+        if (withLength) {
+            n = n + 16 + HttpResponse.decimalWidth(length) + 2;
+        }
+        if (this.chunked) {
+            n = n + 19 + 7 + 2;
+        }
+        if (!this.reuse) {
+            n = n + 12 + 5 + 2;
+        } else if (this.peer == Version.HTTP_1_0) {
+            n = n + 12 + 10 + 2;
+        }
+        return n + 2;
+    }
+
+    void composeHead(int32 at, boolean withLength, int64 length) {
+        int8[] a = this.out.array();
+        int32 p = HttpResponse.put(a, at, "HTTP/1.1 ");
+        HttpResponse.putDecimal(a, p, 3, (int64) this.code);
+        p = p + 3;
+        a[p] = (int8) 32;
+        p = HttpResponse.put(a, p + 1, Status.reasonLiteral(this.code));
+        p = HttpResponse.put(a, p, "\r\n");
+        int32 i = 0;
+        while (i < this.count) {
+            if (this.spans[i * 5 + 4] == 1) {
+                p = HttpResponse.putBytes(a, p, this.nameAt(i));
+                p = HttpResponse.put(a, p, ": ");
+                p = HttpResponse.putBytes(a, p, this.valueAt(i));
+                p = HttpResponse.put(a, p, "\r\n");
+            }
+            i = i + 1;
+        }
+        if (withLength) {
+            p = HttpResponse.put(a, p, "content-length: ");
+            int32 d = HttpResponse.decimalWidth(length);
+            HttpResponse.putDecimal(a, p, d, length);
+            p = HttpResponse.put(a, p + d, "\r\n");
+        }
+        if (this.chunked) {
+            p = HttpResponse.put(a, p, "transfer-encoding: chunked\r\n");
+        }
+        if (!this.reuse) {
+            p = HttpResponse.put(a, p, "Connection: close\r\n");
+        } else if (this.peer == Version.HTTP_1_0) {
+            p = HttpResponse.put(a, p, "Connection: keep-alive\r\n");
+        }
+        HttpResponse.put(a, p, "\r\n");
+    }
+
+    void prepareFraming(boolean reuse, Version peer) {
+        this.reuse = reuse;
+        this.peer = peer;
+        this.removeHeader("Connection");
+    }
+
+    static int32 hexWidth(int32 v) {
+        int32 d = 1;
+        int32 x = v;
+        while (x >= 16) {
+            x = x / 16;
+            d = d + 1;
+        }
+        return d;
+    }
+
+    static void putHex(int8[] a, int32 at, int32 digits, int32 v) {
+        int32 x = v;
+        int32 i = digits - 1;
+        while (i >= 0) {
+            int32 h = x % 16;
+            a[at + i] = (int8) (h < 10 ? 48 + h : 87 + h);
+            x = x / 16;
+            i = i - 1;
+        }
+    }
+
+    void flushRange(int32 from, int32 to) {
+        this.out.clear();
+        this.out.advanceWrite(to);
+        this.out.advanceRead(from);
+        this.out.writeToAsync(this.ch);
+    }
+
+    void spill() {
+        if (this.ch == null) {
+            throw heap HttpException("response body exceeds the output buffer");
+        }
+        int8[] a = this.out.array();
+        int32 start = this.room;
+        if (!this.committed) {
+            this.chunked = !this.hasHeader("content-length") && !this.hasHeader("transfer-encoding");
+            int32 lineLen = this.chunked ? HttpResponse.hexWidth(this.bodyLen) + 2 : 0;
+            int32 h = this.headLength(false, (int64) 0);
+            start = this.room - lineLen - h;
+            this.composeHead(start, false, (int64) 0);
+            this.committed = true;
+        } else if (this.chunked) {
+            start = this.room - HttpResponse.hexWidth(this.bodyLen) - 2;
+        }
+        int32 end = this.room + this.bodyLen;
+        if (this.chunked) {
+            int32 w = HttpResponse.hexWidth(this.bodyLen);
+            int32 lineAt = this.room - w - 2;
+            HttpResponse.putHex(a, lineAt, w, this.bodyLen);
+            a[lineAt + w] = (int8) 13;
+            a[lineAt + w + 1] = (int8) 10;
+            a[end] = (int8) 13;
+            a[end + 1] = (int8) 10;
+            end = end + 2;
+        }
+        this.flushRange(start, end);
+        this.sent = this.sent + (int64) this.bodyLen;
+        this.bodyLen = 0;
+    }
+
+    /**
+     * Makes the response ready to write. `reuse` says whether the connection
+     * stays open, and `peer` is the request's version. Returns false when
+     * everything was already flushed. Otherwise the output buffer's readable
+     * region is exactly the bytes still to send.
+     */
+    public boolean finish(boolean reuse, Version peer, boolean omitBody) {
+        if (!this.committed) {
+            this.prepareFraming(reuse && !this.headerHasToken("connection", "close"), peer);
+            this.omitBody = omitBody;
+            boolean declared = this.hasHeader("content-length") || this.hasHeader("transfer-encoding");
+            boolean withLength = !declared && !this.bodyless();
+            int32 h = this.headLength(withLength, (int64) this.bodyLen);
+            int32 start = this.room - h;
+            this.composeHead(start, withLength, (int64) this.bodyLen);
+            int32 end = this.room + (this.omitBody || this.bodyless() ? 0 : this.bodyLen);
+            this.out.clear();
+            this.out.advanceWrite(end);
+            this.out.advanceRead(start);
+            this.committed = true;
+            return true;
+        }
+        int8[] a = this.out.array();
+        int32 start = this.room;
+        int32 end = this.room + this.bodyLen;
+        if (this.chunked) {
+            if (this.bodyLen > 0) {
+                int32 w = HttpResponse.hexWidth(this.bodyLen);
+                start = this.room - w - 2;
+                HttpResponse.putHex(a, start, w, this.bodyLen);
+                a[start + w] = (int8) 13;
+                a[start + w + 1] = (int8) 10;
+                a[end] = (int8) 13;
+                a[end + 1] = (int8) 10;
+                end = end + 2;
+            }
+            end = HttpResponse.put(a, end, "0\r\n\r\n");
+        }
+        if (end == start) {
+            return false;
+        }
+        this.out.clear();
+        this.out.advanceWrite(end);
+        this.out.advanceRead(start);
+        return true;
+    }
+
+    /** Whether the connection stays open after this response. */
+    public boolean keepsAlive() {
+        return this.reuse;
     }
 }

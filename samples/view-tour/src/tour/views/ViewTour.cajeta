@@ -1,0 +1,184 @@
+package tour.views;
+
+import cajeta.lang.String;
+import cajeta.lang.Slice;
+import cajeta.io.net.SocketAddress;
+import cajeta.io.net.TcpStream;
+import cajeta.time.Duration;
+import dev.cajeta.http.Bytes;
+import dev.cajeta.http.HttpException;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.routing.Router;
+import dev.cajeta.http.server.HttpServer;
+import dev.cajeta.http.server.HttpServerBuilder;
+
+/**
+ * A tour of cajeta-http's view model: one simple request and one simple
+ * response, then what the model buys.
+ *
+ * The request a handler receives is a view over the connection's input
+ * buffer. Its method and version are enums, and its target, headers, path
+ * parameters and body are windows into bytes that were read once and never
+ * copied. The response writes straight into the connection's output buffer.
+ * A value that must outlive the request is copied out on purpose, with an
+ * accessor whose name says so.
+ */
+public final class ViewTour {
+    static int32 checks = 0;
+    static int32 failures = 0;
+    static int32 stored = 0;
+
+    static void check(boolean cond, String what) {
+        ViewTour.checks = ViewTour.checks + 1;
+        if (cond) {
+            System.stdout.println("  ok   {}", what);
+        } else {
+            ViewTour.failures = ViewTour.failures + 1;
+            System.stdout.println("  FAIL {}", what);
+        }
+    }
+
+    // GET /hello/{name}: the parameter is a window into the request target.
+    static void hello(HttpRequest q, HttpResponse r) {
+        r.header("Content-Type", "text/plain");
+        r.write("hello, ");
+        r.writeBytes(q.param("name"));
+    }
+
+    // GET /orders/{id:int64}: the router already checked the type, the read parses in place.
+    static void order(HttpRequest q, HttpResponse r) {
+        int64 id = q.paramInt64("id", -1);
+        r.headerInt("X-Order-Id", id);
+        r.body("order found");
+    }
+
+    // POST /users: the body is a window. Keeping the name means copying it out.
+    static void createUser(HttpRequest q, HttpResponse r) {
+        if (!q.headerIs("content-type", "text/plain")) {
+            throw heap HttpException("expected a text/plain name");
+        }
+        String kept #= Bytes.toString(q.body());
+        ViewTour.stored = ViewTour.stored + 1;
+        r.status(201);
+        r.headerInt("X-User-Number", (int64) ViewTour.stored);
+        r.write("created ");
+        r.write(kept);
+    }
+
+    public static async int32 serveLoop(HttpServer srv) {
+        srv.serve();
+        return 1;
+    }
+
+    static #int8[] bytes(String s) {
+        return s.toBytes();
+    }
+
+    static void simpleExchange(Wire w) {
+        System.stdout.println("-- one request, one response --");
+        String req = "GET /hello/ada HTTP/1.1\r\nHost: tour\r\n\r\n";
+        int8[] b #= ViewTour.bytes(req);
+        w.send(b, req.byteLength());
+        String resp #= w.response();
+        System.stdout.println("  request : GET /hello/ada");
+        System.stdout.println("  response: {}", resp.replace("\r\n", " | "));
+        ViewTour.check(w.startsWith("HTTP/1.1 200 OK\r\n"), "the handler set nothing, so the status is 200");
+        ViewTour.check(w.endsWith("\r\n\r\nhello, ada"), "the body was written straight into the output buffer");
+        ViewTour.check(resp.contains("content-length: 10"), "the server stamped the length it measured");
+    }
+
+    static void moreExchanges(Wire w) {
+        System.stdout.println("-- the same connection, more requests --");
+        String o = "GET /orders/42 HTTP/1.1\r\n\r\n";
+        int8[] ob #= ViewTour.bytes(o);
+        w.send(ob, o.byteLength());
+        String or #= w.response();
+        ViewTour.check(or.contains("X-Order-Id: 42"), "a typed parameter is parsed in place");
+
+        String u = "POST /users HTTP/1.1\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n\r\ngrace";
+        int8[] ub #= ViewTour.bytes(u);
+        w.send(ub, u.byteLength());
+        ViewTour.check(w.startsWith("HTTP/1.1 201 Created\r\n") && w.endsWith("created grace"),
+            "a body window, copied out once to keep it");
+
+        String bad = "POST /users HTTP/1.1\r\nContent-Length: 2\r\n\r\nno";
+        int8[] bb #= ViewTour.bytes(bad);
+        w.send(bb, bad.byteLength());
+        ViewTour.check(w.startsWith("HTTP/1.1 400 Bad Request\r\n"), "a thrown HttpException becomes its status");
+
+        String miss = "GET /nowhere HTTP/1.1\r\n\r\n";
+        int8[] mb #= ViewTour.bytes(miss);
+        w.send(mb, miss.byteLength());
+        ViewTour.check(w.startsWith("HTTP/1.1 404 Not Found\r\n"), "an unmatched path is 404");
+
+        String wrong = "DELETE /hello/ada HTTP/1.1\r\n\r\n";
+        int8[] wb #= ViewTour.bytes(wrong);
+        w.send(wb, wrong.byteLength());
+        String wr #= w.response();
+        ViewTour.check(w.startsWith("HTTP/1.1 405 Method Not Allowed\r\n") && wr.contains("Allow: GET"),
+            "a path matched only under another method is 405 with Allow");
+    }
+
+    static void allocation(Wire w, HttpServer srv) {
+        System.stdout.println("-- what the model buys --");
+        String req = "GET /hello/ada HTTP/1.1\r\nHost: tour\r\n\r\n";
+        int8[] b #= ViewTour.bytes(req);
+        int32 n = req.byteLength();
+        int32 buffersBefore = srv.bufferAllocations();
+        int32 k = 0;
+        while (k < 50) {
+            w.send(b, n);
+            k = k + 1;
+        }
+        int64 before = Cajeta.allocatedBytes();
+        k = 0;
+        while (k < 500) {
+            w.send(b, n);
+            k = k + 1;
+        }
+        int64 delta = Cajeta.allocatedBytes() - before;
+        System.stdout.println("  500 requests on one connection allocated {} bytes", delta);
+        ViewTour.check(srv.bufferAllocations() == buffersBefore, "the connection reused its two pooled buffers throughout");
+        ViewTour.check(delta == 0, "500 more requests allocated nothing, client and server together");
+    }
+
+    public static async int32 drive(int32 port, HttpServer srv) {
+        TcpStream sock #= TcpStream.connectAsync(SocketAddress.parse("127.0.0.1:" + port));
+        Wire w = heap Wire(#sock);
+        ViewTour.simpleExchange(w);
+        ViewTour.moreExchanges(w);
+        ViewTour.allocation(w, srv);
+        w.close();
+        return 1;
+    }
+
+    public static int32 main(String[] args) {
+        System.stdout.println("=== cajeta-http view tour ===");
+        scope {
+            Router router = heap Router();
+            router.route("GET", "/hello/{name}", (HttpRequest q, HttpResponse r) -> ViewTour.hello(q, r));
+            router.route("GET", "/orders/{id:int64}", (HttpRequest q, HttpResponse r) -> ViewTour.order(q, r));
+            router.route("POST", "/users", (HttpRequest q, HttpResponse r) -> ViewTour.createUser(q, r));
+
+            HttpServerBuilder builder #= HttpServer.builder();
+            builder.bind("127.0.0.1:0");
+            builder.handler((HttpRequest q, HttpResponse r) -> router.dispatch(q, r));
+            HttpServer srv #= builder.build();
+            int32 port = srv.server.listener.boundPort();
+            System.stdout.println("  serving 127.0.0.1:{}", port);
+            Task<int32> sv = spawn serveLoop(srv);
+
+            Task<int32> client = spawn drive(port, srv);
+            ViewTour.check(await client == 1, "the client finished its exchanges");
+
+            boolean drained #= srv.shutdown(Duration.ofSeconds(2));
+            int32 sret = await sv;
+            ViewTour.check(drained && sret == 1, "shutdown drained the connection and the accept loop exited");
+        }
+        System.stdout.println("");
+        System.stdout.println("=== view tour complete: {} checks passed, {} failed ===",
+            ViewTour.checks - ViewTour.failures, ViewTour.failures);
+        return ViewTour.failures;
+    }
+}

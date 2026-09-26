@@ -1,0 +1,212 @@
+package dev.cajeta.http;
+
+import cajeta.lang.String;
+import cajeta.lang.Slice;
+import cajeta.io.net.ByteBuffer;
+import dev.cajeta.http.h1.HttpParserLimits;
+
+/**
+ * Finds and parses an HTTP/1.1 message head in place.
+ *
+ * `scan` walks bytes as they arrive in a buffer, enforcing the head, line
+ * and header-count limits before the head completes, and resumes where the
+ * previous call stopped. `parseRequest` then records the start line and
+ * every header field as windows into the same bytes. Nothing is copied and
+ * nothing is allocated on the success path.
+ */
+public final class HeadScanner {
+    int32 maxHead;
+    int32 maxLine;
+    int32 maxLines;
+    int32 seen;
+    int32 lineLen;
+    int32 lines;
+
+    /** A scanner enforcing a copy of `limits`. */
+    public HeadScanner(HttpParserLimits limits) {
+        this.maxHead = limits.maxHeadBytes;
+        this.maxLine = limits.maxLineBytes;
+        this.maxLines = limits.maxHeaderCount;
+        this.reset();
+    }
+
+    /** Forgets progress so the next scan starts a new head. */
+    public void reset() {
+        this.seen = 0;
+        this.lineLen = 0;
+        this.lines = 0;
+    }
+
+    /**
+     * Examines the unread bytes of `in` that earlier calls have not seen.
+     * Returns the head's length including its blank line once it is
+     * complete, or -1 when more bytes are needed. Raises
+     * `HeadersTooLargeException` as soon as a limit is crossed.
+     */
+    public int32 scan(ByteBuffer in) {
+        int8[] a = in.array();
+        int32 start = in.readPosition();
+        int32 end = in.writePosition();
+        int32 i = start + this.seen;
+        while (i < end) {
+            int8 c = a[i];
+            this.seen = this.seen + 1;
+            if (c == (int8) 10) {
+                this.lines = this.lines + 1;
+                this.lineLen = 0;
+                if (this.lines > this.maxLines + 2) {
+                    throw heap HeadersTooLargeException("too many header lines",
+                        (int64) this.maxLines, (int64) (this.lines - 2));
+                }
+            } else {
+                this.lineLen = this.lineLen + 1;
+                if (this.lineLen > this.maxLine) {
+                    throw heap HeadersTooLargeException("header line exceeds maxLineBytes",
+                        (int64) this.maxLine, (int64) this.lineLen);
+                }
+            }
+            if (this.seen > this.maxHead) {
+                throw heap HeadersTooLargeException("head exceeds maxHeadBytes",
+                    (int64) this.maxHead, (int64) this.seen);
+            }
+            if (c == (int8) 10 && this.seen >= 4 && a[i - 1] == (int8) 13
+                    && a[i - 2] == (int8) 10 && a[i - 3] == (int8) 13) {
+                return this.seen;
+            }
+            i = i + 1;
+        }
+        return -1;
+    }
+
+    static int32 findCrlf(int8[] a, int32 from, int32 end) {
+        int32 i = from;
+        while (i + 1 < end) {
+            if (a[i] == (int8) 13 && a[i + 1] == (int8) 10) {
+                return i;
+            }
+            i = i + 1;
+        }
+        if (i + 1 == end && a[i] == (int8) 13 && a[i + 1] == (int8) 10) {
+            return i;
+        }
+        return -1;
+    }
+
+    static int32 indexOf(int8[] a, int32 from, int32 end, int8 b) {
+        int32 i = from;
+        while (i < end) {
+            if (a[i] == b) {
+                return i;
+            }
+            i = i + 1;
+        }
+        return -1;
+    }
+
+    static boolean isOws(int8 b) {
+        return b == (int8) 32 || b == (int8) 9;
+    }
+
+    /**
+     * Records the request head of `headLen` bytes that starts at `start` in
+     * `a` into `req`, and decides its framing and reuse. Raises
+     * `MalformedMessageException` for a malformed head and
+     * `HeadersTooLargeException` when the fields outnumber the table.
+     */
+    public static void parseRequest(int8[] a, int32 start, int32 headLen, HttpRequest req) {
+        req.rebind(a);
+        int32 limit = start + headLen - 2;
+        int32 lineEnd = HeadScanner.findCrlf(a, start, limit);
+        if (lineEnd < 0) {
+            throw heap MalformedMessageException("missing start-line CRLF", (int64) 0);
+        }
+        int32 sp1 = HeadScanner.indexOf(a, start, lineEnd, (int8) 32);
+        if (sp1 < 0) {
+            throw heap MalformedMessageException(
+                "request-line missing method/target separator", (int64) 0);
+        }
+        int32 sp2 = HeadScanner.indexOf(a, sp1 + 1, lineEnd, (int8) 32);
+        if (sp2 < 0) {
+            throw heap MalformedMessageException(
+                "request-line missing target/version separator", (int64) (sp1 + 1 - start));
+        }
+        if (sp1 == start || sp2 == sp1 + 1 || lineEnd == sp2 + 1) {
+            throw heap MalformedMessageException("request-line has an empty token", (int64) 0);
+        }
+        req.methodOff = start;
+        req.methodLen = sp1 - start;
+        req.targetOff = sp1 + 1;
+        req.targetLen = sp2 - sp1 - 1;
+        req.versionOff = sp2 + 1;
+        req.versionLen = lineEnd - sp2 - 1;
+        req.methodKind = Method.ofBytes(req.methodBytes());
+        req.versionKind = Version.ofBytes(a[req.versionOff:req.versionOff + req.versionLen]);
+        int32 q = HeadScanner.indexOf(a, req.targetOff, req.targetOff + req.targetLen, (int8) 63);
+        req.pathLen = q < 0 ? req.targetLen : q - req.targetOff;
+        HeadScanner.parseFields(a, start, lineEnd + 2, limit, req.table);
+        HeadScanner.decideRequest(req);
+    }
+
+    static void parseFields(int8[] a, int32 start, int32 pos, int32 limit, HeaderTable table) {
+        int32 p = pos;
+        while (p < limit) {
+            int32 end = HeadScanner.findCrlf(a, p, limit);
+            if (end < 0) {
+                throw heap MalformedMessageException("header line missing CRLF", (int64) (p - start));
+            }
+            int32 colon = HeadScanner.indexOf(a, p, end, (int8) 58);
+            if (colon < 0) {
+                throw heap MalformedMessageException(
+                    "header line has no ':' separator", (int64) (p - start));
+            }
+            if (colon == p) {
+                throw heap MalformedMessageException(
+                    "header line has an empty field name", (int64) (p - start));
+            }
+            int32 vs = colon + 1;
+            int32 ve = end;
+            while (vs < ve && HeadScanner.isOws(a[vs])) {
+                vs = vs + 1;
+            }
+            while (ve > vs && HeadScanner.isOws(a[ve - 1])) {
+                ve = ve - 1;
+            }
+            if (!table.add(p, colon - p, vs, ve - vs)) {
+                throw heap HeadersTooLargeException("too many header fields",
+                    (int64) table.limit, (int64) (table.limit + 1));
+            }
+            p = end + 2;
+        }
+    }
+
+    static void decideRequest(HttpRequest req) {
+        HeaderTable t = req.table;
+        boolean http10 = req.versionKind == Version.HTTP_1_0;
+        if (t.hasToken("connection", "close")) {
+            req.reuse = false;
+        } else if (t.hasToken("connection", "keep-alive")) {
+            req.reuse = true;
+        } else {
+            req.reuse = !http10;
+        }
+        if (t.hasToken("transfer-encoding", "chunked")) {
+            req.framing = HttpRequest.FRAMING_CHUNKED;
+            return;
+        }
+        int32 cl = t.find("content-length", 0);
+        if (cl >= 0) {
+            Slice<int8> v = t.valueAt(cl);
+            if (v.count() == 0) {
+                throw heap MalformedMessageException("empty Content-Length", (int64) -1);
+            }
+            int64 n = Bytes.parseInt64(v, (int64) -1);
+            if (n < 0) {
+                throw heap MalformedMessageException("non-digit in Content-Length", (int64) -1);
+            }
+            req.framing = HttpRequest.FRAMING_LENGTH;
+            req.declaredLength = n;
+            return;
+        }
+        req.framing = HttpRequest.FRAMING_NONE;
+    }
+}

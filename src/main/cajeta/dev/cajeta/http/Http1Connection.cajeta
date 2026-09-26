@@ -1,0 +1,333 @@
+package dev.cajeta.http;
+
+import cajeta.lang.String;
+import cajeta.lang.Slice;
+import cajeta.io.net.ByteBuffer;
+import cajeta.io.net.ByteChannel;
+import cajeta.io.net.TimedOutException;
+import cajeta.error.Exception;
+import cajeta.time.Clock;
+import dev.cajeta.http.h1.HttpParserLimits;
+
+/**
+ * One HTTP/1.1 connection: reads each request into the input buffer,
+ * parses it in place, runs the handler over the request view and the
+ * response writer, and writes the response from the output buffer. The
+ * request, response and scanner are made once and reused for every
+ * request on the connection.
+ */
+public final class Http1Connection {
+    ByteChannel ch;
+    ByteBuffer in;
+    ByteBuffer out;
+    HeadScanner scanner;
+    HttpRequest req;
+    HttpResponse res;
+    (HttpRequest, HttpResponse) -> void handler;
+    int32 headMs;
+    int32 bodyMs;
+    int64 maxBody;
+    boolean expectEnabled;
+    int32 consumed;
+
+    /**
+     * A connection over `ch` reading into `in` and writing from `out`. Both
+     * buffers are borrowed and must outlive the connection.
+     */
+    public Http1Connection(ByteChannel ch, ByteBuffer in, ByteBuffer out,
+                           HttpParserLimits parse, int32 headMs, int32 bodyMs,
+                           int64 maxBody, boolean expectEnabled,
+                           (HttpRequest, HttpResponse) -> void handler) {
+        this.ch #= ch;
+        this.in #= in;
+        this.out #= out;
+        this.scanner = heap HeadScanner(parse);
+        this.req = heap HttpRequest(parse.maxHeaderCount);
+        this.res = heap HttpResponse(out, ch, 4096, 64);
+        this.handler #= handler;
+        this.headMs = headMs;
+        this.bodyMs = bodyMs;
+        this.maxBody = maxBody;
+        this.expectEnabled = expectEnabled;
+        this.consumed = 0;
+    }
+
+    /** Serves requests until the peer closes or a response ends reuse. */
+    public void serve() {
+        boolean more = true;
+        while (more) {
+            try {
+                more = this.serveOne();
+            } catch (TimedOutException t) {
+                this.refuse(408);
+                more = false;
+            } catch (HttpException e) {
+                this.refuse(e.httpStatus());
+                more = false;
+            } catch (Exception e) {
+                more = false;
+            }
+        }
+    }
+
+    void refuse(int32 status) {
+        try {
+            this.res.reset();
+            this.res.status(status);
+            if (this.res.finish(false, Version.HTTP_1_1, false)) {
+                this.out.writeToAsync(this.ch);
+            }
+        } catch (Exception e) {
+        }
+    }
+
+    int32 remaining(int64 deadline) {
+        if (deadline <= 0) {
+            return 0;
+        }
+        int64 left = deadline - Clock.now().toEpochMilli();
+        if (left < 1) {
+            return 1;
+        }
+        if (left > (int64) 2147483647) {
+            return 2147483647;
+        }
+        return (int32) left;
+    }
+
+    int32 readHead() {
+        int64 deadline = 0;
+        int32 h = this.scanner.scan(this.in);
+        while (h < 0) {
+            if (this.in.writable() == 0) {
+                throw heap HeadersTooLargeException("head exceeds the input buffer",
+                    (int64) this.in.capacity(), (int64) this.in.readable());
+            }
+            int32 ms = this.headMs;
+            if (deadline > 0) {
+                ms = this.remaining(deadline);
+            }
+            boolean first = this.in.readable() == 0;
+            int32 n = this.in.fillWithin(this.ch, ms);
+            if (n == 0) {
+                if (first) {
+                    return -1;
+                }
+                throw heap UnexpectedEofException("stream ended inside the request head",
+                    (int64) this.in.readable());
+            }
+            if (first && this.headMs > 0) {
+                deadline = Clock.now().toEpochMilli() + (int64) this.headMs;
+            }
+            h = this.scanner.scan(this.in);
+        }
+        return h;
+    }
+
+    void need(int32 total, int64 deadline) {
+        while (this.in.readable() < total) {
+            int32 ms = deadline > 0 ? this.remaining(deadline) : this.bodyMs;
+            if (this.in.fillWithin(this.ch, ms) == 0) {
+                throw heap UnexpectedEofException("stream ended inside the request body",
+                    (int64) this.in.readable());
+            }
+        }
+    }
+
+    int64 bodyDeadline() {
+        if (this.bodyMs <= 0) {
+            return 0;
+        }
+        return Clock.now().toEpochMilli() + (int64) this.bodyMs;
+    }
+
+    int32 expectation() {
+        int32 i = this.req.table.find("expect", 0);
+        if (i < 0) {
+            return 0;
+        }
+        if (!Bytes.equalsIgnoreCase(this.req.table.valueAt(i), "100-continue")) {
+            return 417;
+        }
+        if (!this.expectEnabled) {
+            return 0;
+        }
+        if (this.req.framing == HttpRequest.FRAMING_LENGTH && this.req.declaredLength > this.maxBody) {
+            return 413;
+        }
+        if (this.req.versionKind != Version.HTTP_1_1) {
+            return 0;
+        }
+        return 100;
+    }
+
+    void sendContinue() {
+        this.out.clear();
+        int8[] a = this.out.array();
+        int32 end = HttpResponse.put(a, 0, "HTTP/1.1 100 Continue\r\n\r\n");
+        this.out.advanceWrite(end);
+        this.out.writeToAsync(this.ch);
+    }
+
+    static int32 hexDigit(int8 b) {
+        int32 c = ((int32) b) & 255;
+        return Bytes.hexValue(c);
+    }
+
+    int32 lineEnd(int32 from, int64 deadline) {
+        int8[] a = this.in.array();
+        int32 p = from;
+        while (true) {
+            int32 end = this.in.writePosition();
+            while (p + 1 < end) {
+                if (a[p] == (int8) 13 && a[p + 1] == (int8) 10) {
+                    return p;
+                }
+                p = p + 1;
+            }
+            if (this.in.writable() == 0) {
+                throw heap PayloadTooLargeException("chunked body exceeds the input buffer",
+                    (int64) this.in.capacity(), (int64) this.in.readable());
+            }
+            int32 ms = deadline > 0 ? this.remaining(deadline) : this.bodyMs;
+            if (this.in.fillWithin(this.ch, ms) == 0) {
+                throw heap UnexpectedEofException("stream ended inside a chunked body",
+                    (int64) this.in.readable());
+            }
+        }
+        return -1;
+    }
+
+    int32 dechunk(int32 start, int64 deadline) {
+        int8[] a = this.in.array();
+        int32 dst = start;
+        int32 src = start;
+        while (true) {
+            int32 le = this.lineEnd(src, deadline);
+            int64 size = 0;
+            int32 p = src;
+            int32 digits = 0;
+            while (p < le && a[p] != (int8) 59) {
+                int32 d = Http1Connection.hexDigit(a[p]);
+                if (d < 0 || digits >= 8) {
+                    throw heap InvalidChunkEncodingException("bad chunk size", (int64) (p - start));
+                }
+                size = size * 16 + (int64) d;
+                digits = digits + 1;
+                p = p + 1;
+            }
+            if (digits == 0) {
+                throw heap InvalidChunkEncodingException("empty chunk size", (int64) (src - start));
+            }
+            src = le + 2;
+            if (size == 0) {
+                int32 t = this.lineEnd(src, deadline);
+                while (t != src) {
+                    src = t + 2;
+                    t = this.lineEnd(src, deadline);
+                }
+                this.consumed = src + 2;
+                return dst;
+            }
+            if ((int64) (dst - start) + size > this.maxBody) {
+                throw heap PayloadTooLargeException("chunked body over the limit",
+                    this.maxBody, (int64) (dst - start) + size);
+            }
+            int32 n = (int32) size;
+            if (src + n + 2 > this.in.capacity()) {
+                throw heap PayloadTooLargeException("chunked body exceeds the input buffer",
+                    (int64) this.in.capacity(), (int64) (src + n + 2));
+            }
+            this.need(src + n + 2 - this.in.readPosition(), deadline);
+            if (a[src + n] != (int8) 13 || a[src + n + 1] != (int8) 10) {
+                throw heap InvalidChunkEncodingException("chunk data not followed by CRLF",
+                    (int64) (src + n - start));
+            }
+            if (dst != src) {
+                int32 i = 0;
+                while (i < n) {
+                    a[dst + i] = a[src + i];
+                    i = i + 1;
+                }
+            }
+            dst = dst + n;
+            src = src + n + 2;
+        }
+        return dst;
+    }
+
+    boolean readBody(int32 headLen) {
+        int32 start = this.in.readPosition() + headLen;
+        this.consumed = start;
+        if (this.req.framing == HttpRequest.FRAMING_LENGTH) {
+            int64 n = this.req.declaredLength;
+            if (n > this.maxBody) {
+                throw heap PayloadTooLargeException("body over the limit", this.maxBody, n);
+            }
+            if ((int64) start + n > (int64) this.in.capacity()) {
+                throw heap PayloadTooLargeException("body exceeds the input buffer",
+                    (int64) (this.in.capacity() - start), n);
+            }
+            this.need(headLen + (int32) n, this.bodyDeadline());
+            this.req.bodyOff = start;
+            this.req.bodyLen = (int32) n;
+            this.consumed = start + (int32) n;
+            return true;
+        }
+        if (this.req.framing == HttpRequest.FRAMING_CHUNKED) {
+            int32 end = this.dechunk(start, this.bodyDeadline());
+            this.req.bodyOff = start;
+            this.req.bodyLen = end - start;
+            return true;
+        }
+        return true;
+    }
+
+    void dispatch() {
+        this.res.reset();
+        try {
+            (HttpRequest, HttpResponse) -> void fn = this.handler;
+            fn(this.req, this.res);
+        } catch (HttpException e) {
+            if (this.res.isCommitted()) {
+                throw e;
+            }
+            this.res.reset();
+            this.res.status(e.httpStatus());
+        } catch (Exception e) {
+            if (this.res.isCommitted()) {
+                throw e;
+            }
+            this.res.reset();
+            this.res.status(500);
+        }
+    }
+
+    /** Serves one request. Returns false when the connection should close. */
+    boolean serveOne() {
+        this.scanner.reset();
+        int32 h = this.readHead();
+        if (h < 0) {
+            return false;
+        }
+        HeadScanner.parseRequest(this.in.array(), this.in.readPosition(), h, this.req);
+        int32 ex = this.expectation();
+        if (ex == 417 || ex == 413) {
+            this.refuse(ex);
+            return false;
+        }
+        if (ex == 100 && this.in.readable() == h) {
+            this.sendContinue();
+        }
+        this.readBody(h);
+        this.dispatch();
+        boolean omit = this.req.methodKind == Method.HEAD;
+        if (this.res.finish(this.req.reuse, this.req.versionKind, omit)) {
+            this.out.writeToAsync(this.ch);
+        }
+        boolean keep = this.res.keepsAlive();
+        this.in.advanceRead(this.consumed - this.in.readPosition());
+        this.in.compact();
+        return keep;
+    }
+}
