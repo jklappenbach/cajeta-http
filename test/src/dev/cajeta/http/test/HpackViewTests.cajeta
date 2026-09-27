@@ -1,0 +1,88 @@
+package dev.cajeta.http.test;
+
+import cajeta.lang.String;
+import dev.cajeta.http.Bytes;
+import dev.cajeta.http.h2.HpackDecoder;
+import dev.cajeta.http.h2.HpackEncoder;
+import dev.cajeta.http.h2.HpackFieldList;
+
+/** decodeInto yields the same fields as decode, and a fully indexed block decodes without allocating. */
+public final class HpackViewTests {
+    public static void run(Check c) {
+        System.stdout.println("-- hpack decodeInto --");
+        HpackViewTests.agrees(c, false);
+        HpackViewTests.agrees(c, true);
+        HpackViewTests.allocation(c);
+    }
+
+    static #String own(String s) {
+        return s.substring(0, s.byteLength());
+    }
+
+    static #HpackFieldList request(String path, String extra) {
+        HpackFieldList fl = heap HpackFieldList();
+        fl.put(HpackViewTests.own(":method"), HpackViewTests.own("GET"));
+        fl.put(HpackViewTests.own(":scheme"), HpackViewTests.own("https"));
+        fl.put(HpackViewTests.own(":path"), HpackViewTests.own(path));
+        fl.put(HpackViewTests.own(":authority"), HpackViewTests.own("www.example.com"));
+        fl.put(HpackViewTests.own("user-agent"), HpackViewTests.own("cajeta-test/1.0"));
+        fl.put(HpackViewTests.own("x-extra"), HpackViewTests.own(extra));
+        return #fl;
+    }
+
+    static boolean same(HpackFieldList list, HpackDecoder dec, int32 n) {
+        if (list.size() != n) {
+            return false;
+        }
+        int32 i = 0;
+        while (i < n) {
+            if (!Bytes.equals(dec.fieldName(i), list.nameAt(i)) || !Bytes.equals(dec.fieldValue(i), list.valueAt(i))) {
+                return false;
+            }
+            i = i + 1;
+        }
+        return true;
+    }
+
+    static void agrees(Check c, boolean huffman) {
+        HpackEncoder enc = heap HpackEncoder(4096, huffman);
+        HpackDecoder listDec = heap HpackDecoder(4096);
+        HpackDecoder viewDec = heap HpackDecoder(4096);
+        String mode = huffman ? "huffman" : "raw";
+        int32 r = 0;
+        while (r < 3) {
+            HpackFieldList fields #= HpackViewTests.request(r == 2 ? "/other" : "/index.html", "v" + r);
+            int8[] block #= enc.encode(fields);
+            int32 len = (int32) block.count();
+            HpackFieldList list #= listDec.decode(block, len);
+            int32 n = viewDec.decodeInto(block, len);
+            c.that(HpackViewTests.same(list, viewDec, n), "decodeInto matches decode, " + mode + " request " + r);
+            c.that(HpackViewTests.same(fields, viewDec, n), "decodeInto round-trips the encoded fields, " + mode + " request " + r);
+            r = r + 1;
+        }
+        c.eqInt((int64) viewDec.dynamicTable().count(), (int64) listDec.dynamicTable().count(),
+            "both decoders index the same entries, " + mode);
+    }
+
+    static void allocation(Check c) {
+        HpackEncoder enc = heap HpackEncoder(4096, true);
+        HpackDecoder dec = heap HpackDecoder(4096);
+        HpackFieldList first #= HpackViewTests.request("/index.html", "same");
+        int8[] b1 #= enc.encode(first);
+        dec.decodeInto(b1, (int32) b1.count());
+        HpackFieldList second #= HpackViewTests.request("/index.html", "same");
+        int8[] b2 #= enc.encode(second);
+        int32 len = (int32) b2.count();
+        dec.decodeInto(b2, len);
+        int64 before = Cajeta.allocatedBytes();
+        int32 i = 0;
+        int32 fields = 0;
+        while (i < 1000) {
+            fields = dec.decodeInto(b2, len);
+            i = i + 1;
+        }
+        int64 delta = Cajeta.allocatedBytes() - before;
+        c.eqInt((int64) fields, 6, "the indexed block still decodes to six fields");
+        c.that(delta == 0, "1000 decodes of a fully indexed block allocate nothing (" + delta + " bytes)");
+    }
+}

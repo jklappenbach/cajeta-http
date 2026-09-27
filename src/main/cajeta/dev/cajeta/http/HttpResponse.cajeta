@@ -35,6 +35,9 @@ public final class HttpResponse {
     boolean reuse;
     Version peer;
     Body stream;
+    ResponseTransport transport;
+    PushEntry[] pushes;
+    int32 pushLen;
 
     /**
      * A writer over `out` with `fieldBytes` of header space and at most
@@ -48,6 +51,8 @@ public final class HttpResponse {
         this.spans = heap int32[maxFields * 5];
         this.maxFields = maxFields;
         this.room = fieldBytes + 128;
+        this.transport = null;
+        this.pushes = null;
         this.reset();
     }
 
@@ -64,6 +69,7 @@ public final class HttpResponse {
         this.reuse = true;
         this.peer = Version.HTTP_1_1;
         this.stream = null;
+        this.pushLen = 0;
     }
 
     /** Sets the status code. */
@@ -180,6 +186,26 @@ public final class HttpResponse {
             i = i + 1;
         }
         return this;
+    }
+
+    /** Number of header slots, removed ones included. */
+    public int32 fieldCount() {
+        return this.count;
+    }
+
+    /** True when slot `i` still holds a field. */
+    public boolean fieldLive(int32 i) {
+        return this.spans[i * 5 + 4] == 1;
+    }
+
+    /** The name in slot `i`. */
+    public Slice<int8> fieldName(int32 i) {
+        return this.nameAt(i);
+    }
+
+    /** The value in slot `i`. */
+    public Slice<int8> fieldValue(int32 i) {
+        return this.valueAt(i);
     }
 
     Slice<int8> nameAt(int32 i) {
@@ -489,6 +515,17 @@ public final class HttpResponse {
     }
 
     void spill() {
+        if (this.transport != null) {
+            ResponseTransport t = this.transport;
+            if (!this.committed) {
+                this.committed = true;
+                t.head(this, false);
+            }
+            t.data(this.out.array(), this.room, this.bodyLen, false);
+            this.sent = this.sent + (int64) this.bodyLen;
+            this.bodyLen = 0;
+            return;
+        }
         if (this.ch == null) {
             throw heap HttpException("response body exceeds the output buffer");
         }
@@ -571,6 +608,68 @@ public final class HttpResponse {
         this.out.advanceWrite(end);
         this.out.advanceRead(start);
         return true;
+    }
+
+    /** Sends everything through `t` instead of the output channel. */
+    public void attach(ResponseTransport t) {
+        this.transport #= t;
+    }
+
+    /**
+     * Ends the response over its transport: a streamed body is pumped, the head
+     * goes out unless a spill already sent it, and the last piece ends the stream.
+     */
+    public void finishStream() {
+        ResponseTransport t = this.transport;
+        if (this.stream != null) {
+            this.pump(false);
+            this.stream = null;
+        }
+        boolean empty = this.bodyLen == 0 || this.bodyless();
+        if (!this.committed) {
+            this.committed = true;
+            t.head(this, empty);
+            if (!empty) {
+                t.data(this.out.array(), this.room, this.bodyLen, true);
+            }
+            return;
+        }
+        t.data(this.out.array(), this.room, empty ? 0 : this.bodyLen, true);
+    }
+
+    /** Queues a server push of `path` answered with `status` and `body[0 .. bodyLen)`. */
+    public HttpResponse push(String path, int32 status, int8[] body, int32 bodyLen) {
+        if (this.pushes == null) {
+            this.pushes = heap PushEntry[4];
+        }
+        if (this.pushLen == this.pushes.count()) {
+            PushEntry[] grown = heap PushEntry[this.pushLen * 2];
+            int32 i = 0;
+            while (i < this.pushLen) {
+                grown[i] #= this.pushes[i];
+                i = i + 1;
+            }
+            this.pushes #= grown;
+        }
+        int8[] b = heap int8[bodyLen];
+        int32 k = 0;
+        while (k < bodyLen) {
+            b[k] = body[k];
+            k = k + 1;
+        }
+        this.pushes[this.pushLen] = heap PushEntry(path.substring(0, path.byteLength()), status, #b, bodyLen);
+        this.pushLen = this.pushLen + 1;
+        return this;
+    }
+
+    /** Number of queued pushes. */
+    public int32 pushCount() {
+        return this.pushLen;
+    }
+
+    /** Queued push `i`. */
+    public PushEntry pushAt(int32 i) {
+        return this.pushes[i];
     }
 
     /** Whether the connection stays open after this response. */

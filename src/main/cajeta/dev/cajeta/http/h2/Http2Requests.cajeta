@@ -1,0 +1,65 @@
+package dev.cajeta.http.h2;
+
+import cajeta.lang.String;
+import cajeta.lang.Slice;
+import dev.cajeta.http.Bytes;
+import dev.cajeta.http.ClientRequest;
+
+/** Header field lists for the HTTP/2 client, pushes and status-only heads. */
+public final class Http2Requests {
+    static #String own(String s) {
+        return s.substring(0, s.byteLength());
+    }
+
+    /** True for a field HTTP/2 forbids: the HTTP/1.1 connection-specific ones. */
+    static boolean forbidden(String n) {
+        return n.equals("connection") || n.equals("keep-alive")
+            || n.equals("proxy-connection") || n.equals("transfer-encoding")
+            || n.equals("upgrade");
+    }
+
+    /** The fields of `req`, pseudo-headers first, names lowercased, host and forbidden fields left out. */
+    public static #HpackFieldList requestFields(ClientRequest req, String scheme, String authority) {
+        HpackFieldList fl = heap HpackFieldList();
+        fl.put(Http2Requests.own(":method"), Http2Requests.own(req.methodToken()));
+        fl.put(Http2Requests.own(":path"), Bytes.toString(req.target()));
+        fl.put(Http2Requests.own(":scheme"), Http2Requests.own(scheme));
+        fl.put(Http2Requests.own(":authority"), Http2Requests.own(authority));
+        int32 i = 0;
+        while (i < req.fieldCount()) {
+            if (req.fieldLive(i)) {
+                String n #= Bytes.toString(req.nameAt(i)).toLowerCase();
+                if (!Http2Requests.forbidden(n) && !n.equals("host")) {
+                    fl.put(#n, Bytes.toString(req.valueAt(i)));
+                }
+            }
+            i = i + 1;
+        }
+        return #fl;
+    }
+
+    /** The request a server push promises: a GET of `path` at `authority`. */
+    public static #HpackFieldList promisedRequestFields(String path, String authority) {
+        HpackFieldList fl = heap HpackFieldList();
+        fl.put(Http2Requests.own(":method"), Http2Requests.own("GET"));
+        fl.put(Http2Requests.own(":path"), Http2Requests.own(path));
+        fl.put(Http2Requests.own(":scheme"), Http2Requests.own("https"));
+        fl.put(Http2Requests.own(":authority"), Http2Requests.own(authority));
+        return #fl;
+    }
+
+    /** A head carrying only `:status`. */
+    public static #HpackFieldList statusOnlyFields(int32 status) {
+        HpackFieldList fl = heap HpackFieldList();
+        fl.put(Http2Requests.own(":status"), Http2Requests.statusString(status));
+        return #fl;
+    }
+
+    static #String statusString(int32 status) {
+        int8[] d = heap int8[3];
+        d[0] = (int8) (48 + ((status / 100) % 10));
+        d[1] = (int8) (48 + ((status / 10) % 10));
+        d[2] = (int8) (48 + (status % 10));
+        return heap String(#d, 3);
+    }
+}

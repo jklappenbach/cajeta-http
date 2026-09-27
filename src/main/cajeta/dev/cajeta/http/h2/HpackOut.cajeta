@@ -1,0 +1,45 @@
+package dev.cajeta.http.h2;
+
+import cajeta.lang.Slice;
+
+/** A growable byte buffer the HPACK decoder writes fields into and reuses. */
+public final class HpackOut {
+    int8[] buf;
+    int32 len;
+
+    /** An empty buffer with room for `cap` bytes before it grows. */
+    public HpackOut(int32 cap) {
+        this.buf = heap int8[cap < 16 ? 16 : cap];
+        this.len = 0;
+    }
+
+    /** Empties the buffer, keeping its storage. */
+    public void reset() {
+        this.len = 0;
+    }
+
+    /** Appends one byte. */
+    public void put(int32 b) {
+        if (this.len == this.buf.count()) {
+            int8[] grown = heap int8[this.buf.count() * 2];
+            int32 i = 0;
+            while (i < this.len) {
+                grown[i] = this.buf[i];
+                i = i + 1;
+            }
+            this.buf #= grown;
+        }
+        this.buf[this.len] = (int8) b;
+        this.len = this.len + 1;
+    }
+
+    /** Number of bytes written. */
+    public int32 length() {
+        return this.len;
+    }
+
+    /** The bytes `[from .. to)`, valid until the next write. */
+    public Slice<int8> window(int32 from, int32 to) {
+        return this.buf[from:to];
+    }
+}

@@ -21,6 +21,7 @@ public class HttpServerBuilder {
     private int32 bKeyLen;
     private boolean bTls;
     private ConnectionLimits bClimits;
+    private boolean bH2Prior;
 
     /** A builder with one fiber per connection and default limits. */
     public HttpServerBuilder() {
@@ -35,6 +36,13 @@ public class HttpServerBuilder {
         this.bKeyLen = 0;
         this.bTls = false;
         this.bClimits = null;
+        this.bH2Prior = false;
+    }
+
+    /** Serves HTTP/2 on plaintext connections that open with its preface (RFC 9113 prior knowledge). */
+    public HttpServerBuilder h2PriorKnowledge() {
+        this.bH2Prior = true;
+        return this;
     }
 
     /** The address to bind, such as "127.0.0.1:8080". */
@@ -145,8 +153,10 @@ public class HttpServerBuilder {
             this.bClimits = null;
             cl = #cmoved;
         }
-        return HttpServer.bindAddressWithModelAndLimits(SocketAddress.parse(this.addr),
+        HttpServer srv #= HttpServer.bindAddressWithModelAndLimits(SocketAddress.parse(this.addr),
             this.model, h, #l, #cl, #p);
+        srv.h2Prior = this.bH2Prior;
+        return #srv;
     }
 
     /** Builds and serves until shutdown. */

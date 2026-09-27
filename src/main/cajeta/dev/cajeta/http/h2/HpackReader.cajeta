@@ -27,6 +27,26 @@ public final class HpackReader {
     }
 
     /** Whether any bytes remain. */
+    /** Points the reader at `buf[0 .. limit)` from the start. */
+    public void reset(int8[] buf, int32 limit) {
+        this.buf #= buf;
+        this.pos = 0;
+        this.limit = limit;
+    }
+
+    /** The bytes being read. */
+    public int8[] buffer() {
+        return this.buf;
+    }
+
+    /** Skips `n` bytes, raising when fewer remain. */
+    public void skip(int32 n) {
+        if (this.pos + n > this.limit) {
+            throw heap HpackException("truncated HPACK data");
+        }
+        this.pos = this.pos + n;
+    }
+
     public boolean hasMore() {
         return this.pos < this.limit;
     }

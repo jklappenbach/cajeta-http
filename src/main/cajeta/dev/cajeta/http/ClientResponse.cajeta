@@ -87,7 +87,8 @@ public final class ClientResponse {
         this.clear();
     }
 
-    void adopt(#ByteBuffer b) {
+    /** Hands the response the buffer its head and body were written into. */
+    public void adopt(#ByteBuffer b) {
         this.buf #= b;
     }
 
@@ -162,6 +163,14 @@ public final class ClientResponse {
     /** An owned copy of the body as a `String`. */
     public #String bodyString() {
         return Bytes.toString(this.body());
+    }
+
+    /** Binds the body to `[off .. off + len)` of the bytes the head was parsed from. */
+    public void bindBody(int32 off, int32 len) {
+        this.bodyOwned = false;
+        this.ownBody = null;
+        this.bodyOff = off;
+        this.bodyLen = len;
     }
 
     /** Replaces the body with `data[0 .. length)`, which the response keeps. */

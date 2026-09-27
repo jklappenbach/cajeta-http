@@ -1,0 +1,492 @@
+package dev.cajeta.http.h2;
+
+import cajeta.lang.String;
+import cajeta.concurrent.Lock;
+import cajeta.concurrent.LockGuard;
+import cajeta.io.net.AsyncReader;
+import cajeta.io.net.AsyncWriter;
+import cajeta.io.net.NetException;
+import cajeta.io.net.tls.TlsException;
+import dev.cajeta.http.HttpException;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.PushEntry;
+import dev.cajeta.http.h1.HttpParserLimits;
+import dev.cajeta.http.server.ConnectionBuffers;
+import dev.cajeta.http.server.ServerLimits;
+
+/**
+ * The HTTP/2 server engine for one connection. Frames are read in order, each
+ * stream's head is decoded into a pooled stream slot as a request view, and
+ * each complete request runs its handler on a fiber of its own with the
+ * slot's response, whose head and body leave as HEADERS and DATA frames under
+ * flow control. Slots return to the connection when their stream ends.
+ */
+public final class Http2Connection {
+    AsyncReader reader;
+    (HttpRequest, HttpResponse) -> void handler;
+    ConnectionBuffers bufs;
+    HttpParserLimits limits;
+    Http2WriteSide ws;
+    Http2SendGate gate;
+    HpackDecoder hdec;
+    Http2Settings local;
+    Http2Settings remote;
+    Http2FlowController flow;
+    int32 pendConnRecv;
+    int32 pendStreamRecv;
+    int32 pendStreamId;
+    int64 maxBody;
+    Http2StreamTable streams;
+    HeaderBlockAssembler assembler;
+    boolean hdrEndStream;
+    Http2StreamSlot cur;
+    Http2StreamSlot ready;
+    Http2StreamSlot free;
+    Lock slotLock;
+
+    static final int32 RECV_WINDOW = 1048576;
+    static final int32 WINDOW_REPLENISH = 524288;
+
+    /** An engine answering with `handler`, taking stream buffers from `bufs`. */
+    public Http2Connection(AsyncReader reader, AsyncWriter writer,
+                           (HttpRequest, HttpResponse) -> void handler,
+                           ConnectionBuffers bufs, HttpParserLimits limits) {
+        this.reader #= reader;
+        this.handler #= handler;
+        this.bufs #= bufs;
+        this.limits #= limits;
+        this.ws = heap Http2WriteSide(writer);
+        this.gate = heap Http2SendGate(Http2.DEFAULT_INITIAL_WINDOW_SIZE);
+        this.hdec = heap HpackDecoder(Http2.DEFAULT_HEADER_TABLE_SIZE);
+        this.local = heap Http2Settings();
+        this.local.maxConcurrentStreams = (int64) 100;
+        this.local.initialWindowSize = (int64) Http2Connection.RECV_WINDOW;
+        this.remote = heap Http2Settings();
+        this.pendConnRecv = 0;
+        this.pendStreamRecv = 0;
+        this.pendStreamId = 0;
+        this.maxBody = ServerLimits.DEFAULT_MAX_BODY_BYTES;
+        this.flow = heap Http2FlowController(Http2.DEFAULT_INITIAL_WINDOW_SIZE, Http2Connection.RECV_WINDOW);
+        this.streams = heap Http2StreamTable();
+        this.assembler = heap HeaderBlockAssembler();
+        this.hdrEndStream = false;
+        this.cur = null;
+        this.ready = null;
+        this.free = null;
+        this.slotLock = heap Lock();
+    }
+
+    /** Serves one connection until the peer leaves or a connection error ends it. */
+    public static void serve(AsyncReader reader, AsyncWriter writer,
+                             (HttpRequest, HttpResponse) -> void handler,
+                             ConnectionBuffers bufs, HttpParserLimits limits, int64 maxBodyBytes) {
+        Http2Connection c = heap Http2Connection(reader, writer, handler, bufs, limits);
+        c.maxBody = maxBodyBytes;
+        try {
+            c.run();
+        } catch (Http2Exception e) {
+        } catch (NetException e) {
+        } catch (TlsException e) {
+        }
+        c.releaseSlots();
+    }
+
+    #Http2StreamSlot takeSlot() {
+        LockGuard g #= this.slotLock.acquire();
+        if (this.free == null) {
+            return heap Http2StreamSlot(this.bufs, this.limits, this.ws, this.gate);
+        }
+        Http2StreamSlot s #= this.free;
+        if (s.next != null) {
+            Http2StreamSlot rest #= s.next;
+            this.free = #rest;
+        }
+        return #s;
+    }
+
+    void giveSlot(#Http2StreamSlot s) {
+        LockGuard g #= this.slotLock.acquire();
+        if (this.free != null) {
+            Http2StreamSlot prev #= this.free;
+            s.next = #prev;
+        }
+        this.free = #s;
+    }
+
+    void releaseSlots() {
+        LockGuard g #= this.slotLock.acquire();
+        while (this.free != null) {
+            Http2StreamSlot s #= this.free;
+            if (s.next != null) {
+                Http2StreamSlot rest #= s.next;
+                this.free = #rest;
+            }
+            s.recycle(this.bufs);
+        }
+    }
+
+    void run() {
+        int8[] pf = heap int8[24];
+        if (!this.readFully(pf, 24)) {
+            return;
+        }
+        if (!Http2.matchesPreface(pf, 0, 24)) {
+            this.sendGoaway(Http2.PROTOCOL_ERROR);
+            return;
+        }
+        this.sendOurSettings();
+        scope {
+            boolean running = true;
+            while (running) {
+                int8[] hdr = heap int8[9];
+                if (!this.readFully(hdr, 9)) {
+                    running = false;
+                } else {
+                    running = this.readAndDispatch(hdr);
+                    if (this.ready != null) {
+                        Http2StreamSlot s #= this.ready;
+                        int32 maxFrame = (int32) this.remote.maxFrameSize;
+                        boolean pushOk = this.remote.pushEnabled();
+                        int32 initWin = (int32) this.remote.initialWindowSize;
+                        spawn handleStream(this, #s, maxFrame, pushOk, initWin);
+                    }
+                }
+            }
+        }
+    }
+
+    boolean readAndDispatch(int8[] hdr) {
+        Http2FrameHeader h #= Http2FrameHeader(hdr);
+        int32 type = h.typeCode();
+        int32 flags = h.flags();
+        int32 sid = h.streamId();
+        int32 len = h.length();
+        if (len > (int32) this.local.maxFrameSize) {
+            this.sendGoaway(Http2.FRAME_SIZE_ERROR);
+            return false;
+        }
+        int8[] payload = heap int8[len];
+        if (len > 0) {
+            this.reader.readExact(payload, 0, len);
+        }
+        if (this.assembler.isOpen() && type != Http2.FRAME_CONTINUATION) {
+            this.sendGoaway(Http2.PROTOCOL_ERROR);
+            return false;
+        }
+        boolean cont = true;
+        try {
+            cont = this.dispatchFrame(type, flags, sid, payload, len);
+        } catch (Http2Exception e) {
+            if (e.isConnectionError()) {
+                this.sendGoaway(e.errorCode);
+                cont = false;
+            } else {
+                this.sendRst(e.streamId, e.errorCode);
+            }
+        }
+        return cont;
+    }
+
+    boolean dispatchFrame(int32 type, int32 flags, int32 sid, int8[] payload, int32 len) {
+        if (type == Http2.FRAME_SETTINGS) {
+            this.onSettings(flags, payload, len, sid);
+        } else if (type == Http2.FRAME_HEADERS) {
+            this.onHeaders(flags, sid, payload, len);
+        } else if (type == Http2.FRAME_CONTINUATION) {
+            this.onContinuation(flags, sid, payload, len);
+        } else if (type == Http2.FRAME_DATA) {
+            this.onData(flags, sid, payload, len);
+        } else if (type == Http2.FRAME_WINDOW_UPDATE) {
+            this.onWindowUpdate(sid, payload, len);
+        } else if (type == Http2.FRAME_RST_STREAM) {
+            this.onRstStream(sid, payload, len);
+        } else if (type == Http2.FRAME_PING) {
+            this.onPing(flags, sid, payload, len);
+        } else if (type == Http2.FRAME_PRIORITY) {
+            Http2Frames.validatePriority(len, sid);
+        } else if (type == Http2.FRAME_GOAWAY) {
+            return false;
+        }
+        return true;
+    }
+
+    void onSettings(int32 flags, int8[] payload, int32 len, int32 sid) {
+        if ((flags & Http2.FLAG_ACK) != 0) {
+            return;
+        }
+        Http2SettingsList list #= Http2Frames.parseSettings(payload, 0, len, flags, sid);
+        this.remote.apply(list);
+        this.flow.setPeerMaxFrame((int32) this.remote.maxFrameSize);
+        this.sendSettingsAck();
+    }
+
+    void onHeaders(int32 flags, int32 sid, int8[] payload, int32 len) {
+        boolean endStream = (flags & Http2.FLAG_END_STREAM) != 0;
+        boolean endHeaders = (flags & Http2.FLAG_END_HEADERS) != 0;
+        this.streams.openIfAbsent(sid);
+        this.gate.openStream(sid, (int32) this.remote.initialWindowSize);
+        this.streams.recvHeaders(sid, endStream);
+        Http2Payload reg #= Http2ContentFrames.parseHeaders(payload, len, flags, sid);
+        if (endHeaders) {
+            int8[] block #= Http2Connection.slice(payload, reg.offset, reg.length);
+            this.completeRequest(sid, block, reg.length, endStream);
+        } else {
+            this.assembler.begin(sid, payload, reg.offset, reg.length);
+            this.hdrEndStream = endStream;
+        }
+    }
+
+    void onContinuation(int32 flags, int32 sid, int8[] payload, int32 len) {
+        boolean endHeaders = (flags & Http2.FLAG_END_HEADERS) != 0;
+        this.assembler.continueOn(sid, payload, 0, len);
+        if (endHeaders) {
+            int8[] block #= this.assembler.complete();
+            this.completeRequest(sid, block, (int32) block.count(), this.hdrEndStream);
+        }
+    }
+
+    void completeRequest(int32 sid, int8[] block, int32 blockLen, boolean endStream) {
+        int32 n = this.hdec.decodeInto(block, blockLen);
+        Http2StreamSlot s #= this.takeSlot();
+        try {
+            s.gate #= this.gate;
+            s.begin(sid, this.hdec, n);
+        } catch (Exception e) {
+            this.giveSlot(#s);
+            throw e;
+        }
+        if (endStream) {
+            s.endBody();
+            this.ready = #s;
+        } else {
+            if (this.cur != null) {
+                Http2StreamSlot old #= this.cur;
+                this.giveSlot(#old);
+            }
+            this.cur = #s;
+        }
+    }
+
+    void replenish(int32 sid, int32 len, boolean endStream) {
+        this.flow.connRecv.consume(len);
+        if (this.flow.connRecv.available() < 0) {
+            throw heap Http2Exception("peer exceeded the connection receive window", Http2.FLOW_CONTROL_ERROR);
+        }
+        this.pendConnRecv = this.pendConnRecv + len;
+        if (this.pendConnRecv >= Http2Connection.WINDOW_REPLENISH) {
+            Http2FrameWriter fw = heap Http2FrameWriter();
+            Http2Frames.writeWindowUpdate(fw, 0, this.pendConnRecv);
+            this.ws.writeControl(fw);
+            this.flow.connRecv.increase(this.pendConnRecv, 0);
+            this.pendConnRecv = 0;
+        }
+        if (this.pendStreamId != sid) {
+            this.pendStreamId = sid;
+            this.pendStreamRecv = 0;
+        }
+        if (endStream) {
+            this.pendStreamRecv = 0;
+            return;
+        }
+        this.pendStreamRecv = this.pendStreamRecv + len;
+        if (this.pendStreamRecv >= Http2Connection.WINDOW_REPLENISH) {
+            Http2FrameWriter sw = heap Http2FrameWriter();
+            Http2Frames.writeWindowUpdate(sw, sid, this.pendStreamRecv);
+            this.ws.writeControl(sw);
+            this.pendStreamRecv = 0;
+        }
+    }
+
+    void onData(int32 flags, int32 sid, int8[] payload, int32 len) {
+        boolean endStream = (flags & Http2.FLAG_END_STREAM) != 0;
+        if (!this.streams.has(sid)) {
+            if (this.streams.wasClosed(sid)) {
+                throw heap Http2Exception("DATA on closed stream", Http2.STREAM_CLOSED);
+            }
+            throw heap Http2Exception("DATA on unknown stream", Http2.PROTOCOL_ERROR);
+        }
+        this.streams.recvData(sid, endStream);
+        this.flow.afterReceive(len);
+        Http2Payload reg #= Http2ContentFrames.parseData(payload, len, flags, sid);
+        int32 have = this.cur != null && this.cur.sid == sid ? this.cur.bodyLen : 0;
+        if ((int64) have + (int64) reg.length > this.maxBody) {
+            throw heap Http2Exception("request body exceeds maxBodyBytes (" + this.maxBody + ")",
+                                      Http2.ENHANCE_YOUR_CALM);
+        }
+        this.replenish(sid, len, endStream);
+        if (this.cur == null || this.cur.sid != sid) {
+            return;
+        }
+        this.cur.append(payload, reg.offset, reg.length);
+        if (endStream) {
+            Http2StreamSlot s #= this.cur;
+            this.cur = null;
+            s.endBody();
+            this.ready = #s;
+        }
+    }
+
+    void onWindowUpdate(int32 sid, int8[] payload, int32 len) {
+        int32 inc = Http2Frames.parseWindowUpdate(payload, 0, len, sid);
+        if (sid == 0) {
+            this.flow.connSend.increase(inc, 0);
+            this.gate.grantConn(inc);
+        } else {
+            this.gate.grantStream(sid, inc);
+        }
+    }
+
+    void onRstStream(int32 sid, int8[] payload, int32 len) {
+        int64 code = Http2Frames.parseRstStream(payload, 0, len, sid);
+        if (this.streams.has(sid)) {
+            this.streams.recvRst(sid);
+        }
+        this.gate.cancel(sid);
+        if (this.cur != null && this.cur.sid == sid) {
+            Http2StreamSlot s #= this.cur;
+            this.cur = null;
+            this.giveSlot(#s);
+        }
+    }
+
+    void onPing(int32 flags, int32 sid, int8[] payload, int32 len) {
+        Http2Frames.validatePing(len, sid);
+        if ((flags & Http2.FLAG_ACK) == 0) {
+            Http2FrameWriter fw = heap Http2FrameWriter();
+            Http2Frames.writePing(fw, payload, true);
+            this.ws.writeControl(fw);
+        }
+    }
+
+    /** Runs the handler for one complete request, then answers it and returns the slot. */
+    public static async int32 handleStream(Http2Connection c, #Http2StreamSlot slot, int32 maxFrame,
+                                           boolean pushEnabled, int32 initWin) {
+        Http2StreamSlot s #= slot;
+        s.maxFrame = maxFrame;
+        HttpResponse r = s.res;
+        r.reset();
+        (HttpRequest, HttpResponse) -> void fn = c.handler;
+        try {
+            fn(s.req, r);
+        } catch (HttpException e) {
+            if (!r.isCommitted()) {
+                r.reset();
+                r.status(e.httpStatus());
+            }
+        } catch (Exception e) {
+            if (!r.isCommitted()) {
+                r.reset();
+                r.status(500);
+            }
+        }
+        int32 sid = s.sid;
+        if (pushEnabled && r.pushCount() > 0 && !r.isCommitted()) {
+            String authority #= Http2Connection.authorityOf(s.req);
+            int32 pi = 0;
+            while (pi < r.pushCount()) {
+                PushEntry p = r.pushAt(pi);
+                int32 promId = c.ws.nextPromisedId();
+                HpackFieldList prom #= Http2Requests.promisedRequestFields(p.path, authority);
+                c.ws.writePushPromise(sid, promId, prom);
+                c.gate.openStream(promId, initWin);
+                HpackFieldList pf #= Http2Requests.statusOnlyFields(p.status);
+                boolean pHasBody = p.bodyLen > 0;
+                c.ws.writeHeaders(promId, pf, !pHasBody);
+                if (pHasBody) {
+                    Http2Connection.streamBody(c.ws, c.gate, promId, p.body, p.bodyLen, maxFrame);
+                }
+                c.gate.closeStream(promId);
+                pi = pi + 1;
+            }
+        }
+        try {
+            r.finishStream();
+        } catch (Exception e) {
+        }
+        c.gate.closeStream(sid);
+        c.giveSlot(#s);
+        return sid;
+    }
+
+    static void streamBody(Http2WriteSide ws, Http2SendGate gate, int32 streamId,
+                           int8[] body, int32 total, int32 maxFrame) {
+        int32 off = 0;
+        while (off < total) {
+            int64 want = (int64) (total - off);
+            if (want > (int64) maxFrame) {
+                want = (int64) maxFrame;
+            }
+            int64 g = gate.takeUpTo(streamId, want);
+            if (g <= (int64) 0) {
+                off = total;
+            } else {
+                int32 gi = (int32) g;
+                boolean last = (off + gi) >= total;
+                ws.writeData(streamId, body, off, gi, last);
+                off = off + gi;
+            }
+        }
+    }
+
+    static #String authorityOf(HttpRequest r) {
+        String h #= r.headerString("host");
+        if (h == null) {
+            String d = "127.0.0.1";
+            return d.substring(0, d.byteLength());
+        }
+        return #h;
+    }
+
+    void sendOurSettings() {
+        Http2FrameWriter fw = heap Http2FrameWriter();
+        Http2SettingsList l #= this.local.toList();
+        Http2Frames.writeSettings(fw, l);
+        Http2Frames.writeWindowUpdate(fw, 0, Http2Connection.RECV_WINDOW - Http2.DEFAULT_INITIAL_WINDOW_SIZE);
+        this.ws.writeControl(fw);
+    }
+
+    void sendSettingsAck() {
+        Http2FrameWriter fw = heap Http2FrameWriter();
+        Http2Frames.writeSettingsAck(fw);
+        this.ws.writeControl(fw);
+    }
+
+    void sendGoaway(int32 errorCode) {
+        Http2FrameWriter fw = heap Http2FrameWriter();
+        int8[] none = heap int8[0];
+        Http2Frames.writeGoaway(fw, this.streams.lastRemoteId(), (int64) errorCode, none, 0);
+        this.ws.writeControl(fw);
+    }
+
+    void sendRst(int32 sid, int32 errorCode) {
+        Http2FrameWriter fw = heap Http2FrameWriter();
+        Http2Frames.writeRstStream(fw, sid, (int64) errorCode);
+        this.ws.writeControl(fw);
+    }
+
+    boolean readFully(int8[] buf, int32 n) {
+        int32 off = 0;
+        while (off < n) {
+            int32 g = this.reader.read(buf, off, n - off);
+            if (g == 0) {
+                if (off == 0) {
+                    return false;
+                }
+                throw heap Http2Exception("truncated frame at EOF", Http2.PROTOCOL_ERROR);
+            }
+            off = off + g;
+        }
+        return true;
+    }
+
+    static #int8[] slice(int8[] src, int32 off, int32 len) {
+        int8[] out = heap int8[len];
+        int32 i = 0;
+        while (i < len) {
+            out[i] = src[off + i];
+            i = i + 1;
+        }
+        return #out;
+    }
+}

@@ -373,12 +373,24 @@ public final class Huffman {
 
     /** Decode Huffman-coded `data[0..len)` back to its octet string. */
     public #String decode(int8[] data, int32 len) {
-        HpackWriter w = heap HpackWriter();
+        HpackOut out = heap HpackOut(len * 2);
+        this.decodeTo(data, 0, len, out);
+        int8[] b = heap int8[out.length()];
+        int32 k = 0;
+        while (k < out.length()) {
+            b[k] = out.buf[k];
+            k = k + 1;
+        }
+        return heap String(#b, out.length());
+    }
+
+    /** Decodes `data[off .. off + len)` and appends the symbols to `out`. */
+    public void decodeTo(int8[] data, int32 off, int32 len, HpackOut out) {
         int64 cur = 0;
         int32 curlen = 0;
         int32 i = 0;
         while (i < len) {
-            int32 b = ((int32) data[i]) & 0xFF;
+            int32 b = ((int32) data[off + i]) & 0xFF;
             int32 bit = 7;
             while (bit >= 0) {
                 int32 v = (b >> bit) & 1;
@@ -395,7 +407,7 @@ public final class Huffman {
                         if (sym == 256) {
                             throw heap HpackException("EOS symbol in Huffman stream");
                         }
-                        w.writeByte(sym);
+                        out.put(sym);
                         cur = 0;
                         curlen = 0;
                     }
@@ -413,6 +425,5 @@ public final class Huffman {
                 throw heap HpackException("invalid Huffman padding");
             }
         }
-        return w.toStringValue();
     }
 }

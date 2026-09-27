@@ -1,0 +1,13 @@
+package dev.cajeta.http;
+
+/**
+ * Carries a response somewhere other than an HTTP/1.1 byte stream: the head
+ * once, then body pieces, the last marked as ending the response.
+ */
+public interface ResponseTransport {
+    /** Sends the status and header fields of `r`. */
+    void head(HttpResponse r, boolean endStream);
+
+    /** Sends `a[off .. off + len)` of the body. */
+    void data(int8[] a, int32 off, int32 len, boolean endStream);
+}

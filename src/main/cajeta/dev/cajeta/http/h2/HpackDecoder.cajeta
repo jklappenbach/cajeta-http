@@ -1,6 +1,8 @@
 package dev.cajeta.http.h2;
 
 import cajeta.lang.String;
+import cajeta.lang.Slice;
+import dev.cajeta.http.Bytes;
 
 /**
  * The **HPACK decoder** (RFC 7541 §6) — plan item **3.1**. Turns an encoded
@@ -33,6 +35,11 @@ public final class HpackDecoder {
     int32 maxDynAllowed;    // SETTINGS_HEADER_TABLE_SIZE upper bound
     int32 maxListSize;      // decoded-list size cap (bomb guard)
     int32 maxStringLen;     // per-literal length cap
+    HpackReader reader;
+    int8[] noBytes;
+    HpackOut scratch;
+    int32[] spans;
+    int32 fcount;
 
     public HpackDecoder(int32 maxDynamicTableSize) {
         this.staticTable = heap HpackStaticTable();
@@ -41,6 +48,11 @@ public final class HpackDecoder {
         this.maxDynAllowed = maxDynamicTableSize;
         this.maxListSize = 65536;
         this.maxStringLen = 16384;
+        this.noBytes = heap int8[0];
+        this.reader = heap HpackReader(this.noBytes, 0);
+        this.scratch = heap HpackOut(1024);
+        this.spans = heap int32[64 * 4];
+        this.fcount = 0;
     }
 
     /** Set the decoded-list size cap (SETTINGS_MAX_HEADER_LIST_SIZE analogue). */
@@ -116,8 +128,7 @@ public final class HpackDecoder {
             // Add a copy to the dynamic table, then emit.
             String tn #= name.substring(0, name.byteLength());
             String tv #= value.substring(0, value.byteLength());
-            HpackField entry = heap HpackField(#tn, #tv, false);
-            this.dyn.add(#entry);
+            this.dyn.add(heap HpackField(#tn, #tv, false));
             out.put(#name, #value);
         } else {
             out.putSensitive(#name, #value, sensitive);
@@ -126,6 +137,120 @@ public final class HpackDecoder {
     }
 
     // §6.3 Dynamic Table Size Update.
+    /**
+     * Decodes `block[0 .. len)` into the decoder's own bytes and returns the
+     * field count. Fields read back through `fieldName` and `fieldValue`
+     * until the next decode. Only a dynamic-table insertion allocates.
+     */
+    public int32 decodeInto(int8[] block, int32 len) {
+        this.reader.reset(block, len);
+        this.scratch.reset();
+        this.fcount = 0;
+        int32 total = 0;
+        HpackReader r = this.reader;
+        while (r.hasMore()) {
+            int32 b = r.peekByte();
+            if ((b & 0x80) != 0) {
+                int32 index = (int32) r.readInteger(7);
+                if (index == 0) {
+                    throw heap HpackException("HPACK indexed field with index 0");
+                }
+                int32 ns = this.scratch.length();
+                this.putText(this.nameForIndex(index));
+                int32 vs = this.scratch.length();
+                this.putText(this.valueForIndex(index));
+                total = this.keep(ns, vs, total);
+            } else if ((b & 0x40) != 0) {
+                total = this.literalInto(r, total, 6, true);
+            } else if ((b & 0x20) != 0) {
+                this.sizeUpdate(r);
+            } else {
+                total = this.literalInto(r, total, 4, false);
+            }
+        }
+        return this.fcount;
+    }
+
+    /** The name of decoded field `i`. */
+    public Slice<int8> fieldName(int32 i) {
+        return this.scratch.window(this.spans[i * 4], this.spans[i * 4 + 1]);
+    }
+
+    /** The value of decoded field `i`. */
+    public Slice<int8> fieldValue(int32 i) {
+        return this.scratch.window(this.spans[i * 4 + 2], this.spans[i * 4 + 3]);
+    }
+
+    void putText(String s) {
+        int32 i = 0;
+        while (i < s.byteLength()) {
+            this.scratch.put(((int32) s.byteAt(i)) & 255);
+            i = i + 1;
+        }
+    }
+
+    int32 keep(int32 ns, int32 vs, int32 total) {
+        int32 ve = this.scratch.length();
+        int32 nt = this.charge(total, ve - ns);
+        if ((this.fcount + 1) * 4 > this.spans.count()) {
+            int32[] grown = heap int32[this.spans.count() * 2];
+            int32 j = 0;
+            while (j < this.fcount * 4) {
+                grown[j] = this.spans[j];
+                j = j + 1;
+            }
+            this.spans #= grown;
+        }
+        int32 k = this.fcount * 4;
+        this.spans[k] = ns;
+        this.spans[k + 1] = vs;
+        this.spans[k + 2] = vs;
+        this.spans[k + 3] = ve;
+        this.fcount = this.fcount + 1;
+        return nt;
+    }
+
+    void stringInto(HpackReader r) {
+        int32 first = r.peekByte();
+        boolean huff = (first & 0x80) != 0;
+        int64 lenL = r.readInteger(7);
+        if (lenL > (int64) this.maxStringLen) {
+            throw heap HpackException("HPACK string literal exceeds size cap");
+        }
+        int32 len = (int32) lenL;
+        int32 at = r.position();
+        r.skip(len);
+        if (huff) {
+            this.huffman.decodeTo(r.buffer(), at, len, this.scratch);
+            return;
+        }
+        int8[] src = r.buffer();
+        int32 i = 0;
+        while (i < len) {
+            this.scratch.put(((int32) src[at + i]) & 255);
+            i = i + 1;
+        }
+    }
+
+    int32 literalInto(HpackReader r, int32 total, int32 prefixBits, boolean index) {
+        int32 nameIdx = (int32) r.readInteger(prefixBits);
+        int32 ns = this.scratch.length();
+        if (nameIdx == 0) {
+            this.stringInto(r);
+        } else {
+            this.putText(this.nameForIndex(nameIdx));
+        }
+        int32 vs = this.scratch.length();
+        this.stringInto(r);
+        int32 nt = this.keep(ns, vs, total);
+        if (index) {
+            String tn #= Bytes.toString(this.fieldName(this.fcount - 1));
+            String tv #= Bytes.toString(this.fieldValue(this.fcount - 1));
+            this.dyn.add(heap HpackField(#tn, #tv, false));
+        }
+        return nt;
+    }
+
     void sizeUpdate(HpackReader r) {
         int64 newMaxL = r.readInteger(5);
         int32 newMax = (int32) newMaxL;

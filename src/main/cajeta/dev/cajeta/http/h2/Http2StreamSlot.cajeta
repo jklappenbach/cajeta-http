@@ -1,0 +1,231 @@
+package dev.cajeta.http.h2;
+
+import cajeta.lang.String;
+import cajeta.lang.Slice;
+import cajeta.io.net.ByteBuffer;
+import dev.cajeta.http.Bytes;
+import dev.cajeta.http.HeadScanner;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.ResponseTransport;
+import dev.cajeta.http.h1.HttpParserLimits;
+import dev.cajeta.http.server.ConnectionBuffers;
+
+/**
+ * One HTTP/2 stream's request and response, over two pooled buffers. The
+ * decoded head is written into the input buffer as a request head and parsed
+ * in place, so the handler sees the same request view HTTP/1.1 gives it, and
+ * the body lands after the head. The connection reuses a slot for stream after
+ * stream.
+ */
+final class Http2StreamSlot implements ResponseTransport {
+    int32 sid;
+    HttpRequest req;
+    HttpResponse res;
+    ByteBuffer in;
+    ByteBuffer out;
+    int32 headLen;
+    int32 bodyLen;
+    int8[] big;
+    boolean bodyOwned;
+    Http2WriteSide ws;
+    Http2SendGate gate;
+    int32 maxFrame;
+    Http2StreamSlot next;
+
+    Http2StreamSlot(ConnectionBuffers bufs, HttpParserLimits limits,
+                    Http2WriteSide ws, Http2SendGate gate) {
+        this.in #= bufs.take();
+        this.out #= bufs.take();
+        this.req = heap HttpRequest(limits.maxHeaderCount + 1);
+        this.res = heap HttpResponse(this.out, null, 4096, 64);
+        this.res.attach(this);
+        this.ws #= ws;
+        this.gate #= gate;
+        this.big = null;
+        this.next = null;
+    }
+
+    void recycle(ConnectionBuffers bufs) {
+        ByteBuffer i #= this.in;
+        this.in = null;
+        bufs.give(#i);
+        ByteBuffer o #= this.out;
+        this.out = null;
+        bufs.give(#o);
+    }
+
+    static boolean pseudo(Slice<int8> n) {
+        return n.count() > 0 && n[0] == (int8) 58;
+    }
+
+    int32 put(int32 at, Slice<int8> s) {
+        int8[] a = this.in.array();
+        int64 n = s.count();
+        if ((int64) at + n + 4 > (int64) this.in.capacity()) {
+            throw heap Http2Exception("request head exceeds the stream buffer",
+                                      Http2.REFUSED_STREAM, this.sid);
+        }
+        int64 i = 0;
+        while (i < n) {
+            a[at + (int32) i] = s[i];
+            i = i + 1;
+        }
+        return at + (int32) n;
+    }
+
+    int32 putText(int32 at, String s) {
+        int8[] a = this.in.array();
+        if (at + s.byteLength() + 4 > this.in.capacity()) {
+            throw heap Http2Exception("request head exceeds the stream buffer",
+                                      Http2.REFUSED_STREAM, this.sid);
+        }
+        return HttpResponse.put(a, at, s);
+    }
+
+    /** Writes the `n` fields `dec` decoded as a request head and parses it. */
+    void begin(int32 sid, HpackDecoder dec, int32 n) {
+        this.sid = sid;
+        this.bodyLen = 0;
+        this.bodyOwned = false;
+        this.big = null;
+        int32 method = -1;
+        int32 path = -1;
+        int32 scheme = -1;
+        int32 authority = -1;
+        boolean sawRegular = false;
+        int32 i = 0;
+        while (i < n) {
+            Slice<int8> name = dec.fieldName(i);
+            if (Http2StreamSlot.pseudo(name)) {
+                if (sawRegular) {
+                    throw heap Http2Exception("pseudo-header after regular header", Http2.PROTOCOL_ERROR);
+                }
+                if (Bytes.equals(name, ":method")) {
+                    method = i;
+                } else if (Bytes.equals(name, ":path")) {
+                    path = i;
+                } else if (Bytes.equals(name, ":scheme")) {
+                    scheme = i;
+                } else if (Bytes.equals(name, ":authority")) {
+                    authority = i;
+                } else {
+                    throw heap Http2Exception("unknown request pseudo-header", Http2.PROTOCOL_ERROR);
+                }
+            } else {
+                sawRegular = true;
+            }
+            i = i + 1;
+        }
+        if (method < 0 || path < 0 || scheme < 0) {
+            throw heap Http2Exception("missing required pseudo-header", Http2.PROTOCOL_ERROR);
+        }
+        this.in.clear();
+        int32 p = this.put(0, dec.fieldValue(method));
+        p = this.putText(p, " ");
+        p = this.put(p, dec.fieldValue(path));
+        p = this.putText(p, " HTTP/2\r\n");
+        if (authority >= 0) {
+            p = this.putText(p, "host: ");
+            p = this.put(p, dec.fieldValue(authority));
+            p = this.putText(p, "\r\n");
+        }
+        i = 0;
+        while (i < n) {
+            Slice<int8> name = dec.fieldName(i);
+            if (!Http2StreamSlot.pseudo(name)) {
+                p = this.put(p, name);
+                p = this.putText(p, ": ");
+                p = this.put(p, dec.fieldValue(i));
+                p = this.putText(p, "\r\n");
+            }
+            i = i + 1;
+        }
+        p = this.putText(p, "\r\n");
+        this.headLen = p;
+        this.in.advanceWrite(p);
+        HeadScanner.parseRequest(this.in.array(), 0, p, this.req);
+        this.req.bindBody(p, 0);
+    }
+
+    /** Appends `src[off .. off + len)` to the request body. */
+    void append(int8[] src, int32 off, int32 len) {
+        if (len <= 0) {
+            return;
+        }
+        if (!this.bodyOwned && this.headLen + this.bodyLen + len <= this.in.capacity()) {
+            Http2.blit(this.in.array(), (int64) (this.headLen + this.bodyLen), src, (int64) off, (int64) len);
+            this.bodyLen = this.bodyLen + len;
+            return;
+        }
+        if (!this.bodyOwned) {
+            int32 cap = (this.bodyLen + len) * 2;
+            int8[] b = heap int8[cap];
+            Http2.blit(b, 0, this.in.array(), (int64) this.headLen, (int64) this.bodyLen);
+            this.big = #b;
+            this.bodyOwned = true;
+        }
+        if (this.bodyLen + len > this.big.count()) {
+            int32 cap2 = this.big.count() * 2;
+            while (cap2 < this.bodyLen + len) {
+                cap2 = cap2 * 2;
+            }
+            int8[] g = heap int8[cap2];
+            Http2.blit(g, 0, this.big, 0, (int64) this.bodyLen);
+            this.big #= g;
+        }
+        Http2.blit(this.big, (int64) this.bodyLen, src, (int64) off, (int64) len);
+        this.bodyLen = this.bodyLen + len;
+    }
+
+    /** Binds the collected body to the request. */
+    void endBody() {
+        if (this.bodyOwned) {
+            int8[] b #= this.big;
+            this.big = null;
+            this.req.replaceBody(#b, this.bodyLen);
+            return;
+        }
+        this.req.bindBody(this.headLen, this.bodyLen);
+    }
+
+    public void head(HttpResponse r, boolean endStream) {
+        HpackFieldList fl = heap HpackFieldList();
+        fl.put(Http2Requests.own(":status"), Http2Requests.statusString(r.status()));
+        int32 i = 0;
+        while (i < r.fieldCount()) {
+            if (r.fieldLive(i)) {
+                String n #= Bytes.toString(r.fieldName(i)).toLowerCase();
+                if (!Http2Requests.forbidden(n)) {
+                    fl.put(#n, Bytes.toString(r.fieldValue(i)));
+                }
+            }
+            i = i + 1;
+        }
+        this.ws.writeHeaders(this.sid, fl, endStream);
+    }
+
+    public void data(int8[] a, int32 off, int32 len, boolean endStream) {
+        if (len == 0) {
+            if (endStream) {
+                this.ws.writeData(this.sid, a, off, 0, true);
+            }
+            return;
+        }
+        int32 done = 0;
+        while (done < len) {
+            int64 want = (int64) (len - done);
+            if (want > (int64) this.maxFrame) {
+                want = (int64) this.maxFrame;
+            }
+            int64 g = this.gate.takeUpTo(this.sid, want);
+            if (g <= (int64) 0) {
+                return;
+            }
+            int32 gi = (int32) g;
+            boolean last = endStream && done + gi >= len;
+            this.ws.writeData(this.sid, a, off + done, gi, last);
+            done = done + gi;
+        }
+    }
+}
