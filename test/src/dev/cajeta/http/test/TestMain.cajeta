@@ -27,6 +27,8 @@ public final class TestMain {
         if (sel.want("ClientTests")) { ClientTests.run(c); }
         if (sel.want("ClientPoolTests")) { ClientPoolTests.run(c); }
         if (sel.want("ClientTimeoutTests")) { ClientTimeoutTests.run(c); }
+        if (sel.want("ClientCodingTests")) { ClientCodingTests.run(c); }
+        if (sel.want("ClientCookieTests")) { ClientCookieTests.run(c); }
 
         System.stdout.println("");
         System.stdout.println("=== {} passed, {} failed, {} skipped ===",

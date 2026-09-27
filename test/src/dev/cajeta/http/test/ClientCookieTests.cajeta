@@ -2,6 +2,10 @@ package dev.cajeta.http.test;
 
 import cajeta.io.net.Server;
 import cajeta.io.net.TcpStream;
+import cajeta.lang.Slice;
+import cajeta.lang.String;
+import dev.cajeta.http.Bytes;
+import dev.cajeta.http.ClientResponse;
 import dev.cajeta.http.HttpRequest;
 import dev.cajeta.http.HttpResponse;
 import dev.cajeta.http.client.HttpClient;
@@ -9,19 +13,8 @@ import dev.cajeta.http.server.HttpServer;
 import dev.cajeta.http.server.HttpServerBuilder;
 
 /**
- * http:1.4g — `CookieJar` (RFC 6265 subset, **off by default**). The
- * loopback server sets cookies with various attributes; `/echo` (and
- * `/app/echo`) reflect the `Cookie` header a request carried. Pinned:
- *
- *   - no jar → nothing is ever echoed back (the default client stores
- *     nothing);
- *   - with a jar → set/return across exchanges on one connection,
- *     multiple `Set-Cookie` headers in one response both stick;
- *   - `Path` scoping: a `/app` cookie rides `/app/echo`, never `/echo`;
- *   - a foreign `Domain` attribute is rejected at store time;
- *   - `Max-Age=0` deletes a stored cookie; a past `Expires` never
- *     stores; a future `Expires` does (the RFC 1123 parse, both ways);
- *   - `Secure` cookies are withheld from plain-http requests.
+ * The client's `CookieJar`, off by default, against a loopback server that
+ * sets cookies and echoes back the `Cookie` header a request carried.
  */
 public final class ClientCookieTests {
 
@@ -38,104 +31,71 @@ public final class ClientCookieTests {
         withheld(c);
     }
 
-    // ---- the loopback cookie server -------------------------------------
-
-    static #HttpResponse setOne(String header, String body) {
-        HttpResponse resp1 #= HttpResponse.ok();
-        resp1.setHeader("Set-Cookie", header);
-        resp1.body(body.toBytes(), body.byteLength());
-        return #resp1;
+    static void setOne(HttpResponse r, String header, String body) {
+        r.setHeader("Set-Cookie", header);
+        r.body(body);
     }
 
-    static #HttpResponse echoCookie(HttpRequest req) {
-        String ck #= req.getHeaders().get("cookie");
-        String out = "-";
-        if (ck != null) {
-            out = ck;
+    static void echoCookie(HttpRequest q, HttpResponse r) {
+        if (q.hasHeader("cookie")) {
+            r.bodyBytes(q.header("cookie"));
+        } else {
+            r.body("-");
         }
-        HttpResponse resp0 #= HttpResponse.ok();
-        resp0.body(out.toBytes(), out.byteLength());
-        return #resp0;
     }
 
-    public static #HttpResponse handle(HttpRequest req) {
-        String t #= req.getTarget();
-        if (t.equals("/set")) {
-            return ClientCookieTests.setOne("sid=abc; Path=/", "set");
+    static void handle(HttpRequest q, HttpResponse r) {
+        Slice<int8> t = q.target();
+        if (Bytes.equals(t, "/set")) {
+            ClientCookieTests.setOne(r, "sid=abc; Path=/", "set");
+            return;
         }
-        if (t.equals("/settwo")) {
-            String two = "two";
-            HttpResponse resp2 #= HttpResponse.ok();
-            resp2.header("Set-Cookie", "a=1; Path=/");
-            resp2.header("Set-Cookie", "b=2; Path=/");
-            resp2.body(two.toBytes(), two.byteLength());
-            return #resp2;
+        if (Bytes.equals(t, "/settwo")) {
+            r.header("Set-Cookie", "a=1; Path=/");
+            r.header("Set-Cookie", "b=2; Path=/");
+            r.body("two");
+            return;
         }
-        if (t.equals("/setpath")) {
-            return ClientCookieTests.setOne("app=1; Path=/app", "set");
+        if (Bytes.equals(t, "/setpath")) {
+            ClientCookieTests.setOne(r, "app=1; Path=/app", "set");
+            return;
         }
-        if (t.equals("/kill")) {
-            return ClientCookieTests.setOne("sid=gone; Path=/; Max-Age=0", "killed");
+        if (Bytes.equals(t, "/kill")) {
+            ClientCookieTests.setOne(r, "sid=gone; Path=/; Max-Age=0", "killed");
+            return;
         }
-        if (t.equals("/setsecure")) {
-            return ClientCookieTests.setOne("sec=1; Path=/; Secure", "set");
+        if (Bytes.equals(t, "/setsecure")) {
+            ClientCookieTests.setOne(r, "sec=1; Path=/; Secure", "set");
+            return;
         }
-        if (t.equals("/setforeign")) {
-            return ClientCookieTests.setOne("f=1; Domain=other.test; Path=/", "set");
+        if (Bytes.equals(t, "/setforeign")) {
+            ClientCookieTests.setOne(r, "f=1; Domain=other.test; Path=/", "set");
+            return;
         }
-        if (t.equals("/setfuture")) {
-            return ClientCookieTests.setOne(
-                "fut=1; Path=/; Expires=Wed, 01 Jan 2031 00:00:00 GMT", "set");
+        if (Bytes.equals(t, "/setfuture")) {
+            ClientCookieTests.setOne(r, "fut=1; Path=/; Expires=Wed, 01 Jan 2031 00:00:00 GMT", "set");
+            return;
         }
-        if (t.equals("/setpast")) {
-            return ClientCookieTests.setOne(
-                "past=1; Path=/; Expires=Mon, 01 Jan 2001 00:00:00 GMT", "set");
+        if (Bytes.equals(t, "/setpast")) {
+            ClientCookieTests.setOne(r, "past=1; Path=/; Expires=Mon, 01 Jan 2001 00:00:00 GMT", "set");
+            return;
         }
-        if (t.equals("/echo")) { return ClientCookieTests.echoCookie(req); }
-        if (t.equals("/app/echo")) { return ClientCookieTests.echoCookie(req); }
-        return HttpResponse.notFound();
+        if (Bytes.equals(t, "/echo") || Bytes.equals(t, "/app/echo")) {
+            ClientCookieTests.echoCookie(q, r);
+            return;
+        }
+        r.status(404);
     }
 
-    /**
-     * Accept and dispatch until the listener closes; returns how many
-     * connections were served.
-     *
-     * The single-accept version this replaces turned any change in connection
-     * REUSE into an infinite hang rather than a failure. It returned after one
-     * connection, so the moment a client dialled a second, nobody accepted it
-     * and the client waited forever for a response that could not come.
-     * MEASURED on Windows: one client fiber cycling PARKED -> READY -> PARKED
-     * forever inside `Reactor.pollPark`, every carrier asleep, the parked list
-     * and timer wheel alternately empty — a healthy scheduler faithfully
-     * running a wait that nothing would ever satisfy. Four suites wedged this
-     * way, all sharing this shape.
-     *
-     * Looping keeps the client unblocked; the COUNT keeps the guarantee. A
-     * suite that means "these legs rode one connection" still asserts exactly
-     * that, and a regression reports the number instead of hanging the run.
-     */
+    /** Accepts and dispatches until the listener closes, and returns the connection count. */
     public static async int32 acceptLoop(Server core) {
         int32 n = 0;
         boolean going = true;
         while (going) {
-            // `acceptNext` answers NULL on a closed listener rather than
-            // raising, exactly as `Server.serve` documents; catching an
-            // exception here instead handed `dispatch` a null and crashed.
             TcpStream conn #= core.acceptNext();
             if (conn == null) {
-                going = false;      // listener closed — the test is finished
+                going = false;
             } else {
-                // `dispatch` SPAWNS the connection fiber and returns at
-                // once (Server.dispatch), so accepts overlap and a scenario
-                // that needs two connections in flight still works.
-                //
-                // Do NOT wrap this call in a `try`: a try block is a scope
-                // frame, and a statement-position spawn is joined at its
-                // enclosing frame's exit. Wrapping it therefore joins each
-                // connection before the next accept — serializing them, and
-                // deadlocking any scenario whose first handler is waiting on
-                // something the second one delivers. Measured: it wedged
-                // `timeoutReleasesLease` until the deadline elapsed.
                 core.dispatch(#conn);
                 n = n + 1;
             }
@@ -143,41 +103,25 @@ public final class ClientCookieTests {
         return n;
     }
 
-    static #String respText(HttpResponse resp) {
-        int32 n = resp.bodyLength();
-        int8[] copy = heap int8[n];
-        int32 i = 0;
-        while (i < n) {
-            copy[i] = resp.body[i];
-            i = i + 1;
-        }
-        return heap String(#copy, n);
-    }
-
     static #HttpServer cookieServer() {
         HttpServerBuilder b #= HttpServer.builder();
         b.bind("127.0.0.1:0");
-        (HttpRequest) -> #HttpResponse h =
-            (req) -> ClientCookieTests.handle(req);
-        b.handler(h);
+        b.handler((HttpRequest q, HttpResponse r) -> ClientCookieTests.handle(q, r));
         return b.build();
     }
 
-    /** GET `path` with `client`, return the body text (or null on !200). */
+    /** GETs `path` with `client` and returns the body text, or null on a non-200. */
     static #String getText(HttpClient client, int32 port, String path) {
-        String url = "http://127.0.0.1:" + port + path;
-        HttpResponse resp #= client.get(url);
-        if (resp.statusCode() != 200) {
+        ClientResponse resp #= client.get("http://127.0.0.1:" + port + path);
+        if (resp.status() != 200) {
             return null;
         }
-        return ClientCookieTests.respText(resp);
+        return resp.bodyString();
     }
-
-    // ---- client fibers ---------------------------------------------------
 
     /** The default client never stores or returns a cookie. */
     public static async int32 noJar(int32 port) {
-        HttpClient client #= heap HttpClient();
+        HttpClient client = heap HttpClient();
         String s #= ClientCookieTests.getText(client, port, "/set");
         if (s == null || !s.equals("set")) { return -1; }
         String e #= ClientCookieTests.getText(client, port, "/echo");
@@ -189,7 +133,7 @@ public final class ClientCookieTests {
         return 1;
     }
 
-    /** Set → return across exchanges; two Set-Cookie headers both stick. */
+    /** Set, then return across exchanges, and two Set-Cookie fields both stick. */
     public static async int32 roundTrip(int32 port) {
         HttpClient client #= HttpClient.builder().cookieJar().build();
         String s #= ClientCookieTests.getText(client, port, "/set");
@@ -227,7 +171,7 @@ public final class ClientCookieTests {
         return 1;
     }
 
-    /** Max-Age=0 deletes; past Expires never stores; future Expires does. */
+    /** Max-Age=0 deletes, a past Expires never stores, a future Expires does. */
     public static async int32 expiryDrops(int32 port) {
         HttpClient client #= HttpClient.builder().cookieJar().build();
         String s #= ClientCookieTests.getText(client, port, "/set");
@@ -258,7 +202,7 @@ public final class ClientCookieTests {
         return 1;
     }
 
-    /** Secure withheld over http; foreign Domain rejected at store. */
+    /** Secure is withheld over http, and a foreign Domain is rejected at store. */
     public static async int32 secureAndForeign(int32 port) {
         HttpClient client #= HttpClient.builder().cookieJar().build();
         String s #= ClientCookieTests.getText(client, port, "/setsecure");
@@ -278,8 +222,6 @@ public final class ClientCookieTests {
         return 1;
     }
 
-    // ---- scenarios -------------------------------------------------------
-
     static void offByDefault(Check c) {
         scope {
             HttpServer srv #= ClientCookieTests.cookieServer();
@@ -287,10 +229,7 @@ public final class ClientCookieTests {
             int32 port = core.listener.boundPort();
             Task<int32> s1 = spawn acceptLoop(core);
             Task<int32> t1 = spawn noJar(port);
-            c.eqInt((int64) await t1, 1,
-                    "no jar: nothing echoed back");
-            // Unblock the accept loop only once the client is done, so a
-            // second dial is SERVED and then counted rather than hanging.
+            c.eqInt((int64) await t1, 1, "no jar: nothing echoed back");
             core.listener.close();
             c.eqInt((int64) await s1, 1, "no-jar pair rode one connection");
         }
@@ -303,10 +242,7 @@ public final class ClientCookieTests {
             int32 port = core.listener.boundPort();
             Task<int32> s1 = spawn acceptLoop(core);
             Task<int32> t1 = spawn roundTrip(port);
-            c.eqInt((int64) await t1, 1,
-                    "jar returns stored cookies across exchanges");
-            // Unblock the accept loop only once the client is done, so a
-            // second dial is SERVED and then counted rather than hanging.
+            c.eqInt((int64) await t1, 1, "jar returns stored cookies across exchanges");
             core.listener.close();
             c.eqInt((int64) await s1, 1, "round-trip rode one connection");
         }
@@ -319,10 +255,7 @@ public final class ClientCookieTests {
             int32 port = core.listener.boundPort();
             Task<int32> s1 = spawn acceptLoop(core);
             Task<int32> t1 = spawn pathScoped(port);
-            c.eqInt((int64) await t1, 1,
-                    "Path attribute scopes the send");
-            // Unblock the accept loop only once the client is done, so a
-            // second dial is SERVED and then counted rather than hanging.
+            c.eqInt((int64) await t1, 1, "Path attribute scopes the send");
             core.listener.close();
             c.eqInt((int64) await s1, 1, "path-scope legs rode one connection");
         }
@@ -335,10 +268,7 @@ public final class ClientCookieTests {
             int32 port = core.listener.boundPort();
             Task<int32> s1 = spawn acceptLoop(core);
             Task<int32> t1 = spawn expiryDrops(port);
-            c.eqInt((int64) await t1, 1,
-                    "Max-Age=0 deletes; Expires stores future, drops past");
-            // Unblock the accept loop only once the client is done, so a
-            // second dial is SERVED and then counted rather than hanging.
+            c.eqInt((int64) await t1, 1, "Max-Age=0 deletes; Expires stores future, drops past");
             core.listener.close();
             c.eqInt((int64) await s1, 1, "expiry legs rode one connection");
         }
@@ -351,10 +281,7 @@ public final class ClientCookieTests {
             int32 port = core.listener.boundPort();
             Task<int32> s1 = spawn acceptLoop(core);
             Task<int32> t1 = spawn secureAndForeign(port);
-            c.eqInt((int64) await t1, 1,
-                    "Secure withheld over http; foreign Domain rejected");
-            // Unblock the accept loop only once the client is done, so a
-            // second dial is SERVED and then counted rather than hanging.
+            c.eqInt((int64) await t1, 1, "Secure withheld over http; foreign Domain rejected");
             core.listener.close();
             c.eqInt((int64) await s1, 1, "withheld legs rode one connection");
         }
