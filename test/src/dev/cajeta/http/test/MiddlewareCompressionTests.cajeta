@@ -158,7 +158,9 @@ public final class MiddlewareCompressionTests {
         String wire #= Wire.through(#Compression.middleware(cmp), stream,
             "GET /x HTTP/1.1\r\nAccept-Encoding: gzip\r\n\r\n");
         Wire.same(c, Wire.header(wire, "Content-Encoding"), "gzip", "streamed response: Content-Encoding stamped");
-        Wire.same(c, Wire.header(wire, "transfer-encoding"), "chunked", "streamed response: sent chunked");
+        String zipped #= Wire.bodyOf(wire);
+        Wire.same(c, Wire.header(wire, "content-length"), "" + zipped.byteLength(),
+            "streamed response: a stream that fits the buffer is sent with its exact length");
         Wire.same(c, MiddlewareCompressionTests.decoded("gzip", wire), plain,
             "streamed response: the gzip stream decodes to the original");
     }

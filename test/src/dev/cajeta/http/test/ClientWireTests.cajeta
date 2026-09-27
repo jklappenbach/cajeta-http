@@ -1,0 +1,225 @@
+package dev.cajeta.http.test;
+
+import cajeta.lang.String;
+import cajeta.io.net.AsyncReader;
+import cajeta.io.net.BufferPool;
+import dev.cajeta.http.Bytes;
+import dev.cajeta.http.ClientRequest;
+import dev.cajeta.http.ClientResponse;
+import dev.cajeta.http.Http1ClientConnection;
+import dev.cajeta.http.InvalidChunkEncodingException;
+import dev.cajeta.http.UnexpectedEofException;
+import dev.cajeta.http.Version;
+import dev.cajeta.http.body.StreamBody;
+import dev.cajeta.http.h1.HttpParserLimits;
+import dev.cajeta.http.server.ConnectionBuffers;
+
+/** The client connection alone: request bytes out, response views in. */
+public final class ClientWireTests {
+    public static void run(Check c) {
+        System.stdout.println("-- client wire: requests --");
+        ClientWireTests.requests(c);
+        System.stdout.println("-- client wire: responses --");
+        ClientWireTests.responses(c);
+        System.stdout.println("-- client wire: large bodies --");
+        ClientWireTests.large(c);
+        System.stdout.println("-- client wire: failures --");
+        ClientWireTests.failures(c);
+        System.stdout.println("-- client wire: buffers --");
+        ClientWireTests.buffers(c);
+    }
+
+    static #String repeat(String unit, int32 n) {
+        String out = "";
+        int32 i = 0;
+        while (i < n) {
+            out = out + unit;
+            i = i + 1;
+        }
+        return #out;
+    }
+
+    static #AsyncReader reader(String text) {
+        MemChannel ch = heap MemChannel();
+        AsyncReader rd = heap AsyncReader(ch, text.byteLength() + 16);
+        int8[] b #= text.toBytes();
+        rd.stage(b, text.byteLength());
+        rd.markEof();
+        return #rd;
+    }
+
+    static void requests(Check c) {
+        ConnectionBuffers bufs = heap ConnectionBuffers(heap BufferPool(8192, 8));
+        HttpParserLimits pl = heap HttpParserLimits();
+        ReplyChannel ch = heap ReplyChannel(4096);
+        ch.reply("HTTP/1.1 204 No Content\r\n\r\n").reply("HTTP/1.1 204 No Content\r\n\r\n")
+          .reply("HTTP/1.1 204 No Content\r\n\r\n").reply("HTTP/1.1 204 No Content\r\n\r\n");
+        Http1ClientConnection conn = heap Http1ClientConnection(ch, bufs, pl);
+        ClientResponse resp = heap ClientResponse();
+
+        ClientRequest get = heap ClientRequest("http://t.example/a/b?x=1");
+        get.header("Host", "t.example");
+        conn.exchange(get, resp, (int64) 0, bufs);
+        Wire.same(c, ch.written(), "GET /a/b?x=1 HTTP/1.1\r\nHost: t.example\r\n\r\n",
+            "a GET carries the path, the query and no length");
+
+        ch.clearWritten();
+        ClientRequest post #= ClientRequest.post("http://t.example/u");
+        post.header("Content-Type", "text/plain").body("hello");
+        conn.exchange(post, resp, (int64) 0, bufs);
+        Wire.same(c, ch.written(), "POST /u HTTP/1.1\r\nContent-Type: text/plain\r\ncontent-length: 5\r\n\r\nhello",
+            "a POST body is framed by its length");
+
+        ch.clearWritten();
+        ClientRequest sized #= ClientRequest.of("PUT", "http://t.example/s");
+        sized.body(#StreamBody.sized(#ClientWireTests.reader("streamed"), (int64) 8));
+        conn.exchange(sized, resp, (int64) 0, bufs);
+        Wire.same(c, ch.written(), "PUT /s HTTP/1.1\r\ncontent-length: 8\r\n\r\nstreamed",
+            "a sized streamed body is framed by its length");
+
+        ch.clearWritten();
+        ClientRequest chunked #= ClientRequest.of("PUT", "http://t.example/c");
+        chunked.body(#StreamBody.of(#ClientWireTests.reader("abcdef")));
+        chunked.version(Version.HTTP_1_1);
+        conn.exchange(chunked, resp, (int64) 0, bufs);
+        Wire.same(c, ch.written(), "PUT /c HTTP/1.1\r\ntransfer-encoding: chunked\r\n\r\n6\r\nabcdef\r\n0\r\n\r\n",
+            "an unsized streamed body is chunked");
+    }
+
+    static void responses(Check c) {
+        ConnectionBuffers bufs = heap ConnectionBuffers(heap BufferPool(8192, 8));
+        HttpParserLimits pl = heap HttpParserLimits();
+        ReplyChannel ch = heap ReplyChannel(3);
+        ch.reply("HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n\r\nhello")
+          .reply("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n4;x=y\r\ndefg\r\n0\r\nT: v\r\n\r\n")
+          .reply("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+          .reply("HTTP/1.0 200 OK\r\n\r\nuntil close");
+        Http1ClientConnection conn = heap Http1ClientConnection(ch, bufs, pl);
+        ClientRequest req = heap ClientRequest("http://t.example/");
+
+        ClientResponse one = heap ClientResponse();
+        conn.exchange(req, one, (int64) 0, bufs);
+        c.eqInt((int64) one.status(), 200, "an interim 100 is skipped, three bytes at a time");
+        Wire.same(c, Bytes.toString(one.reason()), "OK", "the reason phrase is a window");
+        Wire.same(c, Bytes.toString(one.header("content-type")), "text/plain", "a header reads by name");
+        Wire.same(c, one.bodyString(), "hello", "a length-framed body");
+        c.that(one.keptAlive(), "HTTP/1.1 with a length keeps the connection");
+
+        ClientResponse two = heap ClientResponse();
+        conn.exchange(req, two, (int64) 0, bufs);
+        Wire.same(c, two.bodyString(), "abcdefg", "a chunked body is decoded in place, extensions and trailers skipped");
+        c.that(two.keptAlive(), "a chunked response keeps the connection");
+        Wire.same(c, one.bodyString(), "hello", "the first response is intact after the connection is reused");
+
+        conn.exchange(req, two, (int64) 0, bufs);
+        c.eqInt((int64) two.status(), 404, "a response object is reused");
+        c.that(!two.keptAlive(), "Connection: close ends reuse");
+
+        conn.exchange(req, two, (int64) 0, bufs);
+        Wire.same(c, two.bodyString(), "until close", "a body without framing runs to the close");
+        c.that(!two.keptAlive(), "a close-delimited HTTP/1.0 response ends reuse");
+
+        ReplyChannel hc = heap ReplyChannel(4096);
+        hc.reply("HTTP/1.1 200 OK\r\nContent-Length: 1234\r\n\r\n");
+        Http1ClientConnection hconn = heap Http1ClientConnection(hc, bufs, pl);
+        ClientRequest head #= ClientRequest.of("HEAD", "http://t.example/");
+        hconn.exchange(head, one, (int64) 0, bufs);
+        c.that(one.bodyLength() == 0 && one.keptAlive(), "HEAD reads no body whatever the length says");
+    }
+
+    static void large(Check c) {
+        ConnectionBuffers bufs = heap ConnectionBuffers(heap BufferPool(8192, 8));
+        HttpParserLimits pl = heap HttpParserLimits();
+        String big #= ClientWireTests.repeat("0123456789", 3000);
+        String chunks = "";
+        int32 k = 0;
+        while (k < 30) {
+            chunks = chunks + "3e8\r\n" + big.substring(k * 1000, k * 1000 + 1000) + "\r\n";
+            k = k + 1;
+        }
+        ReplyChannel ch = heap ReplyChannel(1500);
+        ch.reply("HTTP/1.1 200 OK\r\nContent-Length: 30000\r\n\r\n" + big)
+          .reply("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n" + chunks + "0\r\n\r\n")
+          .reply("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n" + big);
+        Http1ClientConnection conn = heap Http1ClientConnection(ch, bufs, pl);
+        ClientRequest req = heap ClientRequest("http://t.example/");
+        ClientResponse resp = heap ClientResponse();
+        conn.exchange(req, resp, (int64) 0, bufs);
+        c.that(resp.bodyString().equals(big), "a length-framed body larger than the buffer arrives whole");
+        c.that(resp.keptAlive(), "and the connection is reusable");
+        conn.exchange(req, resp, (int64) 0, bufs);
+        c.that(resp.bodyString().equals(big), "a chunked body larger than the buffer arrives whole");
+        conn.exchange(req, resp, (int64) 0, bufs);
+        c.that(resp.bodyString().equals(big), "a close-delimited body larger than the buffer arrives whole");
+    }
+
+    static void failures(Check c) {
+        ConnectionBuffers bufs = heap ConnectionBuffers(heap BufferPool(8192, 8));
+        HttpParserLimits pl = heap HttpParserLimits();
+        ClientRequest req = heap ClientRequest("http://t.example/");
+        ClientResponse resp = heap ClientResponse();
+
+        ReplyChannel cut = heap ReplyChannel(4096);
+        cut.reply("HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nshort");
+        Http1ClientConnection c1 = heap Http1ClientConnection(cut, bufs, pl);
+        boolean eof = false;
+        try {
+            c1.exchange(req, resp, (int64) 0, bufs);
+        } catch (UnexpectedEofException e) {
+            eof = true;
+        }
+        c.that(eof, "a body cut short raises UnexpectedEof");
+
+        ReplyChannel bad = heap ReplyChannel(4096);
+        bad.reply("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\nabc\r\n0\r\n\r\n");
+        Http1ClientConnection c2 = heap Http1ClientConnection(bad, bufs, pl);
+        boolean chunkErr = false;
+        try {
+            c2.exchange(req, resp, (int64) 0, bufs);
+        } catch (InvalidChunkEncodingException e) {
+            chunkErr = true;
+        }
+        c.that(chunkErr, "a bad chunk size raises InvalidChunkEncoding");
+
+        ReplyChannel none = heap ReplyChannel(4096);
+        Http1ClientConnection c3 = heap Http1ClientConnection(none, bufs, pl);
+        boolean empty = false;
+        try {
+            c3.exchange(req, resp, (int64) 0, bufs);
+        } catch (UnexpectedEofException e) {
+            empty = true;
+        }
+        c.that(empty, "a peer that closes without answering raises UnexpectedEof");
+    }
+
+    static void buffers(Check c) {
+        ConnectionBuffers bufs = heap ConnectionBuffers(heap BufferPool(8192, 8));
+        HttpParserLimits pl = heap HttpParserLimits();
+        ReplyChannel ch = heap ReplyChannel(4096);
+        ch.repeatReply("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 13\r\n\r\n{\"name\":\"a\"}\n");
+        Http1ClientConnection conn = heap Http1ClientConnection(ch, bufs, pl);
+        ClientRequest req = heap ClientRequest("http://t.example/users/42");
+        req.header("Host", "t.example").header("Accept", "application/json");
+        ClientResponse resp = heap ClientResponse();
+        conn.exchange(req, resp, (int64) 0, bufs);
+        c.that(resp.holdsBuffer(), "the response holds the buffer it was read into");
+        int32 i = 0;
+        while (i < 50) {
+            bufs.give(#resp.takeBuffer());
+            conn.exchange(req, resp, (int64) 0, bufs);
+            i = i + 1;
+        }
+        int64 before = Cajeta.allocatedBytes();
+        int32 poolBefore = bufs.allocations();
+        i = 0;
+        while (i < 1000) {
+            bufs.give(#resp.takeBuffer());
+            conn.exchange(req, resp, (int64) 0, bufs);
+            i = i + 1;
+        }
+        int64 delta = Cajeta.allocatedBytes() - before;
+        c.that(delta == 0, "1000 exchanges on one connection allocate nothing (" + delta + " bytes)");
+        c.eqInt((int64) (bufs.allocations() - poolBefore), 0, "and take no fresh buffer from the pool");
+        Wire.same(c, resp.bodyString(), "{\"name\":\"a\"}\n", "the last response reads correctly");
+    }
+}

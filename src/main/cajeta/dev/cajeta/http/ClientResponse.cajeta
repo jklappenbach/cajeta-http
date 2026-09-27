@@ -1,0 +1,178 @@
+package dev.cajeta.http;
+
+import cajeta.lang.String;
+import cajeta.lang.Slice;
+import cajeta.io.net.ByteBuffer;
+
+/**
+ * An inbound response, as windows into bytes the response owns: the input
+ * buffer its connection read it into, which the response takes over so the
+ * connection can go straight back to its pool. Every window is valid until
+ * the response is reused or closed. A value that must outlive it is copied
+ * with one of the `String` accessors.
+ */
+public final class ClientResponse {
+    ByteBuffer buf;
+    int8[] none;
+    int8[] src;
+    int32 code;
+    Version versionKind;
+    int32 reasonOff;
+    int32 reasonLen;
+    HeaderTable table;
+    int32 bodyOff;
+    int32 bodyLen;
+    int8[] ownBody;
+    boolean bodyOwned;
+    boolean reuse;
+
+    /** An empty response whose header table holds at most `maxHeaders` fields. */
+    public ClientResponse(int32 maxHeaders) {
+        this.table = heap HeaderTable(maxHeaders);
+        this.none = heap int8[0];
+        this.src #= this.none;
+        this.buf = null;
+        this.ownBody = null;
+        this.clear();
+    }
+
+    /** An empty response with room for 100 header fields. */
+    public ClientResponse() {
+        this.table = heap HeaderTable(100);
+        this.none = heap int8[0];
+        this.src #= this.none;
+        this.buf = null;
+        this.ownBody = null;
+        this.clear();
+    }
+
+    void clear() {
+        this.code = 0;
+        this.versionKind = Version.HTTP_1_1;
+        this.reasonOff = 0;
+        this.reasonLen = 0;
+        this.bodyOff = 0;
+        this.bodyLen = 0;
+        this.bodyOwned = false;
+        this.ownBody = null;
+        this.reuse = false;
+    }
+
+    void bind(int8[] store) {
+        this.clear();
+        this.src #= store;
+        this.table.reset(store);
+    }
+
+    /** True while the response holds the buffer it was read into. */
+    public boolean holdsBuffer() {
+        return this.buf != null;
+    }
+
+    /** Hands back the buffer the response holds, and empties the response. */
+    public #ByteBuffer takeBuffer() {
+        ByteBuffer b #= this.buf;
+        this.buf = null;
+        this.src #= this.none;
+        this.table.reset(this.none);
+        this.clear();
+        return #b;
+    }
+
+    /** Releases the bytes the response holds. Its windows are invalid afterwards. */
+    public void close() {
+        this.buf = null;
+        this.src #= this.none;
+        this.table.reset(this.none);
+        this.clear();
+    }
+
+    void adopt(#ByteBuffer b) {
+        this.buf #= b;
+    }
+
+    /** The status code. */
+    public int32 status() {
+        return this.code;
+    }
+
+    /** True for a 2xx status. */
+    public boolean isSuccess() {
+        return this.code >= 200 && this.code < 300;
+    }
+
+    /** The protocol version the server answered with. */
+    public Version version() {
+        return this.versionKind;
+    }
+
+    /** The reason phrase as sent. */
+    public Slice<int8> reason() {
+        return this.src[this.reasonOff:this.reasonOff + this.reasonLen];
+    }
+
+    /** The header fields. */
+    public HeaderTable headers() {
+        return this.table;
+    }
+
+    /** The first value of header `name`, or an empty window. */
+    public Slice<int8> header(String name) {
+        return this.table.get(name);
+    }
+
+    /** True when header `name` is present. */
+    public boolean hasHeader(String name) {
+        return this.table.has(name);
+    }
+
+    /** True when header `name` lists `token`, ignoring case. */
+    public boolean headerHasToken(String name, String token) {
+        return this.table.hasToken(name, token);
+    }
+
+    /** Header `name` as a non-negative integer, or `fallback`. */
+    public int64 headerInt64(String name, int64 fallback) {
+        return this.table.int64Of(name, fallback);
+    }
+
+    /** An owned copy of header `name`, or null when absent. */
+    public #String headerString(String name) {
+        return this.table.copy(name);
+    }
+
+    /** True when the response carries body bytes. */
+    public boolean hasBody() {
+        return this.bodyLen > 0;
+    }
+
+    /** The body. */
+    public Slice<int8> body() {
+        if (this.bodyOwned) {
+            return this.ownBody[0:this.bodyLen];
+        }
+        return this.src[this.bodyOff:this.bodyOff + this.bodyLen];
+    }
+
+    /** Length of the body. */
+    public int32 bodyLength() {
+        return this.bodyLen;
+    }
+
+    /** An owned copy of the body as a `String`. */
+    public #String bodyString() {
+        return Bytes.toString(this.body());
+    }
+
+    /** Replaces the body with `data[0 .. length)`, which the response keeps. */
+    public void replaceBody(#int8[] data, int32 length) {
+        this.ownBody = #data;
+        this.bodyOwned = true;
+        this.bodyLen = length;
+    }
+
+    /** Whether the connection the response came on may carry another request. */
+    public boolean keptAlive() {
+        return this.reuse;
+    }
+}

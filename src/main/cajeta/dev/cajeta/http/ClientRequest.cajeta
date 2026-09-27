@@ -1,0 +1,382 @@
+package dev.cajeta.http;
+
+import cajeta.lang.String;
+import cajeta.lang.Slice;
+import cajeta.io.net.uri.Uri;
+import dev.cajeta.http.body.Body;
+
+/**
+ * An outbound request the client serializes into a connection's output
+ * buffer. Header names, values and a held body are copied into the request's
+ * own bytes, so nothing the caller passes is retained, and a request reused for
+ * the same shape allocates nothing.
+ */
+public final class ClientRequest {
+    Method methodKind;
+    String methodText;
+    Uri uri;
+    boolean https;
+    String host;
+    int32 port;
+    int8[] target;
+    int32 targetLen;
+    Version versionKind;
+    int8[] fields;
+    int32[] spans;
+    int32 fieldsUsed;
+    int32 count;
+    int8[] held;
+    int32 heldLen;
+    Body stream;
+
+    /** A GET for `url`. */
+    public ClientRequest(String url) {
+        this.methodKind = Method.GET;
+        this.methodText = "GET";
+        this.target = heap int8[64];
+        this.fields = heap int8[512];
+        this.spans = heap int32[16 * 5];
+        this.held = heap int8[0];
+        this.versionKind = Version.HTTP_1_1;
+        this.url(url);
+        this.reset();
+    }
+
+    /** A GET for `url`. */
+    public static #ClientRequest get(String url) {
+        return heap ClientRequest(url);
+    }
+
+    /** A POST for `url`. */
+    public static #ClientRequest post(String url) {
+        ClientRequest r = heap ClientRequest(url);
+        r.method("POST");
+        return #r;
+    }
+
+    /** A request with method token `method` for `url`. */
+    public static #ClientRequest of(String method, String url) {
+        ClientRequest r = heap ClientRequest(url);
+        r.method(method);
+        return #r;
+    }
+
+    /** Clears the headers and body, keeping the method, URL and version. */
+    public void reset() {
+        this.fieldsUsed = 0;
+        this.count = 0;
+        this.heldLen = 0;
+        this.stream = null;
+    }
+
+    /** Sets the method token. */
+    public ClientRequest method(String token) {
+        this.methodText #= token.substring(0, token.byteLength());
+        this.methodKind = Method.of(token);
+        return this;
+    }
+
+    /** The method. */
+    public Method method() {
+        return this.methodKind;
+    }
+
+    /** The method token as it goes on the wire. */
+    public String methodToken() {
+        return this.methodText;
+    }
+
+    /** Points the request at `url`: scheme, authority, path and query. */
+    public ClientRequest url(String url) {
+        Uri u #= Uri.parse(url);
+        this.uri #= u;
+        this.https = this.uri.getScheme().equals("https");
+        this.host #= this.uri.getHost().substring(0, this.uri.getHost().byteLength());
+        int32 p = this.uri.getPort();
+        this.port = p >= 0 ? p : (this.https ? 443 : 80);
+        String path = this.uri.getPath();
+        String q = this.uri.getQuery();
+        this.targetLen = 0;
+        if (path.byteLength() == 0) {
+            this.appendTarget("/");
+        } else {
+            this.appendTarget(path);
+        }
+        if (q != null && q.byteLength() > 0) {
+            this.appendTarget("?");
+            this.appendTarget(q);
+        }
+        return this;
+    }
+
+    /** Points the request at `url`, which is already parsed. */
+    public ClientRequest uri(Uri url) {
+        String s #= url.toString();
+        return this.url(s);
+    }
+
+    void appendTarget(String s) {
+        int32 n = s.byteLength();
+        if (this.targetLen + n > this.target.count()) {
+            int32 cap = this.target.count() * 2;
+            while (cap < this.targetLen + n) {
+                cap = cap * 2;
+            }
+            int8[] grown = heap int8[cap];
+            int32 j = 0;
+            while (j < this.targetLen) {
+                grown[j] = this.target[j];
+                j = j + 1;
+            }
+            this.target #= grown;
+        }
+        int32 i = 0;
+        while (i < n) {
+            this.target[this.targetLen + i] = s.byteAt(i);
+            i = i + 1;
+        }
+        this.targetLen = this.targetLen + n;
+    }
+
+    /** Replaces the target with the absolute form a forward proxy expects. */
+    public void absoluteTarget() {
+        if (this.targetLen > 0 && this.target[0] != (int8) 47) {
+            return;
+        }
+        String rel #= Bytes.toString(this.target[0:this.targetLen]);
+        this.targetLen = 0;
+        this.appendTarget("http://" + this.host + ":" + this.port);
+        this.appendTarget(rel);
+    }
+
+    /** The parsed URL. */
+    public Uri uri() {
+        return this.uri;
+    }
+
+    /** True for an `https` URL. */
+    public boolean isHttps() {
+        return this.https;
+    }
+
+    /** The host the URL names. */
+    public String host() {
+        return this.host;
+    }
+
+    /** The port the URL names, or the scheme's default. */
+    public int32 port() {
+        return this.port;
+    }
+
+    /** The request target: the path and query, or the absolute form. */
+    public Slice<int8> target() {
+        return this.target[0:this.targetLen];
+    }
+
+    /** Sets the protocol version. */
+    public ClientRequest version(Version v) {
+        this.versionKind = v;
+        return this;
+    }
+
+    /** The protocol version. */
+    public Version version() {
+        return this.versionKind;
+    }
+
+    int32 reserve(int32 n) {
+        if (this.fieldsUsed + n > this.fields.count()) {
+            int32 cap = this.fields.count() * 2;
+            while (cap < this.fieldsUsed + n) {
+                cap = cap * 2;
+            }
+            int8[] grown = heap int8[cap];
+            int32 j = 0;
+            while (j < this.fieldsUsed) {
+                grown[j] = this.fields[j];
+                j = j + 1;
+            }
+            this.fields #= grown;
+        }
+        if ((this.count + 1) * 5 > this.spans.count()) {
+            int32[] more = heap int32[this.spans.count() * 2];
+            int32 k = 0;
+            while (k < this.count * 5) {
+                more[k] = this.spans[k];
+                k = k + 1;
+            }
+            this.spans #= more;
+        }
+        int32 at = this.fieldsUsed;
+        this.fieldsUsed = this.fieldsUsed + n;
+        return at;
+    }
+
+    void addSpan(int32 nameAt, int32 nameLen, int32 valueAt, int32 valueLen) {
+        int32 k = this.count * 5;
+        this.spans[k] = nameAt;
+        this.spans[k + 1] = nameLen;
+        this.spans[k + 2] = valueAt;
+        this.spans[k + 3] = valueLen;
+        this.spans[k + 4] = 1;
+        this.count = this.count + 1;
+    }
+
+    /** Adds a header field, keeping any earlier field of the same name. */
+    public ClientRequest header(String name, String value) {
+        int32 nl = name.byteLength();
+        int32 vl = value.byteLength();
+        int32 at = this.reserve(nl + vl);
+        HttpResponse.put(this.fields, at, name);
+        HttpResponse.put(this.fields, at + nl, value);
+        this.addSpan(at, nl, at + nl, vl);
+        return this;
+    }
+
+    /** Adds a header field whose value is a byte window. */
+    public ClientRequest headerBytes(String name, Slice<int8> value) {
+        int32 nl = name.byteLength();
+        int32 vl = (int32) value.count();
+        int32 at = this.reserve(nl + vl);
+        HttpResponse.put(this.fields, at, name);
+        int32 i = 0;
+        while (i < vl) {
+            this.fields[at + nl + i] = value[(int64) i];
+            i = i + 1;
+        }
+        this.addSpan(at, nl, at + nl, vl);
+        return this;
+    }
+
+    /** Replaces every field named `name` with one field. */
+    public ClientRequest setHeader(String name, String value) {
+        this.removeHeader(name);
+        return this.header(name, value);
+    }
+
+    /** Removes every field named `name`. */
+    public ClientRequest removeHeader(String name) {
+        int32 i = 0;
+        while (i < this.count) {
+            if (this.spans[i * 5 + 4] == 1 && Bytes.equalsIgnoreCase(this.nameAt(i), name)) {
+                this.spans[i * 5 + 4] = 0;
+            }
+            i = i + 1;
+        }
+        return this;
+    }
+
+    /** Number of header slots, removed ones included. */
+    public int32 fieldCount() {
+        return this.count;
+    }
+
+    /** True when slot `i` still holds a field. */
+    public boolean fieldLive(int32 i) {
+        return this.spans[i * 5 + 4] == 1;
+    }
+
+    /** The name in slot `i`. */
+    public Slice<int8> nameAt(int32 i) {
+        int32 k = i * 5;
+        return this.fields[this.spans[k]:this.spans[k] + this.spans[k + 1]];
+    }
+
+    /** The value in slot `i`. */
+    public Slice<int8> valueAt(int32 i) {
+        int32 k = i * 5;
+        return this.fields[this.spans[k + 2]:this.spans[k + 2] + this.spans[k + 3]];
+    }
+
+    int32 find(String name) {
+        int32 i = 0;
+        while (i < this.count) {
+            if (this.spans[i * 5 + 4] == 1 && Bytes.equalsIgnoreCase(this.nameAt(i), name)) {
+                return i;
+            }
+            i = i + 1;
+        }
+        return -1;
+    }
+
+    /** True when a field named `name` is set. */
+    public boolean hasHeader(String name) {
+        return this.find(name) >= 0;
+    }
+
+    /** The first value named `name`, or an empty window. */
+    public Slice<int8> header(String name) {
+        int32 i = this.find(name);
+        if (i < 0) {
+            return this.fields[0:0];
+        }
+        return this.valueAt(i);
+    }
+
+    void holdRoom(int32 n) {
+        if (n > this.held.count()) {
+            int32 cap = this.held.count() < 64 ? 64 : this.held.count();
+            while (cap < n) {
+                cap = cap * 2;
+            }
+            this.held = heap int8[cap];
+        }
+    }
+
+    /** Sets the body to the bytes of `text`. */
+    public ClientRequest body(String text) {
+        int32 n = text.byteLength();
+        this.holdRoom(n);
+        HttpResponse.put(this.held, 0, text);
+        this.heldLen = n;
+        this.stream = null;
+        return this;
+    }
+
+    /** Sets the body to `data[0 .. length)`. */
+    public ClientRequest body(int8[] data, int32 length) {
+        return this.bodyBytes(data[0:length]);
+    }
+
+    /** Sets the body to the bytes of a window. */
+    public ClientRequest bodyBytes(Slice<int8> data) {
+        int32 n = (int32) data.count();
+        this.holdRoom(n);
+        int32 i = 0;
+        while (i < n) {
+            this.held[i] = data[(int64) i];
+            i = i + 1;
+        }
+        this.heldLen = n;
+        this.stream = null;
+        return this;
+    }
+
+    /** Streams the body from `b`, framed chunked unless `b` declares a length. */
+    public ClientRequest body(#Body b) {
+        this.heldLen = 0;
+        this.stream #= b;
+        return this;
+    }
+
+    /** True when the request carries a body, held or streamed. */
+    public boolean hasBody() {
+        return this.heldLen > 0 || this.stream != null;
+    }
+
+    /** The held body. */
+    public Slice<int8> body() {
+        return this.held[0:this.heldLen];
+    }
+
+    /** Length of the held body. */
+    public int32 bodyLength() {
+        return this.heldLen;
+    }
+
+    /** The streamed body, or null. */
+    public Body bodyStream() {
+        return this.stream;
+    }
+}

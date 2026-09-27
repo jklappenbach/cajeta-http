@@ -1,0 +1,495 @@
+package dev.cajeta.http;
+
+import cajeta.lang.String;
+import cajeta.lang.Slice;
+import cajeta.io.net.ByteBuffer;
+import cajeta.io.net.ByteChannel;
+import cajeta.io.net.AsyncReader;
+import cajeta.io.net.TimedOutException;
+import cajeta.time.Clock;
+import dev.cajeta.http.body.Body;
+import dev.cajeta.http.h1.HttpParserLimits;
+import dev.cajeta.http.server.ConnectionBuffers;
+
+/**
+ * One HTTP/1.1 client connection: a channel with an input and an output
+ * buffer. `exchange` serializes a request into the output buffer, reads the
+ * response into the input buffer, and hands that buffer to the response, so
+ * the connection is free for the next request as soon as it returns.
+ */
+public final class Http1ClientConnection {
+    ByteChannel ch;
+    ByteBuffer in;
+    ByteBuffer out;
+    HeadScanner scanner;
+    int64 deadline;
+    int32 cur;
+    int32 base;
+    int32 consumed;
+
+    /** A connection over `ch`, lent or transferred, with buffers from `bufs`. */
+    public Http1ClientConnection(ByteChannel ch, ConnectionBuffers bufs, HttpParserLimits limits) {
+        this.ch #= ch;
+        this.in #= bufs.take();
+        this.out #= bufs.take();
+        this.scanner = heap HeadScanner(limits);
+        this.deadline = 0;
+    }
+
+    /** The channel. */
+    public ByteChannel channel() {
+        return this.ch;
+    }
+
+    /** Closes the channel. */
+    public void close() {
+        this.ch.close();
+    }
+
+    /** Returns both buffers to `bufs`. The connection is unusable afterwards. */
+    public void recycle(ConnectionBuffers bufs) {
+        if (this.in != null) {
+            ByteBuffer i #= this.in;
+            this.in = null;
+            bufs.give(#i);
+        }
+        if (this.out != null) {
+            ByteBuffer o #= this.out;
+            this.out = null;
+            bufs.give(#o);
+        }
+    }
+
+    /**
+     * Sends `req` and reads the answer into `resp`, which takes the input
+     * buffer. `deadlineMs` is an absolute epoch-millisecond budget, or 0.
+     */
+    public void exchange(ClientRequest req, ClientResponse resp, int64 deadlineMs,
+                         ConnectionBuffers bufs) {
+        this.deadline = deadlineMs;
+        this.in.clear();
+        this.writeRequest(req);
+        this.readResponse(resp, req.method() == Method.HEAD);
+        ByteBuffer taken #= this.in;
+        this.in #= bufs.take();
+        resp.adopt(#taken);
+    }
+
+    int32 budget() {
+        if (this.deadline <= 0) {
+            return 0;
+        }
+        int64 left = this.deadline - Clock.now().toEpochMilli();
+        if (left <= 0) {
+            throw heap TimedOutException("exchange budget exhausted");
+        }
+        if (left > (int64) 2147483647) {
+            return 2147483647;
+        }
+        return (int32) left;
+    }
+
+    int32 fill() {
+        return this.in.fillWithin(this.ch, this.budget());
+    }
+
+    void flush(int32 end) {
+        this.out.clear();
+        this.out.advanceWrite(end);
+        this.out.writeToAsync(this.ch);
+    }
+
+    static int32 putBytes(int8[] a, int32 at, Slice<int8> s) {
+        int64 n = s.count();
+        int64 i = 0;
+        while (i < n) {
+            a[at + (int32) i] = s[i];
+            i = i + 1;
+        }
+        return at + (int32) n;
+    }
+
+    int32 headLength(ClientRequest req, int32 framing, int64 length) {
+        int32 n = req.methodToken().byteLength() + 1 + (int32) req.target().count() + 1 + 8 + 2;
+        int32 i = 0;
+        while (i < req.fieldCount()) {
+            if (req.fieldLive(i)) {
+                n = n + (int32) req.nameAt(i).count() + 2 + (int32) req.valueAt(i).count() + 2;
+            }
+            i = i + 1;
+        }
+        if (framing == 1) {
+            n = n + 16 + HttpResponse.decimalWidth(length) + 2;
+        } else if (framing == 2) {
+            n = n + 28;
+        }
+        return n + 2;
+    }
+
+    int32 composeHead(ClientRequest req, int32 framing, int64 length) {
+        int32 need = this.headLength(req, framing, length);
+        if (need > this.out.capacity()) {
+            throw heap HeadersTooLargeException("request head exceeds the output buffer",
+                (int64) this.out.capacity(), (int64) need);
+        }
+        int8[] a = this.out.array();
+        int32 p = HttpResponse.put(a, 0, req.methodToken());
+        a[p] = (int8) 32;
+        p = Http1ClientConnection.putBytes(a, p + 1, req.target());
+        a[p] = (int8) 32;
+        p = HttpResponse.put(a, p + 1, req.version().wireString());
+        p = HttpResponse.put(a, p, "\r\n");
+        int32 i = 0;
+        while (i < req.fieldCount()) {
+            if (req.fieldLive(i)) {
+                p = Http1ClientConnection.putBytes(a, p, req.nameAt(i));
+                p = HttpResponse.put(a, p, ": ");
+                p = Http1ClientConnection.putBytes(a, p, req.valueAt(i));
+                p = HttpResponse.put(a, p, "\r\n");
+            }
+            i = i + 1;
+        }
+        if (framing == 1) {
+            p = HttpResponse.put(a, p, "content-length: ");
+            int32 d = HttpResponse.decimalWidth(length);
+            HttpResponse.putDecimal(a, p, d, length);
+            p = HttpResponse.put(a, p + d, "\r\n");
+        } else if (framing == 2) {
+            p = HttpResponse.put(a, p, "transfer-encoding: chunked\r\n");
+        }
+        return HttpResponse.put(a, p, "\r\n");
+    }
+
+    void writeRequest(ClientRequest req) {
+        boolean declared = req.hasHeader("content-length") || req.hasHeader("transfer-encoding");
+        Body s = req.bodyStream();
+        int32 framing = 0;
+        int64 length = 0;
+        if (!declared) {
+            if (s != null) {
+                length = s.contentLength();
+                framing = length >= 0 ? 1 : 2;
+            } else if (req.hasBody() || req.method().allowsBody()) {
+                framing = 1;
+                length = (int64) req.bodyLength();
+            }
+        } else if (req.hasHeader("transfer-encoding")) {
+            framing = 3;
+        }
+        int32 end = this.composeHead(req, framing, length);
+        if (s == null) {
+            int32 n = req.bodyLength();
+            if (end + n <= this.out.capacity()) {
+                end = Http1ClientConnection.putBytes(this.out.array(), end, req.body());
+                this.flush(end);
+            } else {
+                this.flush(end);
+                int8[] held = req.held;
+                this.ch.writeAllAsync(held, 0, (int64) n);
+            }
+            return;
+        }
+        this.flush(end);
+        this.pump(s, framing == 2 || framing == 3);
+    }
+
+    void pump(Body s, boolean chunked) {
+        AsyncReader rd = s.reader();
+        int8[] a = this.out.array();
+        int32 room = this.out.capacity() - 16;
+        while (true) {
+            int32 n = rd.read(a, 10, room);
+            if (n <= 0) {
+                break;
+            }
+            if (!chunked) {
+                this.out.clear();
+                this.out.advanceWrite(10 + n);
+                this.out.advanceRead(10);
+                this.out.writeToAsync(this.ch);
+            } else {
+                int32 w = HttpResponse.hexWidth(n);
+                int32 at = 10 - w - 2;
+                HttpResponse.putHex(a, at, w, n);
+                a[at + w] = (int8) 13;
+                a[at + w + 1] = (int8) 10;
+                a[10 + n] = (int8) 13;
+                a[10 + n + 1] = (int8) 10;
+                this.out.clear();
+                this.out.advanceWrite(10 + n + 2);
+                this.out.advanceRead(at);
+                this.out.writeToAsync(this.ch);
+            }
+        }
+        if (chunked) {
+            this.flush(HttpResponse.put(a, 0, "0\r\n\r\n"));
+        }
+    }
+
+    int32 readHead() {
+        this.scanner.reset();
+        int32 h = this.scanner.scan(this.in);
+        while (h < 0) {
+            if (this.in.writable() == 0) {
+                throw heap HeadersTooLargeException("response head exceeds the input buffer",
+                    (int64) this.in.capacity(), (int64) this.in.readable());
+            }
+            if (this.fill() == 0) {
+                throw heap UnexpectedEofException("stream ended inside the response head",
+                    (int64) this.in.readable());
+            }
+            h = this.scanner.scan(this.in);
+        }
+        return h;
+    }
+
+    void readResponse(ClientResponse resp, boolean head) {
+        int32 h = this.readHead();
+        HeadScanner.parseResponse(this.in.array(), this.in.readPosition(), h, resp);
+        while (resp.code >= 100 && resp.code < 200 && resp.code != 101) {
+            this.in.advanceRead(h);
+            h = this.readHead();
+            HeadScanner.parseResponse(this.in.array(), this.in.readPosition(), h, resp);
+        }
+        int32 start = this.in.readPosition() + h;
+        resp.bodyOff = start;
+        resp.bodyLen = 0;
+        this.consumed = start;
+        HeaderTable t = resp.table;
+        boolean http10 = resp.versionKind == Version.HTTP_1_0;
+        boolean keep = t.hasToken("connection", "close") ? false
+            : (t.hasToken("connection", "keep-alive") ? true : !http10);
+        int32 st = resp.code;
+        if (head || (st >= 100 && st < 200) || st == 204 || st == 304) {
+            resp.reuse = keep && this.in.writePosition() == start;
+            return;
+        }
+        if (t.hasToken("transfer-encoding", "chunked")) {
+            this.readChunked(resp, start);
+            resp.reuse = keep && this.in.writePosition() == this.consumed;
+            return;
+        }
+        int32 cl = t.find("content-length", 0);
+        if (cl >= 0) {
+            int64 n = Bytes.parseInt64(t.valueAt(cl), (int64) -1);
+            if (n < 0) {
+                throw heap MalformedMessageException("bad Content-Length", (int64) -1);
+            }
+            this.readLength(resp, start, n);
+            resp.reuse = keep && this.in.writePosition() == this.consumed;
+            return;
+        }
+        this.readToClose(resp, start);
+        resp.reuse = false;
+    }
+
+    void need(int32 upTo) {
+        while (this.in.writePosition() < upTo) {
+            if (this.fill() == 0) {
+                throw heap UnexpectedEofException("stream ended inside the response body",
+                    (int64) this.in.readable());
+            }
+        }
+    }
+
+    void readLength(ClientResponse resp, int32 start, int64 n) {
+        if ((int64) start + n <= (int64) this.in.capacity()) {
+            this.need(start + (int32) n);
+            resp.bodyOff = start;
+            resp.bodyLen = (int32) n;
+            this.consumed = start + (int32) n;
+            return;
+        }
+        int32 total = (int32) n;
+        int8[] body = heap int8[total];
+        int8[] a = this.in.array();
+        int32 have = this.in.writePosition() - start;
+        if (have > total) {
+            have = total;
+        }
+        int32 i = 0;
+        while (i < have) {
+            body[i] = a[start + i];
+            i = i + 1;
+        }
+        while (have < total) {
+            int64 got = this.ch.readWithin(body, (int64) have, (int64) (total - have), this.budget());
+            if (got <= 0) {
+                throw heap UnexpectedEofException("stream ended inside the response body", (int64) have);
+            }
+            have = have + (int32) got;
+        }
+        this.consumed = this.in.writePosition();
+        resp.replaceBody(#body, total);
+    }
+
+    void readToClose(ClientResponse resp, int32 start) {
+        while (this.in.writable() > 0) {
+            if (this.fill() == 0) {
+                resp.bodyOff = start;
+                resp.bodyLen = this.in.writePosition() - start;
+                this.consumed = this.in.writePosition();
+                return;
+            }
+        }
+        int8[] a = this.in.array();
+        int32 len = this.in.writePosition() - start;
+        int32 cap = len * 2;
+        int8[] body = heap int8[cap];
+        int32 i = 0;
+        while (i < len) {
+            body[i] = a[start + i];
+            i = i + 1;
+        }
+        while (true) {
+            if (len == cap) {
+                cap = cap * 2;
+                int8[] grown = heap int8[cap];
+                int32 j = 0;
+                while (j < len) {
+                    grown[j] = body[j];
+                    j = j + 1;
+                }
+                body #= grown;
+            }
+            int64 got = this.ch.readWithin(body, (int64) len, (int64) (cap - len), this.budget());
+            if (got <= 0) {
+                break;
+            }
+            len = len + (int32) got;
+        }
+        this.consumed = this.in.writePosition();
+        resp.replaceBody(#body, len);
+    }
+
+    int8 nextByte() {
+        if (this.cur == this.in.writePosition()) {
+            if (this.in.writePosition() == this.in.capacity()) {
+                this.in.clear();
+                this.in.advanceWrite(this.base);
+                this.in.advanceRead(this.base);
+                this.cur = this.base;
+            }
+            if (this.fill() == 0) {
+                throw heap UnexpectedEofException("stream ended inside a chunked body",
+                    (int64) (this.cur - this.base));
+            }
+        }
+        int8 b = this.in.array()[this.cur];
+        this.cur = this.cur + 1;
+        return b;
+    }
+
+    int64 chunkSize() {
+        int64 size = 0;
+        int32 digits = 0;
+        int8 b = this.nextByte();
+        while (b != (int8) 13 && b != (int8) 59) {
+            int32 d = Bytes.hexValue(((int32) b) & 255);
+            if (d < 0 || digits >= 8) {
+                throw heap InvalidChunkEncodingException("bad chunk size", (int64) digits);
+            }
+            size = size * 16 + (int64) d;
+            digits = digits + 1;
+            b = this.nextByte();
+        }
+        while (b != (int8) 13) {
+            b = this.nextByte();
+        }
+        if (this.nextByte() != (int8) 10) {
+            throw heap InvalidChunkEncodingException("chunk size line missing LF", (int64) digits);
+        }
+        if (digits == 0) {
+            throw heap InvalidChunkEncodingException("empty chunk size", (int64) 0);
+        }
+        return size;
+    }
+
+    void skipLine() {
+        int8 b = this.nextByte();
+        while (b != (int8) 10) {
+            b = this.nextByte();
+        }
+    }
+
+    void readChunked(ClientResponse resp, int32 start) {
+        this.base = start;
+        this.cur = start;
+        int8[] a = this.in.array();
+        int32 dst = start;
+        int8[] owned = null;
+        int32 ownedLen = 0;
+        while (true) {
+            if (owned == null) {
+                this.base = dst;
+            }
+            int64 size = this.chunkSize();
+            if (size == 0) {
+                int8 b = this.nextByte();
+                while (b != (int8) 13) {
+                    this.skipLine();
+                    b = this.nextByte();
+                }
+                if (this.nextByte() != (int8) 10) {
+                    throw heap InvalidChunkEncodingException("trailer missing LF", (int64) 0);
+                }
+                break;
+            }
+            int32 n = (int32) size;
+            if (owned == null && this.cur + n + 2 <= this.in.capacity()) {
+                this.need(this.cur + n + 2);
+                int32 i = 0;
+                while (i < n) {
+                    a[dst + i] = a[this.cur + i];
+                    i = i + 1;
+                }
+                dst = dst + n;
+                this.cur = this.cur + n;
+            } else {
+                if (owned == null) {
+                    int32 cap = (dst - start) + n;
+                    if (cap < 4096) {
+                        cap = 4096;
+                    }
+                    owned = heap int8[cap];
+                    int32 k = 0;
+                    while (k < dst - start) {
+                        owned[k] = a[start + k];
+                        k = k + 1;
+                    }
+                    ownedLen = dst - start;
+                    this.base = start;
+                }
+                if (ownedLen + n > owned.count()) {
+                    int32 cap2 = owned.count() * 2;
+                    while (cap2 < ownedLen + n) {
+                        cap2 = cap2 * 2;
+                    }
+                    int8[] grown = heap int8[cap2];
+                    int32 j = 0;
+                    while (j < ownedLen) {
+                        grown[j] = owned[j];
+                        j = j + 1;
+                    }
+                    owned #= grown;
+                }
+                int32 left = n;
+                while (left > 0) {
+                    owned[ownedLen] = this.nextByte();
+                    ownedLen = ownedLen + 1;
+                    left = left - 1;
+                }
+            }
+            if (this.nextByte() != (int8) 13 || this.nextByte() != (int8) 10) {
+                throw heap InvalidChunkEncodingException("chunk data not followed by CRLF", (int64) 0);
+            }
+        }
+        this.consumed = this.cur;
+        if (owned == null) {
+            resp.bodyOff = start;
+            resp.bodyLen = dst - start;
+        } else {
+            resp.replaceBody(#owned, ownedLen);
+        }
+    }
+}

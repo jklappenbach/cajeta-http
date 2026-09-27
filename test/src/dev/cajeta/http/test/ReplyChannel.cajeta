@@ -1,0 +1,123 @@
+package dev.cajeta.http.test;
+
+import cajeta.lang.String;
+import cajeta.io.net.ByteChannel;
+
+/**
+ * A channel that answers each request with the next scripted reply, in
+ * `chunk`-byte reads, and captures everything written to it. A reply is
+ * released only after a write, as a server answers only after a request.
+ */
+public final class ReplyChannel implements ByteChannel {
+    String[] replies;
+    int32 replyCount;
+    int32 next;
+    int8[] cur;
+    int32 curLen;
+    int32 curPos;
+    int32 chunk;
+    int8[] buf;
+    int32 len;
+    public int32 writes;
+    public int32 closes;
+    boolean repeat;
+
+    /** A channel with room for eight replies, read `chunk` bytes at a time. */
+    public ReplyChannel(int32 chunk) {
+        this.replies = heap String[8];
+        this.replyCount = 0;
+        this.next = 0;
+        this.cur = heap int8[0];
+        this.curLen = 0;
+        this.curPos = 0;
+        this.chunk = chunk;
+        this.buf = heap int8[1 << 20];
+        this.len = 0;
+        this.writes = 0;
+        this.closes = 0;
+        this.repeat = false;
+    }
+
+    /** Answers every request with `reply` and captures nothing, for allocation counts. */
+    public ReplyChannel repeatReply(String reply) {
+        this.cur #= reply.toBytes();
+        this.curLen = reply.byteLength();
+        this.curPos = this.curLen;
+        this.repeat = true;
+        return this;
+    }
+
+    /** Queues `reply` as the answer to the next request. */
+    public ReplyChannel reply(String reply) {
+        this.replies[this.replyCount] #= reply.substring(0, reply.byteLength());
+        this.replyCount = this.replyCount + 1;
+        return this;
+    }
+
+    public int64 readAsync(int8[] b, int64 offset, int64 length) {
+        int32 n = this.curLen - this.curPos;
+        if (n > this.chunk) {
+            n = this.chunk;
+        }
+        if ((int64) n > length) {
+            n = (int32) length;
+        }
+        int32 i = 0;
+        while (i < n) {
+            b[(int32) offset + i] = this.cur[this.curPos + i];
+            i = i + 1;
+        }
+        this.curPos = this.curPos + n;
+        return (int64) n;
+    }
+
+    public int64 readWithin(int8[] b, int64 offset, int64 length, int32 timeoutMs) {
+        return this.readAsync(b, offset, length);
+    }
+
+    public void writeAllAsync(int8[] data, int64 offset, int64 length) {
+        if (this.repeat) {
+            this.writes = this.writes + 1;
+            if (this.curPos == this.curLen) {
+                this.curPos = 0;
+            }
+            return;
+        }
+        int32 o = (int32) offset;
+        int32 n = (int32) length;
+        int32 j = 0;
+        while (j < n) {
+            this.buf[this.len + j] = data[o + j];
+            j = j + 1;
+        }
+        this.len = this.len + n;
+        this.writes = this.writes + 1;
+        if (this.curPos == this.curLen && this.next < this.replyCount) {
+            String r = this.replies[this.next];
+            this.cur #= r.toBytes();
+            this.curLen = r.byteLength();
+            this.curPos = 0;
+            this.next = this.next + 1;
+        }
+    }
+
+    public void close() {
+        this.closes = this.closes + 1;
+    }
+
+    /** Everything written so far, as text. */
+    public #String written() {
+        int8[] out = heap int8[this.len];
+        int32 i = 0;
+        while (i < this.len) {
+            out[i] = this.buf[i];
+            i = i + 1;
+        }
+        return heap String(#out, this.len);
+    }
+
+    /** Forgets what was written. */
+    public void clearWritten() {
+        this.len = 0;
+    }
+}
