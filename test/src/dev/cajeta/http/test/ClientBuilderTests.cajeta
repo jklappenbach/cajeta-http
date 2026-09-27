@@ -1,12 +1,16 @@
 package dev.cajeta.http.test;
 
+import cajeta.lang.String;
+import cajeta.lang.Slice;
 import cajeta.io.net.IpAddress;
 import cajeta.io.net.Server;
 import cajeta.io.net.SocketAddress;
 import cajeta.io.net.TcpListener;
 import cajeta.io.net.TcpStream;
 import cajeta.io.net.tls.TlsStream;
-import cajeta.io.net.uri.Uri;
+import dev.cajeta.http.Bytes;
+import dev.cajeta.http.ClientRequest;
+import dev.cajeta.http.ClientResponse;
 import dev.cajeta.http.HttpRequest;
 import dev.cajeta.http.HttpResponse;
 import dev.cajeta.http.TooManyRedirectsException;
@@ -16,21 +20,8 @@ import dev.cajeta.http.server.HttpServer;
 import dev.cajeta.http.server.HttpServerBuilder;
 
 /**
- * http:1.4f — `HttpClient.builder()` + HTTP proxy. Wire-observable
- * builder config (a default header the caller can still override, the
- * version pin, the redirect cap), then the two proxy forms against
- * minimal in-test proxies:
- *
- *   - **absolute-form** (`http://` via proxy): the client dials the
- *     PROXY and sends `GET http://origin:port/path HTTP/1.1` — proven
- *     by a "proxy" that is just an HttpServer echoing the target it
- *     received (the named origin never exists).
- *   - **CONNECT tunnel** (`https://` via proxy): a raw loopback proxy
- *     validates the `CONNECT host:port HTTP/1.1` head, answers 200,
- *     and blind-relays bytes to a raw TLS origin (self-signed P-256
- *     cert, SAN IP:127.0.0.1, embedded below; the client pins it via
- *     `trustAnchor`). The exchange succeeding proves the tunnel: the
- *     TLS handshake + HTTP exchange ran end-to-end THROUGH the relay.
+ * `HttpClient.builder()` config seen on the wire (default header, version pin,
+ * redirect cap), then both proxy forms: absolute-form and a CONNECT tunnel.
  */
 public final class ClientBuilderTests {
 
@@ -45,101 +36,59 @@ public final class ClientBuilderTests {
         connectTunnel(c);
     }
 
-    // ---- the loopback HTTP server (config + absolute-form scenarios) ----
-
-    public static #HttpResponse handle(HttpRequest req) {
-        String t #= req.getTarget();
-        if (t.equals("/hdr")) {
-            String v #= req.getHeaders().get("x-app");
-            String out = "-";
-            if (v != null) {
-                out = v;
+    /** Echoes what the server saw: the x-app header, the version, or an absolute-form target. */
+    static void handle(HttpRequest q, HttpResponse r) {
+        Slice<int8> t = q.target();
+        if (Bytes.equals(t, "/hdr")) {
+            if (q.hasHeader("x-app")) {
+                r.writeBytes(q.header("x-app"));
+            } else {
+                r.body("-");
             }
-            HttpResponse resp0 #= HttpResponse.ok();
-            resp0.body(out.toBytes(), out.byteLength());
-            return #resp0;
+            return;
         }
-        if (t.equals("/ver")) {
-            String v = req.getVersion();
-            HttpResponse resp1 #= HttpResponse.ok();
-            resp1.body(v.toBytes(), v.byteLength());
-            return #resp1;
+        if (Bytes.equals(t, "/ver")) {
+            r.body(q.version().wireString());
+            return;
         }
-        if (t.equals("/chain/1")) {
-            String moved = "moved";
-            HttpResponse resp2 #= HttpResponse.of(302);
-            resp2.setHeader("Location", "/chain/2");
-            resp2.body(moved.toBytes(), moved.byteLength());
-            return #resp2;
+        if (Bytes.equals(t, "/chain/1")) {
+            r.status(302);
+            r.setHeader("Location", "/chain/2");
+            r.body("moved");
+            return;
         }
-        if (t.equals("/chain/2")) {
-            String moved = "moved";
-            HttpResponse resp3 #= HttpResponse.of(302);
-            resp3.setHeader("Location", "/final");
-            resp3.body(moved.toBytes(), moved.byteLength());
-            return #resp3;
+        if (Bytes.equals(t, "/chain/2")) {
+            r.status(302);
+            r.setHeader("Location", "/final");
+            r.body("moved");
+            return;
         }
-        if (t.equals("/final")) {
-            String done = "done";
-            HttpResponse resp4 #= HttpResponse.ok();
-            resp4.body(done.toBytes(), done.byteLength());
-            return #resp4;
+        if (Bytes.equals(t, "/final")) {
+            r.body("done");
+            return;
         }
-        // Absolute-form targets land here: echo exactly what arrived.
-        if (t.startsWith("http://")) {
-            String h #= req.getHeaders().get("host");
-            String hv = "-";
-            if (h != null) {
-                hv = h;
+        if (Bytes.startsWith(t, "http://")) {
+            r.writeBytes(t);
+            r.write("|");
+            if (q.hasHeader("host")) {
+                r.writeBytes(q.header("host"));
+            } else {
+                r.write("-");
             }
-            String out = t + "|" + hv;
-            HttpResponse resp5 #= HttpResponse.ok();
-            resp5.body(out.toBytes(), out.byteLength());
-            return #resp5;
+            return;
         }
-        return HttpResponse.notFound();
+        r.status(404);
     }
 
-    /**
-     * Accept and dispatch until the listener closes; returns how many
-     * connections were served.
-     *
-     * The single-accept version this replaces returned after ONE connection,
-     * so the moment a client dialled a second nobody accepted it and the
-     * client waited forever for a response that could not come — an infinite
-     * hang where a plain failure belonged. MEASURED on Windows: one client
-     * fiber cycling PARKED -> READY -> PARKED forever inside
-     * `Reactor.pollPark`, every carrier asleep — a healthy scheduler
-     * faithfully running a wait nothing would ever satisfy.
-     *
-     * Looping keeps the client unblocked; the returned COUNT keeps the
-     * guarantee. A suite that means "these legs rode one connection each"
-     * still asserts exactly that, and a regression reports the number
-     * instead of wedging the run.
-     *
-     * Await it only AFTER closing the listener: `acceptNext` answers NULL on
-     * a closed listener rather than raising, and that NULL is what ends the
-     * loop.
-     */
+    /** Accepts and dispatches until the listener closes, returning the connection count. */
     public static async int32 acceptLoop(Server core) {
         int32 n = 0;
         boolean going = true;
         while (going) {
             TcpStream conn #= core.acceptNext();
             if (conn == null) {
-                going = false;      // listener closed — the test is finished
+                going = false;
             } else {
-                // `dispatch` SPAWNS the connection fiber and returns at
-                // once (Server.dispatch), so accepts overlap and a scenario
-                // that needs two connections in flight still works.
-                //
-                // Do NOT wrap this call in a `try`: a try block is a scope
-                // frame, and a statement-position spawn is joined at its
-                // enclosing frame's exit. Wrapping it therefore joins each
-                // connection before the next accept — serializing them, and
-                // deadlocking any scenario whose first handler is waiting on
-                // something the second one delivers. Measured: it wedged
-                // `timeoutReleasesLease` until the deadline elapsed.
                 core.dispatch(#conn);
                 n = n + 1;
             }
@@ -147,47 +96,29 @@ public final class ClientBuilderTests {
         return n;
     }
 
-    static #String respText(HttpResponse resp) {
-        int32 n = resp.bodyLength();
-        int8[] copy = heap int8[n];
-        int32 i = 0;
-        while (i < n) {
-            copy[i] = resp.body[i];
-            i = i + 1;
-        }
-        return heap String(#copy, n);
-    }
-
     static #HttpServer echoServer() {
         HttpServerBuilder b #= HttpServer.builder();
         b.bind("127.0.0.1:0");
-        (HttpRequest) -> #HttpResponse h =
-            (req) -> ClientBuilderTests.handle(req);
-        b.handler(h);
+        b.handler((HttpRequest q, HttpResponse r) -> ClientBuilderTests.handle(q, r));
         return b.build();
     }
 
-    // ---- builder config fibers ------------------------------------------
-
-    /** Default header rides every request; a caller-set one wins. */
+    /** Default header rides every request and a caller-set one wins. */
     public static async int32 defaultHeaderPair(int32 port) {
         HttpClient client #= HttpClient.builder()
             .defaultHeader("x-app", "juju")
             .build();
         String url = "http://127.0.0.1:" + port + "/hdr";
-        HttpResponse d #= client.get(url);
-        String def #= ClientBuilderTests.respText(d);
+        ClientResponse d #= client.get(url);
+        String def #= d.bodyString();
         if (!def.equals("juju")) {
             System.stdout.println("  (default header echo: '{}')", def);
             return -1;
         }
-        Uri uri #= Uri.builder()
-            .scheme("http").host("127.0.0.1").port(port).path("/hdr")
-            .build();
-        HttpRequest req #= HttpRequest.fromUri("GET", uri);
+        ClientRequest req = heap ClientRequest(url);
         req.setHeader("x-app", "own");
-        HttpResponse o #= client.send(uri, req);
-        String ovr #= ClientBuilderTests.respText(o);
+        ClientResponse o #= client.send(req);
+        String ovr #= o.bodyString();
         if (!ovr.equals("own")) {
             System.stdout.println("  (override echo: '{}')", ovr);
             return -2;
@@ -201,8 +132,8 @@ public final class ClientBuilderTests {
             .version("HTTP/1.0")
             .build();
         String url = "http://127.0.0.1:" + port + "/ver";
-        HttpResponse resp #= client.get(url);
-        String got #= ClientBuilderTests.respText(resp);
+        ClientResponse resp #= client.get(url);
+        String got #= resp.bodyString();
         if (!got.equals("HTTP/1.0")) {
             System.stdout.println("  (version echo: '{}')", got);
             return -1;
@@ -210,51 +141,44 @@ public final class ClientBuilderTests {
         return 1;
     }
 
-    /** redirectLimit(2) follows a 2-hop chain; redirectLimit(1) trips. */
+    /** redirectLimit(2) follows a 2-hop chain. */
     public static async int32 twoHopsUnderCapTwo(int32 port) {
         HttpClient client #= HttpClient.builder().redirectLimit(2).build();
         String url = "http://127.0.0.1:" + port + "/chain/1";
-        HttpResponse resp #= client.get(url);
-        if (resp.statusCode() != 200) { return -1; }
-        String got #= ClientBuilderTests.respText(resp);
+        ClientResponse resp #= client.get(url);
+        if (resp.status() != 200) { return -1; }
+        String got #= resp.bodyString();
         if (!got.equals("done")) { return -2; }
         return 1;
     }
 
+    /** redirectLimit(1) trips on hop two. */
     public static async int32 twoHopsOverCapOne(int32 port) {
         HttpClient client #= HttpClient.builder().redirectLimit(1).build();
         String url = "http://127.0.0.1:" + port + "/chain/1";
         try {
-            HttpResponse resp #= client.get(url);
+            ClientResponse resp #= client.get(url);
             return -1;
         } catch (TooManyRedirectsException e) {
             return 1;
         }
     }
 
-    // ---- absolute-form proxy fiber --------------------------------------
-
-    /**
-     * The proxy is an ordinary HttpServer; the ORIGIN in the URL is a
-     * port nobody listens on. The exchange succeeding at all proves the
-     * client dialed the proxy; the echoed target proves absolute-form.
-     */
+    /** The origin port has no listener, so success proves the proxy dial and the echo proves absolute-form. */
     public static async int32 absoluteThroughProxy(int32 proxyPort) {
         HttpClient client #= HttpClient.builder()
             .proxy("127.0.0.1", proxyPort)
             .build();
         String url = "http://127.0.0.1:59151/hello";
-        HttpResponse resp #= client.get(url);
-        if (resp.statusCode() != 200) { return -1; }
-        String got #= ClientBuilderTests.respText(resp);
+        ClientResponse resp #= client.get(url);
+        if (resp.status() != 200) { return -1; }
+        String got #= resp.bodyString();
         if (!got.equals("http://127.0.0.1:59151/hello|127.0.0.1:59151")) {
             System.stdout.println("  (proxy echo: '{}')", got);
             return -2;
         }
         return 1;
     }
-
-    // ---- CONNECT tunnel: raw proxy + raw TLS origin ----------------------
 
     /** Self-signed P-256 cert, CN=127.0.0.1, SAN IP:127.0.0.1 (test-only). */
     static #String certPem() {
@@ -281,11 +205,7 @@ public final class ClientBuilderTests {
         return s.substring(0, s.byteLength());
     }
 
-    /**
-     * Read from `s` into `buf` until a blank line terminates the head;
-     * returns the byte count (or -1 on EOF/overflow). The head is all a
-     * CONNECT/plain-HTTP peer sends before the turn passes.
-     */
+    /** Reads into `buf` until a blank line ends the head, returning the byte count or -1. */
     static int32 readHead(TcpStream s, int8[] buf) {
         int32 have = 0;
         while (true) {
@@ -304,7 +224,7 @@ public final class ClientBuilderTests {
         }
     }
 
-    /** One-way byte pump; ends on EOF or a raise from either side. */
+    /** One-way byte pump that ends on EOF or a raise from either side. */
     public static async int32 pump(TcpStream from, TcpStream to) {
         int8[] buf = heap int8[4096];
         int32 moved = 0;
@@ -321,11 +241,7 @@ public final class ClientBuilderTests {
         return moved;
     }
 
-    /**
-     * Raw TLS origin: accept one connection, complete the server-side
-     * handshake with the embedded cert, read the request head, answer a
-     * fixed 200 with body "tunnel", close.
-     */
+    /** Raw TLS origin: one connection, read the head, answer 200 with body "tunnel", close. */
     public static async int32 tlsOrigin(#TcpListener lst) {
         TcpStream sock #= lst.acceptAsync();
         String cp #= ClientBuilderTests.certPem();
@@ -359,11 +275,7 @@ public final class ClientBuilderTests {
         return 1;
     }
 
-    /**
-     * Raw CONNECT proxy: accept one connection, validate the CONNECT
-     * head against `originPort`, answer 200, then blind-relay both ways
-     * until both sides hang up. Returns 1 iff the head was well-formed.
-     */
+    /** Raw CONNECT proxy: validates the head against `originPort`, answers 200, relays both ways. */
     public static async int32 connectProxy(#TcpListener lst, int32 originPort) {
         TcpStream cli #= lst.acceptAsync();
         int8[] buf = heap int8[4096];
@@ -398,7 +310,7 @@ public final class ClientBuilderTests {
         return 1;
     }
 
-    /** The client end: pinned trust + proxy; the GET must ride the tunnel. */
+    /** Pinned trust plus proxy, so the GET must ride the tunnel. */
     public static async int32 httpsThroughTunnel(int32 proxyPort, int32 originPort) {
         String cp #= ClientBuilderTests.certPem();
         int8[] anchor #= cp.toBytes();
@@ -407,17 +319,15 @@ public final class ClientBuilderTests {
             .proxy("127.0.0.1", proxyPort)
             .build();
         String url = "https://127.0.0.1:" + originPort + "/x";
-        HttpResponse resp #= client.get(url);
-        if (resp.statusCode() != 200) { return -1; }
-        String got #= ClientBuilderTests.respText(resp);
+        ClientResponse resp #= client.get(url);
+        if (resp.status() != 200) { return -1; }
+        String got #= resp.bodyString();
         if (!got.equals("tunnel")) {
             System.stdout.println("  (tunnel body: '{}')", got);
             return -2;
         }
         return 1;
     }
-
-    // ---- scenarios -------------------------------------------------------
 
     static void defaultsOnTheWire(Check c) {
         scope {
@@ -428,8 +338,6 @@ public final class ClientBuilderTests {
             Task<int32> t1 = spawn defaultHeaderPair(port);
             c.eqInt((int64) await t1, 1,
                     "default header rides the wire; caller override wins");
-            // Close first: the NULL from `acceptNext` is what
-            // ends the accept loop.
             core.listener.close();
             c.eqInt((int64) await s1, 1, "header pair rode one connection");
         }
@@ -443,8 +351,6 @@ public final class ClientBuilderTests {
             Task<int32> s1 = spawn acceptLoop(core);
             Task<int32> t1 = spawn pinnedVersion(port);
             c.eqInt((int64) await t1, 1, "version pin is what hits the wire");
-            // Close first: the NULL from `acceptNext` is what
-            // ends the accept loop.
             core.listener.close();
             c.eqInt((int64) await s1, 1, "pinned exchange accepted once");
         }
@@ -455,17 +361,11 @@ public final class ClientBuilderTests {
             HttpServer srv #= ClientBuilderTests.echoServer();
             Server core = srv.server;
             int32 port = core.listener.boundPort();
-
-            // ONE accept loop for every leg in this scope. A fresh
-            // single-accept server per leg hung as soon as a leg dialled
-            // twice; the total below still pins one connection per leg.
             Task<int32> s = spawn acceptLoop(core);
             Task<int32> t1 = spawn twoHopsUnderCapTwo(port);
             c.eqInt((int64) await t1, 1, "redirectLimit(2) follows a 2-hop chain");
-
             Task<int32> t2 = spawn twoHopsOverCapOne(port);
             c.eqInt((int64) await t2, 1, "redirectLimit(1) trips on hop two");
-            // Close first: the NULL from `acceptNext` ends the loop.
             core.listener.close();
             c.eqInt((int64) await s, 2, "each redirect-cap leg rode one connection");
         }
@@ -480,8 +380,6 @@ public final class ClientBuilderTests {
             Task<int32> t1 = spawn absoluteThroughProxy(port);
             c.eqInt((int64) await t1, 1,
                     "http-via-proxy sends the absolute-form target");
-            // Close first: the NULL from `acceptNext` is what
-            // ends the accept loop.
             core.listener.close();
             c.eqInt((int64) await s1, 1, "proxied exchange accepted once");
         }
