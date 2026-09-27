@@ -135,12 +135,20 @@ public final class Http2Client {
                 bufs.give(#buf);
                 throw #e;
             }
+        } catch (Exception e) {
+            bufs.give(#buf);
+            throw e;
         }
         if (headLen < 0) {
             bufs.give(#buf);
             throw heap Http2Exception("no response HEADERS received", Http2.PROTOCOL_ERROR);
         }
-        HeadScanner.parseResponse(buf.array(), 0, headLen, resp);
+        try {
+            HeadScanner.parseResponse(buf.array(), 0, headLen, resp);
+        } catch (Exception e) {
+            bufs.give(#buf);
+            throw e;
+        }
         if (big != null) {
             resp.replaceBody(#big, bodyLen);
         } else {

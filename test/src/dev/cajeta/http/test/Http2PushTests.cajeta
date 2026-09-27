@@ -8,6 +8,7 @@ import cajeta.io.net.SocketAddress;
 import cajeta.io.net.TcpListener;
 import cajeta.io.net.TcpStream;
 import cajeta.io.net.AsyncReader;
+import cajeta.io.net.ByteBuffer;
 import cajeta.io.net.AsyncWriter;
 import dev.cajeta.http.Bytes;
 import dev.cajeta.http.ClientRequest;
@@ -326,6 +327,10 @@ public final class Http2PushTests {
             c.that(threw, "client rejects a PUSH_PROMISE when push disabled");
             c.eqInt((int64) code, (int64) Http2.PROTOCOL_ERROR,
                     "rejection is a PROTOCOL_ERROR connection error");
+            ByteBuffer again #= bufs.take();
+            c.eqInt((int64) bufs.allocations(), (int64) 1,
+                    "the rejected exchange returned its buffer to the pool");
+            bufs.give(#again);
         }
     }
 
