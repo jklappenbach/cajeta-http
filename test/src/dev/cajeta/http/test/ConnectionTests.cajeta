@@ -1,0 +1,174 @@
+package dev.cajeta.http.test;
+
+import cajeta.lang.String;
+import cajeta.lang.Slice;
+import cajeta.io.net.ByteBuffer;
+import dev.cajeta.http.Bytes;
+import dev.cajeta.http.Http1Connection;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.HttpException;
+import dev.cajeta.http.Method;
+import dev.cajeta.http.h1.HttpParserLimits;
+
+public final class ConnectionTests {
+    static boolean wire(ScriptChannel ch, String want) {
+        int8[] a = ch.captured();
+        boolean ok = Bytes.equals(a[0:ch.capturedLen()], want);
+        if (!ok) {
+            String got #= Bytes.toString(a[0:ch.capturedLen()]);
+            System.stdout.println("    got <<{}>>", got);
+        }
+        return ok;
+    }
+
+    static void run1(String script, int32 chunk, int32 inCap, int64 maxBody,
+                     (HttpRequest, HttpResponse) -> void h, ScriptChannel ch) {
+        ByteBuffer in = heap ByteBuffer(inCap);
+        ByteBuffer out = heap ByteBuffer(8192);
+        HttpParserLimits pl = heap HttpParserLimits();
+        Http1Connection conn = heap Http1Connection(ch, in, out, pl, 0, 0, maxBody, true, h);
+        conn.serve();
+    }
+
+    static void echo(HttpRequest q, HttpResponse r) {
+        r.header("X-Path", "p");
+        r.writeBytes(q.methodBytes());
+        r.write(" ");
+        r.writeBytes(q.path());
+        r.write(" ");
+        r.writeBytes(q.body());
+    }
+
+    static void basics(Check c) {
+        (HttpRequest, HttpResponse) -> void h = (HttpRequest q, HttpResponse r) -> ConnectionTests.echo(q, r);
+        ScriptChannel one = heap ScriptChannel("GET /a HTTP/1.1\r\nHost: t\r\n\r\n", 4096);
+        ConnectionTests.run1("", 4096, 4096, (int64) 1000, h, one);
+        c.that(ConnectionTests.wire(one, "HTTP/1.1 200 OK\r\nX-Path: p\r\ncontent-length: 7\r\n\r\nGET /a "), "one request, one response");
+
+        ScriptChannel two = heap ScriptChannel(
+            "GET /a HTTP/1.1\r\n\r\nPOST /b HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello", 4096);
+        ConnectionTests.run1("", 4096, 4096, (int64) 1000, h, two);
+        c.that(ConnectionTests.wire(two,
+            "HTTP/1.1 200 OK\r\nX-Path: p\r\ncontent-length: 7\r\n\r\nGET /a "
+            + "HTTP/1.1 200 OK\r\nX-Path: p\r\ncontent-length: 13\r\n\r\nPOST /b hello"), "pipelined pair served in order");
+
+        ScriptChannel slow = heap ScriptChannel(
+            "POST /b HTTP/1.1\r\nContent-Length: 5\r\n\r\nhelloPUT /c HTTP/1.1\r\nContent-Length: 2\r\n\r\nok", 1);
+        ConnectionTests.run1("", 4096, 4096, (int64) 1000, h, slow);
+        c.that(ConnectionTests.wire(slow,
+            "HTTP/1.1 200 OK\r\nX-Path: p\r\ncontent-length: 13\r\n\r\nPOST /b hello"
+            + "HTTP/1.1 200 OK\r\nX-Path: p\r\ncontent-length: 9\r\n\r\nPUT /c ok"), "one byte per read gives the same result");
+
+        ScriptChannel chunked = heap ScriptChannel(
+            "POST /c HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6;ext=1\r\n world\r\n0\r\nTrailer: x\r\n\r\nGET /d HTTP/1.1\r\n\r\n", 7);
+        ConnectionTests.run1("", 4096, 4096, (int64) 1000, h, chunked);
+        c.that(ConnectionTests.wire(chunked,
+            "HTTP/1.1 200 OK\r\nX-Path: p\r\ncontent-length: 19\r\n\r\nPOST /c hello world"
+            + "HTTP/1.1 200 OK\r\nX-Path: p\r\ncontent-length: 7\r\n\r\nGET /d "), "chunked body decoded in place, next request intact");
+    }
+
+    static void failures(Check c) {
+        (HttpRequest, HttpResponse) -> void boom = (HttpRequest q, HttpResponse r) -> {
+            r.body("partial");
+            throw heap HttpException("bad input");
+        };
+        ScriptChannel t = heap ScriptChannel("GET /x HTTP/1.1\r\n\r\nGET /y HTTP/1.1\r\n\r\n", 4096);
+        ConnectionTests.run1("", 4096, 4096, (int64) 1000, boom, t);
+        c.that(ConnectionTests.wire(t,
+            "HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\n\r\nHTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\n\r\n"),
+            "a thrown HttpException answers its status with no body and keeps the connection");
+
+        (HttpRequest, HttpResponse) -> void h = (HttpRequest q, HttpResponse r) -> ConnectionTests.echo(q, r);
+        ScriptChannel close = heap ScriptChannel("GET /x HTTP/1.1\r\nConnection: close\r\n\r\nGET /y HTTP/1.1\r\n\r\n", 4096);
+        ConnectionTests.run1("", 4096, 4096, (int64) 1000, h, close);
+        c.that(ConnectionTests.wire(close,
+            "HTTP/1.1 200 OK\r\nX-Path: p\r\ncontent-length: 7\r\nConnection: close\r\n\r\nGET /x "),
+            "Connection: close stops after one response");
+
+        ScriptChannel big = heap ScriptChannel("POST /x HTTP/1.1\r\nContent-Length: 5000\r\n\r\n", 4096);
+        ConnectionTests.run1("", 4096, 4096, (int64) 100, h, big);
+        c.that(ConnectionTests.wire(big,
+            "HTTP/1.1 413 Content Too Large\r\ncontent-length: 0\r\nConnection: close\r\n\r\n"),
+            "a body over the limit is refused before it is read");
+
+        ScriptChannel bad = heap ScriptChannel("GET/x HTTP/1.1\r\n\r\n", 4096);
+        ConnectionTests.run1("", 4096, 4096, (int64) 100, h, bad);
+        c.that(ConnectionTests.wire(bad,
+            "HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nConnection: close\r\n\r\n"), "a malformed head is 400 and closes");
+    }
+
+    static void expectAndHead(Check c) {
+        (HttpRequest, HttpResponse) -> void h = (HttpRequest q, HttpResponse r) -> ConnectionTests.echo(q, r);
+        ScriptChannel ex = heap ScriptChannel("PUT /u HTTP/1.1\r\nExpect: 100-continue\r\nContent-Length: 2\r\n\r\nok", 60);
+        ConnectionTests.run1("", 4096, 4096, (int64) 1000, h, ex);
+        c.that(ConnectionTests.wire(ex,
+            "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nX-Path: p\r\ncontent-length: 9\r\n\r\nPUT /u ok"),
+            "100-continue precedes the body");
+        ScriptChannel hd = heap ScriptChannel("HEAD /h HTTP/1.1\r\n\r\n", 4096);
+        ConnectionTests.run1("", 4096, 4096, (int64) 1000, h, hd);
+        c.that(ConnectionTests.wire(hd, "HTTP/1.1 200 OK\r\nX-Path: p\r\ncontent-length: 8\r\n\r\n"), "HEAD answers the length without the body");
+    }
+
+    static #String requests(int32 n) {
+        String one = "POST /users/42?x=1 HTTP/1.1\r\nHost: example.test\r\nContent-Type: application/json\r\nContent-Length: 13\r\n\r\n{\"name\":\"a\"}\n";
+        int32 len = one.byteLength();
+        int8[] all = heap int8[len * n];
+        int8[] b #= one.toBytes();
+        int32 k = 0;
+        while (k < n) {
+            int32 i = 0;
+            while (i < len) {
+                all[k * len + i] = b[i];
+                i = i + 1;
+            }
+            k = k + 1;
+        }
+        return heap String(#all, len * n);
+    }
+
+    static int64 measure(int32 n, (HttpRequest, HttpResponse) -> void h) {
+        String script #= ConnectionTests.requests(n);
+        ScriptChannel ch = heap ScriptChannel(script, 1500);
+        ByteBuffer in = heap ByteBuffer(8192);
+        ByteBuffer out = heap ByteBuffer(8192);
+        HttpParserLimits pl = heap HttpParserLimits();
+        Http1Connection conn = heap Http1Connection(ch, in, out, pl, 0, 0, (int64) 100000, true, h);
+        int64 before = Cajeta.allocatedBytes();
+        conn.serve();
+        int64 delta = Cajeta.allocatedBytes() - before;
+        return delta;
+    }
+
+    static void allocation(Check c) {
+        (HttpRequest, HttpResponse) -> void h = (HttpRequest q, HttpResponse r) -> {
+            if (Bytes.equals(q.header("content-type"), "application/json") && q.bodyLength() == 13) {
+                r.status(201).header("Content-Type", "application/json").headerInt("X-Len", (int64) q.bodyLength());
+                r.writeBytes(q.body());
+            }
+        };
+        int64 small = ConnectionTests.measure(100, h);
+        int64 large = ConnectionTests.measure(1100, h);
+        System.stdout.println("    views: 100 requests {} bytes, 1100 requests {} bytes", small, large);
+        c.that(large - small == 0, "1000 more requests on one connection allocate nothing (" + small + " then " + large + ")");
+        (HttpRequest, HttpResponse) -> void copying = (HttpRequest q, HttpResponse r) -> {
+            String host #= q.headerString("host");
+            r.body(host);
+        };
+        int64 cs = ConnectionTests.measure(100, copying);
+        int64 cl = ConnectionTests.measure(1100, copying);
+        System.stdout.println("    copying control: 100 requests {} bytes, 1100 requests {} bytes", cs, cl);
+        c.that(cl - cs > 0, "the copying control grows with the request count (" + cs + " then " + cl + ")");
+    }
+
+    public static void run(Check c) {
+        System.stdout.println("-- connection: basics --");
+        ConnectionTests.basics(c);
+        System.stdout.println("-- connection: failures --");
+        ConnectionTests.failures(c);
+        System.stdout.println("-- connection: expect and head --");
+        ConnectionTests.expectAndHead(c);
+        System.stdout.println("-- connection: allocation --");
+        ConnectionTests.allocation(c);
+    }
+}

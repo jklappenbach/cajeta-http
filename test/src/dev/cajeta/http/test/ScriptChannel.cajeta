@@ -1,0 +1,68 @@
+package dev.cajeta.http.test;
+
+import cajeta.lang.String;
+import cajeta.io.net.ByteChannel;
+
+public final class ScriptChannel implements ByteChannel {
+    int8[] input;
+    int32 inLen;
+    int32 inPos;
+    int32 chunk;
+    int8[] buf;
+    int32 len;
+    public int32 writes;
+
+    public ScriptChannel(String script, int32 chunk) {
+        this.input #= script.toBytes();
+        this.inLen = script.byteLength();
+        this.inPos = 0;
+        this.chunk = chunk;
+        this.buf = heap int8[1 << 20];
+        this.len = 0;
+        this.writes = 0;
+    }
+
+    public int64 readAsync(int8[] b, int64 offset, int64 length) {
+        int32 n = this.inLen - this.inPos;
+        if (n > this.chunk) {
+            n = this.chunk;
+        }
+        if ((int64) n > length) {
+            n = (int32) length;
+        }
+        int32 i = 0;
+        while (i < n) {
+            b[(int32) offset + i] = this.input[this.inPos + i];
+            i = i + 1;
+        }
+        this.inPos = this.inPos + n;
+        return (int64) n;
+    }
+
+    public int64 readWithin(int8[] b, int64 offset, int64 length, int32 timeoutMs) {
+        return this.readAsync(b, offset, length);
+    }
+
+    public void writeAllAsync(int8[] data, int64 offset, int64 length) {
+        int32 o = (int32) offset;
+        int32 n = (int32) length;
+        int32 j = 0;
+        while (j < n) {
+            this.buf[this.len + j] = data[o + j];
+            j = j + 1;
+        }
+        this.len = this.len + n;
+        this.writes = this.writes + 1;
+    }
+
+    public void close() {
+    }
+
+    public int8[] captured() {
+        return this.buf;
+    }
+
+    public int32 capturedLen() {
+        return this.len;
+    }
+}

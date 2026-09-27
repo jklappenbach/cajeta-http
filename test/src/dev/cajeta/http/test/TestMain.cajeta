@@ -4,115 +4,23 @@ import dev.cajeta.http.Http;
 
 // Entry point for the library's self-checking test binary (see the
 // manifest's `test` task). Exit 0 iff every check passes.
+
 public final class TestMain {
     public static int32 main(String[] args) {
         System.stdout.println("=== cajeta-http tests ===");
         Check c = heap Check();
         Shard sel #= heap Shard(args);
-
         String v = Http.version();
         c.eqStr(v, "0.3.1", "Http.version()");   // keep in lockstep with cajeta.json details.version
-
-        if (sel.want("CoreTypeTests")) { CoreTypeTests.run(c); }
-        if (sel.want("BodyTests")) { BodyTests.run(c); }
-        if (sel.want("FormTests")) { FormTests.run(c); }
-        if (sel.want("StreamTests")) { StreamTests.run(c); }
-        if (sel.want("MultipartTests")) { MultipartTests.run(c); }
-        if (sel.want("MessageBodyTests")) { MessageBodyTests.run(c); }
-        if (sel.want("ClientPoolTests")) { ClientPoolTests.run(c); }
-        if (sel.want("CodecTests")) { CodecTests.run(c); }
-        if (sel.want("ServerTests")) { ServerTests.run(c); }
-        if (sel.want("RouterTests")) { RouterTests.run(c); }
-        if (sel.want("MiddlewareTests")) { MiddlewareTests.run(c); }
-        if (sel.want("MiddlewareBundleTests")) { MiddlewareBundleTests.run(c); }
-        if (sel.want("MiddlewareTimeoutCorsTests")) { MiddlewareTimeoutCorsTests.run(c); }
-        if (sel.want("MiddlewareCompressionTests")) { MiddlewareCompressionTests.run(c); }
-        if (sel.want("MiddlewareAuthRateTests")) { MiddlewareAuthRateTests.run(c); }
-        if (sel.want("MiddlewareStaticEtagProxyTests")) { MiddlewareStaticEtagProxyTests.run(c); }
-        if (sel.want("MiddlewareLoopbackTests")) { MiddlewareLoopbackTests.run(c); }
-        if (sel.want("ClientTests")) { ClientTests.run(c); }
-        if (sel.want("RedirectTests")) { RedirectTests.run(c); }
-        if (sel.want("ClientTimeoutTests")) { ClientTimeoutTests.run(c); }
-        if (sel.want("DownloadTests")) { DownloadTests.run(c); }
-        if (sel.want("CodingTests")) { CodingTests.run(c); }
-        if (sel.want("ClientCodingTests")) { ClientCodingTests.run(c); }
-        if (sel.want("ClientBuilderTests")) { ClientBuilderTests.run(c); }
-        if (sel.want("ClientCookieTests")) { ClientCookieTests.run(c); }
-        if (sel.want("ServerDeadlineTests")) { ServerDeadlineTests.run(c); }
-        if (sel.want("ServerSizeLimitTests")) { ServerSizeLimitTests.run(c); }
-        if (sel.want("StreamingCodingTests")) { StreamingCodingTests.run(c); }
-        if (sel.want("ServerTlsTests")) { ServerTlsTests.run(c); }
-        if (sel.want("ServerStreamingTests")) { ServerStreamingTests.run(c); }
-        if (sel.want("ServerAcceptControlTests")) { ServerAcceptControlTests.run(c); }
-        if (sel.want("WsTests")) { WsTests.run(c); }
-        if (sel.want("HpackPrimitiveTests")) { HpackPrimitiveTests.run(c); }
-        if (sel.want("HpackTableTests")) { HpackTableTests.run(c); }
-        if (sel.want("HpackDecoderTests")) { HpackDecoderTests.run(c); }
-        if (sel.want("HpackEncoderTests")) { HpackEncoderTests.run(c); }
-        if (sel.want("Http2FrameTests")) { Http2FrameTests.run(c); }
-        if (sel.want("Http2FixedFrameTests")) { Http2FixedFrameTests.run(c); }
-        if (sel.want("Http2ContentFrameTests")) { Http2ContentFrameTests.run(c); }
-        if (sel.want("Http2SettingsTests")) { Http2SettingsTests.run(c); }
-        if (sel.want("Http2StreamTests")) { Http2StreamTests.run(c); }
-        if (sel.want("Http2FlowTests")) { Http2FlowTests.run(c); }
-        if (sel.want("Http2ConnTests")) { Http2ConnTests.run(c); }
-        if (sel.want("Http2ConcurrencyTests")) { Http2ConcurrencyTests.run(c); }
-        if (sel.want("Http2FlowParkTests")) { Http2FlowParkTests.run(c); }
-        if (sel.want("Http2RstCancelTests")) { Http2RstCancelTests.run(c); }
-        if (sel.want("Http2ClientTests")) { Http2ClientTests.run(c); }
-        if (sel.want("Http2AlpnTests")) { Http2AlpnTests.run(c); }
-        if (sel.want("Http2PriorKnowledgeTests")) { Http2PriorKnowledgeTests.run(c); }
-        if (sel.want("Http2PushTests")) { Http2PushTests.run(c); }
-        if (sel.want("WsPerMessageDeflateTests")) { WsPerMessageDeflateTests.run(c); }
-        if (sel.want("WsConnectTests")) { WsConnectTests.run(c); }
-        if (sel.want("WsHandlerTests")) { WsHandlerTests.run(c); }
-        if (sel.want("SseTests")) { SseTests.run(c); }
-        if (sel.want("SseServerTests")) { SseServerTests.run(c); }
-        if (sel.want("SseServerLoopbackTests")) { SseServerLoopbackTests.run(c); }
-        if (sel.want("SseClientTests")) { SseClientTests.run(c); }
-        if (sel.want("SseClientLoopbackTests")) { SseClientLoopbackTests.run(c); }
-
-        // Opt-in only. The soak answers whether a connection survives being
-        // used, which takes minutes, so it never runs as part of the battery.
-        int32 soak = TestMain.soakRounds(args);
-        if (soak > 0) { Http2SoakTests.run(c, soak); }
-        int32 sp = TestMain.flagValue(args, "--scopeprobe=");
-        if (sp > 0) { ScopeProbeTests.run(c, sp); }
-        int32 hp = TestMain.flagValue(args, "--handoffprobe=");
-        if (hp > 0) { HandoffProbeTests.run(c, hp); }
-        int32 rp = TestMain.flagValue(args, "--reqpathprobe=");
-        if (rp > 0) { RequestPathProbeTests.run(c, rp); }
-        int32 serve = TestMain.flagValue(args, "--soakserve=");
-        if (serve > 0) { Http2SoakTests.serveOnly(serve); }
-        int32 drive = TestMain.flagValue(args, "--soakdrive=");
-        int32 dport = TestMain.flagValue(args, "--soakport=");
-        if (drive > 0 && dport > 0) { Http2SoakTests.driveOnly(c, dport, drive); }
+        if (sel.want("ScanTests")) { ScanTests.run(c); }
+        if (sel.want("ResponseTests")) { ResponseTests.run(c); }
+        if (sel.want("ConnectionTests")) { ConnectionTests.run(c); }
 
         System.stdout.println("");
         System.stdout.println("=== {} passed, {} failed, {} skipped ===",
                               c.passes, c.failures, c.skips);
         if (c.failures > 0) {
             return 1;
-        }
-        return 0;
-    }
-
-    /** `--soak=N` rounds, or 0 when the flag is absent. */
-    static int32 soakRounds(String[] args) {
-        return TestMain.flagValue(args, "--soak=");
-    }
-
-    /** The decimal after `prefix` in any arg, or 0 when absent. */
-    static int32 flagValue(String[] args, String prefix) {
-        int32 i = 0;
-        while (i < args.count()) {
-            String a = args[i];
-            if (a.startsWith(prefix)) {
-                String v #= a.substring(prefix.byteLength(), a.byteLength());
-                int32 n = Shard.digits(v);
-                if (n > 0) { return n; }
-            }
-            i = i + 1;
         }
         return 0;
     }

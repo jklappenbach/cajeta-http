@@ -1,0 +1,201 @@
+package dev.cajeta.http.test;
+
+import cajeta.lang.String;
+import cajeta.lang.Slice;
+import cajeta.io.net.ByteBuffer;
+import dev.cajeta.http.Bytes;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.HttpException;
+import dev.cajeta.http.Version;
+
+public final class ResponseTests {
+    static Slice<int8> pending(ByteBuffer out) {
+        int8[] a = out.array();
+        return a[out.readPosition():out.writePosition()];
+    }
+
+    static void simple(Check c) {
+        ByteBuffer out = heap ByteBuffer(8192);
+        HttpResponse r = heap HttpResponse(out, null, 1024, 32);
+        r.header("Content-Type", "text/plain").body("hello");
+        c.that(r.finish(true, Version.HTTP_1_1, false), "finish has bytes to send");
+        String want = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\ncontent-length: 5\r\n\r\nhello";
+        c.that(Bytes.equals(ResponseTests.pending(out), want), "exact wire bytes for a simple response");
+        r.reset();
+        r.status(404).body("gone");
+        r.finish(false, Version.HTTP_1_1, false);
+        c.that(Bytes.equals(ResponseTests.pending(out),
+            "HTTP/1.1 404 Not Found\r\ncontent-length: 4\r\nConnection: close\r\n\r\ngone"), "close adds Connection: close");
+        r.reset();
+        r.body("x");
+        r.finish(true, Version.HTTP_1_0, false);
+        c.that(Bytes.equals(ResponseTests.pending(out),
+            "HTTP/1.1 200 OK\r\ncontent-length: 1\r\nConnection: keep-alive\r\n\r\nx"), "1.0 peer kept alive says so");
+        r.reset();
+        r.setHeader("Connection", "close").body("y");
+        r.finish(true, Version.HTTP_1_1, false);
+        c.that(!r.keepsAlive(), "a handler's Connection: close ends reuse");
+    }
+
+    static void bodyless(Check c) {
+        ByteBuffer out = heap ByteBuffer(8192);
+        HttpResponse r = heap HttpResponse(out, null, 1024, 32);
+        r.status(204);
+        r.finish(true, Version.HTTP_1_1, false);
+        c.that(Bytes.equals(ResponseTests.pending(out), "HTTP/1.1 204 No Content\r\n\r\n"), "204 carries no length");
+        r.reset();
+        r.status(200).body("abcdef");
+        r.finish(true, Version.HTTP_1_1, true);
+        c.that(Bytes.equals(ResponseTests.pending(out), "HTTP/1.1 200 OK\r\ncontent-length: 6\r\n\r\n"), "HEAD keeps the length and drops the body");
+        r.reset();
+        r.status(200);
+        r.finish(true, Version.HTTP_1_1, false);
+        c.that(Bytes.equals(ResponseTests.pending(out), "HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n"), "empty 200 stamps length zero");
+    }
+
+    static void headerEdits(Check c) {
+        ByteBuffer out = heap ByteBuffer(8192);
+        HttpResponse r = heap HttpResponse(out, null, 1024, 32);
+        int8[] raw #= "ab;cd".toBytes();
+        r.header("A", "1").header("B", "2").header("a", "3");
+        r.setHeader("A", "9");
+        r.removeHeader("b");
+        r.headerBytes("W", raw[1:4]);
+        r.headerInt("N", (int64) 1234567);
+        c.that(Bytes.equals(r.header("a"), "9"), "setHeader replaced every A");
+        c.that(!r.hasHeader("B"), "removeHeader ignores case");
+        r.finish(true, Version.HTTP_1_1, false);
+        c.that(Bytes.equals(ResponseTests.pending(out),
+            "HTTP/1.1 200 OK\r\nA: 9\r\nW: b;c\r\nN: 1234567\r\ncontent-length: 0\r\n\r\n"), "edited fields serialize in order");
+        HttpResponse small = heap HttpResponse(heap ByteBuffer(1024), null, 16, 4);
+        boolean refused = false;
+        try {
+            small.header("X-Long-Name", "a-value-longer-than-sixteen");
+        } catch (HttpException e) {
+            refused = e.httpStatus() == 431;
+        }
+        c.that(refused, "header space exhaustion refuses loudly");
+    }
+
+    static int32 dechunk(int8[] a, int32 from, int32 end, int8[] outBody) {
+        int32 p = from;
+        int32 n = 0;
+        while (p < end) {
+            int32 size = 0;
+            while (a[p] != (int8) 13) {
+                int32 d = ((int32) a[p]) & 255;
+                size = size * 16 + (d <= 57 ? d - 48 : d - 87);
+                p = p + 1;
+            }
+            p = p + 2;
+            if (size == 0) {
+                return n;
+            }
+            int32 i = 0;
+            while (i < size) {
+                outBody[n + i] = a[p + i];
+                i = i + 1;
+            }
+            n = n + size;
+            p = p + size + 2;
+        }
+        return -1;
+    }
+
+    static int32 headEnd(int8[] a, int32 len) {
+        int32 i = 3;
+        while (i < len) {
+            if (a[i] == (int8) 10 && a[i - 1] == (int8) 13 && a[i - 2] == (int8) 10 && a[i - 3] == (int8) 13) {
+                return i + 1;
+            }
+            i = i + 1;
+        }
+        return -1;
+    }
+
+    static void large(Check c) {
+        ByteBuffer out = heap ByteBuffer(4096);
+        MemChannel ch = heap MemChannel();
+        HttpResponse r = heap HttpResponse(out, ch, 1024, 32);
+        int32 total = 10000;
+        int32 i = 0;
+        while (i < total) {
+            int8[] one = heap int8[1];
+            one[0] = (int8) (97 + i % 26);
+            r.write(one, 0, 1);
+            i = i + 1;
+        }
+        c.that(r.isCommitted(), "a body over the buffer commits the head");
+        if (r.finish(true, Version.HTTP_1_1, false)) {
+            out.writeToAsync(ch);
+        }
+        int8[] wire = ch.captured();
+        int32 len = ch.capturedLen();
+        int32 he = ResponseTests.headEnd(wire, len);
+        c.that(he > 0 && Bytes.equals(wire[0:he], "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n"), "chunked head");
+        int8[] body = heap int8[total];
+        int32 got = ResponseTests.dechunk(wire, he, len, body);
+        boolean same = got == total;
+        i = 0;
+        while (same && i < total) {
+            same = body[i] == (int8) (97 + i % 26);
+            i = i + 1;
+        }
+        c.that(same, "dechunked body is intact (" + got + " bytes)");
+        c.that(out.capacity() == 4096, "the buffer never grew");
+
+        ByteBuffer out2 = heap ByteBuffer(4096);
+        MemChannel ch2 = heap MemChannel();
+        HttpResponse d = heap HttpResponse(out2, ch2, 1024, 32);
+        d.headerInt("Content-Length", (int64) total);
+        i = 0;
+        while (i < total) {
+            d.write("z");
+            i = i + 1;
+        }
+        if (d.finish(true, Version.HTTP_1_1, false)) {
+            out2.writeToAsync(ch2);
+        }
+        int8[] w2 = ch2.captured();
+        int32 he2 = ResponseTests.headEnd(w2, ch2.capturedLen());
+        c.that(Bytes.equals(w2[0:he2], "HTTP/1.1 200 OK\r\nContent-Length: 10000\r\n\r\n"), "declared length streams raw");
+        c.that(ch2.capturedLen() - he2 == total, "raw body is exactly the declared length");
+    }
+
+    static void noAllocation(Check c) {
+        ByteBuffer out = heap ByteBuffer(8192);
+        HttpResponse r = heap HttpResponse(out, null, 1024, 32);
+        int8[] payload #= "{\"id\":42,\"name\":\"ada\"}".toBytes();
+        int32 k = 0;
+        while (k < 10) {
+            r.reset();
+            r.header("Content-Type", "application/json").body(payload, payload.count());
+            r.finish(true, Version.HTTP_1_1, false);
+            k = k + 1;
+        }
+        int64 before = Cajeta.allocatedBytes();
+        k = 0;
+        while (k < 1000) {
+            r.reset();
+            r.status(201).header("Content-Type", "application/json").headerInt("X-Id", (int64) k);
+            r.body(payload, payload.count());
+            r.finish(true, Version.HTTP_1_1, false);
+            k = k + 1;
+        }
+        int64 delta = Cajeta.allocatedBytes() - before;
+        c.that(delta == 0, "writing 1000 responses allocates nothing (delta " + delta + ")");
+    }
+
+    public static void run(Check c) {
+        System.stdout.println("-- response: simple --");
+        ResponseTests.simple(c);
+        System.stdout.println("-- response: bodyless --");
+        ResponseTests.bodyless(c);
+        System.stdout.println("-- response: header edits --");
+        ResponseTests.headerEdits(c);
+        System.stdout.println("-- response: large --");
+        ResponseTests.large(c);
+        System.stdout.println("-- response: no allocation --");
+        ResponseTests.noAllocation(c);
+    }
+}

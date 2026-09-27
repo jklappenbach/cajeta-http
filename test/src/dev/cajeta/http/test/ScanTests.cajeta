@@ -1,0 +1,174 @@
+package dev.cajeta.http.test;
+
+import cajeta.lang.String;
+import cajeta.lang.Slice;
+import cajeta.io.net.ByteBuffer;
+import dev.cajeta.http.Bytes;
+import dev.cajeta.http.HeadScanner;
+import dev.cajeta.http.HeaderTable;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpException;
+import dev.cajeta.http.Method;
+import dev.cajeta.http.Version;
+import dev.cajeta.http.h1.HttpParserLimits;
+
+public final class ScanTests {
+    static int32 load(ByteBuffer b, String text) {
+        b.clear();
+        int8[] bytes #= text.toBytes();
+        return b.write(bytes, 0, text.byteLength());
+    }
+
+    static int32 scanWhole(HeadScanner s, ByteBuffer b) {
+        s.reset();
+        return s.scan(b);
+    }
+
+    static int32 scanByteAtATime(HeadScanner s, ByteBuffer b, String text) {
+        s.reset();
+        b.clear();
+        int8[] bytes #= text.toBytes();
+        int32 n = text.byteLength();
+        int32 i = 0;
+        int32 got = -1;
+        while (i < n && got < 0) {
+            b.write(bytes, i, 1);
+            got = s.scan(b);
+            i = i + 1;
+        }
+        return got;
+    }
+
+    static void simpleGet(Check c) {
+        String raw = "GET /users/42?x=1&y=2 HTTP/1.1\r\nHost: example.test\r\nAccept:  */*  \r\nX-Rep: a\r\nx-rep: b\r\n\r\n";
+        ByteBuffer b = heap ByteBuffer(4096);
+        HeadScanner s = heap HeadScanner(heap HttpParserLimits());
+        HttpRequest r = heap HttpRequest(100);
+        ScanTests.load(b, raw);
+        int32 h = ScanTests.scanWhole(s, b);
+        c.that(h == raw.byteLength(), "scan finds the whole head in one read");
+        HeadScanner.parseRequest(b.array(), b.readPosition(), h, r);
+        c.that(r.method() == Method.GET, "method GET");
+        c.that(r.version() == Version.HTTP_1_1, "version 1.1");
+        c.that(Bytes.equals(r.target(), "/users/42?x=1&y=2"), "target window");
+        c.that(Bytes.equals(r.path(), "/users/42"), "path window");
+        c.that(r.hasQuery() && Bytes.equals(r.query(), "x=1&y=2"), "query window");
+        c.that(Bytes.equals(r.header("host"), "example.test"), "lookup ignores name case");
+        c.that(Bytes.equals(r.header("ACCEPT"), "*/*"), "value trimmed of spaces");
+        c.that(r.headers().countOf("x-rep") == 2, "repeated header counted twice");
+        c.that(Bytes.equals(r.headers().valueAt(r.headers().find("x-rep", 3)), "b"), "second repeat reachable");
+        c.that(!r.hasHeader("missing") && r.header("missing").count() == 0, "absent header is empty");
+        c.that(r.keepAlive(), "1.1 keeps alive by default");
+        c.that(!r.hasBody() && r.contentLength() == -1, "no body declared");
+        String copy #= r.headerString("host");
+        c.eqStr(copy, "example.test", "headerString copies");
+        c.that(r.headerString("missing") == null, "headerString of absent is null");
+        c.that(ScanTests.scanByteAtATime(s, b, raw) == raw.byteLength(), "scan one byte per read finds the same head");
+    }
+
+    static void extensionAndVersion(Check c) {
+        String raw = "BREW /pot HTTP/1.0\r\nConnection: keep-alive\r\nContent-Length: 12\r\n\r\n";
+        ByteBuffer b = heap ByteBuffer(4096);
+        HeadScanner s = heap HeadScanner(heap HttpParserLimits());
+        HttpRequest r = heap HttpRequest(100);
+        ScanTests.load(b, raw);
+        HeadScanner.parseRequest(b.array(), 0, ScanTests.scanWhole(s, b), r);
+        c.that(r.method() == Method.EXTENSION, "unregistered method reads EXTENSION");
+        c.that(Bytes.equals(r.methodBytes(), "BREW") && r.methodIs("BREW"), "extension bytes kept");
+        c.that(r.version() == Version.HTTP_1_0, "version 1.0");
+        c.that(r.keepAlive(), "1.0 with keep-alive token reuses");
+        c.that(r.contentLength() == 12, "content-length parsed in place");
+    }
+
+    static void closeAndChunked(Check c) {
+        String raw = "POST /u HTTP/1.1\r\nConnection: Close\r\nTransfer-Encoding: gzip, chunked\r\nContent-Length: 5\r\n\r\n";
+        ByteBuffer b = heap ByteBuffer(4096);
+        HeadScanner s = heap HeadScanner(heap HttpParserLimits());
+        HttpRequest r = heap HttpRequest(100);
+        ScanTests.load(b, raw);
+        HeadScanner.parseRequest(b.array(), 0, ScanTests.scanWhole(s, b), r);
+        c.that(!r.keepAlive(), "close token ends reuse, any case");
+        c.that(r.contentLength() == -1, "chunked wins over content-length");
+    }
+
+    static boolean refuses(String raw, int32 status, HttpParserLimits limits) {
+        ByteBuffer b = heap ByteBuffer(8192);
+        HeadScanner s = heap HeadScanner(limits);
+        HttpRequest r = heap HttpRequest(limits.maxHeaderCount);
+        ScanTests.load(b, raw);
+        try {
+            int32 h = ScanTests.scanWhole(s, b);
+            if (h < 0) {
+                return false;
+            }
+            HeadScanner.parseRequest(b.array(), 0, h, r);
+        } catch (HttpException e) {
+            return e.httpStatus() == status;
+        }
+        return false;
+    }
+
+    static void malformedAndLimits(Check c) {
+        HttpParserLimits d = heap HttpParserLimits();
+        c.that(ScanTests.refuses("GET/x HTTP/1.1\r\n\r\n", 400, d), "missing separator is 400");
+        c.that(ScanTests.refuses("GET  HTTP/1.1\r\n\r\n", 400, d), "empty target is 400");
+        c.that(ScanTests.refuses("GET / HTTP/1.1\r\nNoColon\r\n\r\n", 400, d), "header without colon is 400");
+        c.that(ScanTests.refuses("GET / HTTP/1.1\r\n: v\r\n\r\n", 400, d), "empty field name is 400");
+        c.that(ScanTests.refuses("POST / HTTP/1.1\r\nContent-Length: 1x\r\n\r\n", 400, d), "non-digit length is 400");
+        HttpParserLimits tight #= HttpParserLimits.of(64, 32, 2);
+        c.that(ScanTests.refuses("GET /aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa HTTP/1.1\r\n\r\n", 431, tight), "long line is 431");
+        c.that(ScanTests.refuses("GET / HTTP/1.1\r\nA: 1\r\nB: 2\r\nC: 3\r\n\r\n", 431, tight), "too many lines is 431");
+        HttpParserLimits small #= HttpParserLimits.of(40, 100, 10);
+        c.that(ScanTests.refuses("GET / HTTP/1.1\r\nAaaa: 1111111111\r\nBbbb: 2222222222\r\n\r\n", 431, small), "head over maxHeadBytes is 431");
+    }
+
+    static void noAllocation(Check c) {
+        String raw = "GET /users/42?x=1 HTTP/1.1\r\nHost: example.test\r\nAccept: */*\r\nConnection: keep-alive\r\nContent-Length: 0\r\n\r\n";
+        ByteBuffer b = heap ByteBuffer(4096);
+        HeadScanner s = heap HeadScanner(heap HttpParserLimits());
+        HttpRequest r = heap HttpRequest(100);
+        ScanTests.load(b, raw);
+        int32 k = 0;
+        int64 hits = 0;
+        while (k < 10) {
+            HeadScanner.parseRequest(b.array(), 0, ScanTests.scanWhole(s, b), r);
+            k = k + 1;
+        }
+        int64 before = Cajeta.allocatedBytes();
+        k = 0;
+        while (k < 1000) {
+            int32 h = ScanTests.scanWhole(s, b);
+            HeadScanner.parseRequest(b.array(), 0, h, r);
+            if (Bytes.equals(r.header("host"), "example.test") && r.headerIs("connection", "KEEP-ALIVE")
+                    && Bytes.equals(r.path(), "/users/42")) {
+                hits = hits + 1;
+            }
+            k = k + 1;
+        }
+        int64 delta = Cajeta.allocatedBytes() - before;
+        c.that(hits == 1000, "every parse reads the same fields");
+        c.that(delta == 0, "scan and parse allocate nothing (delta " + delta + ")");
+        before = Cajeta.allocatedBytes();
+        k = 0;
+        while (k < 1000) {
+            HeadScanner.parseRequest(b.array(), 0, ScanTests.scanWhole(s, b), r);
+            String h #= r.headerString("host");
+            hits = hits + (int64) h.byteLength();
+            k = k + 1;
+        }
+        c.that(Cajeta.allocatedBytes() - before > 0, "the control that copies a header moves the counter");
+    }
+
+    public static void run(Check c) {
+        System.stdout.println("-- scan: simple get --");
+        ScanTests.simpleGet(c);
+        System.stdout.println("-- scan: extension method and 1.0 --");
+        ScanTests.extensionAndVersion(c);
+        System.stdout.println("-- scan: close and chunked --");
+        ScanTests.closeAndChunked(c);
+        System.stdout.println("-- scan: malformed and limits --");
+        ScanTests.malformedAndLimits(c);
+        System.stdout.println("-- scan: no allocation --");
+        ScanTests.noAllocation(c);
+    }
+}
