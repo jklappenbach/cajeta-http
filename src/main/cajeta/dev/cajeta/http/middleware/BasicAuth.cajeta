@@ -1,0 +1,83 @@
+package dev.cajeta.http.middleware;
+
+import cajeta.lang.String;
+import cajeta.lang.Slice;
+import cajeta.codec.Base64;
+import dev.cajeta.http.Bytes;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+
+/**
+ * HTTP Basic authentication. The decoded user and password go to a verifier,
+ * and a missing, malformed or refused credential answers 401 with a
+ * `WWW-Authenticate` challenge for the realm.
+ */
+public class BasicAuth {
+    String realm;
+    (String, String) -> boolean verify;
+
+    /** A policy for `realm` with no verifier yet. */
+    public BasicAuth(String realm) {
+        this.realm #= realm.substring(0, realm.byteLength());
+        this.verify = null;
+    }
+
+    /** A policy for `realm`. */
+    public static #BasicAuth create(String realm) {
+        return heap BasicAuth(realm);
+    }
+
+    /** Sets the user and password check. */
+    public BasicAuth verifier((String, String) -> boolean fn) {
+        this.verify #= fn;
+        return this;
+    }
+
+    /** Builds the middleware for `cfg`, which must outlive the chain. */
+    public static #Middleware middleware(BasicAuth cfg) {
+        (HttpRequest, HttpResponse, (HttpRequest, HttpResponse) -> void) -> void f =
+            (HttpRequest q, HttpResponse r, (HttpRequest, HttpResponse) -> void next) -> BasicAuth.apply(cfg, q, r, next);
+        return Middleware.of(#f);
+    }
+
+    static void apply(BasicAuth cfg, HttpRequest q, HttpResponse r,
+                      (HttpRequest, HttpResponse) -> void next) {
+        Slice<int8> h = q.header("Authorization");
+        if (!Bytes.startsWith(h, "Basic ")) {
+            BasicAuth.challenge(cfg, r);
+            return;
+        }
+        String b64 #= Bytes.toString(Bytes.trim(h[6:h.count()]));
+        int8[] raw #= BasicAuth.decodeBasic(b64);
+        if (raw == null) {
+            BasicAuth.challenge(cfg, r);
+            return;
+        }
+        int64 colon = Bytes.indexOf(raw[0:raw.count()], (int8) 58);
+        if (colon < (int64) 0) {
+            BasicAuth.challenge(cfg, r);
+            return;
+        }
+        String user #= Bytes.toString(raw[0:colon]);
+        String pass #= Bytes.toString(raw[colon + 1:raw.count()]);
+        (String, String) -> boolean vf = cfg.verify;
+        if (vf == null || !vf(user, pass)) {
+            BasicAuth.challenge(cfg, r);
+            return;
+        }
+        next(q, r);
+    }
+
+    static #int8[] decodeBasic(String b64) {
+        try {
+            return Base64.decode(b64);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    static void challenge(BasicAuth cfg, HttpResponse r) {
+        r.status(401);
+        r.setHeader("WWW-Authenticate", "Basic realm=\"" + cfg.realm + "\"");
+    }
+}

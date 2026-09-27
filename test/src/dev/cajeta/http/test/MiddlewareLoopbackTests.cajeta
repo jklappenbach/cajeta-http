@@ -1,0 +1,270 @@
+package dev.cajeta.http.test;
+
+import cajeta.lang.String;
+import cajeta.concurrent.Tasks;
+import cajeta.io.file.File;
+import cajeta.io.file.Path;
+import cajeta.time.Duration;
+import dev.cajeta.http.Bytes;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.HttpException;
+import dev.cajeta.http.coding.ContentCoding;
+import dev.cajeta.http.server.HttpServer;
+import dev.cajeta.http.server.HttpServerBuilder;
+import dev.cajeta.http.middleware.MiddlewareChain;
+import dev.cajeta.http.middleware.Recover;
+import dev.cajeta.http.middleware.RequestId;
+import dev.cajeta.http.middleware.ProxyHeaders;
+import dev.cajeta.http.middleware.Cors;
+import dev.cajeta.http.middleware.Compression;
+import dev.cajeta.http.middleware.Decompression;
+import dev.cajeta.http.middleware.ETag;
+import dev.cajeta.http.middleware.BearerAuth;
+import dev.cajeta.http.middleware.BasicAuth;
+import dev.cajeta.http.middleware.RateLimit;
+import dev.cajeta.http.middleware.Timeout;
+import dev.cajeta.http.middleware.StaticFile;
+
+/** Whole middleware stacks on a live server, driven over loopback TCP. */
+public final class MiddlewareLoopbackTests {
+    public static void run(Check c) {
+        System.stdout.println("-- middleware loopback: full stack --");
+        MiddlewareLoopbackTests.stackServer(c);
+        System.stdout.println("-- middleware loopback: gated --");
+        MiddlewareLoopbackTests.gatedServer(c);
+        System.stdout.println("-- middleware loopback: transform --");
+        MiddlewareLoopbackTests.transformServer(c);
+        System.stdout.println("-- middleware loopback: static --");
+        MiddlewareLoopbackTests.staticServer(c);
+    }
+
+    static async int32 serve(HttpServer srv) {
+        srv.serve();
+        return 1;
+    }
+
+    static #String big() {
+        String unit = "{\"k\":\"the quick brown fox jumps over the lazy dog\"},";
+        String s = unit;
+        int32 i = 1;
+        while (i < 40) {
+            s = s + unit;
+            i = i + 1;
+        }
+        return #s;
+    }
+
+    static #String get(String path, String extra) {
+        return "GET " + path + " HTTP/1.1\r\nHost: t\r\nConnection: close\r\n" + extra + "\r\n";
+    }
+
+    static async int32 status(int32 port, String request) {
+        return Loopback.status(port, request);
+    }
+
+    static async int32 hasHeader(int32 port, String request, String name) {
+        String got #= Loopback.roundTrip(port, request);
+        return Wire.header(got, name).byteLength() > 0 ? 1 : 0;
+    }
+
+    static async int32 bodyIs(int32 port, String request, String expect) {
+        String got #= Loopback.roundTrip(port, request);
+        return Wire.bodyOf(got).equals(expect) ? 1 : 0;
+    }
+
+    static async int32 gzipBodyIs(int32 port, String request, String expect) {
+        String got #= Loopback.roundTrip(port, request);
+        if (!Wire.header(got, "Content-Encoding").equals("gzip")) {
+            return -1;
+        }
+        String body #= Wire.bodyOf(got);
+        int8[] b #= body.toBytes();
+        int8[] back #= ContentCoding.decode("gzip", b, body.byteLength(), (int64) 1000000);
+        String plain #= Bytes.toString(back[0:back.count()]);
+        return plain.equals(expect) ? 1 : 0;
+    }
+
+    static async int32 etagFlow(int32 port, String path) {
+        String first #= Loopback.roundTrip(port, MiddlewareLoopbackTests.get(path, ""));
+        String tag #= Wire.header(first, "ETag");
+        if (tag.byteLength() == 0) {
+            return -1;
+        }
+        return Loopback.status(port, MiddlewareLoopbackTests.get(path, "If-None-Match: " + tag + "\r\n"));
+    }
+
+    static async int32 postGzip(int32 port, String auth, String plain) {
+        int8[] pb #= plain.toBytes();
+        int8[] gz #= ContentCoding.encode("gzip", pb, plain.byteLength());
+        String head #= "POST /echo HTTP/1.1\r\nConnection: close\r\nContent-Encoding: gzip\r\nAuthorization: " + auth
+                     + "\r\nContent-Length: " + gz.count() + "\r\n\r\n";
+        String got #= Loopback.roundTrip(port, head + Bytes.toString(gz[0:gz.count()]));
+        if (Wire.status(got) != 200) {
+            return -1;
+        }
+        return Wire.bodyOf(got).equals(plain) ? 1 : 0;
+    }
+
+    static void handleStack(HttpRequest q, HttpResponse r) {
+        if (Bytes.equals(q.path(), "/boom")) {
+            throw heap HttpException("boom");
+        }
+        if (Bytes.equals(q.path(), "/ip")) {
+            if (q.hasHeader("X-Real-IP")) {
+                r.writeBytes(q.header("X-Real-IP"));
+            } else {
+                r.body("none");
+            }
+            return;
+        }
+        if (Bytes.equals(q.path(), "/data")) {
+            String body #= MiddlewareLoopbackTests.big();
+            r.setHeader("Content-Type", "application/json");
+            r.body(body);
+        }
+    }
+
+    static void stackServer(Check c) {
+        ProxyHeaders ph #= ProxyHeaders.trusted();
+        Cors cors #= Cors.create();
+        cors.allowOrigin("http://example.com").allowMethods("GET, POST");
+        Compression comp #= Compression.create();
+        MiddlewareChain chain = heap MiddlewareChain();
+        chain.use(#Recover.middleware()).use(#RequestId.middleware()).use(#ProxyHeaders.middleware(ph))
+             .use(#Cors.middleware(cors)).use(#Compression.middleware(comp)).use(#ETag.middleware());
+        (HttpRequest, HttpResponse) -> void termi = (HttpRequest q, HttpResponse r) -> MiddlewareLoopbackTests.handleStack(q, r);
+        chain.build(termi);
+        scope {
+            HttpServerBuilder b #= HttpServer.builder();
+            b.bind("127.0.0.1:0");
+            b.handler((HttpRequest q, HttpResponse r) -> chain.run(q, r));
+            HttpServer srv #= b.build();
+            int32 port = srv.server.listener.boundPort();
+            Task<int32> sv = spawn serve(srv);
+            Task<int32> t1 = spawn status(port, MiddlewareLoopbackTests.get("/boom", ""));
+            c.eqInt((int64) await t1, 500, "loopback stack: Recover answers 500 over the wire");
+            Task<int32> t2 = spawn hasHeader(port, MiddlewareLoopbackTests.get("/data", ""), "X-Request-Id");
+            c.eqInt((int64) await t2, 1, "loopback stack: RequestId header on the wire");
+            String expect #= MiddlewareLoopbackTests.big();
+            Task<int32> t3 = spawn gzipBodyIs(port, MiddlewareLoopbackTests.get("/data", "Accept-Encoding: gzip\r\n"), expect);
+            c.eqInt((int64) await t3, 1, "loopback stack: Compression round-trips");
+            Task<int32> t4 = spawn hasHeader(port, MiddlewareLoopbackTests.get("/data", ""), "Vary");
+            c.eqInt((int64) await t4, 1, "loopback stack: Compression added Vary");
+            Task<int32> t5 = spawn etagFlow(port, "/data");
+            c.eqInt((int64) await t5, 304, "loopback stack: an ETag conditional GET is 304");
+            Task<int32> t6 = spawn bodyIs(port, MiddlewareLoopbackTests.get("/ip", "X-Forwarded-For: 1.2.3.4, 9.9.9.9\r\n"), "1.2.3.4");
+            c.eqInt((int64) await t6, 1, "loopback stack: ProxyHeaders resolved the client IP");
+            Task<int32> t7 = spawn hasHeader(port,
+                "OPTIONS /data HTTP/1.1\r\nConnection: close\r\nOrigin: http://example.com\r\nAccess-Control-Request-Method: GET\r\n\r\n",
+                "Access-Control-Allow-Origin");
+            c.eqInt((int64) await t7, 1, "loopback stack: the Cors preflight is answered on the wire");
+            boolean drained #= srv.shutdown(Duration.ofSeconds(2));
+            c.that(drained, "loopback stack: the server drained clean");
+            c.eqInt((int64) await sv, 1, "loopback stack: the accept loop exited");
+        }
+    }
+
+    static void handleGated(HttpRequest q, HttpResponse r) {
+        if (Bytes.equals(q.path(), "/slow")) {
+            Tasks.sleepMillis((int64) 300);
+        }
+        r.body("ok");
+    }
+
+    static #String authed(String path, String xff) {
+        return MiddlewareLoopbackTests.get(path, "Authorization: Bearer good-token\r\nX-Forwarded-For: " + xff + "\r\n");
+    }
+
+    static void gatedServer(Check c) {
+        BearerAuth ba #= BearerAuth.create("api");
+        (String) -> boolean vf = (String t) -> t.equals("good-token");
+        ba.verifier(#vf);
+        RateLimit rl #= RateLimit.create((int64) 2, (int64) 0);
+        MiddlewareChain chain = heap MiddlewareChain();
+        chain.use(#BearerAuth.middleware(ba)).use(#RateLimit.middleware(rl)).use(#Timeout.middleware((int64) 60));
+        (HttpRequest, HttpResponse) -> void termi = (HttpRequest q, HttpResponse r) -> MiddlewareLoopbackTests.handleGated(q, r);
+        chain.build(termi);
+        scope {
+            HttpServerBuilder b #= HttpServer.builder();
+            b.bind("127.0.0.1:0");
+            b.handler((HttpRequest q, HttpResponse r) -> chain.run(q, r));
+            HttpServer srv #= b.build();
+            int32 port = srv.server.listener.boundPort();
+            Task<int32> sv = spawn serve(srv);
+            Task<int32> t1 = spawn status(port, MiddlewareLoopbackTests.get("/fast", ""));
+            c.eqInt((int64) await t1, 401, "loopback gated: no token is 401");
+            Task<int32> t2 = spawn status(port, MiddlewareLoopbackTests.authed("/fast", "10.0.0.1"));
+            c.eqInt((int64) await t2, 200, "loopback gated: a valid token is 200");
+            Task<int32> t3 = spawn status(port, MiddlewareLoopbackTests.authed("/slow", "10.0.0.2"));
+            c.eqInt((int64) await t3, 504, "loopback gated: a slow handler is a Timeout 504");
+            Task<int32> r1 = spawn status(port, MiddlewareLoopbackTests.authed("/fast", "10.0.0.3"));
+            await r1;
+            Task<int32> r2 = spawn status(port, MiddlewareLoopbackTests.authed("/fast", "10.0.0.3"));
+            await r2;
+            Task<int32> r3 = spawn status(port, MiddlewareLoopbackTests.authed("/fast", "10.0.0.3"));
+            c.eqInt((int64) await r3, 429, "loopback gated: an exhausted burst is a RateLimit 429");
+            boolean drained #= srv.shutdown(Duration.ofSeconds(2));
+            c.that(drained, "loopback gated: the server drained clean");
+            c.eqInt((int64) await sv, 1, "loopback gated: the accept loop exited");
+        }
+    }
+
+    static void transformServer(Check c) {
+        BasicAuth ba #= BasicAuth.create("api");
+        (String, String) -> boolean vf = (String u, String p) -> u.equals("alice") && p.equals("secret");
+        ba.verifier(#vf);
+        Decompression dec #= Decompression.create();
+        MiddlewareChain chain = heap MiddlewareChain();
+        chain.use(#BasicAuth.middleware(ba)).use(#Decompression.middleware(dec));
+        (HttpRequest, HttpResponse) -> void termi = (HttpRequest q, HttpResponse r) -> {
+            r.writeBytes(q.body());
+        };
+        chain.build(termi);
+        scope {
+            HttpServerBuilder b #= HttpServer.builder();
+            b.bind("127.0.0.1:0");
+            b.handler((HttpRequest q, HttpResponse r) -> chain.run(q, r));
+            HttpServer srv #= b.build();
+            int32 port = srv.server.listener.boundPort();
+            Task<int32> sv = spawn serve(srv);
+            Task<int32> t1 = spawn status(port, MiddlewareLoopbackTests.get("/echo", ""));
+            c.eqInt((int64) await t1, 401, "loopback transform: no auth is 401");
+            String plain #= MiddlewareLoopbackTests.big();
+            Task<int32> t2 = spawn postGzip(port, "Basic YWxpY2U6c2VjcmV0", plain);
+            c.eqInt((int64) await t2, 1, "loopback transform: a gzip request is inflated before the handler");
+            boolean drained #= srv.shutdown(Duration.ofSeconds(2));
+            c.that(drained, "loopback transform: the server drained clean");
+            c.eqInt((int64) await sv, 1, "loopback transform: the accept loop exited");
+        }
+    }
+
+    static void staticServer(Check c) {
+        String root = "build/test/lbroot";
+        Path.of(root).mkdirs();
+        String a = "hello over the wire";
+        File.writeAllBytes(root + "/a.txt", a.toBytes(), a.byteLength());
+        StaticFile sf #= StaticFile.create(root);
+        MiddlewareChain chain = heap MiddlewareChain();
+        chain.use(#StaticFile.middleware(sf));
+        (HttpRequest, HttpResponse) -> void termi = (HttpRequest q, HttpResponse r) -> {
+            r.status(599);
+        };
+        chain.build(termi);
+        scope {
+            HttpServerBuilder b #= HttpServer.builder();
+            b.bind("127.0.0.1:0");
+            b.handler((HttpRequest q, HttpResponse r) -> chain.run(q, r));
+            HttpServer srv #= b.build();
+            int32 port = srv.server.listener.boundPort();
+            Task<int32> sv = spawn serve(srv);
+            Task<int32> t1 = spawn bodyIs(port, MiddlewareLoopbackTests.get("/a.txt", ""), "hello over the wire");
+            c.eqInt((int64) await t1, 1, "loopback static: a file is served over the wire");
+            Task<int32> t2 = spawn status(port, MiddlewareLoopbackTests.get("/missing.txt", ""));
+            c.eqInt((int64) await t2, 404, "loopback static: a missing file is 404");
+            boolean drained #= srv.shutdown(Duration.ofSeconds(2));
+            c.that(drained, "loopback static: the server drained clean");
+            c.eqInt((int64) await sv, 1, "loopback static: the accept loop exited");
+        }
+    }
+}

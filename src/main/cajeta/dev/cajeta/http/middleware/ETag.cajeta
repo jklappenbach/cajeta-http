@@ -1,0 +1,47 @@
+package dev.cajeta.http.middleware;
+
+import cajeta.lang.String;
+import cajeta.lang.Slice;
+import cajeta.hash.Sha256;
+import dev.cajeta.http.Bytes;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+
+/**
+ * Strong ETags over held response bodies. A matching `If-None-Match` turns
+ * the response into a bodyless 304. A streamed or already flushed body, or
+ * one that carries its own ETag, is left alone.
+ */
+public class ETag {
+    /** Builds the middleware. */
+    public static #Middleware middleware() {
+        (HttpRequest, HttpResponse, (HttpRequest, HttpResponse) -> void) -> void f =
+            (HttpRequest q, HttpResponse r, (HttpRequest, HttpResponse) -> void next) -> ETag.apply(q, r, next);
+        return Middleware.of(#f);
+    }
+
+    static void apply(HttpRequest q, HttpResponse r, (HttpRequest, HttpResponse) -> void next) {
+        next(q, r);
+        if (r.isCommitted() || r.bodyStream() != null || r.bodyLength() == 0) {
+            return;
+        }
+        if (r.hasHeader("etag")) {
+            return;
+        }
+        int8[] body #= Bytes.copyOf(r.body());
+        String tag #= "\"" + Sha256.hashHex(body, (int64) body.count()) + "\"";
+        if (q.hasHeader("If-None-Match") && ETag.matches(q.header("If-None-Match"), tag)) {
+            r.reset();
+            r.status(304);
+        }
+        r.setHeader("ETag", tag);
+    }
+
+    static boolean matches(Slice<int8> inm, String tag) {
+        Slice<int8> t = Bytes.trim(inm);
+        if (Bytes.equals(t, "*")) {
+            return true;
+        }
+        return Bytes.contains(t, tag);
+    }
+}

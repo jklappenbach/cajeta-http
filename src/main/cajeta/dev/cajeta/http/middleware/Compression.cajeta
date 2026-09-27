@@ -1,0 +1,111 @@
+package dev.cajeta.http.middleware;
+
+import cajeta.lang.String;
+import cajeta.lang.Slice;
+import dev.cajeta.http.Bytes;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.body.Body;
+import dev.cajeta.http.body.GzipCompressBody;
+import dev.cajeta.http.coding.ContentCoding;
+import dev.cajeta.http.coding.AcceptEncoding;
+
+/**
+ * Compresses compressible responses for clients that accept a coding. A held
+ * body of at least the minimum size is encoded in place, and a streamed body
+ * is wrapped in a gzip stream. `Vary: Accept-Encoding` is always added.
+ */
+public class Compression {
+    int32 minBytes;
+    int32 compLevel;
+
+    /** Compresses bodies of 256 bytes or more at level 1. */
+    public Compression() {
+        this.minBytes = 256;
+        this.compLevel = 1;
+    }
+
+    /** Compresses bodies of 256 bytes or more at level 1. */
+    public static #Compression create() {
+        return heap Compression();
+    }
+
+    /** Leaves bodies under `n` bytes uncompressed. */
+    public Compression minSize(int32 n) {
+        this.minBytes = n;
+        return this;
+    }
+
+    /** The compression level. */
+    public Compression level(int32 n) {
+        this.compLevel = n;
+        return this;
+    }
+
+    /** Builds the middleware for `cfg`, which must outlive the chain. */
+    public static #Middleware middleware(Compression cfg) {
+        (HttpRequest, HttpResponse, (HttpRequest, HttpResponse) -> void) -> void f =
+            (HttpRequest q, HttpResponse r, (HttpRequest, HttpResponse) -> void next) -> Compression.apply(cfg, q, r, next);
+        return Middleware.of(#f);
+    }
+
+    static void apply(Compression cfg, HttpRequest q, HttpResponse r,
+                      (HttpRequest, HttpResponse) -> void next) {
+        next(q, r);
+        if (r.isCommitted()) {
+            return;
+        }
+        Compression.addVary(r);
+        if (r.hasHeader("content-encoding")) {
+            return;
+        }
+        if (!Compression.isCompressible(r.header("Content-Type"))) {
+            return;
+        }
+        boolean streamed = r.bodyStream() != null;
+        if (!streamed && r.bodyLength() < cfg.minBytes) {
+            return;
+        }
+        String accept #= q.hasHeader("Accept-Encoding") ? q.headerString("Accept-Encoding") : null;
+        String coding = AcceptEncoding.best(accept);
+        if (coding.equals("identity")) {
+            return;
+        }
+        if (streamed) {
+            if (coding.equals("gzip")) {
+                Body src #= r.takeBodyStream();
+                r.body(#GzipCompressBody.of(#src, cfg.compLevel));
+                r.setHeader("Content-Encoding", "gzip");
+                r.removeHeader("Content-Length");
+            }
+            return;
+        }
+        int8[] raw #= Bytes.copyOf(r.body());
+        int8[] encoded #= ContentCoding.encode(coding, raw, raw.count(), cfg.compLevel);
+        r.body(encoded, encoded.count());
+        r.setHeader("Content-Encoding", coding);
+        r.removeHeader("Content-Length");
+    }
+
+    static boolean isCompressible(Slice<int8> ct) {
+        if (ct.count() >= (int64) 5 && Bytes.equalsIgnoreCase(ct[0:5], "text/")) {
+            return true;
+        }
+        return Bytes.containsIgnoreCase(ct, "json") || Bytes.containsIgnoreCase(ct, "javascript")
+            || Bytes.containsIgnoreCase(ct, "xml") || Bytes.containsIgnoreCase(ct, "csv")
+            || Bytes.containsIgnoreCase(ct, "svg") || Bytes.containsIgnoreCase(ct, "wasm");
+    }
+
+    static void addVary(HttpResponse r) {
+        if (!r.hasHeader("Vary")) {
+            r.setHeader("Vary", "Accept-Encoding");
+            return;
+        }
+        Slice<int8> v = r.header("Vary");
+        if (Bytes.equals(Bytes.trim(v), "*") || Bytes.containsIgnoreCase(v, "accept-encoding")) {
+            return;
+        }
+        String merged #= Bytes.toString(v) + ", Accept-Encoding";
+        r.setHeader("Vary", merged);
+    }
+}

@@ -1,0 +1,118 @@
+package dev.cajeta.http.test;
+
+import cajeta.lang.String;
+import cajeta.concurrent.Tasks;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.HttpException;
+import dev.cajeta.http.middleware.Recover;
+import dev.cajeta.http.middleware.Timeout;
+import dev.cajeta.http.middleware.Cors;
+import dev.cajeta.http.middleware.MiddlewareChain;
+
+/** Timeout budgets and the CORS preflight and actual-request shapes. */
+public final class MiddlewareTimeoutCorsTests {
+    public static void run(Check c) {
+        System.stdout.println("-- middleware: Timeout --");
+        MiddlewareTimeoutCorsTests.timeouts(c);
+        System.stdout.println("-- middleware: Cors --");
+        MiddlewareTimeoutCorsTests.preflight(c);
+        MiddlewareTimeoutCorsTests.actual(c);
+    }
+
+    static void slow(HttpRequest q, HttpResponse r) {
+        Tasks.sleepMillis((int64) 300);
+        r.body("late");
+    }
+
+    static void fast(HttpRequest q, HttpResponse r) {
+        r.body("ok");
+    }
+
+    static void boom(HttpRequest q, HttpResponse r) {
+        throw heap HttpException("boom");
+    }
+
+    static void timeouts(Check c) {
+        (HttpRequest, HttpResponse) -> void slowT = (HttpRequest q, HttpResponse r) -> MiddlewareTimeoutCorsTests.slow(q, r);
+        (HttpRequest, HttpResponse) -> void fastT = (HttpRequest q, HttpResponse r) -> MiddlewareTimeoutCorsTests.fast(q, r);
+        (HttpRequest, HttpResponse) -> void boomT = (HttpRequest q, HttpResponse r) -> MiddlewareTimeoutCorsTests.boom(q, r);
+        String got #= Wire.through(#Timeout.middleware((int64) 50), slowT, "GET /x HTTP/1.1\r\n\r\n");
+        Wire.same(c, got, "HTTP/1.1 504 Gateway Timeout\r\ncontent-length: 0\r\n\r\n",
+            "timeout: an overrunning handler becomes an empty 504");
+        got #= Wire.through(#Timeout.middleware((int64) 1000), fastT, "GET /x HTTP/1.1\r\n\r\n");
+        Wire.same(c, Wire.bodyOf(got), "ok", "timeout: an in-budget handler passes through");
+        got #= Wire.through2(#Recover.middleware(), #Timeout.middleware((int64) 1000), boomT,
+                             "GET /x HTTP/1.1\r\n\r\n");
+        c.eqInt((int64) Wire.status(got), 500, "timeout: a handler throw in budget reaches Recover as 500");
+    }
+
+    static void preflight(Check c) {
+        (HttpRequest, HttpResponse) -> void okT = (HttpRequest q, HttpResponse r) -> MiddlewareTimeoutCorsTests.fast(q, r);
+        Cors good #= Cors.create();
+        good.allowOrigin("https://good.example").allowMethods("GET, POST").maxAge((int64) 600);
+        String got #= Wire.through(#Cors.middleware(good), okT,
+            "OPTIONS /x HTTP/1.1\r\nOrigin: https://good.example\r\nAccess-Control-Request-Method: POST\r\n\r\n");
+        c.eqInt((int64) Wire.status(got), 204, "cors preflight: an allowed origin gets 204");
+        Wire.same(c, Wire.header(got, "Access-Control-Allow-Origin"), "https://good.example",
+            "cors preflight: echoes the allowed origin");
+        Wire.same(c, Wire.header(got, "Access-Control-Allow-Methods"), "GET, POST",
+            "cors preflight: advertises the allowed methods");
+        Wire.same(c, Wire.header(got, "Access-Control-Max-Age"), "600", "cors preflight: carries max-age");
+        Wire.same(c, Wire.bodyOf(got), "", "cors preflight: the handler did not run");
+
+        Cors onlyGood #= Cors.create();
+        onlyGood.allowOrigin("https://good.example");
+        got #= Wire.through(#Cors.middleware(onlyGood), okT,
+            "OPTIONS /x HTTP/1.1\r\nOrigin: https://evil.example\r\nAccess-Control-Request-Method: POST\r\n\r\n");
+        Wire.same(c, Wire.header(got, "Access-Control-Allow-Origin"), "",
+            "cors preflight: a disallowed origin gets no Allow-Origin header");
+
+        got #= Wire.through(#Cors.middleware(onlyGood), okT,
+            "OPTIONS /x HTTP/1.1\r\nOrigin: https://good.example\r\nAccess-Control-Request-Method: POST\r\n"
+            + "Access-Control-Request-Headers: X-Custom, Content-Type\r\n\r\n");
+        Wire.same(c, Wire.header(got, "Access-Control-Allow-Headers"), "X-Custom, Content-Type",
+            "cors preflight: echoes the requested headers when none are configured");
+    }
+
+    static void actual(Check c) {
+        (HttpRequest, HttpResponse) -> void okT = (HttpRequest q, HttpResponse r) -> MiddlewareTimeoutCorsTests.fast(q, r);
+        Cors expose #= Cors.create();
+        expose.allowOrigin("https://good.example").exposeHeaders("X-Total-Count");
+        String got #= Wire.through(#Cors.middleware(expose), okT,
+            "GET /x HTTP/1.1\r\nOrigin: https://good.example\r\n\r\n");
+        Wire.same(c, Wire.bodyOf(got), "ok", "cors actual: the handler ran");
+        Wire.same(c, Wire.header(got, "Access-Control-Allow-Origin"), "https://good.example",
+            "cors actual: stamps the allowed origin");
+        Wire.same(c, Wire.header(got, "Access-Control-Expose-Headers"), "X-Total-Count",
+            "cors actual: exposes the configured headers");
+
+        got #= Wire.through(#Cors.middleware(expose), okT, "GET /x HTTP/1.1\r\n\r\n");
+        c.eqInt((int64) Wire.status(got), 200, "cors actual: a same-origin request passes");
+        Wire.same(c, Wire.header(got, "Access-Control-Allow-Origin"), "", "cors actual: no Origin, no CORS headers");
+
+        Cors any #= Cors.create();
+        any.allowAnyOrigin();
+        got #= Wire.through(#Cors.middleware(any), okT, "GET /x HTTP/1.1\r\nOrigin: https://any.example\r\n\r\n");
+        Wire.same(c, Wire.header(got, "Access-Control-Allow-Origin"), "*", "cors wildcard: uncredentialed emits *");
+
+        Cors creds #= Cors.create();
+        creds.allowAnyOrigin().allowCredentials(true);
+        got #= Wire.through(#Cors.middleware(creds), okT, "GET /x HTTP/1.1\r\nOrigin: https://app.example\r\n\r\n");
+        Wire.same(c, Wire.header(got, "Access-Control-Allow-Origin"), "https://app.example",
+            "cors credentialed wildcard: reflects the origin, not *");
+        Wire.same(c, Wire.header(got, "Access-Control-Allow-Credentials"), "true",
+            "cors credentialed wildcard: sets Allow-Credentials");
+        Wire.same(c, Wire.header(got, "Vary"), "Origin", "cors credentialed wildcard: adds Vary: Origin");
+
+        MiddlewareChain chain = heap MiddlewareChain();
+        chain.use(#Cors.middleware(expose));
+        chain.build(okT);
+        (HttpRequest, HttpResponse) -> void app = (HttpRequest q, HttpResponse r) -> chain.run(q, r);
+        String one = "GET /x HTTP/1.1\r\nOrigin: https://good.example\r\n\r\n";
+        int64 small = Wire.measure(one, 100, app);
+        int64 large = Wire.measure(one, 1100, app);
+        c.that(large - small == 0,
+            "cors: 1000 more allowed cross-origin requests allocate nothing (" + small + " then " + large + ")");
+    }
+}

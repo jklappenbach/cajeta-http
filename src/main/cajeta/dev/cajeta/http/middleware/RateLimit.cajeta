@@ -1,0 +1,94 @@
+package dev.cajeta.http.middleware;
+
+import cajeta.lang.String;
+import cajeta.lang.Slice;
+import cajeta.time.Clock;
+import dev.cajeta.http.Bytes;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+
+/**
+ * A token bucket per client key, the value of `X-Forwarded-For` unless
+ * configured otherwise. Requests without the header share one bucket. An
+ * empty bucket answers 429 with `Retry-After`. A known key allocates nothing.
+ */
+public class RateLimit {
+    int64 capacity;
+    int64 refillPerSec;
+    String keyHeader;
+    String[] keys;
+    TokenBucket[] buckets;
+    int32 count;
+
+    /** `capacity` requests at once, refilled at `refillPerSec` a second. */
+    public RateLimit(int64 capacity, int64 refillPerSec) {
+        this.capacity = capacity;
+        this.refillPerSec = refillPerSec;
+        this.keyHeader = "X-Forwarded-For";
+        this.keys = heap String[8];
+        this.buckets = heap TokenBucket[8];
+        this.count = 0;
+    }
+
+    /** A limiter of `capacity` refilled at `refillPerSec`. */
+    public static #RateLimit create(int64 capacity, int64 refillPerSec) {
+        return heap RateLimit(capacity, refillPerSec);
+    }
+
+    /** Keys buckets by header `h`. */
+    public RateLimit keyByHeader(String h) {
+        this.keyHeader #= h.substring(0, h.byteLength());
+        return this;
+    }
+
+    /** Builds the middleware for `cfg`, which must outlive the chain. */
+    public static #Middleware middleware(RateLimit cfg) {
+        (HttpRequest, HttpResponse, (HttpRequest, HttpResponse) -> void) -> void f =
+            (HttpRequest q, HttpResponse r, (HttpRequest, HttpResponse) -> void next) -> RateLimit.apply(cfg, q, r, next);
+        return Middleware.of(#f);
+    }
+
+    static void apply(RateLimit cfg, HttpRequest q, HttpResponse r,
+                      (HttpRequest, HttpResponse) -> void next) {
+        int64 now = Clock.now().toEpochMilli();
+        TokenBucket b = cfg.bucketFor(q.header(cfg.keyHeader), now);
+        if (b.tryAcquire(now)) {
+            next(q, r);
+            return;
+        }
+        r.status(429);
+        r.headerInt("Retry-After", b.retryAfterSecs(now));
+    }
+
+    TokenBucket bucketFor(Slice<int8> key, int64 now) {
+        int32 i = 0;
+        while (i < this.count) {
+            if (Bytes.equals(key, this.keys[i])) {
+                return this.buckets[i];
+            }
+            i = i + 1;
+        }
+        if (this.count >= this.keys.count()) {
+            this.grow();
+        }
+        this.keys[this.count] #= Bytes.toString(key);
+        TokenBucket b = heap TokenBucket(this.capacity, this.refillPerSec, now);
+        this.buckets[this.count] = #b;
+        this.count = this.count + 1;
+        return this.buckets[this.count - 1];
+    }
+
+    void grow() {
+        int32 newCap = this.keys.count() * 2;
+        String[] gk = heap String[newCap];
+        TokenBucket[] gb = heap TokenBucket[newCap];
+        int32 j = 0;
+        while (j < this.count) {
+            gk[j] #= this.keys[j];
+            gb[j] #= this.buckets[j];
+            j = j + 1;
+        }
+        this.keys #= gk;
+        this.buckets #= gb;
+    }
+}

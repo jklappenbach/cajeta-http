@@ -1,0 +1,168 @@
+package dev.cajeta.http.middleware;
+
+import cajeta.lang.String;
+import cajeta.lang.Slice;
+import dev.cajeta.http.Bytes;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.Method;
+
+/**
+ * Cross-origin resource sharing. A preflight (`OPTIONS` with
+ * `Access-Control-Request-Method`) is answered here with 204 and the allow
+ * headers. Any other request runs, then an allowed origin is stamped on the
+ * response. A credentialed wildcard reflects the origin rather than `*`, and a
+ * disallowed origin gets no allow headers at all.
+ */
+public class Cors {
+    String[] origins;
+    int32 originCount;
+    boolean anyOrigin;
+    String methods;
+    String allowHeaders;
+    String exposeHeaders;
+    int64 maxAgeSecs;
+    boolean credentials;
+
+    /** A policy that allows no origin yet. */
+    public Cors() {
+        this.origins = heap String[4];
+        this.originCount = 0;
+        this.anyOrigin = false;
+        this.methods = "GET, HEAD, PUT, PATCH, POST, DELETE";
+        this.allowHeaders = null;
+        this.exposeHeaders = null;
+        this.maxAgeSecs = 0;
+        this.credentials = false;
+    }
+
+    /** A policy that allows no origin yet. */
+    public static #Cors create() {
+        return heap Cors();
+    }
+
+    /** Allows the exact origin `o`. */
+    public Cors allowOrigin(String o) {
+        if (this.originCount >= this.origins.count()) {
+            String[] grown = heap String[this.origins.count() * 2];
+            int32 j = 0;
+            while (j < this.originCount) {
+                grown[j] #= this.origins[j];
+                j = j + 1;
+            }
+            this.origins #= grown;
+        }
+        this.origins[this.originCount] #= o.substring(0, o.byteLength());
+        this.originCount = this.originCount + 1;
+        return this;
+    }
+
+    /** Allows every origin. */
+    public Cors allowAnyOrigin() {
+        this.anyOrigin = true;
+        return this;
+    }
+
+    /** The methods a preflight advertises. */
+    public Cors allowMethods(String m) {
+        this.methods #= m.substring(0, m.byteLength());
+        return this;
+    }
+
+    /** The request headers a preflight allows, instead of echoing the requested set. */
+    public Cors allowHeaders(String h) {
+        this.allowHeaders #= h.substring(0, h.byteLength());
+        return this;
+    }
+
+    /** The response headers a script may read. */
+    public Cors exposeHeaders(String h) {
+        this.exposeHeaders #= h.substring(0, h.byteLength());
+        return this;
+    }
+
+    /** How long a preflight may be cached, in seconds. 0 sends no header. */
+    public Cors maxAge(int64 s) {
+        this.maxAgeSecs = s;
+        return this;
+    }
+
+    /** Whether credentialed requests are allowed. */
+    public Cors allowCredentials(boolean b) {
+        this.credentials = b;
+        return this;
+    }
+
+    boolean isAllowed(Slice<int8> origin) {
+        if (this.anyOrigin) {
+            return true;
+        }
+        int32 i = 0;
+        while (i < this.originCount) {
+            if (Bytes.equals(origin, this.origins[i])) {
+                return true;
+            }
+            i = i + 1;
+        }
+        return false;
+    }
+
+    void stampOrigin(HttpResponse r, Slice<int8> origin) {
+        if (this.anyOrigin && !this.credentials) {
+            r.setHeader("Access-Control-Allow-Origin", "*");
+        } else {
+            r.setHeaderBytes("Access-Control-Allow-Origin", origin);
+        }
+    }
+
+    void stampTail(HttpResponse r) {
+        if (this.credentials) {
+            r.setHeader("Access-Control-Allow-Credentials", "true");
+        }
+        if (!this.anyOrigin || this.credentials) {
+            r.setHeader("Vary", "Origin");
+        }
+    }
+
+    /** Builds the middleware for `cfg`, which must outlive the chain. */
+    public static #Middleware middleware(Cors cfg) {
+        (HttpRequest, HttpResponse, (HttpRequest, HttpResponse) -> void) -> void f =
+            (HttpRequest q, HttpResponse r, (HttpRequest, HttpResponse) -> void next) -> Cors.apply(cfg, q, r, next);
+        return Middleware.of(#f);
+    }
+
+    static void apply(Cors cfg, HttpRequest q, HttpResponse r,
+                      (HttpRequest, HttpResponse) -> void next) {
+        boolean hasOrigin = q.hasHeader("Origin");
+        if (q.method() == Method.OPTIONS && q.hasHeader("Access-Control-Request-Method")) {
+            r.status(204);
+            if (hasOrigin && cfg.isAllowed(q.header("Origin"))) {
+                cfg.stampOrigin(r, q.header("Origin"));
+                r.setHeader("Access-Control-Allow-Methods", cfg.methods);
+                if (cfg.allowHeaders != null) {
+                    r.setHeader("Access-Control-Allow-Headers", cfg.allowHeaders);
+                } else if (q.hasHeader("Access-Control-Request-Headers")) {
+                    r.setHeaderBytes("Access-Control-Allow-Headers", q.header("Access-Control-Request-Headers"));
+                }
+                if (cfg.maxAgeSecs > 0) {
+                    r.headerInt("Access-Control-Max-Age", cfg.maxAgeSecs);
+                }
+                cfg.stampTail(r);
+            }
+            return;
+        }
+        next(q, r);
+        if (hasOrigin && !r.isCommitted() && cfg.isAllowed(q.header("Origin"))) {
+            cfg.stampOrigin(r, q.header("Origin"));
+            if (cfg.credentials) {
+                r.setHeader("Access-Control-Allow-Credentials", "true");
+            }
+            if (cfg.exposeHeaders != null) {
+                r.setHeader("Access-Control-Expose-Headers", cfg.exposeHeaders);
+            }
+            if (!cfg.anyOrigin || cfg.credentials) {
+                r.setHeader("Vary", "Origin");
+            }
+        }
+    }
+}

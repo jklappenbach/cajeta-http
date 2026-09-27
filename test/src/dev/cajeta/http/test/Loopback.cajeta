@@ -1,0 +1,62 @@
+package dev.cajeta.http.test;
+
+import cajeta.lang.String;
+import cajeta.io.net.SocketAddress;
+import cajeta.io.net.TcpStream;
+import dev.cajeta.http.Bytes;
+
+/** A real server on a loopback port, driven by raw requests over TCP. */
+public final class Loopback {
+    /** Sends `request` on a fresh connection and returns the whole response. */
+    public static #String roundTrip(int32 port, String request) {
+        TcpStream sock #= TcpStream.connectAsync(SocketAddress.parse("127.0.0.1:" + port));
+        int8[] req #= request.toBytes();
+        sock.writeAllAsync(req, 0, (int64) request.byteLength());
+        int8[] buf = heap int8[65536];
+        int32 len = 0;
+        while (len < buf.count()) {
+            int64 got = sock.readAsync(buf, (int64) len, (int64) (buf.count() - len));
+            if (got <= 0) {
+                break;
+            }
+            len = len + (int32) got;
+            if (Loopback.complete(buf, len)) {
+                break;
+            }
+        }
+        sock.close();
+        return Bytes.toString(buf[0:len]);
+    }
+
+    static boolean complete(int8[] a, int32 n) {
+        String text #= Bytes.toString(a[0:n]);
+        int64 headEnd = text.indexOf("\r\n\r\n");
+        if (headEnd < (int64) 0) {
+            return false;
+        }
+        String head #= text.substring(0, (int32) headEnd + 2).toLowerCase();
+        if (head.contains("transfer-encoding: chunked")) {
+            return text.endsWith("0\r\n\r\n");
+        }
+        String cl #= Wire.header(text, "content-length");
+        if (cl.byteLength() == 0) {
+            return false;
+        }
+        int8[] d #= cl.toBytes();
+        int64 want = Bytes.parseInt64(d[0:cl.byteLength()], (int64) 0);
+        return (int64) n >= headEnd + (int64) 4 + want;
+    }
+
+    /** The status of the response to `request`. */
+    public static int32 status(int32 port, String request) {
+        String got #= Loopback.roundTrip(port, request);
+        return Wire.status(got);
+    }
+
+    /** 1 when the response to `request` carries header `name` starting with `prefix`, else 0. */
+    public static int32 headerStarts(int32 port, String request, String name, String prefix) {
+        String got #= Loopback.roundTrip(port, request);
+        String v #= Wire.header(got, name);
+        return v.startsWith(prefix) ? 1 : 0;
+    }
+}

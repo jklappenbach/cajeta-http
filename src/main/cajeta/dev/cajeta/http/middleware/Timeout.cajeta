@@ -1,0 +1,36 @@
+package dev.cajeta.http.middleware;
+
+import cajeta.lang.String;
+import cajeta.time.Clock;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+
+/**
+ * A response budget. When the rest of the chain takes `budgetMs` or longer,
+ * or throws after the budget ran out, the answer is 504 unless the head was
+ * already sent.
+ */
+public class Timeout {
+    /** Builds the middleware with a budget of `budgetMs` milliseconds. */
+    public static #Middleware middleware(int64 budgetMs) {
+        (HttpRequest, HttpResponse, (HttpRequest, HttpResponse) -> void) -> void f =
+            (HttpRequest q, HttpResponse r, (HttpRequest, HttpResponse) -> void next) -> Timeout.apply(budgetMs, q, r, next);
+        return Middleware.of(#f);
+    }
+
+    static void apply(int64 budgetMs, HttpRequest q, HttpResponse r,
+                      (HttpRequest, HttpResponse) -> void next) {
+        int64 deadline = Clock.now().toEpochMilli() + budgetMs;
+        try {
+            next(q, r);
+        } catch (Exception e) {
+            if (Clock.now().toEpochMilli() < deadline || r.isCommitted()) {
+                throw e;
+            }
+        }
+        if (Clock.now().toEpochMilli() >= deadline && !r.isCommitted()) {
+            r.reset();
+            r.status(504);
+        }
+    }
+}

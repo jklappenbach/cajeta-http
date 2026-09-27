@@ -1,0 +1,27 @@
+package dev.cajeta.http.middleware;
+
+import cajeta.lang.String;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+
+/** Answers 500 when anything below it throws before the response head is sent. */
+public class Recover {
+    /** Builds the middleware. */
+    public static #Middleware middleware() {
+        (HttpRequest, HttpResponse, (HttpRequest, HttpResponse) -> void) -> void f =
+            (HttpRequest q, HttpResponse r, (HttpRequest, HttpResponse) -> void next) -> Recover.apply(q, r, next);
+        return Middleware.of(#f);
+    }
+
+    static void apply(HttpRequest q, HttpResponse r, (HttpRequest, HttpResponse) -> void next) {
+        try {
+            next(q, r);
+        } catch (Exception e) {
+            if (r.isCommitted()) {
+                throw e;
+            }
+            r.reset();
+            r.status(500);
+        }
+    }
+}

@@ -1,0 +1,209 @@
+package dev.cajeta.http.test;
+
+import cajeta.lang.String;
+import cajeta.io.net.AsyncReader;
+import dev.cajeta.http.Bytes;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.body.BytesBody;
+import dev.cajeta.http.body.GzipCompressBody;
+import dev.cajeta.http.body.StreamBody;
+import dev.cajeta.http.coding.ContentCoding;
+import dev.cajeta.http.coding.AcceptEncoding;
+import dev.cajeta.http.middleware.Compression;
+import dev.cajeta.http.middleware.Decompression;
+
+/** Accept-Encoding negotiation, response compression and request decompression. */
+public final class MiddlewareCompressionTests {
+    public static void run(Check c) {
+        System.stdout.println("-- coding: Accept-Encoding negotiation --");
+        MiddlewareCompressionTests.negotiation(c);
+        System.stdout.println("-- middleware: Compression held bodies --");
+        MiddlewareCompressionTests.held(c);
+        MiddlewareCompressionTests.skips(c);
+        System.stdout.println("-- middleware: Compression streamed --");
+        MiddlewareCompressionTests.streamed(c);
+        System.stdout.println("-- middleware: Decompression --");
+        MiddlewareCompressionTests.decompression(c);
+    }
+
+    static #String bigText() {
+        String unit = "The quick brown fox jumps over the lazy dog. ";
+        String s = unit + unit;
+        int32 i = 2;
+        while (i < 20) {
+            s = s + unit;
+            i = i + 1;
+        }
+        return #s;
+    }
+
+    static void typed(HttpResponse r, String type, String body) {
+        r.setHeader("Content-Type", type);
+        r.body(body);
+    }
+
+    static #String decoded(String coding, String wire) {
+        String body #= Wire.bodyOf(wire);
+        int8[] b #= body.toBytes();
+        int8[] back #= ContentCoding.decode(coding, b, body.byteLength(), (int64) 100000);
+        return Bytes.toString(back[0:back.count()]);
+    }
+
+    static void negotiation(Check c) {
+        c.eqStr(AcceptEncoding.best("gzip, deflate"), "gzip", "negotiate: gzip preferred over deflate on a tie");
+        c.eqStr(AcceptEncoding.best("deflate, gzip;q=0.5"), "deflate", "negotiate: the higher q wins");
+        c.eqStr(AcceptEncoding.best("gzip;q=0.9, deflate;q=0.8"), "gzip", "negotiate: gzip's higher q wins");
+        c.eqStr(AcceptEncoding.best("identity;q=0, deflate"), "deflate",
+            "negotiate: identity;q=0 is irrelevant when deflate is offered");
+        c.eqStr(AcceptEncoding.best("gzip;q=0, deflate;q=0"), "identity",
+            "negotiate: everything forbidden falls back to identity");
+        c.eqStr(AcceptEncoding.best("*;q=0, gzip"), "gzip", "negotiate: explicit gzip beats a wildcard q=0");
+        c.eqStr(AcceptEncoding.best(null), "identity", "negotiate: an absent header is identity");
+    }
+
+    static void held(Check c) {
+        Compression cmp #= Compression.create();
+        String text #= MiddlewareCompressionTests.bigText();
+        (HttpRequest, HttpResponse) -> void json = (HttpRequest q, HttpResponse r) ->
+            MiddlewareCompressionTests.typed(r, "application/json", text);
+        String got #= Wire.through(#Compression.middleware(cmp), json,
+            "GET /x HTTP/1.1\r\nAccept-Encoding: gzip\r\n\r\n");
+        Wire.same(c, Wire.header(got, "Content-Encoding"), "gzip", "held gzip: Content-Encoding stamped");
+        c.that(Wire.header(got, "Vary").toLowerCase().contains("accept-encoding"),
+            "held gzip: Vary: Accept-Encoding added");
+        Wire.same(c, MiddlewareCompressionTests.decoded("gzip", got), text, "held gzip: the body round-trips");
+        String body #= Wire.bodyOf(got);
+        Wire.same(c, Wire.header(got, "content-length"), "" + body.byteLength(),
+            "held gzip: the length is the compressed length");
+
+        got #= Wire.through(#Compression.middleware(cmp), json,
+            "GET /x HTTP/1.1\r\nAccept-Encoding: deflate\r\n\r\n");
+        Wire.same(c, Wire.header(got, "Content-Encoding"), "deflate", "held deflate: Content-Encoding stamped");
+        Wire.same(c, MiddlewareCompressionTests.decoded("deflate", got), text, "held deflate: the body round-trips");
+    }
+
+    static void skips(Check c) {
+        Compression cmp #= Compression.create();
+        String text #= MiddlewareCompressionTests.bigText();
+        (HttpRequest, HttpResponse) -> void tiny = (HttpRequest q, HttpResponse r) ->
+            MiddlewareCompressionTests.typed(r, "text/plain", "hello");
+        String got #= Wire.through(#Compression.middleware(cmp), tiny,
+            "GET /x HTTP/1.1\r\nAccept-Encoding: gzip\r\n\r\n");
+        Wire.same(c, Wire.header(got, "Content-Encoding"), "", "skip tiny: a body under the minimum stays plain");
+
+        (HttpRequest, HttpResponse) -> void pre = (HttpRequest q, HttpResponse r) -> {
+            MiddlewareCompressionTests.typed(r, "application/json", text);
+            r.setHeader("Content-Encoding", "gzip");
+        };
+        got #= Wire.through(#Compression.middleware(cmp), pre,
+            "GET /x HTTP/1.1\r\nAccept-Encoding: gzip\r\n\r\n");
+        Wire.same(c, Wire.header(got, "Content-Encoding"), "gzip", "skip encoded: the handler's coding is kept");
+        Wire.same(c, Wire.bodyOf(got), text, "skip encoded: the body is not compressed twice");
+
+        (HttpRequest, HttpResponse) -> void png = (HttpRequest q, HttpResponse r) ->
+            MiddlewareCompressionTests.typed(r, "image/png", text);
+        got #= Wire.through(#Compression.middleware(cmp), png,
+            "GET /x HTTP/1.1\r\nAccept-Encoding: gzip\r\n\r\n");
+        Wire.same(c, Wire.header(got, "Content-Encoding"), "", "skip incompressible: image types stay plain");
+
+        (HttpRequest, HttpResponse) -> void json = (HttpRequest q, HttpResponse r) ->
+            MiddlewareCompressionTests.typed(r, "application/json", text);
+        got #= Wire.through(#Compression.middleware(cmp), json, "GET /x HTTP/1.1\r\n\r\n");
+        Wire.same(c, Wire.header(got, "Content-Encoding"), "", "skip identity: no Accept-Encoding, no coding");
+        c.that(Wire.header(got, "Vary").toLowerCase().contains("accept-encoding"),
+            "skip identity: Vary is still added");
+    }
+
+    static #AsyncReader reader(String text) {
+        MemChannel ch = heap MemChannel();
+        AsyncReader rd = heap AsyncReader(ch, text.byteLength() + 16);
+        int8[] b #= text.toBytes();
+        rd.stage(b, text.byteLength());
+        rd.markEof();
+        return #rd;
+    }
+
+    static void streamed(Check c) {
+        Compression cmp #= Compression.create();
+        String plain #= MiddlewareCompressionTests.bigText();
+        int32 pn = plain.byteLength();
+        BytesBody src #= BytesBody.of(plain.toBytes(), pn);
+        GzipCompressBody cb #= GzipCompressBody.of(#src);
+        AsyncReader rd = cb.reader();
+        int8[] acc = heap int8[8192];
+        int32 accLen = 0;
+        int8[] chunk = heap int8[7];
+        boolean going = true;
+        while (going) {
+            int32 got = rd.read(chunk, 0, 7);
+            if (got <= 0) {
+                going = false;
+            } else {
+                int32 k = 0;
+                while (k < got) {
+                    acc[accLen] = chunk[k];
+                    accLen = accLen + 1;
+                    k = k + 1;
+                }
+            }
+        }
+        int8[] back #= ContentCoding.decode("gzip", acc, accLen, (int64) 100000);
+        c.eqBytes(back, back.count(), plain, "streamed gzip: a chunk-drained stream decodes to the original");
+
+        (HttpRequest, HttpResponse) -> void stream = (HttpRequest q, HttpResponse r) -> {
+            r.setHeader("Content-Type", "application/json");
+            r.body(#StreamBody.of(#MiddlewareCompressionTests.reader(plain)));
+        };
+        String wire #= Wire.through(#Compression.middleware(cmp), stream,
+            "GET /x HTTP/1.1\r\nAccept-Encoding: gzip\r\n\r\n");
+        Wire.same(c, Wire.header(wire, "Content-Encoding"), "gzip", "streamed response: Content-Encoding stamped");
+        Wire.same(c, Wire.header(wire, "transfer-encoding"), "chunked", "streamed response: sent chunked");
+        Wire.same(c, MiddlewareCompressionTests.decoded("gzip", wire), plain,
+            "streamed response: the gzip stream decodes to the original");
+    }
+
+    static #String post(String coding, int8[] body, int32 n) {
+        String head #= "POST /x HTTP/1.1\r\nContent-Encoding: " + coding + "\r\nContent-Length: " + n + "\r\n\r\n";
+        return head + Bytes.toString(body[0:n]);
+    }
+
+    static void decompression(Check c) {
+        Decompression dec #= Decompression.create();
+        (HttpRequest, HttpResponse) -> void echo = (HttpRequest q, HttpResponse r) -> {
+            r.writeBytes(q.body());
+            r.header("X-Seen-Length", "" + q.headerInt64("Content-Length", (int64) -1));
+            r.header("X-Seen-Coding", q.hasHeader("Content-Encoding") ? "yes" : "no");
+        };
+        String plain #= MiddlewareCompressionTests.bigText();
+        int8[] pb #= plain.toBytes();
+        int8[] gz #= ContentCoding.encode("gzip", pb, plain.byteLength());
+        String got #= Wire.through(#Decompression.middleware(dec), echo,
+            MiddlewareCompressionTests.post("gzip", gz, gz.count()));
+        c.eqInt((int64) Wire.status(got), 200, "decompress: the handler ran");
+        Wire.same(c, Wire.bodyOf(got), plain, "decompress: the handler saw the inflated body");
+        Wire.same(c, Wire.header(got, "X-Seen-Length"), "" + plain.byteLength(),
+            "decompress: Content-Length is the inflated length");
+        Wire.same(c, Wire.header(got, "X-Seen-Coding"), "no", "decompress: Content-Encoding is removed");
+
+        Decompression small #= Decompression.create();
+        small.maxSize((int64) 16);
+        got #= Wire.through(#Decompression.middleware(small), echo,
+            MiddlewareCompressionTests.post("gzip", gz, gz.count()));
+        c.eqInt((int64) Wire.status(got), 413, "bomb guard: a decoded body over the cap is 413");
+
+        int8[] junk = heap int8[8];
+        int32 i = 0;
+        while (i < 8) {
+            junk[i] = (int8) 65;
+            i = i + 1;
+        }
+        got #= Wire.through(#Decompression.middleware(dec), echo,
+            MiddlewareCompressionTests.post("gzip", junk, 8));
+        c.eqInt((int64) Wire.status(got), 400, "malformed: an undecodable gzip body is 400");
+
+        got #= Wire.through(#Decompression.middleware(dec), echo,
+            MiddlewareCompressionTests.post("br", junk, 4));
+        c.eqInt((int64) Wire.status(got), 415, "unsupported: an unknown Content-Encoding is 415");
+    }
+}

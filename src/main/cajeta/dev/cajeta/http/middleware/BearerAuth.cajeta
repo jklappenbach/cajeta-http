@@ -1,0 +1,66 @@
+package dev.cajeta.http.middleware;
+
+import cajeta.lang.String;
+import cajeta.lang.Slice;
+import dev.cajeta.http.Bytes;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+
+/**
+ * Bearer token authentication. The token goes to a verifier, and a missing,
+ * empty or refused token answers 401 with a `WWW-Authenticate` challenge.
+ */
+public class BearerAuth {
+    String realm;
+    (String) -> boolean verify;
+
+    /** A policy for `realm` with no verifier yet. */
+    public BearerAuth(String realm) {
+        this.realm #= realm.substring(0, realm.byteLength());
+        this.verify = null;
+    }
+
+    /** A policy for `realm`. */
+    public static #BearerAuth create(String realm) {
+        return heap BearerAuth(realm);
+    }
+
+    /** Sets the token check. */
+    public BearerAuth verifier((String) -> boolean fn) {
+        this.verify #= fn;
+        return this;
+    }
+
+    /** Builds the middleware for `cfg`, which must outlive the chain. */
+    public static #Middleware middleware(BearerAuth cfg) {
+        (HttpRequest, HttpResponse, (HttpRequest, HttpResponse) -> void) -> void f =
+            (HttpRequest q, HttpResponse r, (HttpRequest, HttpResponse) -> void next) -> BearerAuth.apply(cfg, q, r, next);
+        return Middleware.of(#f);
+    }
+
+    static void apply(BearerAuth cfg, HttpRequest q, HttpResponse r,
+                      (HttpRequest, HttpResponse) -> void next) {
+        Slice<int8> h = q.header("Authorization");
+        if (!Bytes.startsWith(h, "Bearer ")) {
+            BearerAuth.challenge(cfg, r);
+            return;
+        }
+        Slice<int8> t = Bytes.trim(h[7:h.count()]);
+        if (t.count() == (int64) 0) {
+            BearerAuth.challenge(cfg, r);
+            return;
+        }
+        String token #= Bytes.toString(t);
+        (String) -> boolean vf = cfg.verify;
+        if (vf == null || !vf(token)) {
+            BearerAuth.challenge(cfg, r);
+            return;
+        }
+        next(q, r);
+    }
+
+    static void challenge(BearerAuth cfg, HttpResponse r) {
+        r.status(401);
+        r.setHeader("WWW-Authenticate", "Bearer realm=\"" + cfg.realm + "\"");
+    }
+}

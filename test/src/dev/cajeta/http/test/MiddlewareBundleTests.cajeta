@@ -1,0 +1,136 @@
+package dev.cajeta.http.test;
+
+import cajeta.lang.String;
+import cajeta.time.Duration;
+import dev.cajeta.http.Bytes;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.HttpException;
+import dev.cajeta.http.server.HttpServer;
+import dev.cajeta.http.server.HttpServerBuilder;
+import dev.cajeta.http.middleware.MiddlewareChain;
+import dev.cajeta.http.middleware.Recover;
+import dev.cajeta.http.middleware.RequestId;
+import dev.cajeta.http.middleware.Logging;
+import dev.cajeta.http.middleware.LogSink;
+
+/** Recover, RequestId and Logging, alone and together on a live server. */
+public final class MiddlewareBundleTests {
+    public static void run(Check c) {
+        System.stdout.println("-- middleware bundle: Recover --");
+        MiddlewareBundleTests.recoverUnit(c);
+        System.stdout.println("-- middleware bundle: RequestId --");
+        MiddlewareBundleTests.requestIdUnit(c);
+        System.stdout.println("-- middleware bundle: Logging --");
+        MiddlewareBundleTests.loggingUnit(c);
+        System.stdout.println("-- middleware bundle: live server --");
+        MiddlewareBundleTests.liveServer(c);
+    }
+
+    static void recoverUnit(Check c) {
+        (HttpRequest, HttpResponse) -> void thrower = (HttpRequest q, HttpResponse r) -> {
+            r.body("partial");
+            throw heap HttpException("boom");
+        };
+        MiddlewareChain chain = heap MiddlewareChain();
+        chain.use(#Recover.middleware());
+        chain.build(thrower);
+        (HttpRequest, HttpResponse) -> void app = (HttpRequest q, HttpResponse r) -> chain.run(q, r);
+        String got #= Wire.serve("GET /x HTTP/1.1\r\n\r\n", app);
+        Wire.same(c, got, "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\n\r\n",
+            "recover: an uncaught exception becomes an empty 500");
+    }
+
+    static void requestIdUnit(Check c) {
+        (HttpRequest, HttpResponse) -> void echo = (HttpRequest q, HttpResponse r) -> {
+            if (!q.hasHeader("X-Request-Id")) {
+                r.status(500);
+                return;
+            }
+            r.writeBytes(q.header("X-Request-Id"));
+        };
+        MiddlewareChain chain = heap MiddlewareChain();
+        chain.use(#RequestId.middleware());
+        chain.build(echo);
+        (HttpRequest, HttpResponse) -> void app = (HttpRequest q, HttpResponse r) -> chain.run(q, r);
+
+        String kept #= Wire.serve("GET /x HTTP/1.1\r\nX-Request-Id: abc-123\r\n\r\n", app);
+        c.eqInt((int64) Wire.status(kept), 200, "requestid: the handler saw the id");
+        Wire.same(c, Wire.bodyOf(kept), "abc-123", "requestid: an inbound id reaches the handler");
+        Wire.same(c, Wire.header(kept, "X-Request-Id"), "abc-123", "requestid: an inbound id is echoed");
+
+        String made #= Wire.serve("GET /y HTTP/1.1\r\n\r\n", app);
+        String id #= Wire.header(made, "X-Request-Id");
+        c.that(id.startsWith("req-"), "requestid: an id is generated when none was sent");
+        Wire.same(c, Wire.bodyOf(made), id, "requestid: the generated id reaches the handler");
+
+        String one = "GET /z HTTP/1.1\r\nX-Request-Id: client-supplied-7\r\n\r\n";
+        int64 small = Wire.measure(one, 100, app);
+        int64 large = Wire.measure(one, 1100, app);
+        c.that(large - small == 0,
+            "requestid: 1000 more requests with a client id allocate nothing (" + small + " then " + large + ")");
+    }
+
+    static void loggingUnit(Check c) {
+        LogSink sink #= LogSink.capturing();
+        (HttpRequest, HttpResponse) -> void ok = (HttpRequest q, HttpResponse r) -> {
+            r.status(200);
+        };
+        MiddlewareChain chain = heap MiddlewareChain();
+        chain.use(#Logging.middleware(sink));
+        chain.build(ok);
+        (HttpRequest, HttpResponse) -> void app = (HttpRequest q, HttpResponse r) -> chain.run(q, r);
+        String got #= Wire.serve("GET /x?a=1 HTTP/1.1\r\n\r\n", app);
+        c.eqInt((int64) Wire.status(got), 200, "logging: passes the exchange through");
+        c.eqInt((int64) sink.count(), 1, "logging: exactly one line per exchange");
+        String line = sink.at(0);
+        c.that(line.startsWith("GET /x?a=1 200 "), "logging: the line carries method, target and status");
+        c.that(line.endsWith("ms"), "logging: the line carries a duration");
+    }
+
+    static async int32 serveLoop(HttpServer srv) {
+        srv.serve();
+        return 1;
+    }
+
+    static async int32 statusOf(int32 port, String request) {
+        return Loopback.status(port, request);
+    }
+
+    static async int32 hasGenId(int32 port, String request) {
+        return Loopback.headerStarts(port, request, "X-Request-Id", "req-");
+    }
+
+    static void handle(HttpRequest q, HttpResponse r) {
+        if (Bytes.equals(q.path(), "/boom")) {
+            throw heap HttpException("boom");
+        }
+        r.body("ok");
+    }
+
+    static void liveServer(Check c) {
+        LogSink sink #= LogSink.capturing();
+        MiddlewareChain chain = heap MiddlewareChain();
+        chain.use(#Recover.middleware()).use(#RequestId.middleware()).use(#Logging.middleware(sink));
+        (HttpRequest, HttpResponse) -> void termi = (HttpRequest q, HttpResponse r) -> MiddlewareBundleTests.handle(q, r);
+        chain.build(termi);
+        scope {
+            HttpServerBuilder b #= HttpServer.builder();
+            b.bind("127.0.0.1:0");
+            b.handler((HttpRequest q, HttpResponse r) -> chain.run(q, r));
+            HttpServer srv #= b.build();
+            int32 port = srv.server.listener.boundPort();
+            Task<int32> sv = spawn serveLoop(srv);
+            Task<int32> t1 = spawn statusOf(port, "GET /boom HTTP/1.1\r\nConnection: close\r\n\r\n");
+            c.eqInt((int64) await t1, 500, "live: a throwing handler is recovered to 500");
+            Task<int32> t2 = spawn statusOf(port, "GET /ok HTTP/1.1\r\nConnection: close\r\n\r\n");
+            c.eqInt((int64) await t2, 200, "live: the server survives the 500");
+            Task<int32> t3 = spawn hasGenId(port, "GET /also HTTP/1.1\r\nConnection: close\r\n\r\n");
+            c.eqInt((int64) await t3, 1, "live: the response carries a generated X-Request-Id");
+            boolean drained #= srv.shutdown(Duration.ofSeconds(2));
+            c.that(drained, "live: the server drained clean");
+            c.eqInt((int64) await sv, 1, "live: the accept loop exited");
+            c.that(sink.count() >= 2, "live: Logging captured a line per served exchange");
+        }
+    }
+}

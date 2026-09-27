@@ -6,7 +6,7 @@ import cajeta.io.file.File;
 import cajeta.io.file.Path;
 import dev.cajeta.http.HttpRequest;
 import dev.cajeta.http.HttpResponse;
-import dev.cajeta.http.middleware.Middleware;
+import dev.cajeta.http.Method;
 import dev.cajeta.http.middleware.StaticPath;
 
 /**
@@ -62,25 +62,23 @@ public class StaticFile {
 
     /** Build the middleware from config `cfg` (captured by the lambda). */
     public static #Middleware middleware(StaticFile cfg) {
-        (HttpRequest, (HttpRequest) -> #HttpResponse) -> #HttpResponse f =
-            (req, next) -> StaticFile.apply(cfg, req, next);
+        (HttpRequest, HttpResponse, (HttpRequest, HttpResponse) -> void) -> void f =
+            (HttpRequest q, HttpResponse r, (HttpRequest, HttpResponse) -> void next) -> StaticFile.apply(cfg, q, r, next);
         return Middleware.of(#f);
     }
 
-    static #HttpResponse apply(StaticFile cfg, HttpRequest req,
-                               (HttpRequest) -> #HttpResponse next) {
-        String method = req.getMethod();
-        boolean head = method.equals("HEAD");
-        if (!method.equals("GET") && !head) {
-            return next(req);
+    static void apply(StaticFile cfg, HttpRequest q, HttpResponse r,
+                      (HttpRequest, HttpResponse) -> void next) {
+        if (q.method() != Method.GET && q.method() != Method.HEAD) {
+            next(q, r);
+            return;
         }
-
-        String pathOnly #= StaticFile.stripQuery(req.getTarget());
+        String pathOnly #= q.pathString();
         String rel #= StaticPath.jail(pathOnly);
         if (rel == null) {
-            return HttpResponse.of(403);
+            r.status(403);
+            return;
         }
-
         String serveFull #= StaticFile.joinRoot(cfg.rootStr, rel);
         Path p #= Path.of(serveFull);
         if (p.isDir()) {
@@ -88,37 +86,22 @@ public class StaticFile {
             p #= Path.of(serveFull);
         }
         if (!p.exists() || !p.isFile()) {
-            return HttpResponse.of(404);
+            r.status(404);
+            return;
         }
-
         String canonRoot = cfg.canonRoot();
         if (canonRoot == null) {
-            return HttpResponse.of(404);
+            r.status(404);
+            return;
         }
         String canonFile #= StaticFile.canonStr(serveFull);
         if (canonFile == null || !StaticFile.underRoot(canonFile, canonRoot)) {
-            return HttpResponse.of(403);
+            r.status(403);
+            return;
         }
-
         int8[] bytes #= File.readAllBytes(serveFull);
-        int32 blen = bytes.count();
-        HttpResponse resp #= HttpResponse.ok();
-        resp.setHeader("Content-Type", StaticFile.contentTypeFor(serveFull));
-        if (head) {
-            resp.setHeader("Content-Length", "" + blen);
-            return #resp;
-        }
-        resp.body(bytes, blen);
-        return #resp;
-    }
-
-    /** Everything before a `?`, if any. */
-    static #String stripQuery(String target) {
-        int64 q = target.indexOf("?");
-        if (q < (int64) 0) {
-            return target.substring(0, target.byteLength());
-        }
-        return target.substring(0, (int32) q);
+        r.setHeader("Content-Type", StaticFile.contentTypeFor(serveFull));
+        r.body(bytes, bytes.count());
     }
 
     /** `root` joined with a (possibly empty) safe relative path. */

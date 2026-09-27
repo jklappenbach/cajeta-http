@@ -1,0 +1,61 @@
+package dev.cajeta.http.middleware;
+
+import cajeta.lang.String;
+import cajeta.lang.Slice;
+import dev.cajeta.http.Bytes;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+
+/**
+ * Forwarding headers. Behind a trusted proxy the first `X-Forwarded-For` hop
+ * becomes `X-Real-IP`. Otherwise the forwarding headers are removed so a
+ * client cannot spoof them.
+ */
+public class ProxyHeaders {
+    boolean trust;
+
+    /** A policy that trusts the proxy when `trust` is true. */
+    public ProxyHeaders(boolean trust) {
+        this.trust = trust;
+    }
+
+    /** Trusts the forwarding headers. */
+    public static #ProxyHeaders trusted() {
+        return heap ProxyHeaders(true);
+    }
+
+    /** Strips the forwarding headers. */
+    public static #ProxyHeaders untrusted() {
+        return heap ProxyHeaders(false);
+    }
+
+    /** Builds the middleware for `cfg`, which must outlive the chain. */
+    public static #Middleware middleware(ProxyHeaders cfg) {
+        (HttpRequest, HttpResponse, (HttpRequest, HttpResponse) -> void) -> void f =
+            (HttpRequest q, HttpResponse r, (HttpRequest, HttpResponse) -> void next) -> ProxyHeaders.apply(cfg, q, r, next);
+        return Middleware.of(#f);
+    }
+
+    static void apply(ProxyHeaders cfg, HttpRequest q, HttpResponse r,
+                      (HttpRequest, HttpResponse) -> void next) {
+        if (cfg.trust) {
+            if (q.hasHeader("X-Forwarded-For")) {
+                q.setHeaderBytes("X-Real-IP", ProxyHeaders.firstHop(q.header("X-Forwarded-For")));
+            }
+        } else {
+            q.removeHeader("X-Forwarded-For");
+            q.removeHeader("X-Forwarded-Proto");
+            q.removeHeader("X-Forwarded-Host");
+            q.removeHeader("X-Real-IP");
+        }
+        next(q, r);
+    }
+
+    static Slice<int8> firstHop(Slice<int8> xff) {
+        int64 comma = Bytes.indexOf(xff, (int8) 44);
+        if (comma < (int64) 0) {
+            return Bytes.trim(xff);
+        }
+        return Bytes.trim(xff[0:comma]);
+    }
+}

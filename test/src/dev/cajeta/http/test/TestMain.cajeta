@@ -15,6 +15,14 @@ public final class TestMain {
         if (sel.want("ScanTests")) { ScanTests.run(c); }
         if (sel.want("ResponseTests")) { ResponseTests.run(c); }
         if (sel.want("ConnectionTests")) { ConnectionTests.run(c); }
+        if (sel.want("ViewEditTests")) { ViewEditTests.run(c); }
+        if (sel.want("MiddlewareTests")) { MiddlewareTests.run(c); }
+        if (sel.want("MiddlewareBundleTests")) { MiddlewareBundleTests.run(c); }
+        if (sel.want("MiddlewareTimeoutCorsTests")) { MiddlewareTimeoutCorsTests.run(c); }
+        if (sel.want("MiddlewareCompressionTests")) { MiddlewareCompressionTests.run(c); }
+        if (sel.want("MiddlewareAuthRateTests")) { MiddlewareAuthRateTests.run(c); }
+        if (sel.want("MiddlewareStaticEtagProxyTests")) { MiddlewareStaticEtagProxyTests.run(c); }
+        if (sel.want("MiddlewareLoopbackTests")) { MiddlewareLoopbackTests.run(c); }
 
         System.stdout.println("");
         System.stdout.println("=== {} passed, {} failed, {} skipped ===",
