@@ -78,7 +78,12 @@ jobs:
       # model reads and writes through. scripts/ci-checks.sh is green on the
       # released binary with .cajeta/cache cleared: 1445 suite tests, 150 tour
       # checks, 128 of 128 public types covered.
-      cajeta-version: v0.30.0
+      #
+      # Raised to v0.30.1 for the closure-field, closure-return and slice fixes
+      # the view model relies on. On the view-model branch the library builds
+      # and the view tour passes 12 of 12 on the released binary. The suite
+      # joins the gate when the ported tests land.
+      cajeta-version: v0.30.1
       # Suite + tour + tour-coverage gate, chained in scripts/ci-checks.sh.
       # (`./run-tests.sh` rather than `cajeta test` because the suite needs the
       # codec's native zlib backend extracted out of its .cja with
