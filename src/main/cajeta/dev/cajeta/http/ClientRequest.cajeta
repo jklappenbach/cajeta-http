@@ -18,6 +18,7 @@ public final class ClientRequest {
     boolean https;
     String host;
     int32 port;
+    String authority;
     int8[] target;
     int32 targetLen;
     Version versionKind;
@@ -94,6 +95,8 @@ public final class ClientRequest {
         this.host #= this.uri.getHost().substring(0, this.uri.getHost().byteLength());
         int32 p = this.uri.getPort();
         this.port = p >= 0 ? p : (this.https ? 443 : 80);
+        boolean usual = p < 0 || (this.https ? p == 443 : p == 80);
+        this.authority #= usual ? this.host.substring(0, this.host.byteLength()) : this.host + ":" + p;
         String path = this.uri.getPath();
         String q = this.uri.getQuery();
         this.targetLen = 0;
@@ -162,6 +165,11 @@ public final class ClientRequest {
     /** The host the URL names. */
     public String host() {
         return this.host;
+    }
+
+    /** The Host header value: the host, with the port when it is not the scheme's default. */
+    public String authority() {
+        return this.authority;
     }
 
     /** The port the URL names, or the scheme's default. */

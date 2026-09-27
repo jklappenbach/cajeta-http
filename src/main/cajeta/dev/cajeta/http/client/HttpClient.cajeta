@@ -236,7 +236,7 @@ public class HttpClient {
 
     void sendOnce(ClientRequest req, ClientResponse resp, int64 deadline, BodySink sink) {
         if (!req.hasHeader("Host")) {
-            req.header("Host", req.host());
+            req.header("Host", req.authority());
         }
         ConnectionBuffers bufs = this.pool.buffers();
         if (req.isHttps()) {

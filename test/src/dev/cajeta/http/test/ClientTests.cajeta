@@ -24,6 +24,10 @@ public final class ClientTests {
             r.body("hello");
             return;
         }
+        if (Bytes.equals(q.path(), "/host")) {
+            r.writeBytes(q.header("host"));
+            return;
+        }
         if (Bytes.equals(q.path(), "/echo")) {
             r.writeBytes(q.body());
             return;
@@ -60,6 +64,12 @@ public final class ClientTests {
             return -1;
         }
         return resp.bodyString().equals("ping") ? 2 : -2;
+    }
+
+    static async int32 hostHeader(int32 port) {
+        HttpClient client = heap HttpClient();
+        ClientResponse resp #= client.get("http://127.0.0.1:" + port + "/host");
+        return resp.bodyString().equals("127.0.0.1:" + port) ? 1 : 0;
     }
 
     static async int32 keepAlive(int32 port) {
@@ -110,6 +120,8 @@ public final class ClientTests {
             c.eqInt((int64) await tg, 1, "HttpClient GET /hello");
             Task<int32> tp = spawn clientPost(port);
             c.eqInt((int64) await tp, 2, "HttpClient POST /echo round-trip");
+            Task<int32> th = spawn hostHeader(port);
+            c.eqInt((int64) await th, 1, "Host carries a port that is not the scheme's default");
             Task<int32> tk = spawn keepAlive(port);
             c.eqInt((int64) await tk, 1, "20 sends on one request and response reuse one pooled connection");
             Task<int32> ta = spawn allocation(port);
