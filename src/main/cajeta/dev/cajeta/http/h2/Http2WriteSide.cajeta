@@ -100,6 +100,23 @@ public final class Http2WriteSide {
         this.writer.flush();
     }
 
+    /**
+     * Writes HEADERS and one DATA frame carrying `body[off .. off+len)` in one
+     * flush, so the peer never waits on a lone HEADERS segment.
+     */
+    public void writeHeadersAndData(int32 sid, HpackFieldList fields, int8[] body,
+                                    int32 off, int32 len, boolean last) {
+        int8[] slice #= Http2WriteSide.slice(body, off, len);
+        LockGuard g #= this.lock.acquire();
+        int8[] block #= this.henc.encode(fields);
+        Http2FrameWriter fw = heap Http2FrameWriter();
+        Http2ContentFrames.writeHeaders(fw, sid, block, (int32) block.count(), false, true, 0);
+        Http2ContentFrames.writeData(fw, sid, slice, len, last, 0);
+        int8[] bytes #= fw.toBytes();
+        this.writer.writeAll(bytes, 0, (int32) bytes.count());
+        this.writer.flush();
+    }
+
     /** Write one DATA frame carrying `body[off .. off+len)`. */
     public void writeData(int32 sid, int8[] body, int32 off, int32 len,
                           boolean last) {

@@ -31,6 +31,7 @@ final class Http2StreamSlot implements ResponseTransport {
     Http2WriteSide ws;
     Http2SendGate gate;
     int32 maxFrame;
+    HpackFieldList pendingHead;
     Http2StreamSlot next;
 
     Http2StreamSlot(ConnectionBuffers bufs, HttpParserLimits limits,
@@ -43,6 +44,7 @@ final class Http2StreamSlot implements ResponseTransport {
         this.ws #= ws;
         this.gate #= gate;
         this.big = null;
+        this.pendingHead = null;
         this.next = null;
     }
 
@@ -86,6 +88,7 @@ final class Http2StreamSlot implements ResponseTransport {
     /** Writes the `n` fields `dec` decoded as a request head and parses it. */
     void begin(int32 sid, HpackDecoder dec, int32 n) {
         this.sid = sid;
+        this.pendingHead = null;
         this.bodyLen = 0;
         this.bodyOwned = false;
         this.big = null;
@@ -202,11 +205,28 @@ final class Http2StreamSlot implements ResponseTransport {
             }
             i = i + 1;
         }
-        this.ws.writeHeaders(this.sid, fl, endStream);
+        if (endStream) {
+            this.pendingHead = null;
+            this.ws.writeHeaders(this.sid, fl, true);
+            return;
+        }
+        this.pendingHead #= fl;
+    }
+
+    void flushHead(boolean endStream) {
+        if (this.pendingHead != null) {
+            HpackFieldList fl #= this.pendingHead;
+            this.pendingHead = null;
+            this.ws.writeHeaders(this.sid, fl, endStream);
+        }
     }
 
     public void data(int8[] a, int32 off, int32 len, boolean endStream) {
         if (len == 0) {
+            if (this.pendingHead != null) {
+                this.flushHead(endStream);
+                return;
+            }
             if (endStream) {
                 this.ws.writeData(this.sid, a, off, 0, true);
             }
@@ -220,11 +240,18 @@ final class Http2StreamSlot implements ResponseTransport {
             }
             int64 g = this.gate.takeUpTo(this.sid, want);
             if (g <= (int64) 0) {
+                this.pendingHead = null;
                 return;
             }
             int32 gi = (int32) g;
             boolean last = endStream && done + gi >= len;
-            this.ws.writeData(this.sid, a, off + done, gi, last);
+            if (this.pendingHead != null) {
+                HpackFieldList fl #= this.pendingHead;
+                this.pendingHead = null;
+                this.ws.writeHeadersAndData(this.sid, fl, a, off + done, gi, last);
+            } else {
+                this.ws.writeData(this.sid, a, off + done, gi, last);
+            }
             done = done + gi;
         }
     }

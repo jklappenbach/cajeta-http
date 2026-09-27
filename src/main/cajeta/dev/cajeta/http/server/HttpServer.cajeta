@@ -127,12 +127,18 @@ public class HttpServer {
             srv.server = #admitted;
             return #srv;
         }
-        Server core #= model.bindServer(#addr, (conn) -> self.serveChannel(conn));
+        Server core #= model.bindServer(#addr, (conn) -> self.serveTcp(conn));
         srv.server = #core;
         return #srv;
     }
 
+    void serveTcp(TcpStream conn) {
+        conn.setNoDelay(true);
+        this.serveChannel(conn);
+    }
+
     void serveAdmitted(TcpStream conn) {
+        conn.setNoDelay(true);
         if (!this.limiter.admit()) {
             conn.close();
             return;
@@ -237,6 +243,7 @@ public class HttpServer {
     }
 
     static async int32 tlsWorker(HttpServer srv, #TcpStream conn) {
+        conn.setNoDelay(true);
         TlsStream tls #= TlsStream.server(#conn, srv.tlsCert, srv.tlsCertLen, srv.tlsKey, srv.tlsKeyLen);
         int8[] alpn #= HttpServer.alpnH2Http11();
         tls.supportAlpn(alpn, 12);

@@ -629,7 +629,9 @@ public class HttpClient {
         int32 olen = ip.isV4() ? 4 : 16;
         IpAddress ipCopy #= IpAddress.fromOctets(oct, olen);
         SocketAddress connAddr #= SocketAddress.of(#ipCopy, port);
-        return TcpStream.connectAsync(#connAddr);
+        TcpStream s #= TcpStream.connectAsync(#connAddr);
+        s.setNoDelay(true);
+        return #s;
     }
 
     static #int8[] alpnHttp11() {
