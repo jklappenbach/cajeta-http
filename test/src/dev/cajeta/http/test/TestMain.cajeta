@@ -32,6 +32,14 @@ public final class TestMain {
         if (sel.want("ClientBuilderTests")) { ClientBuilderTests.run(c); }
         if (sel.want("RedirectTests")) { RedirectTests.run(c); }
         if (sel.want("DownloadTests")) { DownloadTests.run(c); }
+        if (sel.want("Http2FlowTests")) { Http2FlowTests.run(c); }
+        if (sel.want("Http2SettingsTests")) { Http2SettingsTests.run(c); }
+        if (sel.want("Http2FixedFrameTests")) { Http2FixedFrameTests.run(c); }
+        if (sel.want("Http2FrameTests")) { Http2FrameTests.run(c); }
+        if (sel.want("HpackEncoderTests")) { HpackEncoderTests.run(c); }
+        if (sel.want("HpackDecoderTests")) { HpackDecoderTests.run(c); }
+        if (sel.want("HpackTableTests")) { HpackTableTests.run(c); }
+        if (sel.want("HpackPrimitiveTests")) { HpackPrimitiveTests.run(c); }
 
         System.stdout.println("");
         System.stdout.println("=== {} passed, {} failed, {} skipped ===",
