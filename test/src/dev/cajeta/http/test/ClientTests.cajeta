@@ -1,0 +1,122 @@
+package dev.cajeta.http.test;
+
+import cajeta.lang.String;
+import cajeta.time.Duration;
+import dev.cajeta.http.Bytes;
+import dev.cajeta.http.ClientRequest;
+import dev.cajeta.http.ClientResponse;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.client.HttpClient;
+import dev.cajeta.http.server.HttpServer;
+import dev.cajeta.http.server.HttpServerBuilder;
+
+/** The client against a live server: GET, POST, keep-alive reuse and allocation. */
+public final class ClientTests {
+    public static void run(Check c) {
+        System.stdout.println("-- client: loopback --");
+        ClientTests.liveClient(c);
+    }
+
+    static void handle(HttpRequest q, HttpResponse r) {
+        if (Bytes.equals(q.path(), "/hello")) {
+            r.header("Content-Type", "text/plain");
+            r.body("hello");
+            return;
+        }
+        if (Bytes.equals(q.path(), "/echo")) {
+            r.writeBytes(q.body());
+            return;
+        }
+        r.status(404);
+    }
+
+    static async int32 serve(HttpServer srv) {
+        srv.serve();
+        return 1;
+    }
+
+    static async int32 clientGet(int32 port) {
+        HttpClient client = heap HttpClient();
+        ClientResponse resp #= client.get("http://127.0.0.1:" + port + "/hello");
+        if (resp.status() != 200) {
+            return -1;
+        }
+        if (!resp.bodyString().equals("hello")) {
+            return -2;
+        }
+        if (!Bytes.equals(resp.header("content-type"), "text/plain")) {
+            return -3;
+        }
+        return 1;
+    }
+
+    static async int32 clientPost(int32 port) {
+        HttpClient client = heap HttpClient();
+        ClientRequest req #= ClientRequest.post("http://127.0.0.1:" + port + "/echo");
+        req.body("ping");
+        ClientResponse resp #= client.send(req);
+        if (resp.status() != 200) {
+            return -1;
+        }
+        return resp.bodyString().equals("ping") ? 2 : -2;
+    }
+
+    static async int32 keepAlive(int32 port) {
+        HttpClient client = heap HttpClient();
+        ClientRequest req = heap ClientRequest("http://127.0.0.1:" + port + "/hello");
+        ClientResponse resp = heap ClientResponse();
+        int32 i = 0;
+        while (i < 20) {
+            client.send(req, resp);
+            if (resp.status() != 200 || !resp.bodyString().equals("hello")) {
+                return -1;
+            }
+            i = i + 1;
+        }
+        return client.pool().idleCount("127.0.0.1", port);
+    }
+
+    static async int32 allocation(int32 port) {
+        HttpClient client = heap HttpClient();
+        ClientRequest req = heap ClientRequest("http://127.0.0.1:" + port + "/hello");
+        ClientResponse resp = heap ClientResponse();
+        int32 i = 0;
+        while (i < 50) {
+            client.send(req, resp);
+            i = i + 1;
+        }
+        int64 before = Cajeta.allocatedBytes();
+        i = 0;
+        while (i < 200) {
+            client.send(req, resp);
+            i = i + 1;
+        }
+        int64 delta = Cajeta.allocatedBytes() - before;
+        System.stdout.println("    client and server together, 200 keep-alive exchanges: {} bytes", delta);
+        return delta == 0 ? 1 : 0;
+    }
+
+    static void liveClient(Check c) {
+        scope {
+            HttpServerBuilder b #= HttpServer.builder();
+            b.bind("127.0.0.1:0");
+            b.handler((HttpRequest q, HttpResponse r) -> ClientTests.handle(q, r));
+            HttpServer srv #= b.build();
+            int32 port = srv.server.listener.boundPort();
+            c.that(port > 0, "the server bound an ephemeral port");
+            Task<int32> sv = spawn serve(srv);
+            Task<int32> tg = spawn clientGet(port);
+            c.eqInt((int64) await tg, 1, "HttpClient GET /hello");
+            Task<int32> tp = spawn clientPost(port);
+            c.eqInt((int64) await tp, 2, "HttpClient POST /echo round-trip");
+            Task<int32> tk = spawn keepAlive(port);
+            c.eqInt((int64) await tk, 1, "20 sends on one request and response reuse one pooled connection");
+            Task<int32> ta = spawn allocation(port);
+            c.eqInt((int64) await ta, 1, "200 keep-alive exchanges allocate nothing, client and server together");
+            boolean drained #= srv.shutdown(Duration.ofSeconds(2));
+            c.that(drained, "the server drained clean");
+            c.eqInt((int64) await sv, 1, "the accept loop exited");
+        }
+    }
+}

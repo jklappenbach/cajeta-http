@@ -1,0 +1,175 @@
+package dev.cajeta.http.client;
+
+import cajeta.lang.String;
+import cajeta.concurrent.Lock;
+import cajeta.concurrent.LockGuard;
+import cajeta.io.net.BufferPool;
+import cajeta.io.net.TcpStream;
+import cajeta.time.Clock;
+import dev.cajeta.http.Http1ClientConnection;
+import dev.cajeta.http.h1.HttpParserLimits;
+import dev.cajeta.http.server.ConnectionBuffers;
+
+/**
+ * Keep-alive client connections by origin, with a cap on connections in use
+ * that parks an over-cap fiber, and the buffer pool the connections and
+ * their responses share.
+ *
+ * `acquire` takes a permit first, then revives the most recently parked idle
+ * connection that is still fresh and still open, or reports none and the
+ * caller dials. A connection the server closed while it sat idle is found by
+ * a one-byte probe and dropped, never surfaced. Lookup and reuse allocate
+ * nothing.
+ */
+public final class ConnectionPool {
+    public static final int32 DEFAULT_MAX_PER_ORIGIN = 6;
+    public static final int32 DEFAULT_IDLE_MAX_MS = 60000;
+    public static final int32 DEFAULT_BUFFER_BYTES = 16384;
+
+    Lock lock;
+    OriginEntry[] entries;
+    int32 entryCount;
+    int32 maxPerOrigin;
+    int32 idleMaxMs;
+    ConnectionBuffers bufs;
+    HttpParserLimits limits;
+
+    ConnectionPool(int32 maxPerOrigin, int32 idleMaxMs) {
+        this.lock = heap Lock();
+        this.entries = heap OriginEntry[4];
+        this.entryCount = 0;
+        this.maxPerOrigin = maxPerOrigin;
+        this.idleMaxMs = idleMaxMs;
+        this.bufs = heap ConnectionBuffers(heap BufferPool(ConnectionPool.DEFAULT_BUFFER_BYTES, 64));
+        this.limits = heap HttpParserLimits();
+    }
+
+    /** A pool with the default limits. */
+    public static #ConnectionPool of() {
+        return heap ConnectionPool(ConnectionPool.DEFAULT_MAX_PER_ORIGIN, ConnectionPool.DEFAULT_IDLE_MAX_MS);
+    }
+
+    /** A pool allowing `maxPerOrigin` connections in use and idling at most `idleMaxMs`. */
+    public static #ConnectionPool withLimits(int32 maxPerOrigin, int32 idleMaxMs) {
+        return heap ConnectionPool(maxPerOrigin, idleMaxMs);
+    }
+
+    /** The buffers the pool's connections and their responses share. */
+    public ConnectionBuffers buffers() {
+        return this.bufs;
+    }
+
+    /** The parser limits for responses. */
+    public HttpParserLimits limits() {
+        return this.limits;
+    }
+
+    /** Takes a permit for the origin, parking while it is at its cap, and a live idle connection or null. */
+    public #PooledConnection acquire(String host, int32 port) {
+        OriginEntry e = this.lockedEntryFor(host, port);
+        e.sem.acquire();
+        return this.lockedTakeIdle(e);
+    }
+
+    /** Wraps a freshly dialed `stream` for `host`:`port`. The permit was taken by `acquire`. */
+    public #PooledConnection adopt(#TcpStream stream, String host, int32 port) {
+        PooledConnection pc = heap PooledConnection();
+        pc.stream #= stream;
+        pc.conn = heap Http1ClientConnection(pc.stream, this.bufs, this.limits);
+        pc.host #= host.substring(0, host.byteLength());
+        pc.port = port;
+        return #pc;
+    }
+
+    /** Returns `pc` and its permit. A reusable connection is parked, any other is closed. */
+    public void release(#PooledConnection pc, boolean reusable) {
+        if (pc == null) {
+            return;
+        }
+        OriginEntry e = this.lockedEntryFor(pc.host, pc.port);
+        if (reusable) {
+            this.lockedPark(e, #pc);
+        } else {
+            this.discard(pc);
+        }
+        e.sem.release();
+    }
+
+    /** Returns the permit of a lease whose dial failed. */
+    public void releaseFailed(String host, int32 port) {
+        OriginEntry e = this.lockedEntryFor(host, port);
+        e.sem.release();
+    }
+
+    /** Idle connections parked for the origin. */
+    public int32 idleCount(String host, int32 port) {
+        OriginEntry e = this.lockedEntryFor(host, port);
+        return e.idleCount;
+    }
+
+    void discard(PooledConnection pc) {
+        pc.conn.recycle(this.bufs);
+        pc.stream.close();
+    }
+
+    OriginEntry lockedEntryFor(String host, int32 port) {
+        LockGuard g #= this.lock.acquire();
+        return this.entryFor(host, port);
+    }
+
+    #PooledConnection lockedTakeIdle(OriginEntry e) {
+        LockGuard g #= this.lock.acquire();
+        return this.takeIdle(e);
+    }
+
+    void lockedPark(OriginEntry e, #PooledConnection pc) {
+        LockGuard g #= this.lock.acquire();
+        pc.idleSince = Clock.now().toEpochMilli();
+        e.pushIdle(#pc);
+    }
+
+    #PooledConnection takeIdle(OriginEntry e) {
+        int64 now = Clock.now().toEpochMilli();
+        while (true) {
+            PooledConnection cand #= e.popIdle();
+            if (cand == null) {
+                return null;
+            }
+            boolean fresh = (now - cand.idleSince) <= (int64) this.idleMaxMs;
+            if (fresh && ConnectionPool.isAlive(cand)) {
+                cand.idleSince = (int64) 0;
+                return #cand;
+            }
+            this.discard(cand);
+        }
+        return null;
+    }
+
+    static boolean isAlive(PooledConnection pc) {
+        int64 n = pc.stream.read(pc.probe, (int64) 0, (int64) 1);
+        return n < (int64) 0;
+    }
+
+    OriginEntry entryFor(String host, int32 port) {
+        int32 i = 0;
+        while (i < this.entryCount) {
+            OriginEntry e = this.entries[i];
+            if (e.port == port && e.host.equals(host)) {
+                return e;
+            }
+            i = i + 1;
+        }
+        if (this.entryCount == this.entries.count()) {
+            OriginEntry[] es = heap OriginEntry[this.entries.count() * 2];
+            int32 k = 0;
+            while (k < this.entryCount) {
+                es[k] #= this.entries[k];
+                k = k + 1;
+            }
+            this.entries #= es;
+        }
+        this.entries[this.entryCount] #= OriginEntry.of(host, port, this.maxPerOrigin);
+        this.entryCount = this.entryCount + 1;
+        return this.entries[this.entryCount - 1];
+    }
+}

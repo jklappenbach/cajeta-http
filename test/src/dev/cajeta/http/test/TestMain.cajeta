@@ -24,6 +24,7 @@ public final class TestMain {
         if (sel.want("MiddlewareStaticEtagProxyTests")) { MiddlewareStaticEtagProxyTests.run(c); }
         if (sel.want("MiddlewareLoopbackTests")) { MiddlewareLoopbackTests.run(c); }
         if (sel.want("ClientWireTests")) { ClientWireTests.run(c); }
+        if (sel.want("ClientTests")) { ClientTests.run(c); }
 
         System.stdout.println("");
         System.stdout.println("=== {} passed, {} failed, {} skipped ===",

@@ -1,0 +1,634 @@
+package dev.cajeta.http.client;
+
+import cajeta.lang.String;
+import cajeta.lang.Slice;
+import cajeta.io.net.IpAddress;
+import cajeta.io.net.SocketAddress;
+import cajeta.io.net.TcpStream;
+import cajeta.io.net.dns.Dns;
+import cajeta.io.net.dns.ResolveFamily;
+import cajeta.io.net.tls.TlsStream;
+import cajeta.io.net.uri.Uri;
+import cajeta.io.net.NetException;
+import cajeta.io.net.Headers;
+import cajeta.concurrent.Tasks;
+import cajeta.time.Clock;
+import cajeta.hash.Sha256;
+import cajeta.io.file.File;
+import cajeta.io.file.FileWriter;
+import cajeta.io.file.OpenMode;
+import cajeta.codec.json.Json;
+import cajeta.codec.json.JsonValue;
+import dev.cajeta.http.Bytes;
+import dev.cajeta.http.ClientRequest;
+import dev.cajeta.http.ClientResponse;
+import dev.cajeta.http.HttpException;
+import dev.cajeta.http.Http1ClientConnection;
+import dev.cajeta.http.BodySink;
+import dev.cajeta.http.TooManyRedirectsException;
+import dev.cajeta.http.Version;
+import dev.cajeta.http.coding.ContentCoding;
+import dev.cajeta.http.server.ConnectionBuffers;
+
+/**
+ * The HTTP/1.1 client. `send` writes a request and fills a response the
+ * caller supplies: plaintext origins reuse pooled keep-alive connections,
+ * `https` dials a verifying TLS connection per exchange, and a forward proxy
+ * takes absolute-form targets or a CONNECT tunnel.
+ *
+ * A response owns the buffer it was read into. Sending into the same
+ * response again returns that buffer to the client's pool first, so a
+ * keep-alive loop that reuses one request and one response allocates nothing.
+ *
+ * Retries cover idempotent requests that fail to connect or are reset, within
+ * the exchange budget. Responses are decoded from gzip or deflate, cookies are
+ * kept when a jar is set, and `sendFollowing` follows redirects.
+ */
+public class HttpClient {
+    ConnectionPool pool;
+    int8[] trustPem;
+    int32 trustLen;
+    boolean hasTrustAnchor;
+    int32 exchangeTimeoutMs;
+    int32 maxRetries;
+    int32 retryBackoffMs;
+    int64 maxDecodedBytes;
+    Headers defaultHeaders;
+    Version versionPin;
+    boolean hasVersionPin;
+    int32 redirectMax;
+    String proxyHost;
+    int32 proxyPort;
+    boolean hasProxy;
+    CookieJar jar;
+
+    /** The most redirects `sendFollowing` takes before raising. */
+    public static final int32 MAX_REDIRECTS = 10;
+
+    /**
+     * A client trusting the operating system's CA store.
+     *
+     * @EntryPoint
+     */
+    public HttpClient() {
+        this.pool #= ConnectionPool.of();
+        this.trustPem = heap int8[0];
+        this.trustLen = 0;
+        this.hasTrustAnchor = false;
+        this.exchangeTimeoutMs = 0;
+        this.maxRetries = 1;
+        this.retryBackoffMs = 100;
+        this.maxDecodedBytes = (int64) 67108864;
+        this.defaultHeaders = heap Headers();
+        this.versionPin = Version.HTTP_1_1;
+        this.hasVersionPin = false;
+        this.redirectMax = HttpClient.MAX_REDIRECTS;
+        this.proxyHost = null;
+        this.proxyPort = 0;
+        this.hasProxy = false;
+        this.jar = null;
+    }
+
+    /** Bounds each exchange, retries included, to `ms` milliseconds. 0 is unbounded. */
+    public HttpClient exchangeTimeout(int32 ms) {
+        this.exchangeTimeoutMs = ms;
+        return this;
+    }
+
+    /** Retries an idempotent request up to `maxRetries` times, `backoffMs` apart. */
+    public HttpClient retryPolicy(int32 maxRetries, int32 backoffMs) {
+        this.maxRetries = maxRetries;
+        this.retryBackoffMs = backoffMs;
+        return this;
+    }
+
+    /** Caps a decoded response body at `maxBytes`. */
+    public HttpClient decodeLimit(int64 maxBytes) {
+        this.maxDecodedBytes = maxBytes;
+        return this;
+    }
+
+    /** A builder for a configured client. */
+    public static #HttpClientBuilder builder() {
+        return heap HttpClientBuilder();
+    }
+
+    /** Adds `name` to every request that does not set it. */
+    public HttpClient defaultHeader(String name, String value) {
+        this.defaultHeaders.set(name, value);
+        return this;
+    }
+
+    /** Sends every request with protocol version `v`, such as `HTTP/1.0`. */
+    public HttpClient version(String v) {
+        this.versionPin = Version.of(v);
+        this.hasVersionPin = true;
+        return this;
+    }
+
+    /** The most redirects `sendFollowing` takes. */
+    public HttpClient redirectLimit(int32 maxHops) {
+        this.redirectMax = maxHops;
+        return this;
+    }
+
+    /** Routes every request through the HTTP proxy at `host`:`port`. */
+    public HttpClient proxy(String host, int32 port) {
+        this.proxyHost #= host.substring(0, host.byteLength());
+        this.proxyPort = port;
+        this.hasProxy = true;
+        return this;
+    }
+
+    /** Keeps cookies in `j`. */
+    public HttpClient cookieJar(#CookieJar j) {
+        this.jar = #j;
+        return this;
+    }
+
+    /** Replaces the pool with one of `maxPerOrigin` connections idling at most `idleMaxMs`. */
+    public HttpClient poolLimits(int32 maxPerOrigin, int32 idleMaxMs) {
+        this.pool #= ConnectionPool.withLimits(maxPerOrigin, idleMaxMs);
+        return this;
+    }
+
+    /** Trusts only the CA in `pem[0 .. len)` for `https`. */
+    public HttpClient trustAnchor(int8[] pem, int32 len) {
+        int8[] copy = heap int8[len];
+        int32 i = 0;
+        while (i < len) {
+            copy[i] = pem[i];
+            i = i + 1;
+        }
+        this.trustPem = #copy;
+        this.trustLen = len;
+        this.hasTrustAnchor = true;
+        return this;
+    }
+
+    /** The connection pool. */
+    public ConnectionPool pool() {
+        return this.pool;
+    }
+
+    /** Returns the buffer `resp` holds to the pool, so `resp` can be filled again. */
+    public void recycle(ClientResponse resp) {
+        if (resp.holdsBuffer()) {
+            this.pool.buffers().give(#resp.takeBuffer());
+        }
+    }
+
+    int64 deadlineFromNow() {
+        if (this.exchangeTimeoutMs <= 0) {
+            return 0;
+        }
+        return Clock.now().toEpochMilli() + (int64) this.exchangeTimeoutMs;
+    }
+
+    /** Sends `req` and fills `resp`, without following redirects. */
+    public void send(ClientRequest req, ClientResponse resp) {
+        this.recycle(resp);
+        int64 deadline = this.deadlineFromNow();
+        boolean idem = req.method().isIdempotent();
+        if (this.hasVersionPin) {
+            req.version(this.versionPin);
+        }
+        this.applyDefaultHeaders(req);
+        if (!req.hasHeader("Accept-Encoding")) {
+            req.header("Accept-Encoding", "gzip, deflate");
+        }
+        if (this.jar != null && !req.hasHeader("Cookie")) {
+            String ck #= this.jar.cookieHeaderFor(req.host(), req.uri().getPath(), req.isHttps(),
+                                                  Clock.now().toEpochMilli());
+            if (ck != null) {
+                req.setHeader("Cookie", ck);
+            }
+        }
+        int32 attempt = 0;
+        while (true) {
+            try {
+                this.sendOnce(req, resp, deadline, null);
+                if (this.jar != null) {
+                    this.storeCookies(req, resp);
+                }
+                this.decodeResponse(resp);
+                return;
+            } catch (NetException e) {
+                boolean again = attempt < this.maxRetries && idem
+                    && HttpClient.retryableKind(e.kind) && HttpClient.budgetLeft(deadline);
+                if (!again) {
+                    throw e;
+                }
+            }
+            attempt = attempt + 1;
+            if (this.retryBackoffMs > 0) {
+                Tasks.sleepMillis((int64) this.retryBackoffMs);
+            }
+        }
+    }
+
+    /** Sends `req` and returns a new response, without following redirects. */
+    public #ClientResponse send(ClientRequest req) {
+        ClientResponse resp = heap ClientResponse();
+        this.send(req, resp);
+        return #resp;
+    }
+
+    void sendOnce(ClientRequest req, ClientResponse resp, int64 deadline, BodySink sink) {
+        if (!req.hasHeader("Host")) {
+            req.header("Host", req.host());
+        }
+        ConnectionBuffers bufs = this.pool.buffers();
+        if (req.isHttps()) {
+            req.setHeader("Connection", "close");
+            TcpStream sock #= this.dialSecure(req.host(), req.port());
+            int8[] hostBytes #= req.host().toBytes();
+            TlsStream tls #= HttpClient.wrapTls(#sock, hostBytes, req.host().byteLength(),
+                                               this.trustPem, this.trustLen, this.hasTrustAnchor);
+            int8[] alpn #= HttpClient.alpnHttp11();
+            tls.offerAlpn(alpn, 9);
+            tls.handshake();
+            Http1ClientConnection c = heap Http1ClientConnection(tls, bufs, this.pool.limits());
+            try {
+                c.exchangeInto(req, resp, deadline, bufs, sink);
+            } catch (Exception e) {
+                c.recycle(bufs);
+                tls.close();
+                throw e;
+            }
+            c.recycle(bufs);
+            tls.close();
+            return;
+        }
+        String dialHost = req.host();
+        int32 dialPort = req.port();
+        if (this.hasProxy) {
+            req.absoluteTarget();
+            dialHost = this.proxyHost;
+            dialPort = this.proxyPort;
+        }
+        PooledConnection pc #= this.leaseFor(dialHost, dialPort);
+        try {
+            pc.conn.exchangeInto(req, resp, deadline, bufs, sink);
+        } catch (Exception e) {
+            this.pool.release(#pc, false);
+            throw e;
+        }
+        this.pool.release(#pc, resp.keptAlive());
+    }
+
+    #PooledConnection leaseFor(String host, int32 port) {
+        PooledConnection idle #= this.pool.acquire(host, port);
+        if (idle != null) {
+            return #idle;
+        }
+        try {
+            TcpStream sock #= HttpClient.connectAny(host, port);
+            return this.pool.adopt(#sock, host, port);
+        } catch (Exception e) {
+            this.pool.releaseFailed(host, port);
+            throw e;
+        }
+    }
+
+    static boolean retryableKind(int32 kind) {
+        return kind == NetException.KIND_CONNECTION_REFUSED
+            || kind == NetException.KIND_CONNECTION_RESET
+            || kind == NetException.KIND_CONNECTION_ABORTED
+            || kind == NetException.KIND_HOST_UNREACHABLE
+            || kind == NetException.KIND_NETWORK_UNREACHABLE
+            || kind == NetException.KIND_BROKEN_PIPE;
+    }
+
+    static boolean budgetLeft(int64 deadline) {
+        if (deadline == (int64) 0) {
+            return true;
+        }
+        return Clock.now().toEpochMilli() < deadline;
+    }
+
+    /** GETs `url`, following redirects, into a new response. */
+    public #ClientResponse get(String url) {
+        ClientRequest req = heap ClientRequest(url);
+        ClientResponse resp = heap ClientResponse();
+        this.sendFollowing(req, resp);
+        return #resp;
+    }
+
+    /** GETs `url` and parses a 2xx body as JSON. */
+    public #JsonValue getJson(String url) {
+        ClientResponse resp #= this.get(url);
+        if (!resp.isSuccess()) {
+            throw heap HttpException("getJson: HTTP " + resp.status());
+        }
+        if (!resp.hasBody()) {
+            throw heap HttpException("getJson: bodyless response");
+        }
+        int8[] raw #= Bytes.copyOf(resp.body());
+        return Json.parse(raw, (int64) raw.count());
+    }
+
+    #TcpStream dialSecure(String host, int32 port) {
+        if (this.hasProxy) {
+            return this.connectTunnel(host, port);
+        }
+        return HttpClient.connectAny(host, port);
+    }
+
+    #TcpStream connectTunnel(String host, int32 port) {
+        TcpStream sock #= HttpClient.connectAny(this.proxyHost, this.proxyPort);
+        String hp = host + ":" + port;
+        String head = "CONNECT " + hp + " HTTP/1.1\r\nhost: " + hp + "\r\n\r\n";
+        int8[] hb #= head.toBytes();
+        sock.writeAllAsync(hb, (int64) 0, (int64) head.byteLength());
+        int32 status = HttpClient.readTunnelStatus(sock);
+        if (status < 200 || status >= 300) {
+            sock.close();
+            throw heap HttpException("proxy CONNECT: HTTP " + status);
+        }
+        return #sock;
+    }
+
+    static int32 readTunnelStatus(TcpStream sock) {
+        int8[] buf = heap int8[4096];
+        int32 have = 0;
+        while (true) {
+            int64 n = sock.readAsync(buf, (int64) have, (int64) (4096 - have));
+            if (n <= (int64) 0) {
+                throw heap HttpException("proxy CONNECT: stream ended before the response head");
+            }
+            have = have + (int32) n;
+            int32 i = 3;
+            while (i < have) {
+                if (buf[i - 3] == (int8) 13 && buf[i - 2] == (int8) 10
+                    && buf[i - 1] == (int8) 13 && buf[i] == (int8) 10) {
+                    return HttpClient.statusOfHead(buf, have);
+                }
+                i = i + 1;
+            }
+            if (have >= 4096) {
+                throw heap HttpException("proxy CONNECT: response head too large");
+            }
+        }
+        return -1;
+    }
+
+    static int32 statusOfHead(int8[] buf, int32 n) {
+        int32 i = 0;
+        while (i < n && buf[i] != (int8) 32) {
+            i = i + 1;
+        }
+        if (i + 3 >= n) {
+            return -1;
+        }
+        int32 d1 = ((int32) buf[i + 1]) - 48;
+        int32 d2 = ((int32) buf[i + 2]) - 48;
+        int32 d3 = ((int32) buf[i + 3]) - 48;
+        if (d1 < 0 || d1 > 9 || d2 < 0 || d2 > 9 || d3 < 0 || d3 > 9) {
+            return -1;
+        }
+        return d1 * 100 + d2 * 10 + d3;
+    }
+
+    void storeCookies(ClientRequest req, ClientResponse resp) {
+        int64 nowMs = Clock.now().toEpochMilli();
+        int32 i = resp.headers().find("set-cookie", 0);
+        while (i >= 0) {
+            String sc #= Bytes.toString(resp.headers().valueAt(i));
+            this.jar.store(sc, req.host(), req.uri().getPath(), nowMs);
+            i = resp.headers().find("set-cookie", i + 1);
+        }
+    }
+
+    void applyDefaultHeaders(ClientRequest req) {
+        int32 n = this.defaultHeaders.count();
+        int32 i = 0;
+        while (i < n) {
+            String name = this.defaultHeaders.nameAt(i);
+            if (!req.hasHeader(name)) {
+                req.header(name, this.defaultHeaders.valueAt(i));
+            }
+            i = i + 1;
+        }
+    }
+
+    void decodeResponse(ClientResponse resp) {
+        if (!resp.hasBody() || !resp.hasHeader("content-encoding")) {
+            return;
+        }
+        Slice<int8> ce = Bytes.trim(resp.header("content-encoding"));
+        if (Bytes.indexOf(ce, (int8) 44) >= 0) {
+            return;
+        }
+        String token #= Bytes.toString(ce).toLowerCase();
+        if (!ContentCoding.isSupported(token)) {
+            return;
+        }
+        if (token.equals("identity")) {
+            resp.headers().remove("content-encoding");
+            return;
+        }
+        int8[] raw #= Bytes.copyOf(resp.body());
+        int8[] decoded #= ContentCoding.decode(token, raw, raw.count(), this.maxDecodedBytes);
+        int32 n = decoded.count();
+        resp.replaceBody(#decoded, n);
+        resp.headers().remove("content-encoding");
+        resp.headers().set("content-length", "" + n);
+    }
+
+    /** Sends `req` into `resp`, following redirects up to the redirect limit. */
+    public void sendFollowing(ClientRequest req, ClientResponse resp) {
+        this.send(req, resp);
+        if (!HttpClient.isRedirect(resp.status()) || !resp.hasHeader("Location")) {
+            return;
+        }
+        boolean origHttps = req.isHttps();
+        String origHost = req.host();
+        int32 origPort = req.port();
+        String method #= req.methodToken().substring(0, req.methodToken().byteLength());
+        boolean keepBody = req.bodyLength() > 0;
+        String baseUrl #= req.uri().toString();
+        int32 lastStatus = resp.status();
+        String loc #= resp.headerString("Location");
+        int32 hops = 0;
+        while (true) {
+            if (hops >= this.redirectMax) {
+                throw heap TooManyRedirectsException("too many redirects", hops);
+            }
+            method #= HttpClient.redirectMethod(lastStatus, method);
+            keepBody = keepBody && HttpClient.redirectKeepsBody(lastStatus);
+            Uri base #= Uri.parse(baseUrl);
+            Uri next #= Uri.resolve(base, loc);
+            boolean sameOrig = HttpClient.originMatches(next, origHttps, origHost, origPort);
+            ClientRequest hop #= HttpClient.redirectedRequest(req, method, keepBody, next, sameOrig);
+            this.send(hop, resp);
+            hops = hops + 1;
+            if (!HttpClient.isRedirect(resp.status()) || !resp.hasHeader("Location")) {
+                return;
+            }
+            loc #= resp.headerString("Location");
+            lastStatus = resp.status();
+            baseUrl #= next.toString();
+        }
+    }
+
+    /** Sends `req` into a new response, following redirects. */
+    public #ClientResponse sendFollowing(ClientRequest req) {
+        ClientResponse resp = heap ClientResponse();
+        this.sendFollowing(req, resp);
+        return #resp;
+    }
+
+    static boolean isRedirect(int32 status) {
+        return status == 301 || status == 302 || status == 303 || status == 307 || status == 308;
+    }
+
+    static #String redirectMethod(int32 status, String m) {
+        boolean toGet = false;
+        if (status == 303) {
+            toGet = !m.equals("HEAD");
+        }
+        if (status == 301 || status == 302) {
+            toGet = m.equals("POST") || m.equals("PUT");
+        }
+        if (toGet) {
+            String g = "GET";
+            return g.substring(0, g.byteLength());
+        }
+        return m.substring(0, m.byteLength());
+    }
+
+    static boolean redirectKeepsBody(int32 status) {
+        return status == 307 || status == 308;
+    }
+
+    static boolean isHttps(String scheme) {
+        return scheme.equals("https");
+    }
+
+    static boolean originMatches(Uri next, boolean https, String host, int32 port) {
+        boolean nHttps = HttpClient.isHttps(next.getScheme());
+        if (nHttps != https) {
+            return false;
+        }
+        if (!next.getHost().equals(host)) {
+            return false;
+        }
+        int32 np = next.getPort();
+        if (np < 0) {
+            np = nHttps ? 443 : 80;
+        }
+        return np == port;
+    }
+
+    static #ClientRequest redirectedRequest(ClientRequest original, String method,
+                                            boolean keepBody, Uri target, boolean sameOrigin) {
+        String url #= target.toString();
+        ClientRequest r = heap ClientRequest(url);
+        r.method(method);
+        r.version(original.version());
+        int32 i = 0;
+        while (i < original.fieldCount()) {
+            if (original.fieldLive(i) && !HttpClient.dropOnRedirect(original.nameAt(i), keepBody, sameOrigin)) {
+                String name #= Bytes.toString(original.nameAt(i));
+                r.headerBytes(name, original.valueAt(i));
+            }
+            i = i + 1;
+        }
+        if (keepBody && original.bodyLength() > 0) {
+            r.bodyBytes(original.body());
+        }
+        return #r;
+    }
+
+    static boolean dropOnRedirect(Slice<int8> name, boolean keepBody, boolean sameOrigin) {
+        if (Bytes.equalsIgnoreCase(name, "host") || Bytes.equalsIgnoreCase(name, "content-length")) {
+            return true;
+        }
+        if (!keepBody && Bytes.equalsIgnoreCase(name, "content-type")) {
+            return true;
+        }
+        if (!sameOrigin && (Bytes.equalsIgnoreCase(name, "authorization") || Bytes.equalsIgnoreCase(name, "cookie"))) {
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * GETs `url`, following redirects, and streams a 2xx body into the file
+     * `destPath` without holding it in memory. Returns the body's hash, and
+     * raises for any other final status.
+     */
+    public #Sha256 downloadTo(String url, String destPath) {
+        FileWriter out #= File.openWrite(destPath, OpenMode.WRITE);
+        Sha256 hasher = heap Sha256();
+        DownloadSink sink = heap DownloadSink(out, hasher);
+        ClientRequest req = heap ClientRequest(url);
+        ClientResponse resp = heap ClientResponse();
+        this.sendDownload(req, resp, sink);
+        boolean origHttps = req.isHttps();
+        String origHost = req.host();
+        int32 origPort = req.port();
+        String baseUrl #= req.uri().toString();
+        int32 hops = 0;
+        while (HttpClient.isRedirect(resp.status()) && resp.hasHeader("Location")) {
+            if (hops >= this.redirectMax) {
+                out.close();
+                throw heap TooManyRedirectsException("too many redirects", hops);
+            }
+            String loc #= resp.headerString("Location");
+            Uri base #= Uri.parse(baseUrl);
+            Uri next #= Uri.resolve(base, loc);
+            boolean sameOrig = HttpClient.originMatches(next, origHttps, origHost, origPort);
+            ClientRequest hop #= HttpClient.redirectedRequest(req, "GET", false, next, sameOrig);
+            this.sendDownload(hop, resp, sink);
+            hops = hops + 1;
+            baseUrl #= next.toString();
+        }
+        out.flush();
+        out.close();
+        if (!resp.isSuccess()) {
+            throw heap HttpException("downloadTo: HTTP " + resp.status());
+        }
+        return #hasher;
+    }
+
+    void sendDownload(ClientRequest req, ClientResponse resp, BodySink sink) {
+        this.recycle(resp);
+        this.sendOnce(req, resp, this.deadlineFromNow(), sink);
+    }
+
+    static #TlsStream wrapTls(#TcpStream sock, int8[] host, int32 hostLen,
+                              int8[] trustPem, int32 trustLen, boolean hasAnchor) {
+        if (hasAnchor) {
+            return TlsStream.client(#sock, host, hostLen, trustPem, trustLen);
+        }
+        return TlsStream.clientSystemTrust(#sock, host, hostLen);
+    }
+
+    static #TcpStream connectAny(String host, int32 port) {
+        SocketAddress[] addrs #= Dns.resolve(host, port, ResolveFamily.V4_ONLY);
+        SocketAddress a0 = addrs[0];
+        IpAddress ip = a0.getIp();
+        int8[] oct = ip.getOctets();
+        int32 olen = ip.isV4() ? 4 : 16;
+        IpAddress ipCopy #= IpAddress.fromOctets(oct, olen);
+        SocketAddress connAddr #= SocketAddress.of(#ipCopy, port);
+        return TcpStream.connectAsync(#connAddr);
+    }
+
+    static #int8[] alpnHttp11() {
+        int8[] a = heap int8[9];
+        a[0] = (int8) 8;
+        HttpClient.putAscii(a, 1, "http/1.1");
+        return #a;
+    }
+
+    static void putAscii(int8[] a, int32 at, String s) {
+        int32 i = 0;
+        while (i < s.byteLength()) {
+            a[at + i] = s.byteAt(i);
+            i = i + 1;
+        }
+    }
+}

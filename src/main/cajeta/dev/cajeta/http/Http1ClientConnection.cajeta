@@ -66,10 +66,19 @@ public final class Http1ClientConnection {
      */
     public void exchange(ClientRequest req, ClientResponse resp, int64 deadlineMs,
                          ConnectionBuffers bufs) {
+        this.exchangeInto(req, resp, deadlineMs, bufs, null);
+    }
+
+    /**
+     * As `exchange`, but a 2xx body goes to `sink` in pieces instead of being
+     * held. Any other status keeps its body in the response.
+     */
+    public void exchangeInto(ClientRequest req, ClientResponse resp, int64 deadlineMs,
+                             ConnectionBuffers bufs, BodySink sink) {
         this.deadline = deadlineMs;
         this.in.clear();
         this.writeRequest(req);
-        this.readResponse(resp, req.method() == Method.HEAD);
+        this.readResponse(resp, req.method() == Method.HEAD, sink);
         ByteBuffer taken #= this.in;
         this.in #= bufs.take();
         resp.adopt(#taken);
@@ -243,7 +252,7 @@ public final class Http1ClientConnection {
         return h;
     }
 
-    void readResponse(ClientResponse resp, boolean head) {
+    void readResponse(ClientResponse resp, boolean head, BodySink sink) {
         int32 h = this.readHead();
         HeadScanner.parseResponse(this.in.array(), this.in.readPosition(), h, resp);
         while (resp.code >= 100 && resp.code < 200 && resp.code != 101) {
@@ -264,8 +273,13 @@ public final class Http1ClientConnection {
             resp.reuse = keep && this.in.writePosition() == start;
             return;
         }
+        boolean streamed = sink != null && resp.isSuccess();
         if (t.hasToken("transfer-encoding", "chunked")) {
-            this.readChunked(resp, start);
+            if (streamed) {
+                this.streamChunked(start, sink);
+            } else {
+                this.readChunked(resp, start);
+            }
             resp.reuse = keep && this.in.writePosition() == this.consumed;
             return;
         }
@@ -275,11 +289,19 @@ public final class Http1ClientConnection {
             if (n < 0) {
                 throw heap MalformedMessageException("bad Content-Length", (int64) -1);
             }
-            this.readLength(resp, start, n);
+            if (streamed) {
+                this.streamLength(start, n, sink);
+            } else {
+                this.readLength(resp, start, n);
+            }
             resp.reuse = keep && this.in.writePosition() == this.consumed;
             return;
         }
-        this.readToClose(resp, start);
+        if (streamed) {
+            this.streamToClose(start, sink);
+        } else {
+            this.readToClose(resp, start);
+        }
         resp.reuse = false;
     }
 
@@ -362,7 +384,7 @@ public final class Http1ClientConnection {
         resp.replaceBody(#body, len);
     }
 
-    int8 nextByte() {
+    int32 avail() {
         if (this.cur == this.in.writePosition()) {
             if (this.in.writePosition() == this.in.capacity()) {
                 this.in.clear();
@@ -371,10 +393,15 @@ public final class Http1ClientConnection {
                 this.cur = this.base;
             }
             if (this.fill() == 0) {
-                throw heap UnexpectedEofException("stream ended inside a chunked body",
+                throw heap UnexpectedEofException("stream ended inside the response body",
                     (int64) (this.cur - this.base));
             }
         }
+        return this.in.writePosition() - this.cur;
+    }
+
+    int8 nextByte() {
+        this.avail();
         int8 b = this.in.array()[this.cur];
         this.cur = this.cur + 1;
         return b;
@@ -491,5 +518,74 @@ public final class Http1ClientConnection {
         } else {
             resp.replaceBody(#owned, ownedLen);
         }
+    }
+
+    void streamLength(int32 start, int64 n, BodySink sink) {
+        this.base = start;
+        this.cur = start;
+        int64 left = n;
+        while (left > 0) {
+            int32 k = this.avail();
+            if ((int64) k > left) {
+                k = (int32) left;
+            }
+            sink.accept(this.in.array(), this.cur, k);
+            this.cur = this.cur + k;
+            left = left - (int64) k;
+        }
+        this.consumed = this.cur;
+    }
+
+    void streamToClose(int32 start, BodySink sink) {
+        this.base = start;
+        this.cur = start;
+        while (true) {
+            if (this.cur == this.in.writePosition()) {
+                this.in.clear();
+                this.in.advanceWrite(this.base);
+                this.in.advanceRead(this.base);
+                this.cur = this.base;
+                if (this.fill() == 0) {
+                    break;
+                }
+            }
+            int32 k = this.in.writePosition() - this.cur;
+            sink.accept(this.in.array(), this.cur, k);
+            this.cur = this.cur + k;
+        }
+        this.consumed = this.cur;
+    }
+
+    void streamChunked(int32 start, BodySink sink) {
+        this.base = start;
+        this.cur = start;
+        while (true) {
+            int64 size = this.chunkSize();
+            if (size == 0) {
+                int8 b = this.nextByte();
+                while (b != (int8) 13) {
+                    this.skipLine();
+                    b = this.nextByte();
+                }
+                if (this.nextByte() != (int8) 10) {
+                    throw heap InvalidChunkEncodingException("trailer missing LF", (int64) 0);
+                }
+                break;
+            }
+            int64 left = size;
+            while (left > 0) {
+                int32 k = this.avail();
+                if ((int64) k > left) {
+                    k = (int32) left;
+                }
+                sink.accept(this.in.array(), this.cur, k);
+                this.cur = this.cur + k;
+                left = left - (int64) k;
+            }
+            if (this.nextByte() != (int8) 13 || this.nextByte() != (int8) 10) {
+                throw heap InvalidChunkEncodingException("chunk data not followed by CRLF", (int64) 0);
+            }
+        }
+        this.consumed = this.cur;
     }
 }

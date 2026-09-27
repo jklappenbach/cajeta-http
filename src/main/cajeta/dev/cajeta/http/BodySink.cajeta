@@ -1,0 +1,7 @@
+package dev.cajeta.http;
+
+/** Receives a response body in pieces, for a body that is not held in memory. */
+public interface BodySink {
+    /** Takes `a[off .. off + len)`, which is valid only during the call. */
+    void accept(int8[] a, int32 off, int32 len);
+}

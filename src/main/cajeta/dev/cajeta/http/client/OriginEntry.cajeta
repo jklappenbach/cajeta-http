@@ -1,0 +1,55 @@
+package dev.cajeta.http.client;
+
+import cajeta.lang.String;
+import cajeta.concurrent.Semaphore;
+
+/** One origin's idle connections and its cap on connections in use. */
+public final class OriginEntry {
+    public String host;
+    public int32 port;
+    public Semaphore sem;
+    PooledConnection idleHead;
+    public int32 idleCount;
+
+    OriginEntry() {
+        this.host = null;
+        this.port = 0;
+        this.sem = null;
+        this.idleHead = null;
+        this.idleCount = 0;
+    }
+
+    /** An entry for `host`:`port` allowing `maxPerOrigin` connections in use. */
+    public static #OriginEntry of(String host, int32 port, int32 maxPerOrigin) {
+        OriginEntry e = heap OriginEntry();
+        e.host #= host.substring(0, host.byteLength());
+        e.port = port;
+        e.sem = heap Semaphore(maxPerOrigin);
+        return #e;
+    }
+
+    /** Parks `pc` at the head of the idle list. */
+    public void pushIdle(#PooledConnection pc) {
+        if (this.idleHead != null) {
+            PooledConnection prev #= this.idleHead;
+            pc.next = #prev;
+        }
+        this.idleHead = #pc;
+        this.idleCount = this.idleCount + 1;
+    }
+
+    /** The most recently parked connection, or null. */
+    public #PooledConnection popIdle() {
+        if (this.idleHead == null) {
+            return null;
+        }
+        PooledConnection got #= this.idleHead;
+        this.idleHead = null;
+        if (got.next != null) {
+            PooledConnection rest #= got.next;
+            this.idleHead = #rest;
+        }
+        this.idleCount = this.idleCount - 1;
+        return #got;
+    }
+}

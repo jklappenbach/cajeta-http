@@ -1,0 +1,36 @@
+package dev.cajeta.http.client;
+
+import cajeta.hash.Sha256;
+import cajeta.io.file.FileWriter;
+import dev.cajeta.http.BodySink;
+
+/** Writes body pieces to a file and hashes them as they pass. */
+final class DownloadSink implements BodySink {
+    FileWriter out;
+    Sha256 hasher;
+    int8[] scratch;
+
+    DownloadSink(FileWriter out, Sha256 hasher) {
+        this.out #= out;
+        this.hasher #= hasher;
+        this.scratch = heap int8[16384];
+    }
+
+    public void accept(int8[] a, int32 off, int32 len) {
+        int32 done = 0;
+        while (done < len) {
+            int32 k = len - done;
+            if (k > this.scratch.count()) {
+                k = this.scratch.count();
+            }
+            int32 i = 0;
+            while (i < k) {
+                this.scratch[i] = a[off + done + i];
+                i = i + 1;
+            }
+            this.out.write(this.scratch, k);
+            this.hasher.update(this.scratch, (int64) k);
+            done = done + k;
+        }
+    }
+}

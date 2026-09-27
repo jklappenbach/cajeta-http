@@ -1,0 +1,26 @@
+package dev.cajeta.http.client;
+
+import cajeta.lang.String;
+import cajeta.io.net.TcpStream;
+import dev.cajeta.http.Http1ClientConnection;
+
+/** A keep-alive connection the pool parks between exchanges, with its buffers. */
+public final class PooledConnection {
+    public TcpStream stream;
+    public Http1ClientConnection conn;
+    public String host;
+    public int32 port;
+    public int64 idleSince;
+    public PooledConnection next;
+    int8[] probe;
+
+    PooledConnection() {
+        this.stream = null;
+        this.conn = null;
+        this.host = null;
+        this.port = 0;
+        this.idleSince = (int64) 0;
+        this.next = null;
+        this.probe = heap int8[1];
+    }
+}
