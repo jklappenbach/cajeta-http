@@ -1,0 +1,142 @@
+package dev.cajeta.http.test;
+
+import cajeta.lang.String;
+import cajeta.lang.Slice;
+import cajeta.io.net.AsyncReader;
+import dev.cajeta.http.Bytes;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.body.Body;
+import dev.cajeta.http.body.StreamBody;
+
+/** Request header and body edits a middleware makes, and streamed response bodies. */
+public final class ViewEditTests {
+    static #AsyncReader reader(String text) {
+        MemChannel ch = heap MemChannel();
+        AsyncReader rd = heap AsyncReader(ch, text.byteLength() + 16);
+        int8[] b #= text.toBytes();
+        rd.stage(b, text.byteLength());
+        rd.markEof();
+        return #rd;
+    }
+
+    static #String repeat(String unit, int32 n) {
+        String out = "";
+        int32 i = 0;
+        while (i < n) {
+            out = out + unit;
+            i = i + 1;
+        }
+        return #out;
+    }
+
+    static void requestEdits(Check c) {
+        (HttpRequest, HttpResponse) -> void add = (HttpRequest q, HttpResponse r) -> {
+            q.setHeader("X-Id", "abc");
+            r.writeBytes(q.header("x-id"));
+            r.write(q.hasHeader("X-ID") ? " yes" : " no");
+        };
+        String got #= Wire.serve("GET / HTTP/1.1\r\n\r\n", add);
+        Wire.same(c, Wire.bodyOf(got), "abc yes", "a header set on the request reads back by name, ignoring case");
+
+        (HttpRequest, HttpResponse) -> void replace = (HttpRequest q, HttpResponse r) -> {
+            q.setHeader("X-Id", "new");
+            r.writeBytes(q.header("x-id"));
+            r.write(" ");
+            r.write("" + q.headers().countOf("x-id"));
+        };
+        got #= Wire.serve("GET / HTTP/1.1\r\nX-Id: old\r\nX-Id: older\r\n\r\n", replace);
+        Wire.same(c, Wire.bodyOf(got), "new 1", "setHeader replaces every parsed field of that name");
+
+        (HttpRequest, HttpResponse) -> void remove = (HttpRequest q, HttpResponse r) -> {
+            q.removeHeader("X-Forwarded-For");
+            r.write(q.hasHeader("x-forwarded-for") ? "kept" : "gone");
+            r.write(" ");
+            r.writeBytes(q.header("host"));
+        };
+        got #= Wire.serve("GET / HTTP/1.1\r\nX-Forwarded-For: 1.2.3.4\r\nHost: h\r\n\r\n", remove);
+        Wire.same(c, Wire.bodyOf(got), "gone h", "removeHeader drops a parsed field and keeps the rest");
+
+        (HttpRequest, HttpResponse) -> void window = (HttpRequest q, HttpResponse r) -> {
+            Slice<int8> xff = q.header("x-forwarded-for");
+            q.setHeaderBytes("X-Real-IP", xff[0:7]);
+            r.writeBytes(q.header("x-real-ip"));
+        };
+        got #= Wire.serve("GET / HTTP/1.1\r\nX-Forwarded-For: 1.2.3.4, 5.6.7.8\r\n\r\n", window);
+        Wire.same(c, Wire.bodyOf(got), "1.2.3.4", "setHeaderBytes copies a window of the request itself");
+
+        (HttpRequest, HttpResponse) -> void perRequest = (HttpRequest q, HttpResponse r) -> {
+            r.write(q.hasHeader("x-id") ? "seen" : "none");
+            q.setHeader("X-Id", "abc");
+        };
+        got #= Wire.serve("GET /a HTTP/1.1\r\n\r\nGET /b HTTP/1.1\r\n\r\n", perRequest);
+        Wire.same(c, got,
+            "HTTP/1.1 200 OK\r\ncontent-length: 4\r\n\r\nnone"
+            + "HTTP/1.1 200 OK\r\ncontent-length: 4\r\n\r\nnone",
+            "an edit lasts for its own request only");
+
+        (HttpRequest, HttpResponse) -> void swap = (HttpRequest q, HttpResponse r) -> {
+            String up = "HELLO!";
+            int8[] b #= up.toBytes();
+            q.replaceBody(#b, 6);
+            r.writeBytes(q.body());
+            r.write(" " + q.bodyLength());
+        };
+        got #= Wire.serve("POST / HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello"
+                          + "POST / HTTP/1.1\r\nContent-Length: 2\r\n\r\nok", swap);
+        Wire.same(c, got,
+            "HTTP/1.1 200 OK\r\ncontent-length: 8\r\n\r\nHELLO! 6"
+            + "HTTP/1.1 200 OK\r\ncontent-length: 8\r\n\r\nHELLO! 6",
+            "replaceBody hands the request a new body for that request");
+
+        (HttpRequest, HttpResponse) -> void quiet = (HttpRequest q, HttpResponse r) -> {
+            q.setHeader("X-Request-Id", "req-1");
+            q.removeHeader("Content-Type");
+            r.writeBytes(q.header("x-request-id"));
+        };
+        int64 small = ConnectionTests.measure(100, quiet);
+        int64 large = ConnectionTests.measure(1100, quiet);
+        c.that(large - small == 0,
+            "1000 more requests that set and remove a header allocate nothing (" + small + " then " + large + ")");
+    }
+
+    static void streamedResponses(Check c) {
+        (HttpRequest, HttpResponse) -> void sized = (HttpRequest q, HttpResponse r) -> {
+            r.body(#StreamBody.sized(#ViewEditTests.reader("hello world"), (int64) 11));
+        };
+        String got #= Wire.serve("GET / HTTP/1.1\r\n\r\n", sized);
+        Wire.same(c, got, "HTTP/1.1 200 OK\r\ncontent-length: 11\r\n\r\nhello world",
+            "a sized streamed body is framed by its length");
+
+        String big #= ViewEditTests.repeat("0123456789", 2000);
+        (HttpRequest, HttpResponse) -> void unsized = (HttpRequest q, HttpResponse r) -> {
+            r.body(#StreamBody.of(#ViewEditTests.reader(big)));
+        };
+        got #= Wire.serveWith("GET / HTTP/1.1\r\n\r\n", 4096, 6000, unsized);
+        c.that(got.startsWith("HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n"),
+            "an unsized streamed body larger than the buffer is chunked");
+        Wire.same(c, Wire.bodyOf(got), big, "the chunked stream arrives intact");
+
+        got #= Wire.serve("HEAD / HTTP/1.1\r\n\r\n", sized);
+        Wire.same(c, got, "HTTP/1.1 200 OK\r\ncontent-length: 11\r\n\r\n",
+            "HEAD with a sized stream sends the length and no body");
+
+        (HttpRequest, HttpResponse) -> void take = (HttpRequest q, HttpResponse r) -> {
+            r.body(#StreamBody.sized(#ViewEditTests.reader("abc"), (int64) 3));
+            Body b #= r.takeBodyStream();
+            boolean cleared = r.bodyStream() == null;
+            r.body(#b);
+            r.header("X-Cleared", cleared ? "yes" : "no");
+        };
+        got #= Wire.serve("GET / HTTP/1.1\r\n\r\n", take);
+        Wire.same(c, got, "HTTP/1.1 200 OK\r\nX-Cleared: yes\r\ncontent-length: 3\r\n\r\nabc",
+            "takeBodyStream hands the stream over and clears it");
+    }
+
+    public static void run(Check c) {
+        System.stdout.println("-- view edits: request --");
+        ViewEditTests.requestEdits(c);
+        System.stdout.println("-- view edits: streamed responses --");
+        ViewEditTests.streamedResponses(c);
+    }
+}

@@ -4,6 +4,7 @@ import cajeta.lang.String;
 import cajeta.lang.Slice;
 import cajeta.io.net.ByteBuffer;
 import cajeta.io.net.ByteChannel;
+import cajeta.io.net.AsyncReader;
 import dev.cajeta.http.body.Body;
 
 /**
@@ -162,6 +163,12 @@ public final class HttpResponse {
         return this.header(name, value);
     }
 
+    /** Replaces every field named `name` with one field whose value is a byte window. */
+    public HttpResponse setHeaderBytes(String name, Slice<int8> value) {
+        this.removeHeader(name);
+        return this.headerBytes(name, value);
+    }
+
     /** Removes every field named `name`. */
     public HttpResponse removeHeader(String name) {
         this.requireOpen();
@@ -305,6 +312,42 @@ public final class HttpResponse {
     /** The streamed body, or null. */
     public Body bodyStream() {
         return this.stream;
+    }
+
+    /** Hands over the streamed body and clears it, or null when there is none. */
+    public #Body takeBodyStream() {
+        Body s #= this.stream;
+        this.stream = null;
+        return #s;
+    }
+
+    void pump(boolean omit) {
+        Body s = this.stream;
+        int64 len = s.contentLength();
+        if (len >= (int64) 0 && !this.hasHeader("content-length") && !this.hasHeader("transfer-encoding")) {
+            this.headerInt("content-length", len);
+        }
+        if (omit) {
+            s.abort();
+            return;
+        }
+        AsyncReader rd = s.reader();
+        int8[] a = this.out.array();
+        try {
+            while (true) {
+                if (this.bodyLen >= this.capacity()) {
+                    this.spill();
+                }
+                int32 n = rd.read(a, this.room + this.bodyLen, this.capacity() - this.bodyLen);
+                if (n <= 0) {
+                    break;
+                }
+                this.bodyLen = this.bodyLen + n;
+            }
+        } catch (Exception e) {
+            s.abort();
+            throw e;
+        }
     }
 
     static int32 decimalWidth(int64 v) {
@@ -487,6 +530,12 @@ public final class HttpResponse {
         if (!this.committed) {
             this.prepareFraming(reuse && !this.headerHasToken("connection", "close"), peer);
             this.omitBody = omitBody;
+            if (this.stream != null) {
+                this.pump(omitBody);
+                this.stream = null;
+            }
+        }
+        if (!this.committed) {
             boolean declared = this.hasHeader("content-length") || this.hasHeader("transfer-encoding");
             boolean withLength = !declared && !this.bodyless();
             int32 h = this.headLength(withLength, (int64) this.bodyLen);

@@ -30,6 +30,8 @@ public final class HttpRequest {
     int32 bodyOff;
     int32 bodyLen;
     Body stream;
+    int8[] ownBody;
+    boolean bodyOwned;
     String[] paramNames;
     int32[] paramSpans;
     int32 paramCount;
@@ -68,6 +70,8 @@ public final class HttpRequest {
         this.bodyOff = 0;
         this.bodyLen = 0;
         this.stream = null;
+        this.bodyOwned = false;
+        this.ownBody = null;
         this.paramNames = null;
         this.paramCount = 0;
         this.segCount = 0;
@@ -168,6 +172,24 @@ public final class HttpRequest {
         return this.table.copy(name);
     }
 
+    /** Replaces every field named `name` with `value` for the rest of this request. */
+    public HttpRequest setHeader(String name, String value) {
+        this.table.set(name, value);
+        return this;
+    }
+
+    /** As `setHeader`, copying the value from a window. */
+    public HttpRequest setHeaderBytes(String name, Slice<int8> value) {
+        this.table.setBytes(name, value);
+        return this;
+    }
+
+    /** Removes every field named `name` for the rest of this request. */
+    public HttpRequest removeHeader(String name) {
+        this.table.remove(name);
+        return this;
+    }
+
     /** The declared Content-Length, or -1 when none was declared. */
     public int64 contentLength() {
         return this.declaredLength;
@@ -185,7 +207,19 @@ public final class HttpRequest {
 
     /** The body held in the input buffer, or an empty window. */
     public Slice<int8> body() {
+        if (this.bodyOwned) {
+            return this.ownBody[0:this.bodyLen];
+        }
         return this.src[this.bodyOff:this.bodyOff + this.bodyLen];
+    }
+
+    /** Replaces the body with `data[0 .. length)` for the rest of this request. */
+    public void replaceBody(#int8[] data, int32 length) {
+        this.ownBody = #data;
+        this.bodyOwned = true;
+        this.bodyLen = length;
+        this.declaredLength = (int64) length;
+        this.stream = null;
     }
 
     /** Length of the held body in bytes. */

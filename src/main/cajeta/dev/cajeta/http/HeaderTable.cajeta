@@ -7,39 +7,63 @@ import cajeta.lang.Slice;
  * The header fields of one inbound message, held as windows into the
  * message's byte store. Lookup is case-insensitive over the bytes and
  * allocates nothing. The table is reused from message to message.
+ *
+ * A field set after parsing is copied into the table's own scratch bytes, so
+ * an edit survives only until the next message.
  */
 public final class HeaderTable {
     int8[] none;
     int8[] src;
+    int8[] extra;
+    int32 extraUsed;
     int32[] spans;
     int32 used;
     int32 limit;
 
-    /** A table that holds at most `limit` fields. */
+    static int32 STRIDE = 5;
+
+    /** A table that holds at most `limit` parsed fields. */
     public HeaderTable(int32 limit) {
         this.limit = limit;
-        this.spans = heap int32[limit * 4];
+        this.spans = heap int32[(limit + 8) * HeaderTable.STRIDE];
         this.used = 0;
         this.none = heap int8[0];
         this.src #= this.none;
+        this.extra = heap int8[256];
+        this.extraUsed = 0;
     }
 
     void reset(int8[] store) {
         this.src #= store;
         this.used = 0;
+        this.extraUsed = 0;
     }
 
-    /** Records one field. False when the table is already full. */
-    boolean add(int32 nameOff, int32 nameLen, int32 valueOff, int32 valueLen) {
-        if (this.used >= this.limit) {
-            return false;
+    void addField(int32 nameOff, int32 nameLen, int32 valueOff, int32 valueLen, int32 store) {
+        if (this.used * HeaderTable.STRIDE >= this.spans.count()) {
+            int32[] grown = heap int32[this.spans.count() * 2];
+            int32 j = 0;
+            while (j < this.used * HeaderTable.STRIDE) {
+                grown[j] = this.spans[j];
+                j = j + 1;
+            }
+            this.spans #= grown;
         }
-        int32 k = this.used * 4;
+        int32 k = this.used * HeaderTable.STRIDE;
         this.spans[k] = nameOff;
         this.spans[k + 1] = nameLen;
         this.spans[k + 2] = valueOff;
         this.spans[k + 3] = valueLen;
+        this.spans[k + 4] = store;
         this.used = this.used + 1;
+    }
+
+    /** Records one parsed field. False when the table is already full. */
+    boolean add(int32 nameOff, int32 nameLen, int32 valueOff, int32 valueLen) {
+        if (this.used >= this.limit) {
+            return false;
+        }
+        this.addField(nameOff, nameLen, valueOff, valueLen, 0);
         return true;
     }
 
@@ -50,15 +74,21 @@ public final class HeaderTable {
 
     /** The name of field `i`, as sent. */
     public Slice<int8> nameAt(int32 i) {
-        int32 k = i * 4;
+        int32 k = i * HeaderTable.STRIDE;
         int32 off = this.spans[k];
+        if (this.spans[k + 4] == 1) {
+            return this.extra[off:off + this.spans[k + 1]];
+        }
         return this.src[off:off + this.spans[k + 1]];
     }
 
     /** The value of field `i`, with surrounding whitespace removed. */
     public Slice<int8> valueAt(int32 i) {
-        int32 k = i * 4;
+        int32 k = i * HeaderTable.STRIDE;
         int32 off = this.spans[k + 2];
+        if (this.spans[k + 4] == 1) {
+            return this.extra[off:off + this.spans[k + 3]];
+        }
         return this.src[off:off + this.spans[k + 3]];
     }
 
@@ -133,5 +163,108 @@ public final class HeaderTable {
             return null;
         }
         return Bytes.toString(this.valueAt(i));
+    }
+
+    /** Removes every field named `name`. */
+    public void remove(String name) {
+        int32 w = 0;
+        int32 r = 0;
+        while (r < this.used) {
+            if (!Bytes.equalsIgnoreCase(this.nameAt(r), name)) {
+                if (w != r) {
+                    int32 j = 0;
+                    while (j < HeaderTable.STRIDE) {
+                        this.spans[w * HeaderTable.STRIDE + j] = this.spans[r * HeaderTable.STRIDE + j];
+                        j = j + 1;
+                    }
+                }
+                w = w + 1;
+            }
+            r = r + 1;
+        }
+        this.used = w;
+    }
+
+    int32 room(int32 need) {
+        int32 at = this.extraUsed;
+        if (at + need > this.extra.count()) {
+            int32 cap = this.extra.count() * 2;
+            while (cap < at + need) {
+                cap = cap * 2;
+            }
+            int8[] grown = heap int8[cap];
+            int32 j = 0;
+            while (j < at) {
+                grown[j] = this.extra[j];
+                j = j + 1;
+            }
+            this.extra #= grown;
+        }
+        this.extraUsed = at + need;
+        return at;
+    }
+
+    /** Replaces every field named `name` with one field holding `value`. */
+    public void set(String name, String value) {
+        this.remove(name);
+        int32 nl = name.byteLength();
+        int32 vl = value.byteLength();
+        int32 at = this.room(nl + vl);
+        int32 i = 0;
+        while (i < nl) {
+            this.extra[at + i] = name.byteAt(i);
+            i = i + 1;
+        }
+        i = 0;
+        while (i < vl) {
+            this.extra[at + nl + i] = value.byteAt(i);
+            i = i + 1;
+        }
+        this.addField(at, nl, at + nl, vl, 1);
+    }
+
+    /** As `set`, copying the value from a window, which may be one of this table's own. */
+    public void setBytes(String name, Slice<int8> value) {
+        int32 vl = (int32) value.count();
+        int32 nl = name.byteLength();
+        this.remove(name);
+        if (this.extraUsed + nl + vl > this.extra.count()) {
+            int8[] held = heap int8[vl];
+            int32 h = 0;
+            while (h < vl) {
+                held[h] = value[(int64) h];
+                h = h + 1;
+            }
+            this.putHeld(name, held, vl);
+            return;
+        }
+        int32 at = this.room(nl + vl);
+        int32 i = 0;
+        while (i < nl) {
+            this.extra[at + i] = name.byteAt(i);
+            i = i + 1;
+        }
+        i = 0;
+        while (i < vl) {
+            this.extra[at + nl + i] = value[(int64) i];
+            i = i + 1;
+        }
+        this.addField(at, nl, at + nl, vl, 1);
+    }
+
+    void putHeld(String name, int8[] held, int32 vl) {
+        int32 nl = name.byteLength();
+        int32 at = this.room(nl + vl);
+        int32 i = 0;
+        while (i < nl) {
+            this.extra[at + i] = name.byteAt(i);
+            i = i + 1;
+        }
+        i = 0;
+        while (i < vl) {
+            this.extra[at + nl + i] = held[i];
+            i = i + 1;
+        }
+        this.addField(at, nl, at + nl, vl, 1);
     }
 }

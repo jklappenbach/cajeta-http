@@ -210,4 +210,57 @@ public final class Bytes {
         }
         return heap String(#out, n);
     }
+
+    /** An owned copy of the window as an array of exactly its length. */
+    public static #int8[] copyOf(Slice<int8> s) {
+        int32 n = (int32) s.count();
+        int8[] out = heap int8[n];
+        int32 i = 0;
+        while (i < n) {
+            out[i] = s[(int64) i];
+            i = i + 1;
+        }
+        return #out;
+    }
+
+    /** The window without leading and trailing spaces and tabs. */
+    public static Slice<int8> trim(Slice<int8> s) {
+        int64 a = 0;
+        int64 b = s.count();
+        while (a < b && (s[a] == (int8) 32 || s[a] == (int8) 9)) {
+            a = a + 1;
+        }
+        while (b > a && (s[b - 1] == (int8) 32 || s[b - 1] == (int8) 9)) {
+            b = b - 1;
+        }
+        return s[a:b];
+    }
+
+    /** True when `text` occurs in the window. */
+    public static boolean contains(Slice<int8> s, String text) {
+        int64 n = s.count();
+        int64 m = (int64) text.byteLength();
+        int64 i = 0;
+        while (i + m <= n) {
+            if (Bytes.equals(s[i:i + m], text)) {
+                return true;
+            }
+            i = i + 1;
+        }
+        return false;
+    }
+
+    /** True when `text` occurs in the window, ignoring ASCII case. */
+    public static boolean containsIgnoreCase(Slice<int8> s, String text) {
+        int64 n = s.count();
+        int64 m = (int64) text.byteLength();
+        int64 i = 0;
+        while (i + m <= n) {
+            if (Bytes.equalsIgnoreCase(s[i:i + m], text)) {
+                return true;
+            }
+            i = i + 1;
+        }
+        return false;
+    }
 }

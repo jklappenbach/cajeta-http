@@ -1,0 +1,150 @@
+package dev.cajeta.http.test;
+
+import cajeta.lang.String;
+import cajeta.io.net.ByteBuffer;
+import dev.cajeta.http.Bytes;
+import dev.cajeta.http.Http1Connection;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.h1.HttpParserLimits;
+import dev.cajeta.http.middleware.Middleware;
+import dev.cajeta.http.middleware.MiddlewareChain;
+
+/** Serves a scripted byte stream through one connection and returns what it wrote. */
+public final class Wire {
+    /** Everything `h` answers to `script`, with an 8 KiB output buffer. */
+    public static #String serve(String script, (HttpRequest, HttpResponse) -> void h) {
+        return Wire.serveWith(script, 4096, 8192, h);
+    }
+
+    /** As `serve`, reading `chunk` bytes at a time into an output buffer of `outCap`. */
+    public static #String serveWith(String script, int32 chunk, int32 outCap,
+                                    (HttpRequest, HttpResponse) -> void h) {
+        ScriptChannel ch = heap ScriptChannel(script, chunk);
+        ByteBuffer in = heap ByteBuffer(8192);
+        ByteBuffer out = heap ByteBuffer(outCap);
+        HttpParserLimits pl = heap HttpParserLimits();
+        Http1Connection conn = heap Http1Connection(ch, in, out, pl, 0, 0, (int64) 1000000, true, h);
+        conn.serve();
+        int8[] a = ch.captured();
+        return Bytes.toString(a[0:ch.capturedLen()]);
+    }
+
+    /** Bytes allocated while one connection serves `one` repeated `n` times. */
+    public static int64 measure(String one, int32 n, (HttpRequest, HttpResponse) -> void h) {
+        String script = "";
+        int32 i = 0;
+        while (i < n) {
+            script = script + one;
+            i = i + 1;
+        }
+        ScriptChannel ch = heap ScriptChannel(script, 1500);
+        ByteBuffer in = heap ByteBuffer(8192);
+        ByteBuffer out = heap ByteBuffer(8192);
+        HttpParserLimits pl = heap HttpParserLimits();
+        Http1Connection conn = heap Http1Connection(ch, in, out, pl, 0, 0, (int64) 1000000, true, h);
+        int64 before = Cajeta.allocatedBytes();
+        conn.serve();
+        return Cajeta.allocatedBytes() - before;
+    }
+
+    /** Everything a one-layer chain of `m` around `h` answers to `script`. */
+    public static #String through(#Middleware m, (HttpRequest, HttpResponse) -> void h, String script) {
+        MiddlewareChain chain = heap MiddlewareChain();
+        chain.use(#m);
+        chain.build(h);
+        (HttpRequest, HttpResponse) -> void app = (HttpRequest q, HttpResponse r) -> chain.run(q, r);
+        return Wire.serve(script, app);
+    }
+
+    /** As `through`, with `outer` wrapped around `inner`. */
+    public static #String through2(#Middleware outer, #Middleware inner,
+                                   (HttpRequest, HttpResponse) -> void h, String script) {
+        MiddlewareChain chain = heap MiddlewareChain();
+        chain.use(#outer).use(#inner);
+        chain.build(h);
+        (HttpRequest, HttpResponse) -> void app = (HttpRequest q, HttpResponse r) -> chain.run(q, r);
+        return Wire.serve(script, app);
+    }
+
+    /** Checks `got` against `want`, printing `got` when they differ. */
+    public static void same(Check c, String got, String want, String label) {
+        boolean ok = got.equals(want);
+        if (!ok) {
+            System.stdout.println("    got <<{}>>", got);
+        }
+        c.that(ok, label);
+    }
+
+    /** The status code of the first response in `wire`, or -1. */
+    public static int32 status(String wire) {
+        if (wire.byteLength() < 12) {
+            return -1;
+        }
+        int32 s = 0;
+        int32 i = 9;
+        while (i < 12) {
+            s = s * 10 + (((int32) wire.byteAt(i)) - 48);
+            i = i + 1;
+        }
+        return s;
+    }
+
+    /** The value of header `name` in the first response in `wire`, or "" when absent. */
+    public static #String header(String wire, String name) {
+        int64 headEnd = wire.indexOf("\r\n\r\n");
+        if (headEnd < (int64) 0) {
+            return "";
+        }
+        String head #= wire.substring(0, (int32) headEnd + 2);
+        String lower #= head.toLowerCase();
+        String key #= "\r\n" + name.toLowerCase() + ": ";
+        int64 at = lower.indexOf(key);
+        if (at < (int64) 0) {
+            return "";
+        }
+        int32 start = (int32) at + key.byteLength();
+        int32 end = start;
+        while (end < head.byteLength() && head.byteAt(end) != (int8) 13) {
+            end = end + 1;
+        }
+        return head.substring(start, end);
+    }
+
+    /** The body of the first response in `wire`, decoded when chunked. */
+    public static #String bodyOf(String wire) {
+        int64 headEnd = wire.indexOf("\r\n\r\n");
+        if (headEnd < (int64) 0) {
+            return "";
+        }
+        String head #= wire.substring(0, (int32) headEnd).toLowerCase();
+        int32 at = (int32) headEnd + 4;
+        if (!head.contains("transfer-encoding: chunked")) {
+            return wire.substring(at, wire.byteLength());
+        }
+        String out = "";
+        while (true) {
+            int32 lineEnd = at;
+            while (lineEnd + 1 < wire.byteLength()
+                   && !(wire.byteAt(lineEnd) == (int8) 13 && wire.byteAt(lineEnd + 1) == (int8) 10)) {
+                lineEnd = lineEnd + 1;
+            }
+            if (lineEnd + 1 >= wire.byteLength()) {
+                return #out;
+            }
+            int32 size = 0;
+            int32 i = at;
+            while (i < lineEnd) {
+                size = size * 16 + Bytes.hexValue(((int32) wire.byteAt(i)) & 255);
+                i = i + 1;
+            }
+            if (size == 0) {
+                return #out;
+            }
+            int32 start = lineEnd + 2;
+            out = out + wire.substring(start, start + size);
+            at = start + size + 2;
+        }
+        return #out;
+    }
+}
