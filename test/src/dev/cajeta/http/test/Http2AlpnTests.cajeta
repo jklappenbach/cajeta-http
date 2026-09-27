@@ -8,6 +8,7 @@ import cajeta.io.net.SocketAddress;
 import cajeta.io.net.TcpStream;
 import cajeta.io.net.tls.TlsStream;
 import cajeta.error.Exception;
+import dev.cajeta.http.ClientResponse;
 import dev.cajeta.http.HttpRequest;
 import dev.cajeta.http.HttpResponse;
 import dev.cajeta.http.client.HttpClient;
@@ -15,37 +16,24 @@ import dev.cajeta.http.server.HttpServer;
 import dev.cajeta.http.server.HttpServerBuilder;
 
 /**
- * http:3.4b — **ALPN negotiation**. `HttpServer` now advertises `h2`,`http/1.1`
- * and the shipped `HttpClient` offers the same, so a single `client.get(https…)`
- * transparently selects HTTP/2 and is served by the *same* handler. The handler
- * echoes the request's protocol version, so the response body proves which wire
- * carried it:
- *
- *   - shipped client ↔ TLS server → negotiates `h2`, body `HTTP/2.0`;
- *   - a client offering only `http/1.1` → negotiates `http/1.1`, the server
- *     falls back to the hardened h1 loop, body `HTTP/1.1`.
- *
- * Cert: the shared self-signed P-256 fixture (CN/SAN 127.0.0.1).
+ * ALPN negotiation: the shipped client and the TLS server select h2 and the same
+ * handler answers, while a client offering only http/1.1 negotiates http/1.1.
  */
 public final class Http2AlpnTests {
 
-    // The handler echoes the negotiated protocol back as the body.
-    public static #HttpResponse handle(HttpRequest req) {
-        String v = req.version;
-        HttpResponse resp0 #= HttpResponse.ok();
-        resp0.body(v.toBytes(), v.byteLength());
-        return #resp0;
+    /** Echoes the request's protocol version as the body. */
+    public static void handle(HttpRequest q, HttpResponse r) {
+        r.body(q.version().wireString());
     }
 
     static #HttpServer tlsServer() {
-        String cp #= ServerTlsTests.certPem();
-        String kp #= ServerTlsTests.keyPem();
+        String cp #= ClientBuilderTests.certPem();
+        String kp #= ClientBuilderTests.keyPem();
         int8[] cert #= cp.toBytes();
         int8[] key #= kp.toBytes();
         HttpServerBuilder b #= HttpServer.builder();
         b.bind("127.0.0.1:0");
-        (HttpRequest) -> #HttpResponse h = (req) -> Http2AlpnTests.handle(req);
-        b.handler(h);
+        b.handler((HttpRequest q, HttpResponse r) -> Http2AlpnTests.handle(q, r));
         b.tls(cert, cp.byteLength(), key, kp.byteLength());
         return b.build();
     }
@@ -56,22 +44,20 @@ public final class Http2AlpnTests {
         return 1;
     }
 
-    // ---- h2 via the shipped client --------------------------------------
-
-    // 1 => 200 + body "HTTP/2.0" (h2 confirmed); 2 => body "HTTP/1.1"; <0 else.
+    /** 1 when the body is "HTTP/2", 2 when it is "HTTP/1.1", negative otherwise. */
     public static async int32 h2Client(int32 port) {
-        String cp #= ServerTlsTests.certPem();
+        String cp #= ClientBuilderTests.certPem();
         int8[] anchor #= cp.toBytes();
         HttpClient client #= HttpClient.builder()
             .trustAnchor(anchor, cp.byteLength())
             .build();
         String url = "https://127.0.0.1:" + port + "/proto";
-        HttpResponse resp #= client.get(url);
-        if (resp.statusCode() != 200) {
+        ClientResponse resp #= client.get(url);
+        if (resp.status() != 200) {
             return -1;
         }
-        String body #= Http2AlpnTests.bodyString(resp.body, resp.bodyLength());
-        if (body.equals("HTTP/2.0")) {
+        String body #= resp.bodyString();
+        if (body.equals("HTTP/2")) {
             return 1;
         }
         if (body.equals("HTTP/1.1")) {
@@ -80,30 +66,18 @@ public final class Http2AlpnTests {
         return -2;
     }
 
-    static #String bodyString(int8[] body, int32 n) {
-        int8[] copy = heap int8[n];
-        int32 i = 0;
-        while (i < n) {
-            copy[i] = body[i];
-            i = i + 1;
-        }
-        return heap String(#copy, n);
-    }
-
-    // ---- h1 fallback via a manual TLS client offering only http/1.1 ------
-
     static #int8[] alpnHttp11() {
         int8[] a = heap int8[9];
         a[0] = (int8) 8;
         a[1] = (int8) 104;  a[2] = (int8) 116;  a[3] = (int8) 116;
         a[4] = (int8) 112;  a[5] = (int8) 47;   a[6] = (int8) 49;
-        a[7] = (int8) 46;   a[8] = (int8) 49;   // "http/1.1"
+        a[7] = (int8) 46;   a[8] = (int8) 49;
         return #a;
     }
 
-    // 1 => negotiated http/1.1 AND h1 exchange returned 200 + body "HTTP/1.1".
+    /** 1 when a client offering only http/1.1 negotiates http/1.1. */
     public static async int32 h1FallbackClient(int32 port) {
-        String cp #= ServerTlsTests.certPem();
+        String cp #= ClientBuilderTests.certPem();
         IpAddress ip #= IpAddress.loopbackV4();
         SocketAddress a #= SocketAddress.of(#ip, port);
         TcpStream sock #= TcpStream.connectAsync(#a);
@@ -115,19 +89,12 @@ public final class Http2AlpnTests {
         int8[] alpn #= Http2AlpnTests.alpnHttp11();
         tls.offerAlpn(alpn, 9);
         tls.handshake();
-
-        // The fallback contract is the ALPN *selection*: an http/1.1-only
-        // client must negotiate http/1.1, never h2 (its full h1 serving over
-        // TLS is covered by ServerTlsTests). Asserting the negotiated protocol
-        // avoids a TLS teardown-timing hang in a hand-rolled h1 exchange.
         int8[] sel = heap int8[16];
         int32 selLen = tls.negotiatedAlpn(sel, 16);
         boolean h1 = selLen == 8 && sel[0] == (int8) 104 && sel[1] == (int8) 116;
         tls.close();
         return h1 ? 1 : -1;
     }
-
-    // ---- cases -----------------------------------------------------------
 
     static void h2Negotiated(Check c) {
         scope {

@@ -2,14 +2,19 @@ package dev.cajeta.http.test;
 
 import cajeta.lang.String;
 import cajeta.time.Duration;
+import cajeta.io.net.BufferPool;
 import cajeta.io.net.IpAddress;
 import cajeta.io.net.SocketAddress;
 import cajeta.io.net.TcpListener;
 import cajeta.io.net.TcpStream;
 import cajeta.io.net.AsyncReader;
 import cajeta.io.net.AsyncWriter;
+import dev.cajeta.http.Bytes;
+import dev.cajeta.http.ClientRequest;
+import dev.cajeta.http.ClientResponse;
 import dev.cajeta.http.HttpRequest;
 import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.server.ConnectionBuffers;
 import dev.cajeta.http.server.HttpServer;
 import dev.cajeta.http.server.HttpServerBuilder;
 import dev.cajeta.http.h2.Http2;
@@ -27,17 +32,8 @@ import dev.cajeta.http.h2.HpackDecoder;
 import dev.cajeta.http.h2.HpackFieldList;
 
 /**
- * http:3.5 — **HTTP/2 server push** (RFC 9113 §8.4).
- *
- *  - *delivery + cache keying (enabled):* a prior-knowledge h2 server whose
- *    handler declares `resp.push("/style.css", …)` emits a `PUSH_PROMISE` on the
- *    request stream (promising `GET /style.css`) plus the pushed response on a
- *    reserved even stream; a push-enabled client receives both and can key the
- *    pushed bytes by the promised path;
- *  - *client policy (disabled by default):* the shipped `Http2Client`
- *    advertises `SETTINGS_ENABLE_PUSH = 0` and treats any `PUSH_PROMISE` as a
- *    connection error — proven with a rogue server that both records the
- *    client's advertised value and sends a promise anyway.
+ * HTTP/2 server push: a prior-knowledge server delivers a promised response to a
+ * push-enabled client, and the shipped client advertises push off and rejects a promise.
  */
 public final class Http2PushTests {
 
@@ -84,22 +80,17 @@ public final class Http2PushTests {
         return s;
     }
 
-    // ================= case 1: server push delivered ======================
-
-    public static #HttpResponse handleIndex(HttpRequest req) {
-        String t #= req.getTarget();
-        if (t.equals("/index")) {
-            String body = "INDEX";
+    /** Answers /index with "INDEX" and a push of /style.css, anything else with 404. */
+    public static void handleIndex(HttpRequest q, HttpResponse r) {
+        if (Bytes.equals(q.target(), "/index")) {
             String css = "body{margin:0}";
-            HttpResponse resp #= HttpResponse.ok();
-            resp.body(body.toBytes(), body.byteLength());
-            resp.push("/style.css", 200, css.toBytes(), css.byteLength());
-            return #resp;
+            int8[] cssBytes #= css.toBytes();
+            r.body("INDEX");
+            r.push("/style.css", 200, cssBytes, css.byteLength());
+            return;
         }
-        String nf = "nope";
-        HttpResponse resp0 #= HttpResponse.of(404);
-        resp0.body(nf.toBytes(), nf.byteLength());
-        return #resp0;
+        r.status(404);
+        r.body("nope");
     }
 
     public static async int32 serve(HttpServer srv) {
@@ -107,9 +98,7 @@ public final class Http2PushTests {
         return 1;
     }
 
-    // Raw push-ENABLED client: request /index, collect the promise + both
-    // responses. Returns 1 iff promised path is /style.css, pushed body is the
-    // stylesheet, and the main body is INDEX.
+    /** A raw push-enabled client: requests /index and collects the promise and both responses. */
     static void pushClient(Check c, int32 port) {
         IpAddress ca #= IpAddress.loopbackV4();
         SocketAddress connAddr #= SocketAddress.of(#ca, port);
@@ -186,7 +175,7 @@ public final class Http2PushTests {
                                                                       flags, sid);
                     int8[] blk #= Http2PushTests.slice(pl, reg.offset, reg.length);
                     HpackFieldList rf #= dec.decode(blk, reg.length);
-                    Http2PushTests.statusOf(rf);   // keep the decoder in sync
+                    Http2PushTests.statusOf(rf);
                     if ((flags & Http2.FLAG_END_STREAM) != 0) {
                         if (sid == 1) { s1Done = true; } else { s2Done = true; }
                     }
@@ -223,9 +212,7 @@ public final class Http2PushTests {
         scope {
             HttpServerBuilder b #= HttpServer.builder();
             b.bind("127.0.0.1:0");
-            (HttpRequest) -> #HttpResponse h =
-                (req) -> Http2PushTests.handleIndex(req);
-            b.handler(h);
+            b.handler((HttpRequest q, HttpResponse r) -> Http2PushTests.handleIndex(q, r));
             b.h2PriorKnowledge();
             HttpServer srv #= b.build();
             int32 port = srv.server.listener.boundPort();
@@ -239,10 +226,7 @@ public final class Http2PushTests {
         }
     }
 
-    // ============ case 2: client rejects push when disabled ================
-
-    // Rogue server: record the client's advertised ENABLE_PUSH, then send a
-    // PUSH_PROMISE anyway. out[0] <- the client's SETTINGS_ENABLE_PUSH.
+    /** Records the client's advertised ENABLE_PUSH in `out[0]`, then sends a PUSH_PROMISE anyway. */
     public static async int32 rogueServer(#TcpListener listener, int32[] out) {
         TcpStream sock #= listener.acceptAsync();
         AsyncReader reader = heap AsyncReader(sock);
@@ -289,7 +273,6 @@ public final class Http2PushTests {
             }
         }
 
-        // Rogue PUSH_PROMISE (the client disabled push) on stream 1.
         HpackEncoder enc = heap HpackEncoder(Http2.DEFAULT_HEADER_TABLE_SIZE, true);
         HpackFieldList prom = heap HpackFieldList();
         prom.put(Http2PushTests.own(":method"), Http2PushTests.own("GET"));
@@ -323,13 +306,14 @@ public final class Http2PushTests {
             TcpStream sock #= TcpStream.connectAsync(#connAddr);
             AsyncReader reader = heap AsyncReader(sock);
             AsyncWriter writer = heap AsyncWriter(sock);
-            HttpRequest req #= HttpRequest.of("GET", "/index");
+            ConnectionBuffers bufs = heap ConnectionBuffers(heap BufferPool(65536, 8));
+            ClientRequest req #= ClientRequest.of("GET", "http://127.0.0.1:" + port + "/index");
+            ClientResponse resp = heap ClientResponse();
 
             boolean threw = false;
             int32 code = 0;
             try {
-                HttpResponse r #= Http2Client.exchange(reader, writer, req,
-                                                      "http", "127.0.0.1");
+                Http2Client.exchange(reader, writer, req, resp, "http", "127.0.0.1", bufs);
             } catch (Http2Exception e) {
                 threw = true;
                 code = e.errorCode;
@@ -344,8 +328,6 @@ public final class Http2PushTests {
                     "rejection is a PROTOCOL_ERROR connection error");
         }
     }
-
-    // ---- helpers ---------------------------------------------------------
 
     static boolean bytesEq(int8[] buf, int32 len, String expected) {
         if (len != expected.byteLength()) {
