@@ -103,16 +103,8 @@ public final class DownloadTests {
             return;
         }
         if (Bytes.equals(t, "/upload")) {
-            int32 n = q.bodyLength();
-            int8[] got = heap int8[n];
-            int32 off = 0;
-            while (off < n) {
-                int32 end = off + 8192;
-                if (end > n) { end = n; }
-                DownloadTests.copyPiece(q.body(), got, off, end);
-                off = end;
-            }
-            String bodyHash #= Sha256.hashHex(got, (int64) n);
+            int8[] got #= Bytes.copyOf(q.body());
+            String bodyHash #= Sha256.hashHex(got, (int64) got.count());
             r.write(bodyHash);
             r.write("|");
             if (q.hasHeader("transfer-encoding")) {
@@ -123,18 +115,6 @@ public final class DownloadTests {
             return;
         }
         r.status(404);
-    }
-
-    /**
-     * Copies `s[from .. to)` into `dst`. Each window index costs stack until
-     * its frame returns, so a large body is copied one bounded piece per call.
-     */
-    static void copyPiece(Slice<int8> s, int8[] dst, int32 from, int32 to) {
-        int32 i = from;
-        while (i < to) {
-            dst[i] = s[(int64) i];
-            i = i + 1;
-        }
     }
 
     static #HttpServer startServer() {
@@ -369,7 +349,5 @@ public final class DownloadTests {
             core.listener.close();
             c.eqInt((int64) await svc, 1, "upload rode one connection");
         }
-        c.skip("Bytes.copyOf of the 1 MiB upload body on a server fiber",
-            "compiler defect: the operator[] result slot is allocated inside the loop and overflows the fiber stack");
     }
 }
