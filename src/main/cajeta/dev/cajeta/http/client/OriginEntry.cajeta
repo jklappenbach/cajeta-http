@@ -49,6 +49,7 @@ public final class OriginEntry {
             PooledConnection rest #= got.next;
             this.idleHead = #rest;
         }
+        got.next = null;
         this.idleCount = this.idleCount - 1;
         return #got;
     }

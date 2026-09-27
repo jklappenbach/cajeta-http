@@ -98,10 +98,12 @@ public final class Http2Connection {
             return heap Http2StreamSlot(this.bufs, this.limits, this.ws, this.gate);
         }
         Http2StreamSlot s #= this.free;
+        this.free = null;
         if (s.next != null) {
             Http2StreamSlot rest #= s.next;
             this.free = #rest;
         }
+        s.next = null;
         return #s;
     }
 
@@ -118,10 +120,12 @@ public final class Http2Connection {
         LockGuard g #= this.slotLock.acquire();
         while (this.free != null) {
             Http2StreamSlot s #= this.free;
+            this.free = null;
             if (s.next != null) {
                 Http2StreamSlot rest #= s.next;
                 this.free = #rest;
             }
+            s.next = null;
             s.recycle(this.bufs);
         }
     }
@@ -146,6 +150,7 @@ public final class Http2Connection {
                     running = this.readAndDispatch(hdr);
                     if (this.ready != null) {
                         Http2StreamSlot s #= this.ready;
+                        this.ready = null;
                         int32 maxFrame = (int32) this.remote.maxFrameSize;
                         boolean pushOk = this.remote.pushEnabled();
                         int32 initWin = (int32) this.remote.initialWindowSize;
