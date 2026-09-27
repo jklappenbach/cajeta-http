@@ -1,6 +1,7 @@
 package dev.cajeta.http.test;
 
 import cajeta.lang.String;
+import cajeta.io.net.BufferPool;
 import cajeta.io.net.IpAddress;
 import cajeta.io.net.SocketAddress;
 import cajeta.io.net.TcpListener;
@@ -9,6 +10,9 @@ import cajeta.io.net.AsyncReader;
 import cajeta.io.net.AsyncWriter;
 import dev.cajeta.http.HttpRequest;
 import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.h1.HttpParserLimits;
+import dev.cajeta.http.server.ConnectionBuffers;
+import dev.cajeta.http.server.ServerLimits;
 import dev.cajeta.http.h2.Http2;
 import dev.cajeta.http.h2.Http2Connection;
 import dev.cajeta.http.h2.Http2FrameHeader;
@@ -22,14 +26,8 @@ import dev.cajeta.http.h2.HpackDecoder;
 import dev.cajeta.http.h2.HpackFieldList;
 
 /**
- * http:3.3e — **send-side flow control** (RFC 9113 §5.2). The client advertises
- * a tiny `SETTINGS_INITIAL_WINDOW_SIZE` (10), so a 30-byte response body cannot
- * be sent in full: the handler fiber sends one ≤10-byte DATA frame, then
- * **parks** on [`Http2SendGate`](Http2SendGate.cajeta) with the window
- * exhausted. Only after the client sends a `WINDOW_UPDATE` does the reader fiber
- * wake it to stream the remainder. The proof: the first DATA is a partial,
- * non-END_STREAM chunk, and the stream completes *only after* the client grants
- * more window.
+ * Send-side flow control: a 30-byte body under a 10-byte stream window leaves as
+ * one clamped DATA frame, the handler parks, and a WINDOW_UPDATE lets the rest out.
  */
 public final class Http2FlowParkTests {
 
@@ -53,31 +51,29 @@ public final class Http2FlowParkTests {
         return true;
     }
 
-    // ---- server ----------------------------------------------------------
-
-    static #HttpResponse handle(HttpRequest req) {
+    static void handle(HttpRequest q, HttpResponse r) {
         int8[] b = heap int8[Http2FlowParkTests.BODY_LEN];
         int32 i = 0;
         while (i < Http2FlowParkTests.BODY_LEN) {
-            b[i] = (int8) (65 + (i % 26));   // 'A'..'Z' repeating
+            b[i] = (int8) (65 + (i % 26));
             i = i + 1;
         }
-        HttpResponse resp0 #= HttpResponse.ok();
-        resp0.body(b, Http2FlowParkTests.BODY_LEN);
-        return #resp0;
+        r.status(200);
+        r.body(b, Http2FlowParkTests.BODY_LEN);
     }
 
     public static async int32 h2Server(#TcpListener listener) {
         TcpStream sock #= listener.acceptAsync();
         AsyncReader reader = heap AsyncReader(sock);
         AsyncWriter writer = heap AsyncWriter(sock);
-        (HttpRequest) -> #HttpResponse h = (req) -> Http2FlowParkTests.handle(req);
-        Http2Connection.serve(reader, writer, h);
+        ConnectionBuffers bufs = heap ConnectionBuffers(heap BufferPool(65536, 8));
+        HttpParserLimits limits = heap HttpParserLimits();
+        Http2Connection.serve(reader, writer,
+                              (HttpRequest q, HttpResponse r) -> Http2FlowParkTests.handle(q, r),
+                              bufs, limits, ServerLimits.DEFAULT_MAX_BODY_BYTES);
         sock.close();
         return 1;
     }
-
-    // ---- client ----------------------------------------------------------
 
     static void client(Check c, int32 port) {
         IpAddress ca #= IpAddress.loopbackV4();
@@ -89,7 +85,6 @@ public final class Http2FlowParkTests {
         int8[] pf #= Http2.preface();
         writer.writeAll(pf, 0, 24);
 
-        // SETTINGS advertising a 10-byte per-stream window.
         Http2FrameWriter fw = heap Http2FrameWriter();
         Http2SettingsList st = heap Http2SettingsList();
         st.add(Http2.SETTINGS_INITIAL_WINDOW_SIZE, (int64) Http2FlowParkTests.WIN);
@@ -153,7 +148,6 @@ public final class Http2FlowParkTests {
                         bodyLen = bodyLen + 1;
                         j = j + 1;
                     }
-                    // After the first (window-limited) chunk, unblock the writer.
                     if (!grantedMore) {
                         Http2FrameWriter wfw = heap Http2FrameWriter();
                         Http2Frames.writeWindowUpdate(wfw, 1, 1000);
@@ -172,8 +166,6 @@ public final class Http2FlowParkTests {
         sock.close();
 
         c.that(!timedOut, "h2 flow: did not time out");
-        // The first DATA chunk was window-limited (<= 10) and NOT the end —
-        // i.e. the writer parked rather than dumping the whole body.
         c.that(firstChunkLen >= 0 && firstChunkLen <= Http2FlowParkTests.WIN,
                "h2 flow: first chunk clamped to send window");
         c.that(!firstChunkWasEnd, "h2 flow: first chunk parked (not END_STREAM)");

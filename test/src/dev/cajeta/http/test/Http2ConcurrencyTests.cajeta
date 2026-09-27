@@ -1,6 +1,7 @@
 package dev.cajeta.http.test;
 
 import cajeta.lang.String;
+import cajeta.io.net.BufferPool;
 import cajeta.io.net.IpAddress;
 import cajeta.io.net.SocketAddress;
 import cajeta.io.net.TcpListener;
@@ -8,8 +9,12 @@ import cajeta.io.net.TcpStream;
 import cajeta.io.net.AsyncReader;
 import cajeta.io.net.AsyncWriter;
 import cajeta.concurrent.Tasks;
+import dev.cajeta.http.Bytes;
 import dev.cajeta.http.HttpRequest;
 import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.h1.HttpParserLimits;
+import dev.cajeta.http.server.ConnectionBuffers;
+import dev.cajeta.http.server.ServerLimits;
 import dev.cajeta.http.h2.Http2;
 import dev.cajeta.http.h2.Http2Connection;
 import dev.cajeta.http.h2.Http2FrameHeader;
@@ -23,13 +28,8 @@ import dev.cajeta.http.h2.HpackDecoder;
 import dev.cajeta.http.h2.HpackFieldList;
 
 /**
- * http:3.3e — **multiplexing**. Proves the connection serves streams on
- * independent fibers rather than one-at-a-time: a client opens two streams
- * back-to-back where the first (`/slow`) handler sleeps and the second
- * (`/fast`) returns immediately. A sequential engine would answer stream 1
- * first; the fiber-per-stream engine answers **stream 3 first** (out of request
- * order) — the observable signature of true concurrency. Both response bodies
- * must still be correct.
+ * Streams run on fibers of their own: a slow stream opened first finishes after
+ * a fast stream opened second, and both bodies arrive intact.
  */
 public final class Http2ConcurrencyTests {
 
@@ -50,34 +50,29 @@ public final class Http2ConcurrencyTests {
         return true;
     }
 
-    // ---- server ----------------------------------------------------------
-
-    static #HttpResponse handle(HttpRequest req) {
-        String target #= req.getTarget();
-        if (target.equals("/slow")) {
+    static void handle(HttpRequest q, HttpResponse r) {
+        if (Bytes.equals(q.target(), "/slow")) {
             Tasks.sleepMillis((int64) 150);
-            String b = "slow";
-            HttpResponse resp0 #= HttpResponse.ok();
-            resp0.body(b.toBytes(), b.byteLength());
-            return #resp0;
+            r.status(200);
+            r.body("slow");
+            return;
         }
-        String f = "fast";
-        HttpResponse resp1 #= HttpResponse.ok();
-        resp1.body(f.toBytes(), f.byteLength());
-        return #resp1;
+        r.status(200);
+        r.body("fast");
     }
 
     public static async int32 h2Server(#TcpListener listener) {
         TcpStream sock #= listener.acceptAsync();
         AsyncReader reader = heap AsyncReader(sock);
         AsyncWriter writer = heap AsyncWriter(sock);
-        (HttpRequest) -> #HttpResponse h = (req) -> Http2ConcurrencyTests.handle(req);
-        Http2Connection.serve(reader, writer, h);
+        ConnectionBuffers bufs = heap ConnectionBuffers(heap BufferPool(65536, 8));
+        HttpParserLimits limits = heap HttpParserLimits();
+        Http2Connection.serve(reader, writer,
+                              (HttpRequest q, HttpResponse r) -> Http2ConcurrencyTests.handle(q, r),
+                              bufs, limits, ServerLimits.DEFAULT_MAX_BODY_BYTES);
         sock.close();
         return 1;
     }
-
-    // ---- client ----------------------------------------------------------
 
     static int32 statusOf(HpackFieldList fields) {
         int32 i = 0;
@@ -110,7 +105,7 @@ public final class Http2ConcurrencyTests {
                                         true, true, 0);
     }
 
-    // Stream 1 -> slot 0, stream 3 -> slot 1.
+    /** Stream 1 maps to slot 0 and stream 3 to slot 1. */
     static int32 slotOf(int32 sid) {
         if (sid == 1) {
             return 0;
@@ -133,7 +128,6 @@ public final class Http2ConcurrencyTests {
         Http2Frames.writeSettings(fw, empty);
 
         HpackEncoder enc = heap HpackEncoder(Http2.DEFAULT_HEADER_TABLE_SIZE, true);
-        // Open the slow stream first, then the fast one — back to back.
         Http2ConcurrencyTests.encodeRequest(enc, fw, 1, "/slow");
         Http2ConcurrencyTests.encodeRequest(enc, fw, 3, "/fast");
         int8[] out #= fw.toBytes();
@@ -216,7 +210,6 @@ public final class Http2ConcurrencyTests {
         sock.close();
 
         c.that(!timedOut, "h2 mux did not time out");
-        // Fast stream (3) completes before slow stream (1): true concurrency.
         c.eqInt((int64) firstCompleted, (int64) 3, "h2 mux: fast stream finishes first");
         boolean b0ok = Http2ConcurrencyTests.bytesEq(body0, len0, "slow");
         boolean b1ok = Http2ConcurrencyTests.bytesEq(body1, len1, "fast");
