@@ -1,0 +1,312 @@
+package dev.cajeta.http.test;
+
+import cajeta.io.net.Server;
+import cajeta.io.net.TcpStream;
+import cajeta.lang.Slice;
+import cajeta.lang.String;
+import cajeta.time.Duration;
+import dev.cajeta.http.Bytes;
+import dev.cajeta.http.ClientRequest;
+import dev.cajeta.http.ClientResponse;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.TooManyRedirectsException;
+import dev.cajeta.http.client.HttpClient;
+import dev.cajeta.http.server.HttpServer;
+import dev.cajeta.http.server.HttpServerBuilder;
+
+/**
+ * Redirect following against a loopback server whose `/final` echoes
+ * `method|authorization|body`: the per-status rewrite table, the hop cap,
+ * and dropping credentials on a cross-origin hop.
+ */
+public final class RedirectTests {
+
+    static int32 ownPort = 0;
+    static int32 xPort = 0;
+
+    public static void run(Check c) {
+        System.stdout.println("-- client redirects: rewrite table --");
+        sameOriginTable(c);
+        System.stdout.println("-- client redirects: hop cap --");
+        hopCapTrips(c);
+        System.stdout.println("-- client redirects: cross-origin auth --");
+        crossOriginAuthStrip(c);
+        System.stdout.println("-- client redirects: cross-origin cookie --");
+        crossOriginCookieStrip(c);
+    }
+
+    /** A redirect with a small body, so its framing ends and the chain keeps its connection. */
+    static void redirectTo(HttpResponse r, int32 code, String loc) {
+        r.status(code);
+        r.setHeader("Location", loc);
+        r.body("moved");
+    }
+
+    static void finalEcho(HttpRequest q, HttpResponse r) {
+        r.writeBytes(q.methodBytes());
+        r.write("|");
+        if (q.hasHeader("authorization")) {
+            r.writeBytes(q.header("authorization"));
+        } else {
+            r.write("-");
+        }
+        r.write("|");
+        r.writeBytes(q.body());
+    }
+
+    /** `/cookie` echo: `authorization-or-dash|cookie-or-dash`. */
+    static void cookieEcho(HttpRequest q, HttpResponse r) {
+        if (q.hasHeader("authorization")) {
+            r.writeBytes(q.header("authorization"));
+        } else {
+            r.write("-");
+        }
+        r.write("|");
+        if (q.hasHeader("cookie")) {
+            r.writeBytes(q.header("cookie"));
+        } else {
+            r.write("-");
+        }
+    }
+
+    static void handle(HttpRequest q, HttpResponse r) {
+        Slice<int8> t = q.target();
+        if (Bytes.equals(t, "/r/301")) { RedirectTests.redirectTo(r, 301, "/final"); return; }
+        if (Bytes.equals(t, "/r/302")) { RedirectTests.redirectTo(r, 302, "/final"); return; }
+        if (Bytes.equals(t, "/r/303")) { RedirectTests.redirectTo(r, 303, "/final"); return; }
+        if (Bytes.equals(t, "/r/307")) { RedirectTests.redirectTo(r, 307, "/final"); return; }
+        if (Bytes.equals(t, "/r/308")) { RedirectTests.redirectTo(r, 308, "/final"); return; }
+        if (Bytes.equals(t, "/dir/hop")) { RedirectTests.redirectTo(r, 302, "target"); return; }
+        if (Bytes.equals(t, "/dir/target")) { r.body("reldir"); return; }
+        if (Bytes.equals(t, "/chain/1")) { RedirectTests.redirectTo(r, 302, "/chain/2"); return; }
+        if (Bytes.equals(t, "/chain/2")) { RedirectTests.redirectTo(r, 302, "/final"); return; }
+        if (Bytes.equals(t, "/loop")) { RedirectTests.redirectTo(r, 302, "/loop"); return; }
+        if (Bytes.equals(t, "/abs")) {
+            RedirectTests.redirectTo(r, 302, "http://127.0.0.1:" + RedirectTests.ownPort + "/final");
+            return;
+        }
+        if (Bytes.equals(t, "/x")) {
+            RedirectTests.redirectTo(r, 302, "http://127.0.0.1:" + RedirectTests.xPort + "/final");
+            return;
+        }
+        if (Bytes.equals(t, "/absc")) {
+            RedirectTests.redirectTo(r, 302, "http://127.0.0.1:" + RedirectTests.ownPort + "/cookie");
+            return;
+        }
+        if (Bytes.equals(t, "/xc")) {
+            RedirectTests.redirectTo(r, 302, "http://127.0.0.1:" + RedirectTests.xPort + "/cookie");
+            return;
+        }
+        if (Bytes.equals(t, "/final")) { RedirectTests.finalEcho(q, r); return; }
+        if (Bytes.equals(t, "/cookie")) { RedirectTests.cookieEcho(q, r); return; }
+        r.status(404);
+    }
+
+    /**
+     * Accepts and dispatches until the listener closes, returning how many
+     * connections were served. Await it only after closing the listener.
+     */
+    public static async int32 acceptLoop(Server core) {
+        int32 n = 0;
+        boolean going = true;
+        while (going) {
+            TcpStream conn #= core.acceptNext();
+            if (conn == null) {
+                going = false;
+            } else {
+                core.dispatch(#conn);
+                n = n + 1;
+            }
+        }
+        return n;
+    }
+
+    static int32 compare(ClientResponse resp, String expect) {
+        if (resp.status() != 200) {
+            System.stdout.println("  (redirect status: {})", resp.status());
+            return -1;
+        }
+        String got #= resp.bodyString();
+        if (!got.equals(expect)) {
+            System.stdout.println("  (redirect echo: '{}')", got);
+            return -2;
+        }
+        return 1;
+    }
+
+    /** POSTs `data` with Authorization to `path`, follows redirects, and compares the echo. */
+    public static async int32 followPost(int32 port, String path, String expect) {
+        HttpClient client = heap HttpClient();
+        ClientRequest req #= ClientRequest.post("http://127.0.0.1:" + port + path);
+        req.body("data");
+        req.setHeader("Authorization", "Bearer tok");
+        ClientResponse resp = heap ClientResponse();
+        client.sendFollowing(req, resp);
+        return RedirectTests.compare(resp, expect);
+    }
+
+    /** GETs `path` (with Authorization iff `withAuth`), follows redirects, and compares the echo. */
+    public static async int32 followGet(int32 port, String path,
+                                        boolean withAuth, String expect) {
+        HttpClient client = heap HttpClient();
+        String url = "http://127.0.0.1:" + port + path;
+        if (!withAuth) {
+            ClientResponse plain #= client.get(url);
+            return RedirectTests.compare(plain, expect);
+        }
+        ClientRequest req #= ClientRequest.get(url);
+        req.setHeader("Authorization", "Bearer tok");
+        ClientResponse resp = heap ClientResponse();
+        client.sendFollowing(req, resp);
+        return RedirectTests.compare(resp, expect);
+    }
+
+    /** GETs `path` with Authorization and Cookie, follows redirects, and compares the echo. */
+    public static async int32 followGetCookie(int32 port, String path, String expect) {
+        HttpClient client = heap HttpClient();
+        ClientRequest req #= ClientRequest.get("http://127.0.0.1:" + port + path);
+        req.setHeader("Authorization", "Bearer tok");
+        req.setHeader("Cookie", "k=v");
+        ClientResponse resp #= client.sendFollowing(req);
+        return RedirectTests.compare(resp, expect);
+    }
+
+    public static async int32 loopTrips(int32 port) {
+        HttpClient client = heap HttpClient();
+        ClientRequest req #= ClientRequest.get("http://127.0.0.1:" + port + "/loop");
+        ClientResponse resp = heap ClientResponse();
+        try {
+            client.sendFollowing(req, resp);
+            return -1;
+        } catch (TooManyRedirectsException e) {
+            return 1;
+        }
+    }
+
+    static #HttpServer startServer() {
+        HttpServerBuilder b #= HttpServer.builder();
+        b.bind("127.0.0.1:0");
+        b.handler((HttpRequest q, HttpResponse r) -> RedirectTests.handle(q, r));
+        return b.build();
+    }
+
+    /** Each client fiber has its own pool, so each leg is exactly one accepted connection. */
+    static void sameOriginTable(Check c) {
+        scope {
+            HttpServer srv #= RedirectTests.startServer();
+            Server core = srv.server;
+            int32 port = core.listener.boundPort();
+            RedirectTests.ownPort = port;
+
+            Task<int32> s = spawn acceptLoop(core);
+
+            Task<int32> t1 = spawn followPost(port, "/r/301", "GET|Bearer tok|");
+            c.eqInt((int64) await t1, 1, "301 rewrites POST to GET and drops the body");
+
+            Task<int32> t2 = spawn followPost(port, "/r/302", "GET|Bearer tok|");
+            c.eqInt((int64) await t2, 1, "302 rewrites POST to GET and drops the body");
+
+            Task<int32> t3 = spawn followPost(port, "/r/303", "GET|Bearer tok|");
+            c.eqInt((int64) await t3, 1, "303 rewrites POST to GET and drops the body");
+
+            Task<int32> t4 = spawn followPost(port, "/r/307", "POST|Bearer tok|data");
+            c.eqInt((int64) await t4, 1, "307 preserves method and body");
+
+            Task<int32> t5 = spawn followPost(port, "/r/308", "POST|Bearer tok|data");
+            c.eqInt((int64) await t5, 1, "308 preserves method and body");
+
+            Task<int32> t6 = spawn followGet(port, "/r/301", false, "GET|-|");
+            c.eqInt((int64) await t6, 1, "301 leaves a GET a GET");
+
+            Task<int32> t7 = spawn followGet(port, "/dir/hop", false, "reldir");
+            c.eqInt((int64) await t7, 1, "relative Location resolves against the base path");
+
+            Task<int32> t8 = spawn followGet(port, "/chain/1", false, "GET|-|");
+            c.eqInt((int64) await t8, 1, "a two-hop chain lands");
+
+            Task<int32> t9 = spawn followGet(port, "/abs", true, "GET|Bearer tok|");
+            c.eqInt((int64) await t9, 1, "same-origin absolute hop keeps Authorization");
+
+            boolean drained = core.drainInflight(Duration.ofSeconds(5));
+            c.that(drained, "redirect-table connections drained");
+            core.listener.close();
+            c.eqInt((int64) await s, 9, "each of the nine legs rode one connection");
+        }
+    }
+
+    static void hopCapTrips(Check c) {
+        scope {
+            HttpServer srv #= RedirectTests.startServer();
+            Server core = srv.server;
+            int32 port = core.listener.boundPort();
+
+            Task<int32> s1 = spawn acceptLoop(core);
+            Task<int32> t1 = spawn loopTrips(port);
+            c.eqInt((int64) await t1, 1,
+                "a redirect loop raises TooManyRedirectsException at the cap");
+
+            boolean drained = core.drainInflight(Duration.ofSeconds(5));
+            c.that(drained, "hop-cap connection drained");
+            core.listener.close();
+            c.eqInt((int64) await s1, 1, "loop exchanges rode one connection");
+        }
+    }
+
+    /** `/x` on origin A 302s to `/final` on origin B, so Authorization must not arrive at B. */
+    static void crossOriginAuthStrip(Check c) {
+        scope {
+            HttpServer srvA #= RedirectTests.startServer();
+            Server coreA = srvA.server;
+            int32 portA = coreA.listener.boundPort();
+
+            HttpServer srvB #= RedirectTests.startServer();
+            Server coreB = srvB.server;
+            int32 portB = coreB.listener.boundPort();
+            RedirectTests.xPort = portB;
+
+            Task<int32> sa = spawn acceptLoop(coreA);
+            Task<int32> sb = spawn acceptLoop(coreB);
+            Task<int32> t = spawn followGet(portA, "/x", true, "GET|-|");
+            c.eqInt((int64) await t, 1, "cross-origin hop strips Authorization");
+            boolean drainedA = coreA.drainInflight(Duration.ofSeconds(5));
+            boolean drainedB = coreB.drainInflight(Duration.ofSeconds(5));
+            c.that(drainedA, "origin A drained");
+            c.that(drainedB, "origin B drained");
+            coreA.listener.close();
+            coreB.listener.close();
+            c.eqInt((int64) await sa, 1, "origin A accepted once");
+            c.eqInt((int64) await sb, 1, "origin B accepted once");
+        }
+    }
+
+    /** Cookie and Authorization survive a same-origin hop and are both dropped on a cross-origin one. */
+    static void crossOriginCookieStrip(Check c) {
+        scope {
+            HttpServer srvA #= RedirectTests.startServer();
+            Server coreA = srvA.server;
+            int32 portA = coreA.listener.boundPort();
+            RedirectTests.ownPort = portA;
+
+            HttpServer srvB #= RedirectTests.startServer();
+            Server coreB = srvB.server;
+            int32 portB = coreB.listener.boundPort();
+            RedirectTests.xPort = portB;
+
+            Task<int32> sa = spawn acceptLoop(coreA);
+            Task<int32> sb = spawn acceptLoop(coreB);
+            Task<int32> same = spawn followGetCookie(portA, "/absc", "Bearer tok|k=v");
+            c.eqInt((int64) await same, 1, "same-origin hop keeps Cookie and Authorization");
+            Task<int32> cross = spawn followGetCookie(portA, "/xc", "-|-");
+            c.eqInt((int64) await cross, 1, "cross-origin hop strips Cookie and Authorization");
+            boolean drainedA = coreA.drainInflight(Duration.ofSeconds(5));
+            boolean drainedB = coreB.drainInflight(Duration.ofSeconds(5));
+            c.that(drainedA, "cookie origin A drained");
+            c.that(drainedB, "cookie origin B drained");
+            coreA.listener.close();
+            coreB.listener.close();
+            c.eqInt((int64) await sa, 2, "cookie origin A accepted once per leg");
+            c.eqInt((int64) await sb, 1, "cookie origin B accepted once");
+        }
+    }
+}
