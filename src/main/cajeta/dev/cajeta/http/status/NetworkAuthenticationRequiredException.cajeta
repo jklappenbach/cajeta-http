@@ -1,0 +1,23 @@
+package dev.cajeta.http.status;
+
+import cajeta.lang.String;
+import dev.cajeta.http.HttpException;
+
+/** 511 Network Authentication Required. A server answers it with an empty body. */
+public class NetworkAuthenticationRequiredException extends HttpException {
+    public NetworkAuthenticationRequiredException() {
+        this.message = "Network Authentication Required";
+        this.cause = 0;
+        this.kind = 12;
+    }
+
+    public NetworkAuthenticationRequiredException(String message) {
+        this.message = message;
+        this.cause = 0;
+        this.kind = 12;
+    }
+
+    public int32 httpStatus() {
+        return 511;
+    }
+}

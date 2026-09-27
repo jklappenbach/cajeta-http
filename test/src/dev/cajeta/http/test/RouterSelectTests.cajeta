@@ -1,0 +1,37 @@
+package dev.cajeta.http.test;
+
+import cajeta.lang.String;
+import dev.cajeta.http.Bytes;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.routing.Router;
+
+/** Router.select names the matched route by its add order and binds its parameters without running it. */
+public final class RouterSelectTests {
+    public static void run(Check c) {
+        System.stdout.println("-- router select --");
+        (HttpRequest, HttpResponse) -> void never = (HttpRequest q, HttpResponse r) -> {
+            r.write("ran");
+        };
+        Router router = heap Router();
+        router.route("POST", "/users", never);
+        router.route("GET", "/users/{id}", never);
+        router.route("POST", "/users/{id}/confirm", never);
+        (HttpRequest, HttpResponse) -> void pick = (HttpRequest q, HttpResponse r) -> {
+            int32 i = router.select(q, r);
+            if (i >= 0) {
+                r.write("route " + i + " ");
+                r.writeBytes(q.param("id"));
+            }
+        };
+        String got #= Wire.serve("GET /users/42 HTTP/1.1\r\n\r\n", pick);
+        Wire.same(c, Wire.bodyOf(got), "route 1 42", "select returns the route's add order and binds its parameters");
+        got #= Wire.serve("POST /users/7/confirm HTTP/1.1\r\nContent-Length: 0\r\n\r\n", pick);
+        Wire.same(c, Wire.bodyOf(got), "route 2 7", "select picks the longer pattern by its own index");
+        got #= Wire.serve("GET /nothing HTTP/1.1\r\n\r\n", pick);
+        c.eqInt((int64) Wire.status(got), 404, "an unmatched path selects nothing and answers 404");
+        got #= Wire.serve("DELETE /users HTTP/1.1\r\n\r\n", pick);
+        c.eqInt((int64) Wire.status(got), 405, "a path matched under other methods selects nothing and answers 405");
+        c.that(Wire.header(got, "allow").byteLength() > 0, "the 405 names the allowed methods");
+    }
+}

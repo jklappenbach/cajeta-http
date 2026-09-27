@@ -1,0 +1,23 @@
+package dev.cajeta.http.status;
+
+import cajeta.lang.String;
+import dev.cajeta.http.HeadersTooLargeException;
+
+/** 431 Request Header Fields Too Large, thrown by application code. The parser's own limit raises {@link HeadersTooLargeException}. */
+public class RequestHeaderFieldsTooLargeException extends HeadersTooLargeException {
+    public RequestHeaderFieldsTooLargeException() {
+        this.message = "Request Header Fields Too Large";
+        this.cause = 0;
+        this.kind = 12;
+        this.limit = 0;
+        this.observed = 0;
+    }
+
+    public RequestHeaderFieldsTooLargeException(String message) {
+        this.message = message;
+        this.cause = 0;
+        this.kind = 12;
+        this.limit = 0;
+        this.observed = 0;
+    }
+}

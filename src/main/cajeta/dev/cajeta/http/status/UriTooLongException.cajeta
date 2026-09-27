@@ -1,0 +1,23 @@
+package dev.cajeta.http.status;
+
+import cajeta.lang.String;
+import dev.cajeta.http.HttpException;
+
+/** 414 URI Too Long. A server answers it with an empty body. */
+public class UriTooLongException extends HttpException {
+    public UriTooLongException() {
+        this.message = "URI Too Long";
+        this.cause = 0;
+        this.kind = 12;
+    }
+
+    public UriTooLongException(String message) {
+        this.message = message;
+        this.cause = 0;
+        this.kind = 12;
+    }
+
+    public int32 httpStatus() {
+        return 414;
+    }
+}

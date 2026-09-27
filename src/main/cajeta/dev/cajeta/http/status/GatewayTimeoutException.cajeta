@@ -1,0 +1,23 @@
+package dev.cajeta.http.status;
+
+import cajeta.lang.String;
+import dev.cajeta.http.HttpException;
+
+/** 504 Gateway Timeout. A server answers it with an empty body. */
+public class GatewayTimeoutException extends HttpException {
+    public GatewayTimeoutException() {
+        this.message = "Gateway Timeout";
+        this.cause = 0;
+        this.kind = 12;
+    }
+
+    public GatewayTimeoutException(String message) {
+        this.message = message;
+        this.cause = 0;
+        this.kind = 12;
+    }
+
+    public int32 httpStatus() {
+        return 504;
+    }
+}

@@ -1,0 +1,23 @@
+package dev.cajeta.http.status;
+
+import cajeta.lang.String;
+import dev.cajeta.http.HttpException;
+
+/** 405 Method Not Allowed. A server answers it with an empty body. */
+public class MethodNotAllowedException extends HttpException {
+    public MethodNotAllowedException() {
+        this.message = "Method Not Allowed";
+        this.cause = 0;
+        this.kind = 12;
+    }
+
+    public MethodNotAllowedException(String message) {
+        this.message = message;
+        this.cause = 0;
+        this.kind = 12;
+    }
+
+    public int32 httpStatus() {
+        return 405;
+    }
+}

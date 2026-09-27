@@ -1,0 +1,23 @@
+package dev.cajeta.http.status;
+
+import cajeta.lang.String;
+import dev.cajeta.http.HttpException;
+
+/** 410 Gone. A server answers it with an empty body. */
+public class GoneException extends HttpException {
+    public GoneException() {
+        this.message = "Gone";
+        this.cause = 0;
+        this.kind = 12;
+    }
+
+    public GoneException(String message) {
+        this.message = message;
+        this.cause = 0;
+        this.kind = 12;
+    }
+
+    public int32 httpStatus() {
+        return 410;
+    }
+}

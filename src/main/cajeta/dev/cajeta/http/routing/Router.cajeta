@@ -114,10 +114,21 @@ public class Router {
 
     /** Runs the best route for `q` into `r`, or answers 404, 405 or 413. */
     public void dispatch(HttpRequest q, HttpResponse r) {
+        int32 i = this.select(q, r);
+        if (i >= 0) {
+            this.routes[i].run(q, r);
+        }
+    }
+
+    /**
+     * The index of the best route for `q`, in the order routes were added, with
+     * its parameters bound; or -1 after answering 404, 405 or 413 into `r`.
+     */
+    public int32 select(HttpRequest q, HttpResponse r) {
         int32 n = q.splitPath();
         if (n < 0) {
             r.status(404);
-            return;
+            return -1;
         }
         Slice<int8> method = q.methodBytes();
         boolean pathMatched = false;
@@ -141,11 +152,10 @@ public class Router {
             if (chosen.maxBodyBytes > 0 && (q.contentLength() > chosen.maxBodyBytes
                     || (int64) q.bodyLength() > chosen.maxBodyBytes)) {
                 r.status(413);
-                return;
+                return -1;
             }
             chosen.bind(q, n);
-            chosen.run(q, r);
-            return;
+            return best;
         }
         if (pathMatched) {
             r.status(405);
@@ -153,9 +163,10 @@ public class Router {
             if (allow.byteLength() > 0) {
                 r.setHeader("Allow", allow);
             }
-            return;
+            return -1;
         }
         r.status(404);
+        return -1;
     }
 
     #String allowFor(HttpRequest q, int32 n) {

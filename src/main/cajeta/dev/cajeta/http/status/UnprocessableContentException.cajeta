@@ -1,0 +1,23 @@
+package dev.cajeta.http.status;
+
+import cajeta.lang.String;
+import dev.cajeta.http.HttpException;
+
+/** 422 Unprocessable Content. A server answers it with an empty body. */
+public class UnprocessableContentException extends HttpException {
+    public UnprocessableContentException() {
+        this.message = "Unprocessable Content";
+        this.cause = 0;
+        this.kind = 12;
+    }
+
+    public UnprocessableContentException(String message) {
+        this.message = message;
+        this.cause = 0;
+        this.kind = 12;
+    }
+
+    public int32 httpStatus() {
+        return 422;
+    }
+}

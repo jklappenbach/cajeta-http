@@ -1,0 +1,23 @@
+package dev.cajeta.http.status;
+
+import cajeta.lang.String;
+import dev.cajeta.http.HttpException;
+
+/** 508 Loop Detected. A server answers it with an empty body. */
+public class LoopDetectedException extends HttpException {
+    public LoopDetectedException() {
+        this.message = "Loop Detected";
+        this.cause = 0;
+        this.kind = 12;
+    }
+
+    public LoopDetectedException(String message) {
+        this.message = message;
+        this.cause = 0;
+        this.kind = 12;
+    }
+
+    public int32 httpStatus() {
+        return 508;
+    }
+}

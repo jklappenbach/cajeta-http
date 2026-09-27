@@ -1,0 +1,23 @@
+package dev.cajeta.http.status;
+
+import cajeta.lang.String;
+import dev.cajeta.http.HttpException;
+
+/** 501 Not Implemented. A server answers it with an empty body. */
+public class NotImplementedException extends HttpException {
+    public NotImplementedException() {
+        this.message = "Not Implemented";
+        this.cause = 0;
+        this.kind = 12;
+    }
+
+    public NotImplementedException(String message) {
+        this.message = message;
+        this.cause = 0;
+        this.kind = 12;
+    }
+
+    public int32 httpStatus() {
+        return 501;
+    }
+}

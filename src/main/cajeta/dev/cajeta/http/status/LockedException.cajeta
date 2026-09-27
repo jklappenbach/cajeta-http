@@ -1,0 +1,23 @@
+package dev.cajeta.http.status;
+
+import cajeta.lang.String;
+import dev.cajeta.http.HttpException;
+
+/** 423 Locked. A server answers it with an empty body. */
+public class LockedException extends HttpException {
+    public LockedException() {
+        this.message = "Locked";
+        this.cause = 0;
+        this.kind = 12;
+    }
+
+    public LockedException(String message) {
+        this.message = message;
+        this.cause = 0;
+        this.kind = 12;
+    }
+
+    public int32 httpStatus() {
+        return 423;
+    }
+}

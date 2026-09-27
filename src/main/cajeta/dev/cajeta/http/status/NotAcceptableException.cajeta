@@ -1,0 +1,23 @@
+package dev.cajeta.http.status;
+
+import cajeta.lang.String;
+import dev.cajeta.http.HttpException;
+
+/** 406 Not Acceptable. A server answers it with an empty body. */
+public class NotAcceptableException extends HttpException {
+    public NotAcceptableException() {
+        this.message = "Not Acceptable";
+        this.cause = 0;
+        this.kind = 12;
+    }
+
+    public NotAcceptableException(String message) {
+        this.message = message;
+        this.cause = 0;
+        this.kind = 12;
+    }
+
+    public int32 httpStatus() {
+        return 406;
+    }
+}

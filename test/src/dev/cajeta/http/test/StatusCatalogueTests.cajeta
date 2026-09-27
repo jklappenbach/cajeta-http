@@ -1,0 +1,165 @@
+package dev.cajeta.http.test;
+
+import cajeta.lang.String;
+import dev.cajeta.http.HttpException;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.status.BadGatewayException;
+import dev.cajeta.http.status.BadRequestException;
+import dev.cajeta.http.status.ConflictException;
+import dev.cajeta.http.status.ContentTooLargeException;
+import dev.cajeta.http.status.ExpectationFailedException;
+import dev.cajeta.http.status.FailedDependencyException;
+import dev.cajeta.http.status.ForbiddenException;
+import dev.cajeta.http.status.GatewayTimeoutException;
+import dev.cajeta.http.status.GoneException;
+import dev.cajeta.http.status.HttpVersionNotSupportedException;
+import dev.cajeta.http.status.InsufficientStorageException;
+import dev.cajeta.http.status.InternalServerErrorException;
+import dev.cajeta.http.status.LengthRequiredException;
+import dev.cajeta.http.status.LockedException;
+import dev.cajeta.http.status.LoopDetectedException;
+import dev.cajeta.http.status.MethodNotAllowedException;
+import dev.cajeta.http.status.MisdirectedRequestException;
+import dev.cajeta.http.status.NetworkAuthenticationRequiredException;
+import dev.cajeta.http.status.NotAcceptableException;
+import dev.cajeta.http.status.NotExtendedException;
+import dev.cajeta.http.status.NotFoundException;
+import dev.cajeta.http.status.NotImplementedException;
+import dev.cajeta.http.status.PaymentRequiredException;
+import dev.cajeta.http.status.PreconditionFailedException;
+import dev.cajeta.http.status.PreconditionRequiredException;
+import dev.cajeta.http.status.ProxyAuthenticationRequiredException;
+import dev.cajeta.http.status.RangeNotSatisfiableException;
+import dev.cajeta.http.status.RequestHeaderFieldsTooLargeException;
+import dev.cajeta.http.status.RequestTimeoutException;
+import dev.cajeta.http.status.ServiceUnavailableException;
+import dev.cajeta.http.status.TooEarlyException;
+import dev.cajeta.http.status.TooManyRequestsException;
+import dev.cajeta.http.status.UnauthorizedException;
+import dev.cajeta.http.status.UnavailableForLegalReasonsException;
+import dev.cajeta.http.status.UnprocessableContentException;
+import dev.cajeta.http.status.UnsupportedMediaTypeException;
+import dev.cajeta.http.status.UpgradeRequiredException;
+import dev.cajeta.http.status.UriTooLongException;
+import dev.cajeta.http.status.VariantAlsoNegotiatesException;
+
+/** Every error status has a named exception, a server answers each with that status and no body, and a handler can reach the bytes behind its body. */
+public final class StatusCatalogueTests {
+    public static void run(Check c) {
+        System.stdout.println("-- status catalogue --");
+        StatusCatalogueTests.catalogue(c);
+        StatusCatalogueTests.served(c);
+        StatusCatalogueTests.bodyBytes(c);
+    }
+
+    static int32 statusOf(HttpException e) {
+        return e.httpStatus();
+    }
+
+    static void catalogue(Check c) {
+        int32 sum = 0;
+        int32 n = 0;
+        int32[] want = heap int32[39];
+        HttpException[] all = heap HttpException[39];
+        all[0] = heap BadRequestException(); want[0] = 400;
+        all[1] = heap UnauthorizedException(); want[1] = 401;
+        all[2] = heap PaymentRequiredException(); want[2] = 402;
+        all[3] = heap ForbiddenException(); want[3] = 403;
+        all[4] = heap NotFoundException(); want[4] = 404;
+        all[5] = heap MethodNotAllowedException(); want[5] = 405;
+        all[6] = heap NotAcceptableException(); want[6] = 406;
+        all[7] = heap ProxyAuthenticationRequiredException(); want[7] = 407;
+        all[8] = heap RequestTimeoutException(); want[8] = 408;
+        all[9] = heap ConflictException(); want[9] = 409;
+        all[10] = heap GoneException(); want[10] = 410;
+        all[11] = heap LengthRequiredException(); want[11] = 411;
+        all[12] = heap PreconditionFailedException(); want[12] = 412;
+        all[13] = heap ContentTooLargeException(); want[13] = 413;
+        all[14] = heap UriTooLongException(); want[14] = 414;
+        all[15] = heap UnsupportedMediaTypeException(); want[15] = 415;
+        all[16] = heap RangeNotSatisfiableException(); want[16] = 416;
+        all[17] = heap ExpectationFailedException(); want[17] = 417;
+        all[18] = heap MisdirectedRequestException(); want[18] = 421;
+        all[19] = heap UnprocessableContentException(); want[19] = 422;
+        all[20] = heap LockedException(); want[20] = 423;
+        all[21] = heap FailedDependencyException(); want[21] = 424;
+        all[22] = heap TooEarlyException(); want[22] = 425;
+        all[23] = heap UpgradeRequiredException(); want[23] = 426;
+        all[24] = heap PreconditionRequiredException(); want[24] = 428;
+        all[25] = heap TooManyRequestsException(); want[25] = 429;
+        all[26] = heap RequestHeaderFieldsTooLargeException(); want[26] = 431;
+        all[27] = heap UnavailableForLegalReasonsException(); want[27] = 451;
+        all[28] = heap InternalServerErrorException(); want[28] = 500;
+        all[29] = heap NotImplementedException(); want[29] = 501;
+        all[30] = heap BadGatewayException(); want[30] = 502;
+        all[31] = heap ServiceUnavailableException(); want[31] = 503;
+        all[32] = heap GatewayTimeoutException(); want[32] = 504;
+        all[33] = heap HttpVersionNotSupportedException(); want[33] = 505;
+        all[34] = heap VariantAlsoNegotiatesException(); want[34] = 506;
+        all[35] = heap InsufficientStorageException(); want[35] = 507;
+        all[36] = heap LoopDetectedException(); want[36] = 508;
+        all[37] = heap NotExtendedException(); want[37] = 510;
+        all[38] = heap NetworkAuthenticationRequiredException(); want[38] = 511;
+        int32 i = 0;
+        while (i < 39) {
+            if (StatusCatalogueTests.statusOf(all[i]) == want[i]) {
+                n = n + 1;
+            } else {
+                System.stdout.println("  wrong status for catalogue entry " + i);
+            }
+            i = i + 1;
+        }
+        c.eqInt((int64) n, 39, "every catalogue exception answers its own status");
+        NotFoundException named = heap NotFoundException("no such user");
+        c.eqStr(named.message, "no such user", "a catalogue exception keeps the message it was given");
+        ConflictException plain = heap ConflictException();
+        c.eqStr(plain.message, "Conflict", "the no-argument form carries the reason phrase");
+    }
+
+    static void served(Check c) {
+        (HttpRequest, HttpResponse) -> void missing = (HttpRequest q, HttpResponse r) -> {
+            r.write("partial");
+            throw heap NotFoundException("the user id is secret detail");
+        };
+        String got #= Wire.serve("GET /users/7 HTTP/1.1\r\n\r\n", missing);
+        c.eqInt((int64) Wire.status(got), 404, "a thrown NotFoundException answers 404");
+        Wire.same(c, Wire.bodyOf(got), "", "the thrown status carries no body, not even what the handler wrote");
+
+        (HttpRequest, HttpResponse) -> void busy = (HttpRequest q, HttpResponse r) -> {
+            throw heap ServiceUnavailableException();
+        };
+        got #= Wire.serve("GET / HTTP/1.1\r\n\r\n", busy);
+        c.eqInt((int64) Wire.status(got), 503, "a thrown 5xx catalogue exception answers its status");
+    }
+
+    static void bodyBytes(Check c) {
+        (HttpRequest, HttpResponse) -> void echo = (HttpRequest q, HttpResponse r) -> {
+            int8[] store = q.bodyStore();
+            int32 at = q.bodyOffset();
+            int32 same = 0;
+            int32 i = 0;
+            while (i < q.bodyLength()) {
+                if (store[at + i] == q.body()[i]) {
+                    same = same + 1;
+                }
+                i = i + 1;
+            }
+            r.write(at > 0 ? "inside " : "front ");
+            r.write("" + same);
+        };
+        String got #= Wire.serve("POST /u HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello", echo);
+        Wire.same(c, Wire.bodyOf(got), "inside 5", "the body's store and offset address the body inside the input buffer");
+
+        (HttpRequest, HttpResponse) -> void replaced = (HttpRequest q, HttpResponse r) -> {
+            int8[] b = heap int8[3];
+            b[0] = (int8) 120; b[1] = (int8) 121; b[2] = (int8) 122;
+            q.replaceBody(#b, 3);
+            int8[] store = q.bodyStore();
+            r.write("" + q.bodyOffset() + " ");
+            r.write("" + (int32) store[q.bodyOffset() + 2]);
+        };
+        got #= Wire.serve("POST /u HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello", replaced);
+        Wire.same(c, Wire.bodyOf(got), "0 122", "a replaced body is addressed at offset zero of its own array");
+    }
+}

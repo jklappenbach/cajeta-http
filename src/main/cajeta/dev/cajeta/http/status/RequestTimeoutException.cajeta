@@ -1,0 +1,23 @@
+package dev.cajeta.http.status;
+
+import cajeta.lang.String;
+import dev.cajeta.http.HttpException;
+
+/** 408 Request Timeout. A server answers it with an empty body. */
+public class RequestTimeoutException extends HttpException {
+    public RequestTimeoutException() {
+        this.message = "Request Timeout";
+        this.cause = 0;
+        this.kind = 12;
+    }
+
+    public RequestTimeoutException(String message) {
+        this.message = message;
+        this.cause = 0;
+        this.kind = 12;
+    }
+
+    public int32 httpStatus() {
+        return 408;
+    }
+}

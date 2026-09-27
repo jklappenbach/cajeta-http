@@ -213,6 +213,22 @@ public final class HttpRequest {
         return this.src[this.bodyOff:this.bodyOff + this.bodyLen];
     }
 
+    /** The array the held body lives in, valid for this request only. */
+    public int8[] bodyStore() {
+        if (this.bodyOwned) {
+            return this.ownBody;
+        }
+        return this.src;
+    }
+
+    /** Where the held body starts in {@link #bodyStore}. */
+    public int32 bodyOffset() {
+        if (this.bodyOwned) {
+            return 0;
+        }
+        return this.bodyOff;
+    }
+
     /** Binds the body to `[off .. off + len)` of the bytes the head was parsed from. */
     public void bindBody(int32 off, int32 len) {
         this.bodyOwned = false;

@@ -1,0 +1,23 @@
+package dev.cajeta.http.status;
+
+import cajeta.lang.String;
+import dev.cajeta.http.HttpException;
+
+/** 404 Not Found. A server answers it with an empty body. */
+public class NotFoundException extends HttpException {
+    public NotFoundException() {
+        this.message = "Not Found";
+        this.cause = 0;
+        this.kind = 12;
+    }
+
+    public NotFoundException(String message) {
+        this.message = message;
+        this.cause = 0;
+        this.kind = 12;
+    }
+
+    public int32 httpStatus() {
+        return 404;
+    }
+}

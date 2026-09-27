@@ -1,0 +1,23 @@
+package dev.cajeta.http.status;
+
+import cajeta.lang.String;
+import dev.cajeta.http.HttpException;
+
+/** 416 Range Not Satisfiable. A server answers it with an empty body. */
+public class RangeNotSatisfiableException extends HttpException {
+    public RangeNotSatisfiableException() {
+        this.message = "Range Not Satisfiable";
+        this.cause = 0;
+        this.kind = 12;
+    }
+
+    public RangeNotSatisfiableException(String message) {
+        this.message = message;
+        this.cause = 0;
+        this.kind = 12;
+    }
+
+    public int32 httpStatus() {
+        return 416;
+    }
+}
