@@ -1,0 +1,90 @@
+package dev.cajeta.http.test;
+
+import cajeta.lang.String;
+import cajeta.time.Duration;
+import cajeta.io.net.BufferPool;
+import cajeta.io.net.IpAddress;
+import cajeta.io.net.SocketAddress;
+import cajeta.io.net.TcpStream;
+import cajeta.io.net.AsyncReader;
+import cajeta.io.net.AsyncWriter;
+import dev.cajeta.http.ClientRequest;
+import dev.cajeta.http.ClientResponse;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.client.HttpClient;
+import dev.cajeta.http.server.ConnectionBuffers;
+import dev.cajeta.http.server.HttpServer;
+import dev.cajeta.http.server.HttpServerBuilder;
+import dev.cajeta.http.h2.Http2Client;
+
+/**
+ * A plaintext server built with `h2PriorKnowledge()` serves a connection that
+ * opens with the preface over HTTP/2 and any other over HTTP/1.1, on one port
+ * with one handler. The handler answers with the version it saw.
+ */
+public final class Http2PriorKnowledgeTests {
+
+    static void handle(HttpRequest q, HttpResponse r) {
+        r.body(q.version().wireString());
+    }
+
+    static async int32 serve(HttpServer srv) {
+        srv.serve();
+        return 1;
+    }
+
+    /** An h2 exchange on the prior-knowledge port: 1 for 200 and body "HTTP/2". */
+    static async int32 h2Client(int32 port) {
+        IpAddress ca #= IpAddress.loopbackV4();
+        SocketAddress connAddr #= SocketAddress.of(#ca, port);
+        TcpStream sock #= TcpStream.connectAsync(#connAddr);
+        AsyncReader reader = heap AsyncReader(sock);
+        AsyncWriter writer = heap AsyncWriter(sock);
+        ClientRequest req = heap ClientRequest("http://127.0.0.1:" + port + "/proto");
+        ClientResponse resp = heap ClientResponse();
+        ConnectionBuffers bufs = heap ConnectionBuffers(heap BufferPool(65536, 8));
+        Http2Client.exchange(reader, writer, req, resp, "http", "127.0.0.1", bufs);
+        sock.close();
+        if (resp.status() != 200) {
+            return -1;
+        }
+        return resp.bodyString().equals("HTTP/2") ? 1 : -2;
+    }
+
+    /** An h1 exchange on the same port: 1 for 200 and body "HTTP/1.1". */
+    static async int32 h1Client(int32 port) {
+        HttpClient client = heap HttpClient();
+        ClientResponse resp #= client.get("http://127.0.0.1:" + port + "/proto");
+        if (resp.status() != 200) {
+            return -1;
+        }
+        return resp.bodyString().equals("HTTP/1.1") ? 1 : -2;
+    }
+
+    public static void run(Check c) {
+        System.stdout.println("-- h2 prior-knowledge: preface sniff -> h2, else h1 --");
+        scope {
+            HttpServerBuilder b #= HttpServer.builder();
+            b.bind("127.0.0.1:0");
+            b.handler((HttpRequest q, HttpResponse r) -> Http2PriorKnowledgeTests.handle(q, r));
+            b.h2PriorKnowledge();
+            HttpServer srv #= b.build();
+            int32 port = srv.server.listener.boundPort();
+            Task<int32> sv = spawn serve(srv);
+
+            Task<int32> th2 = spawn h2Client(port);
+            c.eqInt((int64) await th2, 1,
+                    "prior-knowledge: preface -> served over HTTP/2");
+
+            Task<int32> th1 = spawn h1Client(port);
+            c.eqInt((int64) await th1, 1,
+                    "prior-knowledge: non-preface -> degrades to h1");
+
+            boolean drained #= srv.shutdown(Duration.ofSeconds(2));
+            c.that(drained, "prior-knowledge: server drained clean");
+            int32 s = await sv;
+            c.eqInt((int64) s, 1, "prior-knowledge: accept loop exited");
+        }
+    }
+}

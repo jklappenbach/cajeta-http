@@ -37,6 +37,8 @@ public final class TestMain {
         if (sel.want("Http2ConcurrencyTests")) { Http2ConcurrencyTests.run(c); }
         if (sel.want("Http2RstCancelTests")) { Http2RstCancelTests.run(c); }
         if (sel.want("Http2FlowParkTests")) { Http2FlowParkTests.run(c); }
+        if (sel.want("Http2ConnTests")) { Http2ConnTests.run(c); }
+        if (sel.want("Http2PriorKnowledgeTests")) { Http2PriorKnowledgeTests.run(c); }
         if (sel.want("Http2SettingsTests")) { Http2SettingsTests.run(c); }
         if (sel.want("Http2FixedFrameTests")) { Http2FixedFrameTests.run(c); }
         if (sel.want("Http2FrameTests")) { Http2FrameTests.run(c); }

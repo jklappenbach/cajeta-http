@@ -1,15 +1,19 @@
 package dev.cajeta.http.test;
 
 import cajeta.lang.String;
+import cajeta.io.net.BufferPool;
 import cajeta.io.net.IpAddress;
 import cajeta.io.net.SocketAddress;
 import cajeta.io.net.TcpListener;
 import cajeta.io.net.TcpStream;
 import cajeta.io.net.AsyncReader;
 import cajeta.io.net.AsyncWriter;
-import cajeta.concurrent.Tasks;
+import dev.cajeta.http.Bytes;
 import dev.cajeta.http.HttpRequest;
 import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.h1.HttpParserLimits;
+import dev.cajeta.http.server.ConnectionBuffers;
+import dev.cajeta.http.server.ServerLimits;
 import dev.cajeta.http.h2.Http2;
 import dev.cajeta.http.h2.Http2Connection;
 import dev.cajeta.http.h2.Http2FrameHeader;
@@ -23,14 +27,9 @@ import dev.cajeta.http.h2.HpackDecoder;
 import dev.cajeta.http.h2.HpackFieldList;
 
 /**
- * http:3.3d — the **end-to-end HTTP/2 exchange** over loopback (RFC 9113): a
- * raw h2 client (preface + SETTINGS + HPACK-encoded HEADERS[/DATA]) drives the
- * sequential [`Http2Connection`](../../../h2/Http2Connection.cajeta) server,
- * which turns each stream into an `HttpRequest` for the *same* handler an h1
- * server would use and encodes the `HttpResponse` back to HEADERS+DATA frames.
- * Proves the whole stack — preface, SETTINGS handshake, HPACK both ways, the
- * frame codec, the stream state machine — settles on the wire for a bodyless
- * GET, a POST whose body arrives in a DATA frame, and a 404.
+ * A raw HTTP/2 client over loopback drives the `Http2Connection` engine with the
+ * same handler an HTTP/1.1 server would use: a bodyless GET, a POST whose body
+ * arrives in a DATA frame, a 404, and a body past one receive window.
  */
 public final class Http2ConnTests {
 
@@ -38,7 +37,7 @@ public final class Http2ConnTests {
         return s.substring(0, s.byteLength());
     }
 
-    // Read exactly `n` bytes with a total timeout budget; false on timeout/EOF.
+    /** Reads exactly `n` bytes within `timeoutMs` per read, false on timeout or EOF. */
     static boolean readExactWithin(AsyncReader r, int8[] buf, int32 n,
                                    int32 timeoutMs) {
         int32 off = 0;
@@ -52,38 +51,31 @@ public final class Http2ConnTests {
         return true;
     }
 
-    // ---- server ----------------------------------------------------------
-
-    static #HttpResponse handle(HttpRequest req) {
-        String target #= req.getTarget();
-        if (target.equals("/hello")) {
-            String b = "hello, h2";
-            HttpResponse resp0 #= HttpResponse.ok();
-            resp0.body(b.toBytes(), b.byteLength());
-            return #resp0;
+    static void handle(HttpRequest q, HttpResponse r) {
+        if (Bytes.equals(q.target(), "/hello")) {
+            r.body("hello, h2");
+            return;
         }
-        if (target.equals("/echo")) {
-            HttpResponse resp1 #= HttpResponse.ok();
-            resp1.body(req.body, req.bodyLength());
-            return #resp1;
+        if (Bytes.equals(q.target(), "/echo")) {
+            r.writeBytes(q.body());
+            return;
         }
-        String nf = "nope";
-        HttpResponse resp2 #= HttpResponse.of(404);
-        resp2.body(nf.toBytes(), nf.byteLength());
-        return #resp2;
+        r.status(404);
+        r.body("nope");
     }
 
     public static async int32 h2Server(#TcpListener listener) {
         TcpStream sock #= listener.acceptAsync();
         AsyncReader reader = heap AsyncReader(sock);
         AsyncWriter writer = heap AsyncWriter(sock);
-        (HttpRequest) -> #HttpResponse h = (req) -> Http2ConnTests.handle(req);
-        Http2Connection.serve(reader, writer, h);
+        ConnectionBuffers bufs = heap ConnectionBuffers(heap BufferPool(65536, 8));
+        HttpParserLimits limits = heap HttpParserLimits();
+        Http2Connection.serve(reader, writer,
+                              (HttpRequest q, HttpResponse r) -> Http2ConnTests.handle(q, r),
+                              bufs, limits, ServerLimits.DEFAULT_MAX_BODY_BYTES);
         sock.close();
         return 1;
     }
-
-    // ---- client ----------------------------------------------------------
 
     static int32 statusOf(HpackFieldList fields) {
         int32 i = 0;
@@ -112,7 +104,6 @@ public final class Http2ConnTests {
         AsyncReader reader = heap AsyncReader(sock);
         AsyncWriter writer = heap AsyncWriter(sock);
 
-        // preface + client SETTINGS + request HEADERS (+ DATA).
         int8[] pf #= Http2.preface();
         writer.writeAll(pf, 0, 24);
 
@@ -136,7 +127,6 @@ public final class Http2ConnTests {
         writer.writeAll(out, 0, (int32) out.count());
         writer.flush();
 
-        // Read frames until the response stream ends.
         HpackDecoder dec = heap HpackDecoder(Http2.DEFAULT_HEADER_TABLE_SIZE);
         int32 status = -1;
         Http2ConnTests.windowUpdates = 0;
@@ -151,63 +141,63 @@ public final class Http2ConnTests {
                 System.stdout.println("  CLT timeout waiting for frame header");
                 timedOut = true;
             } else {
-            Http2FrameHeader h #= Http2FrameHeader(hdr);
-            int32 type = h.typeCode();
-            int32 flags = h.flags();
-            int32 sid = h.streamId();
-            int32 len = h.length();
-            int8[] pl = heap int8[len];
-            if (len > 0) {
-                Http2ConnTests.readExactWithin(reader, pl, len, 4000);
-            }
-            if (type == Http2.FRAME_WINDOW_UPDATE) {
-                Http2ConnTests.windowUpdates = Http2ConnTests.windowUpdates + 1;
-            } else if (type == Http2.FRAME_SETTINGS) {
-                if ((flags & Http2.FLAG_ACK) == 0) {
-                    Http2FrameWriter afw = heap Http2FrameWriter();
-                    Http2Frames.writeSettingsAck(afw);
-                    int8[] ab #= afw.toBytes();
-                    writer.writeAll(ab, 0, (int32) ab.count());
-                    writer.flush();
+                Http2FrameHeader h #= Http2FrameHeader(hdr);
+                int32 type = h.typeCode();
+                int32 flags = h.flags();
+                int32 sid = h.streamId();
+                int32 len = h.length();
+                int8[] pl = heap int8[len];
+                if (len > 0) {
+                    Http2ConnTests.readExactWithin(reader, pl, len, 4000);
                 }
-            } else if (type == Http2.FRAME_HEADERS) {
-                Http2Payload reg #= Http2ContentFrames.parseHeaders(pl, len,
-                                                                  flags, sid);
-                int8[] blk = heap int8[reg.length];
-                int32 j = 0;
-                while (j < reg.length) {
-                    blk[j] = pl[reg.offset + j];
-                    j = j + 1;
-                }
-                HpackFieldList rf #= dec.decode(blk, reg.length);
-                status = Http2ConnTests.statusOf(rf);
-                if ((flags & Http2.FLAG_END_STREAM) != 0) {
-                    done = true;
-                }
-            } else if (type == Http2.FRAME_DATA) {
-                Http2Payload reg #= Http2ContentFrames.parseData(pl, len, flags,
-                                                               sid);
-                int32 j = 0;
-                while (j < reg.length) {
-                    if (bodyLen >= bodyCap) {
-                        int32 nc = bodyCap * 2;
-                        int8[] nb = heap int8[nc];
-                        int32 m = 0;
-                        while (m < bodyLen) {
-                            nb[m] = body[m];
-                            m = m + 1;
-                        }
-                        body = #nb;
-                        bodyCap = nc;
+                if (type == Http2.FRAME_WINDOW_UPDATE) {
+                    Http2ConnTests.windowUpdates = Http2ConnTests.windowUpdates + 1;
+                } else if (type == Http2.FRAME_SETTINGS) {
+                    if ((flags & Http2.FLAG_ACK) == 0) {
+                        Http2FrameWriter afw = heap Http2FrameWriter();
+                        Http2Frames.writeSettingsAck(afw);
+                        int8[] ab #= afw.toBytes();
+                        writer.writeAll(ab, 0, (int32) ab.count());
+                        writer.flush();
                     }
-                    body[bodyLen] = pl[reg.offset + j];
-                    bodyLen = bodyLen + 1;
-                    j = j + 1;
+                } else if (type == Http2.FRAME_HEADERS) {
+                    Http2Payload reg #= Http2ContentFrames.parseHeaders(pl, len,
+                                                                      flags, sid);
+                    int8[] blk = heap int8[reg.length];
+                    int32 j = 0;
+                    while (j < reg.length) {
+                        blk[j] = pl[reg.offset + j];
+                        j = j + 1;
+                    }
+                    HpackFieldList rf #= dec.decode(blk, reg.length);
+                    status = Http2ConnTests.statusOf(rf);
+                    if ((flags & Http2.FLAG_END_STREAM) != 0) {
+                        done = true;
+                    }
+                } else if (type == Http2.FRAME_DATA) {
+                    Http2Payload reg #= Http2ContentFrames.parseData(pl, len, flags,
+                                                                   sid);
+                    int32 j = 0;
+                    while (j < reg.length) {
+                        if (bodyLen >= bodyCap) {
+                            int32 nc = bodyCap * 2;
+                            int8[] nb = heap int8[nc];
+                            int32 m = 0;
+                            while (m < bodyLen) {
+                                nb[m] = body[m];
+                                m = m + 1;
+                            }
+                            body = #nb;
+                            bodyCap = nc;
+                        }
+                        body[bodyLen] = pl[reg.offset + j];
+                        bodyLen = bodyLen + 1;
+                        j = j + 1;
+                    }
+                    if ((flags & Http2.FLAG_END_STREAM) != 0) {
+                        done = true;
+                    }
                 }
-                if ((flags & Http2.FLAG_END_STREAM) != 0) {
-                    done = true;
-                }
-            }
             }
         }
         sock.close();
@@ -235,18 +225,8 @@ public final class Http2ConnTests {
     static int32 streamWindowUpdates;
 
     /**
-     * A body larger than one receive window, sent as several DATA frames.
-     *
-     * The server must hand receive-window credit back as it consumes them. It
-     * did not: `writeWindowUpdate` had no callers on either side, so a real
-     * peer that respects flow control stopped after 65535 octets and both ends
-     * waited forever. This raw client ignores the window, so it cannot
-     * reproduce that stall. What it pins is that the server now EMITS the
-     * frames, which is the half that was missing.
-     *
-     * The body must cross `WINDOW_REPLENISH`, or the only WINDOW_UPDATE on the
-     * wire is the one the server sends at connection start to raise its
-     * connection window, and the assertion passes without `replenish` running.
+     * A body past one receive window, sent as many DATA frames. The server must
+     * hand back receive credit on the connection and on the stream as it consumes them.
      */
     static void largeBody(Check c) {
         scope {
@@ -260,11 +240,11 @@ public final class Http2ConnTests {
         }
     }
 
-    // 64 frames of 16384 = 1048576 octets: past the server's replenish
-    // threshold, and each frame is within SETTINGS_MAX_FRAME_SIZE.
+    /** 64 frames of 16384 octets, past the replenish threshold and within the frame size. */
     static final int32 BIG_FRAME = 16384;
     static final int32 BIG_FRAMES = 64;
 
+    /** POSTs to the small-response path, so the server never waits on its own send window. */
     static void bigClient(Check c, int32 port) {
         IpAddress ca #= IpAddress.loopbackV4();
         SocketAddress connAddr #= SocketAddress.of(#ca, port);
@@ -281,10 +261,6 @@ public final class Http2ConnTests {
 
         HpackEncoder enc = heap HpackEncoder(Http2.DEFAULT_HEADER_TABLE_SIZE, true);
         HpackFieldList fl = heap HpackFieldList();
-        // A SMALL-response path on purpose. Echoing 131 KB back would make the
-        // server spend its own send window and park for a WINDOW_UPDATE this
-        // raw client never sends, since it has the very defect being fixed.
-        // The RECEIVE half is what this test pins.
         fl.put(Http2ConnTests.own(":method"), Http2ConnTests.own("POST"));
         fl.put(Http2ConnTests.own(":path"), Http2ConnTests.own("/hello"));
         fl.put(Http2ConnTests.own(":scheme"), Http2ConnTests.own("http"));
@@ -329,8 +305,6 @@ public final class Http2ConnTests {
                 if (type == Http2.FRAME_WINDOW_UPDATE) {
                     Http2ConnTests.windowUpdates =
                         Http2ConnTests.windowUpdates + 1;
-                    // Only `replenish` sends stream-level credit. The
-                    // connection-level one at startup is stream 0.
                     if (h.streamId() != 0) {
                         Http2ConnTests.streamWindowUpdates =
                             Http2ConnTests.streamWindowUpdates + 1;
