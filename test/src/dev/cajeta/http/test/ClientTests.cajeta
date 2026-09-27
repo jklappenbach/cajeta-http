@@ -16,6 +16,7 @@ public final class ClientTests {
     public static void run(Check c) {
         System.stdout.println("-- client: loopback --");
         ClientTests.liveClient(c);
+        ClientTests.builderGone(c);
     }
 
     static void handle(HttpRequest q, HttpResponse r) {
@@ -105,6 +106,42 @@ public final class ClientTests {
         int64 delta = Cajeta.allocatedBytes() - before;
         System.stdout.println("    client and server together, 200 keep-alive exchanges: {} bytes", delta);
         return delta == 0 ? 1 : 0;
+    }
+
+    static void handleAs(int32 code, HttpRequest q, HttpResponse r) {
+        ClientTests.handle(q, r);
+        if (r.status() == 200) {
+            r.status(code);
+        }
+    }
+
+    static #HttpServer built() {
+        HttpServerBuilder b #= HttpServer.builder();
+        b.bind("127.0.0.1:0");
+        int32 code = 200;
+        b.handler((HttpRequest q, HttpResponse r) -> ClientTests.handleAs(code, q, r));
+        return b.build();
+    }
+
+    static void builderGone(Check c) {
+        scope {
+            HttpServer srv #= ClientTests.built();
+            cajeta.collection.ArrayList<String> churn = heap cajeta.collection.ArrayList<String>();
+            String unit = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+            int32 k = 0;
+            while (k < 400) {
+                String s #= unit.substring(0, 1 + k % 64);
+                churn.add(#s);
+                k = k + 1;
+            }
+            int32 port = srv.server.listener.boundPort();
+            Task<int32> sv = spawn serve(srv);
+            Task<int32> tg = spawn clientGet(port);
+            c.eqInt((int64) await tg, 1, "a server outlives the builder that made it, handler and model included");
+            c.that(srv.serverModel() != null, "the server owns its model");
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
     }
 
     static void liveClient(Check c) {

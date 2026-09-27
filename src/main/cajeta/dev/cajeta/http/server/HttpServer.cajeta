@@ -113,7 +113,7 @@ public class HttpServer {
             #SocketAddress addr, ServerModel model, (HttpRequest, HttpResponse) -> void handler,
             #ServerLimits limits, #ConnectionLimits climits, #BufferPool pool) {
         HttpServer srv = heap HttpServer(#handler);
-        srv.model = model;
+        srv.model #= model;
         srv.applyLimits(#limits, #pool);
         HttpServer self = srv;
         if (climits != null) {

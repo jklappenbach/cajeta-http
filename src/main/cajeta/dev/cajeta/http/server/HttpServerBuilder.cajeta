@@ -125,7 +125,8 @@ public class HttpServerBuilder {
 
     /** Binds and returns the server. A missing handler answers every request with 500. */
     public #HttpServer build() {
-        (HttpRequest, HttpResponse) -> void h = this.handler;
+        (HttpRequest, HttpResponse) -> void h #= this.handler;
+        this.handler = null;
         if (h == null) {
             h = (HttpRequest q, HttpResponse r) -> {
                 r.status(500);
@@ -144,7 +145,7 @@ public class HttpServerBuilder {
             p = #pmoved;
         }
         if (this.bTls) {
-            return HttpServer.bindTlsAddress(SocketAddress.parse(this.addr), h, #l,
+            return HttpServer.bindTlsAddress(SocketAddress.parse(this.addr), #h, #l,
                 this.bCert, this.bCertLen, this.bKey, this.bKeyLen);
         }
         ConnectionLimits cl = null;
@@ -153,8 +154,10 @@ public class HttpServerBuilder {
             this.bClimits = null;
             cl = #cmoved;
         }
+        ServerModel m #= this.model;
+        this.model = null;
         HttpServer srv #= HttpServer.bindAddressWithModelAndLimits(SocketAddress.parse(this.addr),
-            this.model, h, #l, #cl, #p);
+            #m, #h, #l, #cl, #p);
         srv.h2Prior = this.bH2Prior;
         return #srv;
     }
