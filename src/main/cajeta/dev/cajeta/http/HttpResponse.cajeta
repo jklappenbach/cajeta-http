@@ -295,8 +295,15 @@ public final class HttpResponse {
         return this.writeBytes(data);
     }
 
-    /** Streams the body from `b` after the handler returns. */
+    /**
+     * Streams the body from `b` after the handler returns. Its media type
+     * becomes `Content-Type` unless one is already set.
+     */
     public HttpResponse body(#Body b) {
+        MediaType t = b.contentType();
+        if (t != null && !this.hasHeader("Content-Type")) {
+            this.header("Content-Type", t.format());
+        }
         this.bodyLen = 0;
         this.stream #= b;
         return this;

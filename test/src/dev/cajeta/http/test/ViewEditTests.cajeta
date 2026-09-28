@@ -8,6 +8,7 @@ import dev.cajeta.http.HttpRequest;
 import dev.cajeta.http.HttpResponse;
 import dev.cajeta.http.body.Body;
 import dev.cajeta.http.body.StreamBody;
+import dev.cajeta.http.body.StringBody;
 
 /** Request header and body edits a middleware makes, and streamed response bodies. */
 public final class ViewEditTests {
@@ -116,6 +117,20 @@ public final class ViewEditTests {
         c.that(got.startsWith("HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n"),
             "an unsized streamed body larger than the buffer is chunked");
         Wire.same(c, Wire.bodyOf(got), big, "the chunked stream arrives intact");
+
+        (HttpRequest, HttpResponse) -> void typed = (HttpRequest q, HttpResponse r) -> {
+            r.body(#StringBody.of("hi"));
+        };
+        got #= Wire.serve("GET / HTTP/1.1\r\n\r\n", typed);
+        Wire.same(c, got, "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\ncontent-length: 2\r\n\r\nhi",
+            "a typed body's media type becomes the response Content-Type");
+        (HttpRequest, HttpResponse) -> void own = (HttpRequest q, HttpResponse r) -> {
+            r.header("Content-Type", "text/x-custom");
+            r.body(#StringBody.of("hi"));
+        };
+        got #= Wire.serve("GET / HTTP/1.1\r\n\r\n", own);
+        Wire.same(c, got, "HTTP/1.1 200 OK\r\nContent-Type: text/x-custom\r\ncontent-length: 2\r\n\r\nhi",
+            "a Content-Type the handler set is kept");
 
         got #= Wire.serve("HEAD / HTTP/1.1\r\n\r\n", sized);
         Wire.same(c, got, "HTTP/1.1 200 OK\r\ncontent-length: 11\r\n\r\n",
