@@ -1,0 +1,163 @@
+package tour.http;
+
+import cajeta.io.net.ByteBuffer;
+import cajeta.io.net.ByteChannel;
+import dev.cajeta.http.Bytes;
+import dev.cajeta.http.Http1Connection;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.h1.HttpParserLimits;
+
+// support: a channel that plays a fixed byte script to the reader and
+// captures everything written back. One HTTP/1.1 connection served over it
+// is a whole exchange with no socket.
+final class ScriptChannel implements ByteChannel {
+    int8[] input;
+    int32 inLen;
+    int32 inPos;
+    int8[] buf;
+    int32 len;
+
+    public ScriptChannel(#int8[] script, int32 n) {
+        this.input #= script;
+        this.inLen = n;
+        this.inPos = 0;
+        this.buf = heap int8[1 << 18];
+        this.len = 0;
+    }
+
+    public int64 readAsync(int8[] b, int64 offset, int64 length) {
+        int32 n = this.inLen - this.inPos;
+        if ((int64) n > length) {
+            n = (int32) length;
+        }
+        int32 i = 0;
+        while (i < n) {
+            b[(int32) offset + i] = this.input[this.inPos + i];
+            i = i + 1;
+        }
+        this.inPos = this.inPos + n;
+        return (int64) n;
+    }
+
+    public int64 readWithin(int8[] b, int64 offset, int64 length, int32 timeoutMs) {
+        return this.readAsync(b, offset, length);
+    }
+
+    public void writeAllAsync(int8[] data, int64 offset, int64 length) {
+        int32 o = (int32) offset;
+        int32 n = (int32) length;
+        int32 j = 0;
+        while (j < n) {
+            this.buf[this.len + j] = data[o + j];
+            j = j + 1;
+        }
+        this.len = this.len + n;
+    }
+
+    public void close() {
+    }
+}
+
+// support: serve a scripted request through a real connection and read the
+// answer back. The helpers take the first response in the captured wire.
+public final class Served {
+    /** Everything `app` writes in answer to the request text `script`. */
+    public static #String run(String script, (HttpRequest, HttpResponse) -> void app) {
+        int8[] b #= script.toBytes();
+        return Served.runBytes(#b, script.byteLength(), app);
+    }
+
+    /** As `run`, refusing a declared body over `maxBody` bytes. */
+    public static #String runLimited(String script, int64 maxBody, (HttpRequest, HttpResponse) -> void app) {
+        int8[] b #= script.toBytes();
+        return Served.serve(#b, script.byteLength(), maxBody, app);
+    }
+
+    /** As `run`, for a script that carries binary bytes. */
+    public static #String runBytes(#int8[] script, int32 n, (HttpRequest, HttpResponse) -> void app) {
+        return Served.serve(#script, n, (int64) 1000000, app);
+    }
+
+    static #String serve(#int8[] script, int32 n, int64 maxBody, (HttpRequest, HttpResponse) -> void app) {
+        ScriptChannel ch = heap ScriptChannel(#script, n);
+        ByteBuffer in = heap ByteBuffer(8192);
+        ByteBuffer out = heap ByteBuffer(8192);
+        HttpParserLimits pl = heap HttpParserLimits();
+        Http1Connection conn = heap Http1Connection(ch, in, out, pl, 0, 0, maxBody, true, app);
+        conn.serve();
+        return Bytes.toString(ch.buf[0:ch.len]);
+    }
+
+    /** The status code of the first response in `wire`, or -1. */
+    public static int32 status(String wire) {
+        if (wire.byteLength() < 12) {
+            return -1;
+        }
+        int32 s = 0;
+        int32 i = 9;
+        while (i < 12) {
+            s = s * 10 + (((int32) wire.byteAt(i)) - 48);
+            i = i + 1;
+        }
+        return s;
+    }
+
+    /** The value of header `name` in the first response, or "" when absent. */
+    public static #String header(String wire, String name) {
+        int64 headEnd = wire.indexOf("\r\n\r\n");
+        if (headEnd < (int64) 0) {
+            return "";
+        }
+        String head #= wire.substring(0, (int32) headEnd + 2);
+        String lower #= head.toLowerCase();
+        String key #= "\r\n" + name.toLowerCase() + ": ";
+        int64 at = lower.indexOf(key);
+        if (at < (int64) 0) {
+            return "";
+        }
+        int32 start = (int32) at + key.byteLength();
+        int32 end = start;
+        while (end < head.byteLength() && head.byteAt(end) != (int8) 13) {
+            end = end + 1;
+        }
+        return head.substring(start, end);
+    }
+
+    /** The body of the first response, de-chunked when chunked. */
+    public static #String body(String wire) {
+        int64 headEnd = wire.indexOf("\r\n\r\n");
+        if (headEnd < (int64) 0) {
+            return "";
+        }
+        String head #= wire.substring(0, (int32) headEnd).toLowerCase();
+        int32 at = (int32) headEnd + 4;
+        if (!head.contains("transfer-encoding: chunked")) {
+            return wire.substring(at, wire.byteLength());
+        }
+        String out = "";
+        while (true) {
+            int32 lineEnd = at;
+            while (lineEnd + 1 < wire.byteLength()
+                   && !(wire.byteAt(lineEnd) == (int8) 13 && wire.byteAt(lineEnd + 1) == (int8) 10)) {
+                lineEnd = lineEnd + 1;
+            }
+            if (lineEnd + 1 >= wire.byteLength()) {
+                return #out;
+            }
+            int32 size = 0;
+            int32 i = at;
+            while (i < lineEnd) {
+                size = size * 16 + Bytes.hexValue(((int32) wire.byteAt(i)) & 255);
+                i = i + 1;
+            }
+            if (size == 0) {
+                return #out;
+            }
+            int32 start = lineEnd + 2;
+            out = out + wire.substring(start, start + size);
+            at = start + size + 2;
+        }
+        return #out;
+    }
+}

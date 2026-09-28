@@ -9,6 +9,7 @@ import cajeta.lang.String;
 //   RoutingDemo     the Router: typed path params, precedence, defaults
 //   MiddlewareDemo  the chain and the production middleware catalogue
 //   ServerDemo      a live server the public way: builder -> serve -> shutdown
+//   StatusDemo      the status catalogue: throw a named status, get its answer
 //   ClientDemo      the client's operational surface (timeouts, retries,
 //                   redirects, cookies, pool, JSON, download)
 //   BodiesDemo      the body model: form, multipart, streaming, gzip
@@ -39,6 +40,9 @@ public final class HttpTour {
 
         ServerDemo server = heap ServerDemo();
         server.execute();
+
+        StatusDemo status = heap StatusDemo();
+        status.execute();
 
         ClientDemo client #= heap ClientDemo();
         client.execute();

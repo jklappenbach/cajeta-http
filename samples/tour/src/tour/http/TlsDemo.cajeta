@@ -1,5 +1,7 @@
 package tour.http;
 
+import dev.cajeta.http.Bytes;
+import dev.cajeta.http.ClientResponse;
 import dev.cajeta.http.HttpRequest;
 import dev.cajeta.http.HttpResponse;
 import dev.cajeta.http.client.HttpClient;
@@ -48,17 +50,13 @@ public class TlsDemo extends DemoClass {
     }
 
     // support: the handler — the orders health endpoint over TLS.
-    public static #HttpResponse handle(HttpRequest req) {
-        if (req.getTarget().equals("/health")) {
-            String up = "orders: all systems nominal";
-            HttpResponse r #= HttpResponse.ok();
-            r.body(up.toBytes(), up.byteLength());
-            return #r;
+    public static void handle(HttpRequest q, HttpResponse r) {
+        if (Bytes.equals(q.path(), "/health")) {
+            r.body("orders: all systems nominal");
+            return;
         }
-        String nf = "not found";
-        HttpResponse r #= HttpResponse.of(404);
-        r.body(nf.toBytes(), nf.byteLength());
-        return #r;
+        r.status(404);
+        r.body("not found");
     }
 
     // TLS accept is explicit in v1: take the next TLS connection and
@@ -79,11 +77,11 @@ public class TlsDemo extends DemoClass {
             .exchangeTimeout(15000)
             .build();
         String url = "https://127.0.0.1:" + port + "/health";
-        HttpResponse resp #= client.get(url);
-        if (resp.statusCode() != 200) {
+        ClientResponse resp #= client.get(url);
+        if (resp.status() != 200) {
             return 0 - 1;
         }
-        return resp.bodyLength();
+        return (int32) resp.body().count();
     }
 
     public void execute() {
@@ -97,8 +95,7 @@ public class TlsDemo extends DemoClass {
             int8[] key #= kp.toBytes();
             HttpServerBuilder b #= HttpServer.builder();
             b.bind("127.0.0.1:0");
-            (HttpRequest) -> #HttpResponse h = (req) -> TlsDemo.handle(req);
-            b.handler(h);
+            b.handler((HttpRequest q, HttpResponse r) -> TlsDemo.handle(q, r));
             b.tls(cert, cp.byteLength(), key, kp.byteLength());
             HttpServer srv #= b.build();
             int32 port = srv.tlsListener.boundPort();

@@ -1,0 +1,187 @@
+package tour.http;
+
+import dev.cajeta.http.HttpException;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.routing.Router;
+import dev.cajeta.http.status.BadGatewayException;
+import dev.cajeta.http.status.BadRequestException;
+import dev.cajeta.http.status.ConflictException;
+import dev.cajeta.http.status.ContentTooLargeException;
+import dev.cajeta.http.status.ExpectationFailedException;
+import dev.cajeta.http.status.FailedDependencyException;
+import dev.cajeta.http.status.ForbiddenException;
+import dev.cajeta.http.status.GatewayTimeoutException;
+import dev.cajeta.http.status.GoneException;
+import dev.cajeta.http.status.HttpVersionNotSupportedException;
+import dev.cajeta.http.status.InsufficientStorageException;
+import dev.cajeta.http.status.InternalServerErrorException;
+import dev.cajeta.http.status.LengthRequiredException;
+import dev.cajeta.http.status.LockedException;
+import dev.cajeta.http.status.LoopDetectedException;
+import dev.cajeta.http.status.MethodNotAllowedException;
+import dev.cajeta.http.status.MisdirectedRequestException;
+import dev.cajeta.http.status.NetworkAuthenticationRequiredException;
+import dev.cajeta.http.status.NotAcceptableException;
+import dev.cajeta.http.status.NotExtendedException;
+import dev.cajeta.http.status.NotFoundException;
+import dev.cajeta.http.status.NotImplementedException;
+import dev.cajeta.http.status.PaymentRequiredException;
+import dev.cajeta.http.status.PreconditionFailedException;
+import dev.cajeta.http.status.PreconditionRequiredException;
+import dev.cajeta.http.status.ProxyAuthenticationRequiredException;
+import dev.cajeta.http.status.RangeNotSatisfiableException;
+import dev.cajeta.http.status.RequestHeaderFieldsTooLargeException;
+import dev.cajeta.http.status.RequestTimeoutException;
+import dev.cajeta.http.status.ServiceUnavailableException;
+import dev.cajeta.http.status.TooEarlyException;
+import dev.cajeta.http.status.TooManyRequestsException;
+import dev.cajeta.http.status.UnauthorizedException;
+import dev.cajeta.http.status.UnavailableForLegalReasonsException;
+import dev.cajeta.http.status.UnprocessableContentException;
+import dev.cajeta.http.status.UnsupportedMediaTypeException;
+import dev.cajeta.http.status.UpgradeRequiredException;
+import dev.cajeta.http.status.UriTooLongException;
+import dev.cajeta.http.status.VariantAlsoNegotiatesException;
+
+// The status catalogue, dev.cajeta.http.status. Every error status has a
+// named exception extending HttpException. A handler that throws one gets
+// that status on the wire, with no body: whatever the handler had written
+// is discarded, so a detail in the message never leaks to the client.
+//
+//   throw heap NotFoundException("no order 42");   ->  404, empty body
+//   throw heap ServiceUnavailableException();       ->  503, empty body
+//
+// Any other exception is a 500. A catalogue exception's no-argument form
+// carries the reason phrase as its message.
+//
+// The scenario: the orders API signalling its failures by name instead of
+// by status arithmetic.
+public class StatusDemo extends DemoClass {
+
+    public static void getOrder(HttpRequest q, HttpResponse r) {
+        int64 id = q.paramInt64("id", (int64) 0);
+        if (id == (int64) 42) {
+            r.body("order 42");
+            return;
+        }
+        r.write("partial detail the client must not see");
+        throw heap NotFoundException("no order " + id);
+    }
+
+    public static void placeOrder(HttpRequest q, HttpResponse r) {
+        if (!q.hasHeader("Authorization")) {
+            throw heap UnauthorizedException();
+        }
+        if (q.headerIs("X-Queue", "full")) {
+            throw heap TooManyRequestsException();
+        }
+        if (q.headerIs("X-Queue", "closed")) {
+            throw heap ServiceUnavailableException("maintenance window");
+        }
+        if (!q.headerIs("Content-Type", "application/json")) {
+            throw heap UnsupportedMediaTypeException();
+        }
+        r.status(201);
+    }
+
+    public static void crash(HttpRequest q, HttpResponse r) {
+        throw heap Exception("a plain exception is not a status");
+    }
+
+    static int32 statusOf(HttpException e) {
+        return e.httpStatus();
+    }
+
+    public void execute() {
+        System.stdout.println("");
+        System.stdout.println("-- The status catalogue: throw a named status, get its answer --");
+
+        // 1. The catalogue itself: 39 named 4xx and 5xx statuses.
+        int32[] want = heap int32[39];
+        HttpException[] all = heap HttpException[39];
+        all[0] = heap BadRequestException(); want[0] = 400;
+        all[1] = heap UnauthorizedException(); want[1] = 401;
+        all[2] = heap PaymentRequiredException(); want[2] = 402;
+        all[3] = heap ForbiddenException(); want[3] = 403;
+        all[4] = heap NotFoundException(); want[4] = 404;
+        all[5] = heap MethodNotAllowedException(); want[5] = 405;
+        all[6] = heap NotAcceptableException(); want[6] = 406;
+        all[7] = heap ProxyAuthenticationRequiredException(); want[7] = 407;
+        all[8] = heap RequestTimeoutException(); want[8] = 408;
+        all[9] = heap ConflictException(); want[9] = 409;
+        all[10] = heap GoneException(); want[10] = 410;
+        all[11] = heap LengthRequiredException(); want[11] = 411;
+        all[12] = heap PreconditionFailedException(); want[12] = 412;
+        all[13] = heap ContentTooLargeException(); want[13] = 413;
+        all[14] = heap UriTooLongException(); want[14] = 414;
+        all[15] = heap UnsupportedMediaTypeException(); want[15] = 415;
+        all[16] = heap RangeNotSatisfiableException(); want[16] = 416;
+        all[17] = heap ExpectationFailedException(); want[17] = 417;
+        all[18] = heap MisdirectedRequestException(); want[18] = 421;
+        all[19] = heap UnprocessableContentException(); want[19] = 422;
+        all[20] = heap LockedException(); want[20] = 423;
+        all[21] = heap FailedDependencyException(); want[21] = 424;
+        all[22] = heap TooEarlyException(); want[22] = 425;
+        all[23] = heap UpgradeRequiredException(); want[23] = 426;
+        all[24] = heap PreconditionRequiredException(); want[24] = 428;
+        all[25] = heap TooManyRequestsException(); want[25] = 429;
+        all[26] = heap RequestHeaderFieldsTooLargeException(); want[26] = 431;
+        all[27] = heap UnavailableForLegalReasonsException(); want[27] = 451;
+        all[28] = heap InternalServerErrorException(); want[28] = 500;
+        all[29] = heap NotImplementedException(); want[29] = 501;
+        all[30] = heap BadGatewayException(); want[30] = 502;
+        all[31] = heap ServiceUnavailableException(); want[31] = 503;
+        all[32] = heap GatewayTimeoutException(); want[32] = 504;
+        all[33] = heap HttpVersionNotSupportedException(); want[33] = 505;
+        all[34] = heap VariantAlsoNegotiatesException(); want[34] = 506;
+        all[35] = heap InsufficientStorageException(); want[35] = 507;
+        all[36] = heap LoopDetectedException(); want[36] = 508;
+        all[37] = heap NotExtendedException(); want[37] = 510;
+        all[38] = heap NetworkAuthenticationRequiredException(); want[38] = 511;
+        int32 right = 0;
+        int32 i = 0;
+        while (i < 39) {
+            if (StatusDemo.statusOf(all[i]) == want[i]) {
+                right = right + 1;
+            }
+            i = i + 1;
+        }
+        this.check(right == 39, "all 39 catalogue exceptions answer their own status");
+        ConflictException plain = heap ConflictException();
+        this.check(plain.message.equals("Conflict"),
+            "the no-argument form carries the reason phrase");
+
+        // 2. Thrown from a handler behind a Router: the status reaches the
+        //    wire and the body the handler had started does not.
+        Router router = heap Router();
+        router.route("GET", "/orders/{id:int64}",
+            (HttpRequest q, HttpResponse r) -> StatusDemo.getOrder(q, r));
+        router.route("POST", "/orders",
+            (HttpRequest q, HttpResponse r) -> StatusDemo.placeOrder(q, r));
+        router.route("GET", "/crash",
+            (HttpRequest q, HttpResponse r) -> StatusDemo.crash(q, r));
+        (HttpRequest, HttpResponse) -> void app = (HttpRequest q, HttpResponse r) -> router.dispatch(q, r);
+        String found #= Served.run("GET /orders/42 HTTP/1.1\r\n\r\n", app);
+        String missing #= Served.run("GET /orders/7 HTTP/1.1\r\n\r\n", app);
+        String missingBody #= Served.body(missing);
+        this.check(Served.status(found) == 200 && Served.status(missing) == 404
+            && missingBody.byteLength() == 0,
+            "NotFoundException answers 404 and drops the partial body");
+        String anon #= Served.run("POST /orders HTTP/1.1\r\nContent-Length: 0\r\n\r\n", app);
+        String busy #= Served.run("POST /orders HTTP/1.1\r\nAuthorization: Bearer t\r\n"
+            + "X-Queue: full\r\nContent-Length: 0\r\n\r\n", app);
+        String closed #= Served.run("POST /orders HTTP/1.1\r\nAuthorization: Bearer t\r\n"
+            + "X-Queue: closed\r\nContent-Length: 0\r\n\r\n", app);
+        String textual #= Served.run("POST /orders HTTP/1.1\r\nAuthorization: Bearer t\r\n"
+            + "Content-Type: text/plain\r\nContent-Length: 0\r\n\r\n", app);
+        String placed #= Served.run("POST /orders HTTP/1.1\r\nAuthorization: Bearer t\r\n"
+            + "Content-Type: application/json\r\nContent-Length: 0\r\n\r\n", app);
+        this.check(Served.status(anon) == 401 && Served.status(busy) == 429
+            && Served.status(closed) == 503 && Served.status(textual) == 415
+            && Served.status(placed) == 201,
+            "one handler signals 401, 429, 503 and 415 by name, then 201");
+        String crashed #= Served.run("GET /crash HTTP/1.1\r\n\r\n", app);
+        this.check(Served.status(crashed) == 500, "an exception outside the catalogue is a 500");
+    }
+}

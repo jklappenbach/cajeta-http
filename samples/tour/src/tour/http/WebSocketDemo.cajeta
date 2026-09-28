@@ -1,12 +1,20 @@
 package tour.http;
 
+import dev.cajeta.http.Bytes;
+import dev.cajeta.http.ClientResponse;
+import dev.cajeta.http.HeadScanner;
 import dev.cajeta.http.HttpRequest;
 import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.Takeover;
+import dev.cajeta.http.Version;
+import dev.cajeta.http.server.HttpServer;
+import dev.cajeta.http.server.HttpServerBuilder;
 import dev.cajeta.http.ws.WebSocket;
 import dev.cajeta.http.ws.WsUpgrade;
 import dev.cajeta.http.ws.WsMessage;
 import dev.cajeta.http.ws.WsClientHandshake;
 import dev.cajeta.http.ws.WsServerHandshake;
+import dev.cajeta.http.ws.WsTakeover;
 import dev.cajeta.http.ws.WebSocketHandler;
 import dev.cajeta.http.ws.WebSocketConnection;
 import dev.cajeta.http.ws.WsCloseCode;
@@ -30,11 +38,14 @@ import dev.cajeta.http.ws.HandshakeRejectedException;
 import dev.cajeta.http.ws.MessageTooLargeException;
 import cajeta.io.net.AsyncReader;
 import cajeta.io.net.AsyncWriter;
+import cajeta.io.net.ByteBuffer;
 import cajeta.io.net.IpAddress;
 import cajeta.io.net.SocketAddress;
 import cajeta.io.net.TcpListener;
 import cajeta.io.net.TcpStream;
 import cajeta.io.net.uri.Uri;
+import cajeta.time.Duration;
+import cajeta.concurrent.Tasks;
 
 // WebSocket — dev.cajeta.http.ws, RFC 6455 end to end:
 //
@@ -43,8 +54,12 @@ import cajeta.io.net.uri.Uri;
 //   socket      WebSocket.connect(url) or WsUpgrade.acceptServer/
 //               connectClient over your own reader/writer; send/receive/
 //               close(code, reason) — close is a HANDSHAKE, not a slam
-//   handler     WebSocketHandler + WsUpgrade.serve — the callback API
-//               (onConnect/onMessage/onClose) with fail-close semantics
+//   handler     WebSocketHandler + WsUpgrade.accept(q, r, handler, deflate)
+//               — an ordinary HttpServer route answers 101 and hands the
+//               connection to the callbacks (onConnect/onMessage/onClose),
+//               with fail-close semantics
+//   takeover    Takeover — the generic protocol switch under all of it:
+//               r.upgrade(t) after a 101, and the connection runs t
 //   frames      WsFrame codec, control frames (ping/pong/close),
 //               fragmentation via WsMessageAssembler, WsProtocol's
 //               auto-pong, permessage-deflate compression
@@ -90,6 +105,17 @@ final class TicketHandler implements WebSocketHandler {
     }
 }
 
+// support: a toy protocol behind a 101. Once the switch is sent it writes
+// a countdown and ends, which ends the connection.
+final class Countdown extends Takeover {
+    public void run(AsyncReader reader, AsyncWriter writer) {
+        String text = "3 2 1 liftoff\n";
+        int8[] b #= text.toBytes();
+        writer.writeAll(b, 0, text.byteLength());
+        writer.flush();
+    }
+}
+
 // support: a handler whose onMessage throws — the serve loop must
 // fail-close the connection with 1011 (INTERNAL_ERROR), never hang.
 final class FaultyHandler implements WebSocketHandler {
@@ -123,15 +149,27 @@ public class WebSocketDemo extends DemoClass {
         return m1.length() * 100 + m2.length();
     }
 
-    // Handler-API server: serve() drives the callback until close.
-    public static async int32 handlerServer(#TcpListener listener,
-                                            TicketHandler h) {
-        TcpStream sock #= listener.acceptAsync();
-        AsyncReader reader = heap AsyncReader(sock);
-        AsyncWriter writer = heap AsyncWriter(sock);
-        WsUpgrade.serve(reader, writer, h);
-        sock.close();
+    static TicketHandler TICKETS = null;
+
+    // The production path: an HttpServer route that upgrades /tickets and
+    // serves everything else as plain HTTP.
+    public static void route(HttpRequest q, HttpResponse r) {
+        if (Bytes.equals(q.path(), "/tickets")) {
+            WsUpgrade.accept(q, r, WebSocketDemo.TICKETS, false);
+            return;
+        }
+        r.body("plain");
+    }
+
+    public static async int32 serveLoop(HttpServer srv) {
+        srv.serve();
         return 1;
+    }
+
+    public static void countdown(HttpRequest q, HttpResponse r) {
+        r.status(101);
+        r.header("Upgrade", "x-countdown");
+        r.upgrade(heap Countdown());
     }
 
     public static async int32 faultyServer(#TcpListener listener,
@@ -159,12 +197,38 @@ public class WebSocketDemo extends DemoClass {
             .scheme("ws").host("orders.internal").port(80).path("/tickets")
             .build();
         String key #= WsClientHandshake.placeholderKey(42);
-        HttpRequest upgrade #= WsClientHandshake.buildRequest(huri, key);
-        HttpResponse hresp #= WsServerHandshake.accept(upgrade);
+        String head #= WsClientHandshake.requestHead(huri, key, "");
+        int8[] hb #= head.toBytes();
+        HttpRequest upgrade = heap HttpRequest(100);
+        HeadScanner.parseRequest(hb, 0, head.byteLength(), upgrade);
+        ByteBuffer out = heap ByteBuffer(4096);
+        HttpResponse hresp = heap HttpResponse(out, null, 1024, 32);
+        WsServerHandshake.accept(upgrade, hresp);
+        hresp.finish(false, Version.HTTP_1_1, true);
+        ClientResponse seen = heap ClientResponse();
+        HeadScanner.parseResponse(out.array(), out.readPosition(), out.readable(), seen);
         this.check(WsServerHandshake.isUpgradeRequest(upgrade)
-            && hresp.statusCode() == 101
-            && WsClientHandshake.validateAccept(hresp, key),
+            && seen.status() == 101
+            && WsClientHandshake.validateAccept(seen, key),
             "Upgrade request -> 101 -> accept token validates");
+
+        // 1b. Takeover is the generic switch: after a 101 the connection
+        //     runs whatever the response was handed. WsUpgrade.accept hands
+        //     it a WsTakeover; this toy protocol just counts down.
+        (HttpRequest, HttpResponse) -> void launch = (HttpRequest q, HttpResponse r) -> WebSocketDemo.countdown(q, r);
+        String switched #= Served.run("GET /launch HTTP/1.1\r\nUpgrade: x-countdown\r\n"
+            + "Connection: Upgrade\r\n\r\n", launch);
+        this.check(Served.status(switched) == 101
+            && Served.header(switched, "Connection").equals("Upgrade")
+            && switched.endsWith("\r\n\r\n3 2 1 liftoff\n"),
+            "a 101 hands the connection to the Takeover, which speaks next");
+        ByteBuffer wsOut = heap ByteBuffer(4096);
+        HttpResponse wsResp = heap HttpResponse(wsOut, null, 1024, 32);
+        TicketHandler probe = heap TicketHandler();
+        boolean took = WsUpgrade.accept(upgrade, wsResp, probe, false);
+        Takeover t #= wsResp.takeUpgrade();
+        this.check(took && t != null && !wsResp.upgrades(),
+            "WsUpgrade.accept registers a WsTakeover; takeUpgrade hands it over");
 
         // 2. A rejected handshake is a typed failure: a non-101 reply
         //    raises HandshakeRejectedException at connect.
@@ -218,12 +282,14 @@ public class WebSocketDemo extends DemoClass {
         //    code — tearing down a socket without it is the abrupt-close
         //    anti-pattern (code 1006 territory).
         scope {
-            TicketHandler h #= heap TicketHandler();
-            IpAddress laTick #= IpAddress.loopbackV4();
-            SocketAddress bindTick #= SocketAddress.of(#laTick, 0);
-            TcpListener tickLst #= TcpListener.bind(bindTick);
-            int32 port = tickLst.boundPort();
-            Task<int32> sv = spawn handlerServer(#tickLst, h);
+            TicketHandler h = heap TicketHandler();
+            WebSocketDemo.TICKETS = h;
+            HttpServerBuilder b #= HttpServer.builder();
+            b.bind("127.0.0.1:0");
+            b.handler((HttpRequest q, HttpResponse r) -> WebSocketDemo.route(q, r));
+            HttpServer srv #= b.build();
+            int32 port = srv.server.listener.boundPort();
+            Task<int32> sv = spawn serveLoop(srv);
 
             String url = "ws://127.0.0.1:" + port + "/tickets";
             WebSocket client #= WebSocket.connect(url);
@@ -232,8 +298,14 @@ public class WebSocketDemo extends DemoClass {
             this.check(reply.text().equals("ack:close ticket 4417"),
                 "handler onMessage acked the ticket");
             client.close(WsCloseCode.NORMAL, "done");
+            int32 waited = 0;
+            while (h.closes == 0 && waited < 200) {
+                Tasks.sleepMillis((int64) 10);
+                waited = waited + 1;
+            }
+            boolean drained #= srv.shutdown(Duration.ofSeconds(2));
             int32 r = await sv;
-            this.check(r == 1 && h.connects == 1 && h.messages == 1
+            this.check(drained && r == 1 && h.connects == 1 && h.messages == 1
                 && h.closes == 1,
                 "lifecycle ran onConnect -> onMessage -> onClose exactly once");
             this.check(h.lastCode == WsCloseCode.NORMAL,

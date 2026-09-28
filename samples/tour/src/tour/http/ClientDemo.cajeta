@@ -1,5 +1,8 @@
 package tour.http;
 
+import dev.cajeta.http.Bytes;
+import dev.cajeta.http.ClientRequest;
+import dev.cajeta.http.ClientResponse;
 import dev.cajeta.http.HttpRequest;
 import dev.cajeta.http.HttpResponse;
 import dev.cajeta.http.HttpException;
@@ -21,7 +24,6 @@ import cajeta.io.net.NetException;
 import cajeta.io.net.TimedOutException;
 import cajeta.io.net.SocketAddress;
 import cajeta.io.net.TcpListener;
-import cajeta.io.net.uri.Uri;
 import cajeta.time.Duration;
 
 // HttpClient — the operational surface a real caller configures on day one:
@@ -35,6 +37,10 @@ import cajeta.time.Duration;
 //   client.getJson(url)                 GET + 2xx check + JSON parse
 //   client.downloadTo(url, path)        stream to disk, Sha256 receipt
 //
+// An exchange is a `ClientRequest` in and a `ClientResponse` out. `send`
+// makes one exchange; `get` and `sendFollowing` follow redirects. The
+// response holds its bytes and hands out windows into them.
+//
 // Failures are typed: refused/reset -> NetException, deadline ->
 // TimedOutException, over-cap redirects -> TooManyRedirectsException,
 // non-2xx on the convenience calls -> HttpException.
@@ -47,60 +53,47 @@ public class ClientDemo extends DemoClass {
     // support: the server the client drives. /status serves JSON; /hop
     // redirects to /status; /loop redirects forever; /artifact serves a
     // known payload; /login sets a cookie; /whoami echoes it; /slow stalls.
-    public static #HttpResponse handle(HttpRequest req) {
-        String t #= req.getTarget();
-        if (t.equals("/status")) {
-            String body = "{\"service\":\"orders\",\"healthy\":true,\"queue\":17}";
-            HttpResponse r #= HttpResponse.ok();
-            r.setHeader("Content-Type", "application/json");
-            r.body(body.toBytes(), body.byteLength());
-            return #r;
+    public static void handle(HttpRequest q, HttpResponse r) {
+        if (Bytes.equals(q.path(), "/status")) {
+            r.header("Content-Type", "application/json");
+            r.body("{\"service\":\"orders\",\"healthy\":true,\"queue\":17}");
+            return;
         }
-        if (t.equals("/hop")) {
-            String moved = "moved";
-            HttpResponse r #= HttpResponse.of(307);
-            r.setHeader("Location", "/status");
-            r.body(moved.toBytes(), moved.byteLength());
-            return #r;
+        if (Bytes.equals(q.path(), "/hop")) {
+            r.status(307);
+            r.header("Location", "/status");
+            r.body("moved");
+            return;
         }
-        if (t.equals("/loop")) {
-            String moved = "moved";
-            HttpResponse r #= HttpResponse.of(302);
-            r.setHeader("Location", "/loop");
-            r.body(moved.toBytes(), moved.byteLength());
-            return #r;
+        if (Bytes.equals(q.path(), "/loop")) {
+            r.status(302);
+            r.header("Location", "/loop");
+            r.body("moved");
+            return;
         }
-        if (t.equals("/artifact")) {
-            String art = "orders-service-1.4.2 release artifact bytes";
-            HttpResponse r #= HttpResponse.ok();
-            r.body(art.toBytes(), art.byteLength());
-            return #r;
+        if (Bytes.equals(q.path(), "/artifact")) {
+            r.body("orders-service-1.4.2 release artifact bytes");
+            return;
         }
-        if (t.equals("/login")) {
-            String in = "welcome";
-            HttpResponse r #= HttpResponse.ok();
-            r.setHeader("Set-Cookie", "session=tok-77; Path=/");
-            r.body(in.toBytes(), in.byteLength());
-            return #r;
+        if (Bytes.equals(q.path(), "/login")) {
+            r.header("Set-Cookie", "session=tok-77; Path=/");
+            r.body("welcome");
+            return;
         }
-        if (t.equals("/whoami")) {
-            String ck #= req.getHeaders().get("cookie");
-            String out = "-";
-            if (ck != null) {
-                out = ck;
+        if (Bytes.equals(q.path(), "/whoami")) {
+            if (q.hasHeader("cookie")) {
+                r.bodyBytes(q.header("cookie"));
+            } else {
+                r.body("-");
             }
-            HttpResponse r #= HttpResponse.ok();
-            r.body(out.toBytes(), out.byteLength());
-            return #r;
+            return;
         }
-        if (t.equals("/slow")) {
+        if (Bytes.equals(q.path(), "/slow")) {
             Tasks.sleepMillis((int64) 800);
-            return HttpResponse.of(200);
+            return;
         }
-        String nf = "not found";
-        HttpResponse r #= HttpResponse.of(404);
-        r.body(nf.toBytes(), nf.byteLength());
-        return #r;
+        r.status(404);
+        r.body("not found");
     }
 
     public static async int32 serveLoop(HttpServer srv) {
@@ -143,19 +136,25 @@ public class ClientDemo extends DemoClass {
     public static async int32 redirects(int32 port) {
         HttpClient client #= HttpClient.builder().redirectLimit(3)
             .defaultHeader("Connection", "close").build();
-        HttpResponse ok #= client.get("http://127.0.0.1:" + port + "/hop");
-        String body #= DemoClass.bodyString(ok.body, ok.bodyLength());
-        if (ok.statusCode() != 200 || !body.contains("orders")) {
+        ClientResponse ok #= client.get("http://127.0.0.1:" + port + "/hop");
+        String body #= ok.bodyString();
+        if (ok.status() != 200 || !body.contains("orders")) {
             return 0 - 1;
+        }
+        // `send` makes exactly one exchange, so the 307 itself comes back.
+        ClientRequest once #= ClientRequest.get("http://127.0.0.1:" + port + "/hop");
+        ClientResponse hop #= client.send(once);
+        if (hop.status() != 307 || !Bytes.equals(hop.header("Location"), "/status")) {
+            return 0 - 2;
         }
         boolean capped = false;
         try {
-            HttpResponse never #= client.get("http://127.0.0.1:" + port + "/loop");
+            ClientResponse never #= client.get("http://127.0.0.1:" + port + "/loop");
         } catch (TooManyRedirectsException re) {
             capped = re.hops > 0;
         }
         if (!capped) {
-            return 0 - 2;
+            return 0 - 3;
         }
         return 1;
     }
@@ -166,12 +165,12 @@ public class ClientDemo extends DemoClass {
         HttpClient client #= HttpClient.builder().cookieJar()
             .defaultHeader("Connection", "close").build();
         client.exchangeTimeout(15000);
-        HttpResponse in #= client.get("http://127.0.0.1:" + port + "/login");
-        if (in.statusCode() != 200) {
+        ClientResponse in #= client.get("http://127.0.0.1:" + port + "/login");
+        if (in.status() != 200) {
             return 0 - 1;
         }
-        HttpResponse who #= client.get("http://127.0.0.1:" + port + "/whoami");
-        String echoed #= DemoClass.bodyString(who.body, who.bodyLength());
+        ClientResponse who #= client.get("http://127.0.0.1:" + port + "/whoami");
+        String echoed #= who.bodyString();
         if (!echoed.equals("session=tok-77")) {
             return 0 - 2;
         }
@@ -179,8 +178,8 @@ public class ClientDemo extends DemoClass {
         HttpClient bare = heap HttpClient();
         bare.exchangeTimeout(15000);
         bare.defaultHeader("Connection", "close");
-        HttpResponse anon #= bare.get("http://127.0.0.1:" + port + "/whoami");
-        String none #= DemoClass.bodyString(anon.body, anon.bodyLength());
+        ClientResponse anon #= bare.get("http://127.0.0.1:" + port + "/whoami");
+        String none #= anon.bodyString();
         if (!none.equals("-")) {
             return 0 - 3;
         }
@@ -209,12 +208,9 @@ public class ClientDemo extends DemoClass {
         HttpClient client #= heap HttpClient();
         client.exchangeTimeout(150);
         client.defaultHeader("Connection", "close");
-        Uri uri #= Uri.builder()
-            .scheme("http").host("127.0.0.1").port(port).path("/slow")
-            .build();
-        HttpRequest req #= HttpRequest.fromUri("GET", uri);
+        ClientRequest req #= ClientRequest.get("http://127.0.0.1:" + port + "/slow");
         try {
-            HttpResponse resp #= client.send(uri, req);
+            ClientResponse resp #= client.send(req);
             return 0 - 1;
         } catch (TimedOutException te) {
             return 1;
@@ -226,12 +222,9 @@ public class ClientDemo extends DemoClass {
     public static async int32 refused(int32 deadPort) {
         HttpClient client #= heap HttpClient();
         client.retryPolicy(0, 0);
-        Uri uri #= Uri.builder()
-            .scheme("http").host("127.0.0.1").port(deadPort).path("/status")
-            .build();
-        HttpRequest req #= HttpRequest.fromUri("GET", uri);
+        ClientRequest req #= ClientRequest.get("http://127.0.0.1:" + deadPort + "/status");
         try {
-            HttpResponse resp #= client.send(uri, req);
+            ClientResponse resp #= client.send(req);
             return 0 - 1;
         } catch (NetException ne) {
             return 1;
@@ -245,8 +238,7 @@ public class ClientDemo extends DemoClass {
         scope {
             HttpServerBuilder b #= HttpServer.builder();
             b.bind("127.0.0.1:0");
-            (HttpRequest) -> #HttpResponse h = (req) -> ClientDemo.handle(req);
-            b.handler(h);
+            b.handler((HttpRequest q, HttpResponse r) -> ClientDemo.handle(q, r));
             HttpServer srv #= b.build();
             int32 port = srv.server.listener.boundPort();
             Task<int32> sv = spawn serveLoop(srv);
@@ -257,7 +249,7 @@ public class ClientDemo extends DemoClass {
 
             Task<int32> rd = spawn redirects(port);
             this.check(await rd == 1,
-                "307 follows with the method kept; a loop trips TooManyRedirects");
+                "get follows the 307, send stops at it, a loop trips TooManyRedirects");
 
             Task<int32> lg = spawn loginFlow(port);
             this.check(await lg == 1,

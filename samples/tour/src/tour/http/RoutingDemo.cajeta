@@ -1,68 +1,107 @@
 package tour.http;
 
+import cajeta.lang.Slice;
+import cajeta.io.net.ByteBuffer;
+import dev.cajeta.http.HeadScanner;
 import dev.cajeta.http.HttpRequest;
 import dev.cajeta.http.HttpResponse;
-import dev.cajeta.http.PathParams;
 import dev.cajeta.http.routing.Router;
 import dev.cajeta.http.routing.Route;
 
-// The Router — method + pattern dispatch with typed path parameters:
+/** What a routed exchange produced, copied out of the response writer. */
+final class RouteResult {
+    public int32 status;
+    public String body;
+    public String allow;
+
+    public RouteResult() {
+        this.status = 0;
+        this.body = "";
+        this.allow = "";
+    }
+}
+
+// The Router: method + pattern dispatch with typed path parameters.
 //
-//   router.route("GET", "/orders/{id:int64}", handler)
+//   router.route("GET", "/orders/{id:int64}", (HttpRequest q, HttpResponse r) -> ...)
 //
 // Patterns: literal segments, {name} (string), {name:int64|int32|bool|...}
 // (typed, canonical-decimal only), {name:*} (any one segment), {rest:**}
-// (rest of the path, terminal). Precedence: literal > param > * > ** —
-// so /orders/latest can coexist with /orders/{id}. Defaults are correct
-// HTTP, not just misses: unknown path -> 404, known path with the wrong
-// method -> 405 + Allow, an over-cap body on a routeLimited route -> 413.
+// (rest of the path, terminal). Precedence: literal > param > * > **, so
+// /orders/latest can coexist with /orders/{id}. The defaults are real HTTP:
+// unknown path 404, known path with the wrong method 405 + Allow, an over-cap
+// body on a routeLimited route 413.
 //
-// Handlers are capture-free lambdas over statics ((req) -> Cls.h(req)) —
-// escaping closures are a pending runtime item, so the router hands you
-// dispatch() and you write the forwarding lambda at the call site (that
-// is also why every server demo writes b.handler that way).
-//
-// The scenario: the orders service's route table.
+// Path parameters bind onto the request view: q.param("id") is a window into
+// the path, q.paramInt64 converts, and q.paramString copies.
 public class RoutingDemo extends DemoClass {
-
-    // support: the route handlers — static and capture-free by convention.
-    public static #HttpResponse getOrder(HttpRequest req) {
-        int64 id = req.pathParamInt64("id", (int64) 0 - (int64) 1);
-        String body = "order " + id;
-        HttpResponse r #= HttpResponse.ok();
-        r.body(body.toBytes(), body.byteLength());
-        return #r;
+    static void getOrder(HttpRequest q, HttpResponse r) {
+        r.body("order " + q.paramInt64("id", (int64) 0 - (int64) 1));
     }
 
-    public static #HttpResponse latestOrder(HttpRequest req) {
-        String body = "latest";
-        HttpResponse r #= HttpResponse.ok();
-        r.body(body.toBytes(), body.byteLength());
-        return #r;
+    static void latestOrder(HttpRequest q, HttpResponse r) {
+        r.body("latest");
     }
 
-    public static #HttpResponse getReport(HttpRequest req) {
-        String path #= req.pathParam("rest");
-        String body = "report:" + path;
-        HttpResponse r #= HttpResponse.ok();
-        r.body(body.toBytes(), body.byteLength());
-        return #r;
+    static void getReport(HttpRequest q, HttpResponse r) {
+        String rest #= q.paramString("rest");
+        r.body("report:" + rest);
     }
 
-    public static #HttpResponse createOrder(HttpRequest req) {
-        return HttpResponse.of(201);
+    static void createOrder(HttpRequest q, HttpResponse r) {
+        r.status(201);
     }
 
-    public static #HttpResponse tenantUser(HttpRequest req) {
-        String body #= req.pathParam("tid") + ":" + req.pathParam("uid");
-        HttpResponse r #= HttpResponse.ok();
-        r.body(body.toBytes(), body.byteLength());
-        return #r;
+    static void health(HttpRequest q, HttpResponse r) {
+        r.status(204);
     }
 
-    // support: read a dispatched response body as a String.
-    static #String bodyOf(HttpResponse resp) {
-        return DemoClass.bodyString(resp.body, resp.bodyLength());
+    static void flag(HttpRequest q, HttpResponse r) {
+        r.body(q.paramBool("on", false) ? "on" : "off");
+    }
+
+    static void tenantUser(HttpRequest q, HttpResponse r) {
+        String tid #= q.paramString("tid");
+        String uid #= q.paramString("uid");
+        r.body(tid + ":" + uid);
+    }
+
+    static #String copyOf(Slice<int8> s) {
+        int32 n = (int32) s.count();
+        int8[] a = heap int8[n];
+        int32 i = 0;
+        while (i < n) {
+            a[i] = s[i];
+            i = i + 1;
+        }
+        return heap String(#a, n);
+    }
+
+    // Parses `method path` (and `body`) into a request view, dispatches it,
+    // and copies out what the response writer holds.
+    static #RouteResult send(Router router, String method, String path, String body) {
+        String head = method + " " + path + " HTTP/1.1\r\nHost: orders.internal\r\n";
+        if (body.byteLength() > 0) {
+            head = head + "Content-Length: " + body.byteLength() + "\r\n";
+        }
+        head = head + "\r\n";
+        String wire = head + body;
+        int8[] bytes #= wire.toBytes();
+        HttpRequest q = heap HttpRequest(100);
+        HeadScanner.parseRequest(bytes, 0, head.byteLength(), q);
+        if (body.byteLength() > 0) {
+            q.bindBody(head.byteLength(), body.byteLength());
+        }
+        ByteBuffer out = heap ByteBuffer(8192);
+        HttpResponse r = heap HttpResponse(out, null, 1024, 32);
+        router.dispatch(q, r);
+        RouteResult res = heap RouteResult();
+        res.status = r.status();
+        res.body #= RoutingDemo.copyOf(r.body());
+        if (r.hasHeader("Allow")) {
+            res.allow #= RoutingDemo.copyOf(r.header("Allow"));
+        }
+        return #res;
     }
 
     public void execute() {
@@ -70,96 +109,92 @@ public class RoutingDemo extends DemoClass {
         System.stdout.println("-- The Router: typed path params, precedence, HTTP-correct defaults --");
 
         Router router = heap Router();
-        router.route("GET", "/orders/latest", (req) -> RoutingDemo.latestOrder(req));
-        router.route("GET", "/orders/{id:int64}", (req) -> RoutingDemo.getOrder(req));
-        router.route("POST", "/orders", (req) -> RoutingDemo.createOrder(req));
-        router.route("GET", "/reports/{rest:**}", (req) -> RoutingDemo.getReport(req));
-        router.route("GET", "/health", (req) -> HttpResponse.of(204));
-        this.check(router.size() == 5, "five routes registered");
+        router.route("GET", "/orders/latest", (HttpRequest q, HttpResponse r) -> RoutingDemo.latestOrder(q, r));
+        router.route("GET", "/orders/{id:int64}", (HttpRequest q, HttpResponse r) -> RoutingDemo.getOrder(q, r));
+        router.route("POST", "/orders", (HttpRequest q, HttpResponse r) -> RoutingDemo.createOrder(q, r));
+        router.route("GET", "/reports/{rest:**}", (HttpRequest q, HttpResponse r) -> RoutingDemo.getReport(q, r));
+        router.route("GET", "/health", (HttpRequest q, HttpResponse r) -> RoutingDemo.health(q, r));
+        router.route("GET", "/flags/{on:bool}", (HttpRequest q, HttpResponse r) -> RoutingDemo.flag(q, r));
+        this.check(router.size() == 6, "six routes registered");
 
-        // 1. Typed binding: {id:int64} decodes the segment to an int64 —
-        //    and REJECTS non-canonical decimals ("007" is not an id).
-        HttpResponse hit #= router.dispatch(HttpRequest.of("GET", "/orders/9001"));
-        this.check(hit.statusCode() == 200
-            && RoutingDemo.bodyOf(hit).equals("order 9001"),
+        // 1. Typed binding: {id:int64} decodes the segment, and a
+        //    non-canonical decimal ("007") is not an id.
+        RouteResult hit #= RoutingDemo.send(router, "GET", "/orders/9001", "");
+        this.check(hit.status == 200 && hit.body.equals("order 9001"),
             "{id:int64} binds and converts the segment");
-        HttpResponse padded #= router.dispatch(HttpRequest.of("GET", "/orders/007"));
-        this.check(padded.statusCode() == 404,
-            "non-canonical decimal fails the typed match (404, not a bad bind)");
+        RouteResult padded #= RoutingDemo.send(router, "GET", "/orders/007", "");
+        this.check(padded.status == 404,
+            "a non-canonical decimal fails the typed match (404, not a bad bind)");
+        RouteResult on #= RoutingDemo.send(router, "GET", "/flags/true", "");
+        this.check(on.body.equals("on"), "{on:bool} converts true");
 
         // 2. Precedence: the literal /orders/latest wins over {id:int64}.
-        HttpResponse latest #= router.dispatch(HttpRequest.of("GET", "/orders/latest"));
-        this.check(RoutingDemo.bodyOf(latest).equals("latest"),
-            "literal segment outranks the typed param");
+        RouteResult latest #= RoutingDemo.send(router, "GET", "/orders/latest", "");
+        this.check(latest.body.equals("latest"), "a literal segment outranks the typed param");
 
-        // 3. {rest:**} captures the remaining path — the file-serving shape.
-        HttpResponse rep #= router.dispatch(
-            HttpRequest.of("GET", "/reports/2026/07/daily.csv"));
-        this.check(RoutingDemo.bodyOf(rep).equals("report:2026/07/daily.csv"),
+        // 3. {rest:**} captures the remaining path, the file-serving shape.
+        RouteResult rep #= RoutingDemo.send(router, "GET", "/reports/2026/07/daily.csv", "");
+        this.check(rep.body.equals("report:2026/07/daily.csv"),
             "{rest:**} captures the joined tail segments");
 
-        // 4. The defaults are real HTTP: 404 for an unknown path, 405 with
-        //    an Allow header naming the methods that WOULD match.
-        this.check(router.dispatch(HttpRequest.of("GET", "/nope")).statusCode() == 404,
-            "unknown path answers 404");
-        HttpResponse wrong #= router.dispatch(HttpRequest.of("DELETE", "/orders"));
-        String allow #= wrong.getHeaders().get("Allow");
-        this.check(wrong.statusCode() == 405 && allow != null
-            && allow.contains("POST"),
-            "wrong method answers 405 with Allow: POST");
+        // 4. The defaults are real HTTP.
+        RouteResult nope #= RoutingDemo.send(router, "GET", "/nope", "");
+        this.check(nope.status == 404, "an unknown path answers 404");
+        RouteResult wrong #= RoutingDemo.send(router, "DELETE", "/orders", "");
+        this.check(wrong.status == 405 && wrong.allow.contains("POST"),
+            "a wrong method answers 405 with Allow: POST");
+        RouteResult h #= RoutingDemo.send(router, "GET", "/health", "");
+        this.check(h.status == 204, "a handler sets its own status");
 
-        // 5. mount(): compose a sub-router under a prefix — prefix params
-        //    and sub params both bind. The admin API mounts per-tenant.
+        // 5. mount(): a sub-router under a prefix; prefix and sub params both bind.
         Router sub = heap Router();
-        sub.route("GET", "/users/{uid}", (req) -> RoutingDemo.tenantUser(req));
+        sub.route("GET", "/users/{uid}", (HttpRequest q, HttpResponse r) -> RoutingDemo.tenantUser(q, r));
         Router root = heap Router();
         root.mount("/tenants/{tid}", sub);
-        HttpResponse tu #= root.dispatch(
-            HttpRequest.of("GET", "/tenants/acme/users/ada"));
-        this.check(RoutingDemo.bodyOf(tu).equals("acme:ada"),
-            "mounted routes bind prefix and sub params together");
+        RouteResult tu #= RoutingDemo.send(root, "GET", "/tenants/acme/users/ada", "");
+        this.check(tu.body.equals("acme:ada"), "mounted routes bind prefix and sub params together");
 
-        // 6. Per-route body caps: a tight routeLimited cap 413s an over-cap
-        //    request before the handler ever runs.
+        // 6. Per-route body caps: an over-cap request answers 413 before the
+        //    handler runs.
         Router capped = heap Router();
         capped.routeLimited("POST", "/upload", (int64) 100,
-            (req) -> RoutingDemo.createOrder(req));
-        HttpRequest bigPost #= HttpRequest.post("/upload");
+            (HttpRequest q, HttpResponse r) -> RoutingDemo.createOrder(q, r));
         String blob = "";
         int32 i = 0;
         while (i < 20) {
             blob = blob + "0123456789";
             i = i + 1;
         }
-        bigPost.body(blob.toBytes(), blob.byteLength());
-        this.check(capped.dispatch(bigPost).statusCode() == 413,
-            "routeLimited: a 200-byte body against a 100-byte cap answers 413");
+        RouteResult big #= RoutingDemo.send(capped, "POST", "/upload", blob);
+        this.check(big.status == 413, "routeLimited: 200 bytes against a 100-byte cap answers 413");
+        RouteResult small #= RoutingDemo.send(capped, "POST", "/upload", "0123456789");
+        this.check(small.status == 201, "routeLimited: a body under the cap reaches the handler");
 
-        // 7. Pattern hygiene: patternError validates BEFORE registration
-        //    (registering a malformed pattern is a fatal error by design).
-        this.check(Router.patternError("/orders/{id:int64}") == null,
-            "a well-formed pattern validates clean");
-        this.check(Router.patternError("/orders/{id:bogus}") != null
-            && Router.patternError("/a/{rest:**}/b") != null,
-            "unknown param types and non-terminal ** are rejected");
+        // 7. Pattern hygiene: patternError validates before registration.
+        String okPattern #= Route.patternError("/orders/{id:int64}");
+        String badType #= Route.patternError("/orders/{id:bogus}");
+        String badRest #= Route.patternError("/a/{rest:**}/b");
+        this.check(okPattern == null && badType != null && badRest != null,
+            "unknown param types and non-terminal ** are rejected; good patterns pass");
 
-        // 8. Route is the unit under the table: it parses its pattern into
-        //    segments up front, so match time is a segment walk.
+        // 8. Route is the unit under the table: it matches a request view,
+        //    scores the match, binds its params onto the request, and runs.
         Route route = heap Route("GET", "/orders/{id:int64}",
-            (req) -> RoutingDemo.getOrder(req));
-        this.check(route.methodMatches("GET") && !route.methodMatches("PUT")
-            && route.patternSegmentCount() == 2 && route.isParam(1)
-            && route.paramName(1).equals("id"),
-            "Route pre-parses method, segments, and param names");
-
-        // 9. PathParams itself — what bindPathParams hands the handler:
-        //    ordered, typed reads with fallbacks.
-        PathParams pp = heap PathParams();
-        pp.put(DemoClass.own("id"), DemoClass.own("42"));
-        pp.put(DemoClass.own("flag"), DemoClass.own("true"));
-        this.check(pp.size() == 2 && pp.getInt64("id", (int64) 0) == (int64) 42
-            && pp.getBool("flag", false)
-            && pp.getInt32("missing", 7) == 7,
-            "PathParams: typed getters convert, fallbacks cover absence");
+            (HttpRequest q, HttpResponse r) -> RoutingDemo.getOrder(q, r));
+        String text = "GET /orders/42 HTTP/1.1\r\nHost: orders.internal\r\n\r\n";
+        int8[] tb #= text.toBytes();
+        HttpRequest q = heap HttpRequest(100);
+        HeadScanner.parseRequest(tb, 0, text.byteLength(), q);
+        int32 pathLen = q.splitPath();
+        boolean matches = route.methodMatches(q.methodBytes()) && route.score(q, pathLen) > (int64) 0;
+        route.bind(q, pathLen);
+        this.check(matches && q.paramCount() == 1 && q.hasParam("id")
+            && q.paramInt64("id", (int64) 0) == (int64) 42,
+            "Route matches, scores and binds its params onto the request view");
+        ByteBuffer out = heap ByteBuffer(4096);
+        HttpResponse r = heap HttpResponse(out, null, 1024, 32);
+        route.run(q, r);
+        String ran #= RoutingDemo.copyOf(r.body());
+        this.check(ran.equals("order 42"), "Route.run calls the handler with the bound request");
     }
 }

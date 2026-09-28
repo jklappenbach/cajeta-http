@@ -1,5 +1,8 @@
 package tour.http;
 
+import dev.cajeta.http.Bytes;
+import dev.cajeta.http.ClientResponse;
+import dev.cajeta.http.HeadScanner;
 import dev.cajeta.http.HttpRequest;
 import dev.cajeta.http.HttpResponse;
 import dev.cajeta.http.client.HttpClient;
@@ -21,8 +24,8 @@ import cajeta.io.net.TcpStream;
 // text/event-stream body, events as "data:" lines — the push channel you
 // reach for before WebSocket when traffic is one-way (dashboards, feeds):
 //
-//   server:  SseResponse.stream(events, n)      a fixed batch
-//            SseResponse.channel(sseChannel)    a live producer fiber
+//   server:  SseResponse.stream(r, events, n)   a fixed batch
+//            SseResponse.channel(r, sseChannel) a live producer fiber
 //   client:  SseClient.subscribe(onEvent)       auto-reconnect, sending
 //            Last-Event-ID so the server resumes where the client left off
 //   wire:    SseEvent / SseParser / SseDecoder  the format itself
@@ -62,8 +65,8 @@ public class SseDemo extends DemoClass {
     // Resume-aware handler: first connect serves fills 1-2 and ends the
     // stream (dropping the connection); the reconnect arrives carrying
     // Last-Event-ID: 2 and gets fills 3-4.
-    public static #HttpResponse handleFills(HttpRequest req) {
-        String last #= SseResponse.lastEventId(req);
+    public static void handleFills(HttpRequest q, HttpResponse r) {
+        String last #= SseResponse.lastEventId(q);
         SseEvent[] evs = heap SseEvent[2];
         if (last == null) {
             SseEvent a #= SseEvent.typed("fill", "ACME 100@19.99");
@@ -81,13 +84,13 @@ public class SseDemo extends DemoClass {
             d.id #= "4".substring(0, 1);
             evs[1] = #d;
         }
-        return SseResponse.stream(#evs, 2);
+        SseResponse.stream(r, #evs, 2);
     }
 
     // The live-channel handler: the response drains whatever the producer
     // fiber pushes into the shared channel.
-    public static #HttpResponse handleLive(HttpRequest req) {
-        return SseResponse.channel(SseDemo.feed.ch);
+    public static void handleLive(HttpRequest q, HttpResponse r) {
+        SseResponse.channel(r, SseDemo.feed.ch);
     }
 
     public static async int32 acceptN(Server core, int32 n) {
@@ -117,16 +120,16 @@ public class SseDemo extends DemoClass {
     public static async int32 readLive(int32 port) {
         HttpClient client #= heap HttpClient();
         client.exchangeTimeout(15000);
-        HttpResponse resp #= client.get("http://127.0.0.1:" + port + "/live");
-        if (resp.statusCode() != 200) {
+        ClientResponse resp #= client.get("http://127.0.0.1:" + port + "/live");
+        if (resp.status() != 200) {
             return 0 - 1;
         }
-        String ct #= resp.getHeaders().get("Content-Type");
-        if (ct == null || !ct.equals("text/event-stream")) {
+        if (!Bytes.equals(resp.header("Content-Type"), "text/event-stream")) {
             return 0 - 2;
         }
         SseParser p = heap SseParser();
-        p.feed(resp.body, resp.bodyLength());
+        int8[] raw #= Bytes.copyOf(resp.body());
+        p.feed(raw, (int32) raw.count());
         if (!p.hasEvent()) {
             return 0 - 3;
         }
@@ -205,8 +208,7 @@ public class SseDemo extends DemoClass {
             SseDemo.feed #= holder;
             HttpServerBuilder b #= HttpServer.builder();
             b.bind("127.0.0.1:0");
-            (HttpRequest) -> #HttpResponse h = (req) -> SseDemo.handleLive(req);
-            b.handler(h);
+            b.handler((HttpRequest q, HttpResponse r) -> SseDemo.handleLive(q, r));
             HttpServer srv #= b.build();
             Server core = srv.server;
             int32 port = core.listener.boundPort();
@@ -227,8 +229,7 @@ public class SseDemo extends DemoClass {
         scope {
             HttpServerBuilder b #= HttpServer.builder();
             b.bind("127.0.0.1:0");
-            (HttpRequest) -> #HttpResponse h = (req) -> SseDemo.handleFills(req);
-            b.handler(h);
+            b.handler((HttpRequest q, HttpResponse r) -> SseDemo.handleFills(q, r));
             HttpServer srv #= b.build();
             Server core = srv.server;
             int32 port = core.listener.boundPort();
@@ -246,8 +247,10 @@ public class SseDemo extends DemoClass {
         // 5. checkHead is the client's own gate: a non-SSE response is a
         //    terminal SseException (don't reconnect into a 404 forever).
         SseClient gate = heap SseClient("http://127.0.0.1:1/x");
-        HttpResponse wrong #= HttpResponse.ok();
-        wrong.setHeader("Content-Type", "text/html");
+        String htmlHead = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n";
+        int8[] hb #= htmlHead.toBytes();
+        ClientResponse wrong = heap ClientResponse();
+        HeadScanner.parseResponse(hb, 0, htmlHead.byteLength(), wrong);
         boolean rejected = false;
         try {
             gate.checkHead(wrong);

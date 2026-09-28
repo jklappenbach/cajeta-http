@@ -1,8 +1,12 @@
 package tour.http;
 
+import dev.cajeta.http.Bytes;
+import dev.cajeta.http.ClientRequest;
+import dev.cajeta.http.ClientResponse;
 import dev.cajeta.http.HttpRequest;
 import dev.cajeta.http.HttpResponse;
 import dev.cajeta.http.client.HttpClient;
+import dev.cajeta.http.server.ConnectionBuffers;
 import dev.cajeta.http.server.HttpServer;
 import dev.cajeta.http.server.HttpServerBuilder;
 import dev.cajeta.http.h2.Http2;
@@ -25,6 +29,7 @@ import dev.cajeta.http.h2.HpackEncoder;
 import dev.cajeta.http.h2.HpackDecoder;
 import dev.cajeta.http.h2.HpackField;
 import dev.cajeta.http.h2.HpackFieldList;
+import dev.cajeta.http.h2.HpackOut;
 import dev.cajeta.http.h2.HpackStaticTable;
 import dev.cajeta.http.h2.HpackDynamicTable;
 import dev.cajeta.http.h2.HpackException;
@@ -32,6 +37,8 @@ import dev.cajeta.http.h2.Huffman;
 import dev.cajeta.http.PushEntry;
 import cajeta.io.net.AsyncReader;
 import cajeta.io.net.AsyncWriter;
+import cajeta.io.net.BufferPool;
+import cajeta.io.net.ByteBuffer;
 import cajeta.io.net.IpAddress;
 import cajeta.io.net.SocketAddress;
 import cajeta.io.net.TcpStream;
@@ -59,17 +66,13 @@ public class Http2Demo extends DemoClass {
 
     // support: the handler answers with the negotiated protocol version —
     // the one response that PROVES which wire the request rode.
-    public static #HttpResponse handle(HttpRequest req) {
-        if (req.getTarget().equals("/proto")) {
-            String v = req.version;
-            HttpResponse r #= HttpResponse.ok();
-            r.body(v.toBytes(), v.byteLength());
-            return #r;
+    public static void handle(HttpRequest q, HttpResponse r) {
+        if (Bytes.equals(q.path(), "/proto")) {
+            r.body(q.version().wireString());
+            return;
         }
-        String nf = "not found";
-        HttpResponse r #= HttpResponse.of(404);
-        r.body(nf.toBytes(), nf.byteLength());
-        return #r;
+        r.status(404);
+        r.body("not found");
     }
 
     public static async int32 serveLoop(HttpServer srv) {
@@ -79,22 +82,23 @@ public class Http2Demo extends DemoClass {
 
     // An h2 prior-knowledge client: raw TCP + Http2Client.exchange (preface,
     // SETTINGS, HPACK HEADERS, DATA — all inside exchange()).
-    // 1 => 200 with body "HTTP/2.0".
+    // 1 => 200 with body "HTTP/2".
     public static async int32 h2Probe(int32 port) {
         IpAddress ca #= IpAddress.loopbackV4();
         SocketAddress connAddr #= SocketAddress.of(#ca, port);
         TcpStream sock #= TcpStream.connectAsync(#connAddr);
         AsyncReader reader = heap AsyncReader(sock);
         AsyncWriter writer = heap AsyncWriter(sock);
-        HttpRequest req #= HttpRequest.of("GET", "/proto");
-        HttpResponse resp #= Http2Client.exchange(reader, writer, req, "http",
-                                                 "127.0.0.1");
+        ClientRequest req #= ClientRequest.get("http://127.0.0.1:" + port + "/proto");
+        ClientResponse resp = heap ClientResponse();
+        ConnectionBuffers bufs = heap ConnectionBuffers(heap BufferPool(65536, 8));
+        Http2Client.exchange(reader, writer, req, resp, "http", "127.0.0.1", bufs);
         sock.close();
-        if (resp.statusCode() != 200) {
+        if (resp.status() != 200) {
             return 0 - 1;
         }
-        String body #= DemoClass.bodyString(resp.body, resp.bodyLength());
-        if (body.equals("HTTP/2.0")) {
+        String body #= resp.bodyString();
+        if (body.equals("HTTP/2")) {
             return 1;
         }
         return 0 - 2;
@@ -106,11 +110,11 @@ public class Http2Demo extends DemoClass {
         HttpClient client #= HttpClient.builder()
             .defaultHeader("Connection", "close").build();
         String url = "http://127.0.0.1:" + port + "/proto";
-        HttpResponse resp #= client.get(url);
-        if (resp.statusCode() != 200) {
+        ClientResponse resp #= client.get(url);
+        if (resp.status() != 200) {
             return 0 - 1;
         }
-        String body #= DemoClass.bodyString(resp.body, resp.bodyLength());
+        String body #= resp.bodyString();
         if (body.equals("HTTP/1.1")) {
             return 1;
         }
@@ -128,8 +132,7 @@ public class Http2Demo extends DemoClass {
         scope {
             HttpServerBuilder b #= HttpServer.builder();
             b.bind("127.0.0.1:0");
-            (HttpRequest) -> #HttpResponse h = (req) -> Http2Demo.handle(req);
-            b.handler(h);
+            b.handler((HttpRequest q, HttpResponse r) -> Http2Demo.handle(q, r));
             b.h2PriorKnowledge();
             HttpServer srv #= b.build();
             int32 port = srv.server.listener.boundPort();
@@ -137,7 +140,7 @@ public class Http2Demo extends DemoClass {
 
             Task<int32> th2 = spawn h2Probe(port);
             this.check(await th2 == 1,
-                "h2 preface -> the request rode HTTP/2.0");
+                "h2 preface -> the request rode HTTP/2");
             Task<int32> th1 = spawn h1Probe(port);
             this.check(await th1 == 1,
                 "non-preface bytes -> same port degrades to HTTP/1.1");
@@ -203,6 +206,16 @@ public class Http2Demo extends DemoClass {
         this.check((int32) huff.count() < word.byteLength()
             && huffman.decode(huff, (int32) huff.count()).equals(word),
             "Huffman coding shrinks and round-trips header text");
+        // decodeTo writes into a reusable HpackOut, the decoder's allocation-
+        // free path: one buffer serves every string on the connection.
+        HpackOut hout = heap HpackOut(64);
+        huffman.decodeTo(huff, 0, (int32) huff.count(), hout);
+        int32 firstLen = hout.length();
+        hout.reset();
+        huffman.decodeTo(huff, 0, (int32) huff.count(), hout);
+        this.check(firstLen == word.byteLength() && hout.length() == firstLen
+            && Bytes.equals(hout.window(0, hout.length()), word),
+            "decodeTo fills a reusable HpackOut; reset() keeps its storage");
 
         // 3b. The tables under HPACK: the RFC's fixed 61-entry static
         //     table (":method: GET" is entry 2), and the typed decode
@@ -222,16 +235,34 @@ public class Http2Demo extends DemoClass {
         }
         this.check(hpackBad, "a truncated HPACK block raises HpackException");
 
-        // 3c. Http2Requests bridges messages <-> HPACK field lists — the
-        //     pseudo-header (:method/:path/:scheme/:authority) encoding.
-        HttpRequest bridged #= HttpRequest.of("GET", "/api/status");
+        // 3c. Http2Requests bridges a request to its HPACK field list: the
+        //     pseudo-headers (:method/:scheme/:authority/:path) lead, then
+        //     the regular fields in lower case.
+        ClientRequest bridged #= ClientRequest.get("http://orders.internal/api/status");
+        bridged.header("Accept", "application/json");
         HpackFieldList fields #= Http2Requests.requestFields(bridged, "http",
             "orders.internal");
-        HttpRequest rebuilt #= Http2Requests.fromFields(fields);
-        this.check(fields.nameAt(0).startsWith(":")
-            && rebuilt.getMethod().equals("GET")
-            && rebuilt.getTarget().equals("/api/status"),
-            "requestFields/fromFields round-trip via pseudo-headers");
+        boolean sawPath = false;
+        boolean sawAccept = false;
+        int32 fi = 0;
+        while (fi < fields.size()) {
+            if (fields.nameAt(fi).equals(":path") && fields.valueAt(fi).equals("/api/status")) {
+                sawPath = true;
+            }
+            if (fields.nameAt(fi).equals("accept")) {
+                sawAccept = true;
+            }
+            fi = fi + 1;
+        }
+        this.check(fields.nameAt(0).equals(":method") && fields.valueAt(0).equals("GET")
+            && sawPath && sawAccept,
+            "requestFields leads with pseudo-headers and lowercases the rest");
+        HpackFieldList promised #= Http2Requests.promisedRequestFields("/style.css",
+            "orders.internal");
+        HpackFieldList statusOnly #= Http2Requests.statusOnlyFields(204);
+        this.check(promised.size() > 0 && statusOnly.size() == 1
+            && statusOnly.nameAt(0).equals(":status") && statusOnly.valueAt(0).equals("204"),
+            "promised-request and status-only field lists for push and bodyless replies");
 
         // 4. The frame layer: every h2 byte after the preface is a frame —
         //    9-byte big-endian header, then a typed payload.
@@ -285,12 +316,14 @@ public class Http2Demo extends DemoClass {
             "parseData strips padding to the (offset, length) region");
         // Server push declares (path, response) pairs on the response;
         // over h1 they are ignored, over h2 they become PUSH_PROMISE.
-        HttpResponse pushy #= HttpResponse.ok();
+        ByteBuffer pushOut = heap ByteBuffer(4096);
+        HttpResponse pushy = heap HttpResponse(pushOut, null, 1024, 32);
         String css = "body{}";
-        pushy.push("/style.css", 200, css.toBytes(), css.byteLength());
-        this.check(pushy.pushCount() == 1
-            && pushy.pushPathAt(0).equals("/style.css")
-            && pushy.pushes[0] != null,
+        int8[] cssBytes #= css.toBytes();
+        pushy.push("/style.css", 200, cssBytes, css.byteLength());
+        PushEntry pe = pushy.pushAt(0);
+        this.check(pushy.pushCount() == 1 && pe.path.equals("/style.css")
+            && pe.status == 200 && pe.bodyLen == 6,
             "push() records a PushEntry the h2 connection can promise");
 
         // 5. Settings as connection state. Only non-defaults serialize;
