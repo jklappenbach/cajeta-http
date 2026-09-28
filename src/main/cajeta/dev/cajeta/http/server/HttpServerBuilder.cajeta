@@ -145,8 +145,14 @@ public class HttpServerBuilder {
             p = #pmoved;
         }
         if (this.bTls) {
-            return HttpServer.bindTlsAddress(SocketAddress.parse(this.addr), #h, #l,
+            HttpServer tls #= HttpServer.bindTlsAddress(SocketAddress.parse(this.addr), #h, #l,
                 this.bCert, this.bCertLen, this.bKey, this.bKeyLen);
+            if (this.bClimits != null) {
+                ConnectionLimits tmoved #= this.bClimits;
+                this.bClimits = null;
+                tls.limitConnections(#tmoved);
+            }
+            return #tls;
         }
         ConnectionLimits cl = null;
         if (this.bClimits != null) {

@@ -14,6 +14,7 @@ import cajeta.io.net.ByteChannel;
 import cajeta.io.net.AsyncReader;
 import cajeta.io.net.AsyncWriter;
 import cajeta.io.net.tls.TlsStream;
+import cajeta.concurrent.AtomicInt32;
 import cajeta.error.Exception;
 import cajeta.time.Duration;
 import dev.cajeta.http.HttpRequest;
@@ -55,6 +56,7 @@ public class HttpServer {
     public boolean h2Prior;
     public ConnectionLimiter limiter;
     public ConnectionLimits connLimits;
+    AtomicInt32 tlsInflight;
 
     /** Default size of each connection buffer, which bounds a request head and a held body. */
     public static final int32 DEFAULT_BUFFER_BYTES = 65536;
@@ -67,6 +69,7 @@ public class HttpServer {
         this.serverLimits = heap ServerLimits();
         this.buffers = heap ConnectionBuffers(heap BufferPool(HttpServer.DEFAULT_BUFFER_BYTES, 64));
         this.isTls = false;
+        this.tlsInflight = heap AtomicInt32(0);
     }
 
     /** Binds `addr` with one fiber per connection. */
@@ -229,6 +232,14 @@ public class HttpServer {
         return #srv;
     }
 
+    /** Admits TLS connections through `limits`, as a plaintext server does. */
+    public void limitConnections(#ConnectionLimits limits) {
+        ConnectionLimits cls #= limits;
+        ConnectionLimiter climiter #= ConnectionLimiter.fromLimits(cls);
+        this.limiter #= climiter;
+        this.connLimits #= cls;
+    }
+
     /** The next TLS connection, or null once the listener is closed. */
     public #TcpStream acceptTlsNext() {
         try {
@@ -238,12 +249,39 @@ public class HttpServer {
         }
     }
 
-    /** Serves `conn` over TLS on its own fiber. */
+    /** Serves `conn` over TLS, returning when the connection ends. */
     public void dispatchTls(#TcpStream conn) {
+        this.tlsInflight.fetchAdd(1);
         spawn tlsWorker(this, #conn);
     }
 
     static async int32 tlsWorker(HttpServer srv, #TcpStream conn) {
+        int32 served = 0;
+        try {
+            served = HttpServer.serveTls(srv, #conn);
+        } finally {
+            srv.tlsInflight.fetchAdd(-1);
+        }
+        return served;
+    }
+
+    static int32 serveTls(HttpServer srv, #TcpStream conn) {
+        if (srv.limiter != null && !srv.limiter.admit()) {
+            conn.close();
+            return 0;
+        }
+        int32 served = 0;
+        try {
+            served = HttpServer.handshakeAndServe(srv, #conn);
+        } finally {
+            if (srv.limiter != null) {
+                srv.limiter.release();
+            }
+        }
+        return served;
+    }
+
+    static int32 handshakeAndServe(HttpServer srv, #TcpStream conn) {
         conn.setNoDelay(true);
         TlsStream tls #= TlsStream.server(#conn, srv.tlsCert, srv.tlsCertLen, srv.tlsKey, srv.tlsKeyLen);
         int8[] alpn #= HttpServer.alpnH2Http11();
@@ -306,27 +344,27 @@ public class HttpServer {
         return #a;
     }
 
-    /** Accepts and serves connections until `shutdown`. */
+    /**
+     * Accepts and serves connections concurrently until `shutdown`. Each
+     * connection is spawned in this loop's scope, which joins them at teardown.
+     */
     public void serve() {
         if (this.isTls) {
             scope {
                 boolean go = true;
                 while (go) {
-                    go = this.acceptOneTls();
+                    TcpStream conn #= this.acceptTlsNext();
+                    if (conn == null) {
+                        go = false;
+                    } else {
+                        this.tlsInflight.fetchAdd(1);
+                        spawn tlsWorker(this, #conn);
+                    }
                 }
             }
             return;
         }
         this.server.serve();
-    }
-
-    boolean acceptOneTls() {
-        TcpStream conn #= this.acceptTlsNext();
-        if (conn == null) {
-            return false;
-        }
-        this.dispatchTls(#conn);
-        return true;
     }
 
     /** `serve` as a task. */
@@ -339,6 +377,17 @@ public class HttpServer {
     public boolean shutdown(Duration deadline) {
         if (this.isTls) {
             this.tlsListener.close();
+            int64 stop = Cajeta.currentTimeNanos() + deadline.toNanos();
+            int64 backoff = 100000;
+            while (this.tlsInflight.load() > 0) {
+                if (Cajeta.currentTimeNanos() >= stop) {
+                    return false;
+                }
+                Cajeta.fiberSleepNanos(backoff);
+                if (backoff < 10000000) {
+                    backoff = backoff * 2;
+                }
+            }
             return true;
         }
         return this.server.shutdown(deadline);

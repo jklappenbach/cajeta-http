@@ -1,0 +1,309 @@
+package dev.cajeta.http.test;
+
+import cajeta.lang.String;
+import cajeta.concurrent.Tasks;
+import cajeta.io.net.AsyncReader;
+import cajeta.io.net.AsyncWriter;
+import cajeta.io.net.ConnectionLimits;
+import cajeta.io.net.IpAddress;
+import cajeta.io.net.LoadShedPolicy;
+import cajeta.io.net.SocketAddress;
+import cajeta.io.net.TcpStream;
+import cajeta.io.net.tls.TlsStream;
+import cajeta.io.net.uri.Uri;
+import cajeta.time.Clock;
+import cajeta.time.Duration;
+import dev.cajeta.http.Bytes;
+import dev.cajeta.http.ClientResponse;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.client.HttpClient;
+import dev.cajeta.http.server.HttpServer;
+import dev.cajeta.http.server.HttpServerBuilder;
+import dev.cajeta.http.ws.WebSocket;
+import dev.cajeta.http.ws.WsMessage;
+import dev.cajeta.http.ws.WsUpgrade;
+
+/** A TLS server under serve(): h1 over TLS, hostile handshakes, admission, drain, and a wss upgrade. */
+public final class ServerTlsTests {
+    static EchoWsHandler ECHO = heap EchoWsHandler();
+    static int32 held = 0;
+    static boolean letGo = false;
+
+    public static void run(Check c) {
+        System.stdout.println("-- server tls: exchanges and hostile handshakes --");
+        ServerTlsTests.exchanges(c);
+        System.stdout.println("-- server tls: admission and shutdown --");
+        ServerTlsTests.admission(c);
+        ServerTlsTests.drain(c);
+        System.stdout.println("-- server tls: wss through a route --");
+        ServerTlsTests.wss(c);
+    }
+
+    static void handle(HttpRequest q, HttpResponse r) {
+        if (Bytes.equals(q.path(), "/slow")) {
+            Tasks.sleepMillis((int64) 400);
+            r.body("slow-done");
+            return;
+        }
+        if (Bytes.equals(q.path(), "/hold")) {
+            ServerTlsTests.held = ServerTlsTests.held + 1;
+            int32 waited = 0;
+            while (!ServerTlsTests.letGo && waited < 1000) {
+                Tasks.sleepMillis((int64) 10);
+                waited = waited + 1;
+            }
+            r.body("held");
+            return;
+        }
+        if (Bytes.equals(q.path(), "/hung")) {
+            Tasks.sleepMillis((int64) 1500);
+            r.body("hung-done");
+            return;
+        }
+        if (Bytes.equals(q.path(), "/ws")) {
+            WsUpgrade.accept(q, r, ServerTlsTests.ECHO, false);
+            return;
+        }
+        r.body(q.version().wireString());
+    }
+
+    static #HttpServer tlsServer(#ConnectionLimits limits) {
+        String cp #= ClientBuilderTests.certPem();
+        String kp #= ClientBuilderTests.keyPem();
+        int8[] cert #= cp.toBytes();
+        int8[] key #= kp.toBytes();
+        HttpServerBuilder b #= HttpServer.builder();
+        b.bind("127.0.0.1:0");
+        b.handler((HttpRequest q, HttpResponse r) -> ServerTlsTests.handle(q, r));
+        b.tls(cert, cp.byteLength(), key, kp.byteLength());
+        if (limits != null) {
+            b.connectionLimits(#limits);
+        }
+        return b.build();
+    }
+
+    static async int32 serve(HttpServer srv) {
+        srv.serve();
+        return 1;
+    }
+
+    static #TcpStream connect(int32 port) {
+        IpAddress ip #= IpAddress.loopbackV4();
+        SocketAddress a #= SocketAddress.of(#ip, port);
+        return TcpStream.connectAsync(#a);
+    }
+
+    // A TLS client with no ALPN offer, so the server speaks HTTP/1.1.
+    static #TlsStream tlsClient(int32 port) {
+        String cp #= ClientBuilderTests.certPem();
+        TcpStream sock #= ServerTlsTests.connect(port);
+        String host = "127.0.0.1";
+        int8[] hostBytes #= host.toBytes();
+        int8[] anchor #= cp.toBytes();
+        TlsStream tls #= TlsStream.client(#sock, hostBytes, host.byteLength(), anchor, cp.byteLength());
+        tls.handshake();
+        return #tls;
+    }
+
+    static async int32 h1OverTls(int32 port) {
+        TlsStream tls #= ServerTlsTests.tlsClient(port);
+        String req = "GET /proto HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n";
+        int8[] rb #= req.toBytes();
+        tls.writeAllAsync(rb, (int64) 0, (int64) req.byteLength());
+        int8[] buf = heap int8[4096];
+        int32 have = 0;
+        try {
+            while (have < 4096) {
+                int64 n = tls.readAsync(buf, (int64) have, (int64) (4096 - have));
+                if (n <= (int64) 0) {
+                    break;
+                }
+                have = have + (int32) n;
+            }
+        } catch (Exception e) {
+        }
+        tls.close();
+        String got #= Bytes.toString(buf[0:have]);
+        return got.startsWith("HTTP/1.1 200") && got.endsWith("HTTP/1.1") ? 1 : -1;
+    }
+
+    static async int32 httpsGet(int32 port, String path, String want) {
+        String cp #= ClientBuilderTests.certPem();
+        int8[] anchor #= cp.toBytes();
+        HttpClient client #= HttpClient.builder().trustAnchor(anchor, cp.byteLength()).build();
+        client.exchangeTimeout(15000);
+        try {
+            ClientResponse resp #= client.get("https://127.0.0.1:" + port + path);
+            String body #= resp.bodyString();
+            return resp.status() == 200 && body.equals(want) ? 1 : -1;
+        } catch (Exception e) {
+            return -2;
+        }
+    }
+
+    // Plaintext HTTP at the TLS port: any reply is a TLS alert, never HTTP.
+    static async int32 plaintextProbe(int32 port) {
+        TcpStream s #= ServerTlsTests.connect(port);
+        String req = "GET / HTTP/1.1\r\nhost: t\r\n\r\n";
+        int8[] rb #= req.toBytes();
+        try {
+            s.writeAllAsync(rb, (int64) 0, (int64) req.byteLength());
+        } catch (Exception e) {
+        }
+        int8[] buf = heap int8[512];
+        boolean sawHttp = false;
+        try {
+            while (true) {
+                int64 n = s.readAsync(buf, (int64) 0, (int64) 512);
+                if (n <= (int64) 0) {
+                    break;
+                }
+                if (buf[0] == (int8) 72) {
+                    sawHttp = true;
+                }
+            }
+        } catch (Exception e) {
+        }
+        s.close();
+        return sawHttp ? -1 : 1;
+    }
+
+    static async int32 garbageProbe(int32 port) {
+        TcpStream s #= ServerTlsTests.connect(port);
+        int8[] junk = heap int8[16];
+        int32 i = 0;
+        while (i < 16) {
+            junk[i] = (int8) -91;
+            i = i + 1;
+        }
+        try {
+            s.writeAllAsync(junk, (int64) 0, (int64) 16);
+        } catch (Exception e) {
+        }
+        s.close();
+        return 1;
+    }
+
+    static void exchanges(Check c) {
+        scope {
+            HttpServer srv #= ServerTlsTests.tlsServer(null);
+            int32 port = srv.tlsListener.boundPort();
+            Task<int32> sv = spawn serve(srv);
+            Task<int32> h1 = spawn h1OverTls(port);
+            c.eqInt((int64) await h1, 1, "a TLS client without ALPN is served HTTP/1.1");
+            Task<int32> p = spawn plaintextProbe(port);
+            c.eqInt((int64) await p, 1, "plaintext at the TLS port fails cleanly, with no HTTP back");
+            Task<int32> after = spawn httpsGet(port, "/proto", "HTTP/2");
+            c.eqInt((int64) await after, 1, "the next TLS peer is still served");
+            int32 i = 0;
+            while (i < 3) {
+                Task<int32> g = spawn garbageProbe(port);
+                await g;
+                i = i + 1;
+            }
+            Task<int32> clean = spawn httpsGet(port, "/proto", "HTTP/2");
+            c.eqInt((int64) await clean, 1, "three garbage handshakes in a row, then a clean exchange");
+            boolean drained #= srv.shutdown(Duration.ofSeconds(2));
+            c.that(drained, "the TLS server drained clean");
+            c.eqInt((int64) await sv, 1, "its accept loop exited");
+        }
+    }
+
+    // A connection the server sheds: whatever the handshake does, no HTTP comes back.
+    static async int32 shedProbe(int32 port) {
+        try {
+            TlsStream tls #= ServerTlsTests.tlsClient(port);
+            String req = "GET /proto HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n";
+            int8[] rb #= req.toBytes();
+            tls.writeAllAsync(rb, (int64) 0, (int64) req.byteLength());
+            int8[] buf = heap int8[64];
+            int64 n = tls.readAsync(buf, (int64) 0, (int64) 64);
+            tls.close();
+            if (n > (int64) 0 && buf[0] == (int8) 72) {
+                System.stdout.println("    shed probe was served");
+                return -1;
+            }
+            return 1;
+        } catch (Exception e) {
+            return 1;
+        }
+    }
+
+    static void admission(Check c) {
+        scope {
+            ConnectionLimits cl = heap ConnectionLimits(1, 16, 65536, 65536, LoadShedPolicy.REFUSE);
+            HttpServer srv #= ServerTlsTests.tlsServer(#cl);
+            int32 port = srv.tlsListener.boundPort();
+            Task<int32> sv = spawn serve(srv);
+            int32 before = ServerTlsTests.held;
+            ServerTlsTests.letGo = false;
+            Task<int32> a = spawn httpsGet(port, "/hold", "held");
+            int32 waited = 0;
+            while (ServerTlsTests.held == before && waited < 1000) {
+                Tasks.sleepMillis((int64) 10);
+                waited = waited + 1;
+            }
+            Task<int32> probe = spawn shedProbe(port);
+            c.eqInt((int64) await probe, 1, "a TLS server with one slot sheds the second connection");
+            ServerTlsTests.letGo = true;
+            c.eqInt((int64) await a, 1, "the admitted TLS exchange completes");
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+    }
+
+    static void drain(Check c) {
+        scope {
+            HttpServer srv #= ServerTlsTests.tlsServer(null);
+            int32 port = srv.tlsListener.boundPort();
+            Task<int32> sv = spawn serve(srv);
+            Task<int32> a = spawn httpsGet(port, "/slow", "slow-done");
+            Tasks.sleepMillis((int64) 150);
+            boolean drained #= srv.shutdown(Duration.ofSeconds(2));
+            c.that(drained, "TLS shutdown mid-exchange waits for it and reports drained");
+            c.eqInt((int64) await a, 1, "the in-flight TLS exchange completes");
+            await sv;
+        }
+        scope {
+            HttpServer srv #= ServerTlsTests.tlsServer(null);
+            int32 port = srv.tlsListener.boundPort();
+            Task<int32> sv = spawn serve(srv);
+            Task<int32> a = spawn httpsGet(port, "/hung", "hung-done");
+            Tasks.sleepMillis((int64) 150);
+            int64 t0 = Clock.now().toEpochMilli();
+            boolean drained #= srv.shutdown(Duration.ofMillis((int64) 300));
+            int64 elapsed = Clock.now().toEpochMilli() - t0;
+            c.that(!drained && elapsed >= (int64) 300 && elapsed < (int64) 1200,
+                "a hung TLS exchange makes shutdown report false at its deadline");
+            c.eqInt((int64) await a, 1, "the abandoned TLS exchange still completes");
+            await sv;
+        }
+    }
+
+    static async int32 wssEcho(int32 port) {
+        TlsStream tls #= ServerTlsTests.tlsClient(port);
+        AsyncReader reader = heap AsyncReader(tls);
+        AsyncWriter writer = heap AsyncWriter(tls);
+        Uri uri #= Uri.builder().scheme("wss").host("127.0.0.1").port(port).path("/ws").build();
+        WebSocket ws #= WsUpgrade.connectClient(reader, writer, uri, 424242);
+        ws.send("wss-ping");
+        WsMessage back #= ws.receive();
+        String text #= back.text();
+        ws.close(1000, "done");
+        tls.close();
+        return back.isText() && text.equals("wss-ping") ? 1 : -1;
+    }
+
+    static void wss(Check c) {
+        scope {
+            HttpServer srv #= ServerTlsTests.tlsServer(null);
+            int32 port = srv.tlsListener.boundPort();
+            Task<int32> sv = spawn serve(srv);
+            Task<int32> t = spawn wssEcho(port);
+            c.eqInt((int64) await t, 1, "a route upgrades a TLS connection to wss and echoes over it");
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+    }
+}
