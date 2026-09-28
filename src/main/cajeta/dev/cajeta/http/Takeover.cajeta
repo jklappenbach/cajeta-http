@@ -1,0 +1,16 @@
+package dev.cajeta.http;
+
+import cajeta.io.net.AsyncReader;
+import cajeta.io.net.AsyncWriter;
+
+/**
+ * A protocol that takes over a connection after a 101 Switching Protocols
+ * response, such as a WebSocket. The HTTP connection ends when `run` returns.
+ */
+public abstract class Takeover {
+    /**
+     * Runs the new protocol until it ends. `reader` already holds any bytes the
+     * peer sent past the request that asked for the switch.
+     */
+    public abstract void run(AsyncReader reader, AsyncWriter writer);
+}

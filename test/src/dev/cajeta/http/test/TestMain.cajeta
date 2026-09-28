@@ -18,6 +18,10 @@ public final class TestMain {
         if (sel.want("ViewEditTests")) { ViewEditTests.run(c); }
         if (sel.want("StatusCatalogueTests")) { StatusCatalogueTests.run(c); }
         if (sel.want("RouterSelectTests")) { RouterSelectTests.run(c); }
+        if (sel.want("WsConnectTests")) { WsConnectTests.run(c); }
+        if (sel.want("WsHandlerTests")) { WsHandlerTests.run(c); }
+        if (sel.want("WsPerMessageDeflateTests")) { WsPerMessageDeflateTests.run(c); }
+        if (sel.want("WsServerUpgradeTests")) { WsServerUpgradeTests.run(c); }
         if (sel.want("MiddlewareTests")) { MiddlewareTests.run(c); }
         if (sel.want("MiddlewareBundleTests")) { MiddlewareBundleTests.run(c); }
         if (sel.want("MiddlewareTimeoutCorsTests")) { MiddlewareTimeoutCorsTests.run(c); }

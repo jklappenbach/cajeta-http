@@ -12,9 +12,7 @@ import cajeta.io.net.tls.TlsStream;
 import cajeta.io.net.uri.Uri;
 import cajeta.concurrent.Lock;
 import cajeta.concurrent.LockGuard;
-import dev.cajeta.http.HttpRequest;
-import dev.cajeta.http.HttpResponse;
-import dev.cajeta.http.h1.HttpSerializer;
+import dev.cajeta.http.ClientResponse;
 
 /**
  * A live **RFC 6455 WebSocket connection** — plan item **NET-10.6**, the
@@ -308,16 +306,11 @@ public class WebSocket {
         ws.writer = ws.heldWriter;
 
         // Client opening handshake over the owned transport.
-        String key #= WsClientHandshake.placeholderKey(WebSocket.seedOf(url));
-        HttpRequest request #= WsClientHandshake.buildRequest(uri, key);
-        int8[] bytes #= HttpSerializer.request(request);
-        ws.writer.writeAll(bytes, 0, bytes.count());
-        ws.writer.flush();
-        HttpResponse response #= WsUpgrade.readResponse(ws.reader);
-        WsClientHandshake.requireAccept(response, key);
-        String sp #= response.getHeaders().get("Sec-WebSocket-Protocol");
-        if (sp != null) {
-            ws.subprotocol #= sp.substring(0, sp.byteLength());
+        ClientResponse response = heap ClientResponse();
+        String key #= WsUpgrade.handshakeClient(ws.reader, ws.writer, uri,
+                                                WebSocket.seedOf(url), false, response);
+        if (response.hasHeader("Sec-WebSocket-Protocol")) {
+            ws.subprotocol #= response.headerString("Sec-WebSocket-Protocol");
         }
         return #ws;
     }

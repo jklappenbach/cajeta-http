@@ -3,116 +3,94 @@ package dev.cajeta.http.ws;
 import cajeta.lang.String;
 import cajeta.io.net.AsyncReader;
 import cajeta.io.net.AsyncWriter;
+import cajeta.io.net.ByteBuffer;
 import cajeta.io.net.uri.Uri;
+import cajeta.error.Exception;
+import dev.cajeta.http.ClientResponse;
+import dev.cajeta.http.HeadScanner;
 import dev.cajeta.http.HttpRequest;
 import dev.cajeta.http.HttpResponse;
-import dev.cajeta.http.h1.HttpParser;
-import dev.cajeta.http.h1.HttpSerializer;
-import cajeta.error.Exception;
-import dev.cajeta.http.ws.WebSocket;
-import dev.cajeta.http.ws.WsServerHandshake;
-import dev.cajeta.http.ws.WsClientHandshake;
+import dev.cajeta.http.Version;
+import dev.cajeta.http.h1.HttpParserLimits;
 
 /**
- * The **WebSocket entry points** (RFC 6455 §4) — plan item **NET-10.7**: the
- * socket-facing glue that runs the opening handshake over a buffered
- * transport and hands back a live [`WebSocket`](WebSocket.cajeta), for both
- * roles:
- *
- *   - [`acceptServer`](#acceptServer) — the **server** side: read the client
- *     Upgrade request, validate + answer it with `101 Switching Protocols`
- *     ([`WsServerHandshake`](WsServerHandshake.cajeta), NET-10.2), then switch
- *     the connection to server-role WS framing
- *     ([`WebSocket.forServer`](WebSocket.cajeta#forServer)). This is the
- *     `HttpServer route -> upgrade(request) -> WebSocket` the plan names.
- *   - [`connectClient`](#connectClient) — the **client** side: send the
- *     `Upgrade` request with a fresh `Sec-WebSocket-Key`
- *     ([`WsClientHandshake`](WsClientHandshake.cajeta), NET-10.1), read +
- *     validate the `101`, then switch to client-role framing
- *     ([`WebSocket.forClient`](WebSocket.cajeta#forClient)).
- *
- * ## Transport + ownership
- *
- * Both forms operate over an already-connected
- * [`AsyncReader`](../AsyncReader.cajeta) / [`AsyncWriter`](../AsyncWriter.cajeta)
- * pair — plaintext (`ws://`, over a [`TcpStream`](../TcpStream.cajeta)) or TLS
- * (`wss://`, over a [`TlsStream`](../tls/TlsStream.cajeta)) — through the
- * shared [`ByteChannel`](../ByteChannel.cajeta) seam, so the upgrade is
- * scheme-agnostic. The reader/writer are **borrowed**: the caller that opened
- * the socket owns it and the buffered halves, and keeps them alive for the
- * returned [`WebSocket`](WebSocket.cajeta)'s lifetime (which borrows them in
- * turn). The handful of handshake bytes that arrive *after* the head (an
- * eager peer's first frame) are pushed back into the reader's staging ring
- * ([`AsyncReader.stage`](../AsyncReader.cajeta#stage)) so the
- * [`WebSocket`](WebSocket.cajeta) frame reader sees them.
- *
- * A scheme-aware `WebSocket.connect(wss-uri)` that *also* opens the socket is
- * a thin convenience over [`connectClient`](#connectClient); this item ships
- * the handshake-over-transport core both client and server share.
+ * Switches a connection to WebSocket. A handler on `HttpServer` calls
+ * [`accept`](#accept), which answers the upgrade and hands the connection to
+ * the `WebSocketHandler` once the 101 is sent. The raw-stream forms
+ * (`acceptServer`, `serve`, `connectClient`) run the same handshake over a
+ * reader and writer the caller already holds.
  */
-public class WsUpgrade {
+public final class WsUpgrade {
     /**
-     * **Server upgrade.** Read the client's HTTP/1.1 Upgrade request off
-     * `reader`, validate + build the `101` response
-     * ([`WsServerHandshake.accept`](WsServerHandshake.cajeta#accept) — throws
-     * [`HandshakeRejectedException`](HandshakeRejectedException.cajeta) on a
-     * malformed upgrade), write it through `writer`, and return a server-role
-     * [`WebSocket`](WebSocket.cajeta) over the same borrowed transport.
+     * Answers an upgrade request on `r`. On success the connection switches to
+     * `handler` after the 101, and `handler` must outlive it. Returns false after
+     * writing the 400 or 426 rejection when `q` is not a valid upgrade.
      */
+    public static boolean accept(HttpRequest q, HttpResponse r, WebSocketHandler handler,
+                                 boolean allowCompression) {
+        try {
+            WsServerHandshake.accept(q, r);
+        } catch (HandshakeRejectedException e) {
+            WsServerHandshake.reject(e, r);
+            return false;
+        }
+        PmdParams params #= WsUpgrade.serverParams(q, allowCompression);
+        if (params.enabled) {
+            r.header("Sec-WebSocket-Extensions", params.responseHeader);
+        }
+        r.upgrade(heap WsTakeover(handler, #params));
+        return true;
+    }
+
+    /** Reads an upgrade request from `reader` and answers it on `writer`. */
     public static #WebSocket acceptServer(AsyncReader reader, AsyncWriter writer) {
         return WsUpgrade.acceptServer(reader, writer, false);
     }
 
-    /**
-     * Server upgrade with optional `permessage-deflate` (RFC 7692) negotiation.
-     * When `allowCompression` is set, the client's `Sec-WebSocket-Extensions`
-     * offer is negotiated ([`WsCompression`](WsCompression.cajeta)); if
-     * accepted, the agreed parameters are echoed in the `101` and the returned
-     * socket compresses. When off (the default overload), plain frames only.
-     */
+    /** As `acceptServer`, negotiating `permessage-deflate` when allowed. */
     public static #WebSocket acceptServer(AsyncReader reader, AsyncWriter writer,
                                           boolean allowCompression) {
-        HttpRequest request #= WsUpgrade.readRequest(reader);
-        HttpResponse response #= WsServerHandshake.accept(request);
-        PmdParams params #= WsUpgrade.serverParams(request, allowCompression);
+        HttpParserLimits limits = heap HttpParserLimits();
+        ByteBuffer head #= WsUpgrade.readHead(reader, limits);
+        HttpRequest q = heap HttpRequest(limits.maxHeaderCount);
+        HeadScanner.parseRequest(head.array(), 0, head.readable(), q);
+        ByteBuffer out = heap ByteBuffer(8192);
+        HttpResponse r = heap HttpResponse(out, null, 4096, 64);
+        WsServerHandshake.accept(q, r);
+        PmdParams params #= WsUpgrade.serverParams(q, allowCompression);
         if (params.enabled) {
-            response.setHeader("Sec-WebSocket-Extensions", params.responseHeader);
+            r.header("Sec-WebSocket-Extensions", params.responseHeader);
         }
-        int8[] bytes #= HttpSerializer.response(response);
-        writer.writeAll(bytes, 0, bytes.count());
+        r.finish(true, Version.HTTP_1_1, true);
+        writer.writeAll(out.array(), out.readPosition(), out.readable());
         writer.flush();
         WebSocket ws #= WebSocket.forServer(reader, writer);
         ws.enableCompression(params);
         return #ws;
     }
 
-    static #PmdParams serverParams(HttpRequest request, boolean allow) {
-        if (!allow) {
+    static #PmdParams serverParams(HttpRequest q, boolean allow) {
+        if (!allow || !q.hasHeader("Sec-WebSocket-Extensions")) {
             return heap PmdParams();
         }
-        String offered #= request.getHeaders().get("Sec-WebSocket-Extensions");
+        String offered #= q.headerString("Sec-WebSocket-Extensions");
         return WsCompression.negotiateServer(offered);
     }
 
-    /**
-     * **Server handler loop** (plan 4.2b): upgrade the connection, then drive a
-     * [`WebSocketHandler`](WebSocketHandler.cajeta) over a
-     * [`WebSocketConnection`](WebSocketConnection.cajeta) — `onConnect`, then
-     * `onMessage` per inbound message (control frames handled by the library),
-     * then `onClose` with the final [`WsCloseCode`](WsCloseCode.cajeta). A
-     * callback that throws fails the connection with `1011` (a protocol fault
-     * with `1002`); the loop is fault-isolated so one bad connection never
-     * escapes to the acceptor.
-     */
-    public static void serve(AsyncReader reader, AsyncWriter writer,
-                             WebSocketHandler handler) {
+    /** Reads an upgrade request, answers it, and runs `handler` until the close. */
+    public static void serve(AsyncReader reader, AsyncWriter writer, WebSocketHandler handler) {
         WsUpgrade.serve(reader, writer, handler, false);
     }
 
-    /** [`serve`](#serve) with optional `permessage-deflate` negotiation. */
-    public static void serve(AsyncReader reader, AsyncWriter writer,
-                             WebSocketHandler handler, boolean allowCompression) {
+    /** As `serve`, negotiating `permessage-deflate` when allowed. */
+    public static void serve(AsyncReader reader, AsyncWriter writer, WebSocketHandler handler,
+                             boolean allowCompression) {
         WebSocket ws #= WsUpgrade.acceptServer(reader, writer, allowCompression);
+        WsUpgrade.run(#ws, handler);
+    }
+
+    /** Runs `handler` over an open socket until the close, then reports it. */
+    public static void run(#WebSocket ws, WebSocketHandler handler) {
         WebSocketConnection conn = heap WebSocketConnection(ws);
         int32 code = WsCloseCode.NORMAL;
         try {
@@ -145,107 +123,73 @@ public class WsUpgrade {
         }
     }
 
-    /**
-     * **Client upgrade.** Send the `Upgrade` request for `uri` (key derived
-     * from `keySeed` — see [`WsClientHandshake.placeholderKey`](WsClientHandshake.cajeta#placeholderKey)'s
-     * randomness scope note) through `writer`, read the server's response off
-     * `reader`, validate the `Sec-WebSocket-Accept`
-     * ([`WsClientHandshake.requireAccept`](WsClientHandshake.cajeta#requireAccept)
-     * — throws on a bad reply), and return a client-role
-     * [`WebSocket`](WebSocket.cajeta) over the same borrowed transport.
-     */
+    /** The client handshake for `uri` over a reader and writer the caller holds. */
     public static #WebSocket connectClient(AsyncReader reader, AsyncWriter writer,
                                            Uri uri, int32 keySeed) {
         return WsUpgrade.connectClient(reader, writer, uri, keySeed, false);
     }
 
-    /**
-     * Client upgrade with optional `permessage-deflate` (RFC 7692) offer. When
-     * `offerCompression` is set, the request advertises the extension and the
-     * server's reply is interpreted ([`WsCompression`](WsCompression.cajeta));
-     * if accepted, the returned socket compresses. When off (the default
-     * overload), plain frames only.
-     */
+    /** As `connectClient`, offering `permessage-deflate` when asked. */
     public static #WebSocket connectClient(AsyncReader reader, AsyncWriter writer,
                                            Uri uri, int32 keySeed,
                                            boolean offerCompression) {
-        String key #= WsClientHandshake.placeholderKey(keySeed);
-        HttpRequest request #= WsClientHandshake.buildRequest(uri, key);
-        if (offerCompression) {
-            String offer #= WsCompression.clientOffer();
-            request.setHeader("Sec-WebSocket-Extensions", offer);
-        }
-        int8[] bytes #= HttpSerializer.request(request);
-        writer.writeAll(bytes, 0, bytes.count());
-        writer.flush();
-        HttpResponse response #= WsUpgrade.readResponse(reader);
-        WsClientHandshake.requireAccept(response, key);
+        ClientResponse response = heap ClientResponse();
+        String key #= WsUpgrade.handshakeClient(reader, writer, uri, keySeed,
+                                                offerCompression, response);
         PmdParams params #= WsUpgrade.clientParams(response, offerCompression);
         WebSocket ws #= WebSocket.forClient(reader, writer);
         ws.enableCompression(params);
         return #ws;
     }
 
-    static #PmdParams clientParams(HttpResponse response, boolean offered) {
-        if (!offered) {
+    /**
+     * Sends the upgrade request and reads the 101 into `response`, throwing
+     * `HandshakeRejectedException` when it does not complete. Returns the key.
+     */
+    public static #String handshakeClient(AsyncReader reader, AsyncWriter writer, Uri uri,
+                                          int32 keySeed, boolean offerCompression,
+                                          ClientResponse response) {
+        String key #= WsClientHandshake.placeholderKey(keySeed);
+        String offer = "";
+        if (offerCompression) {
+            offer #= WsCompression.clientOffer();
+        }
+        String head #= WsClientHandshake.requestHead(uri, key, offer);
+        int8[] bytes #= head.toBytes();
+        writer.writeAll(bytes, 0, head.byteLength());
+        writer.flush();
+        HttpParserLimits limits = heap HttpParserLimits();
+        ByteBuffer buf #= WsUpgrade.readHead(reader, limits);
+        HeadScanner.parseResponse(buf.array(), 0, buf.readable(), response);
+        response.adopt(#buf);
+        WsClientHandshake.requireAccept(response, key);
+        return #key;
+    }
+
+    static #PmdParams clientParams(ClientResponse response, boolean offered) {
+        if (!offered || !response.hasHeader("Sec-WebSocket-Extensions")) {
             return heap PmdParams();
         }
-        String ext #= response.getHeaders().get("Sec-WebSocket-Extensions");
+        String ext #= response.headerString("Sec-WebSocket-Extensions");
         return WsCompression.confirmClient(ext);
     }
 
-    // ----- head readers (byte-at-a-time; re-stage post-head bytes) ----------
-
     /**
-     * Read one HTTP/1.1 **request** head off `reader` (a byte at a time until
-     * the blank-line terminator), detaching it from the short-lived parser.
-     * Any bytes past the head — the peer's first WS frame on an eager client —
-     * are re-staged into `reader` so the [`WebSocket`](WebSocket.cajeta) frame
-     * reader picks them up. (A WS upgrade request carries no body.)
+     * Reads exactly one message head, one byte at a time so nothing past its
+     * blank line is taken from `reader`. Throws on a head longer than the limits.
      */
-    static #HttpRequest readRequest(AsyncReader reader) {
-        HttpParser parser #= HttpParser.forRequest();
+    static #ByteBuffer readHead(AsyncReader reader, HttpParserLimits limits) {
+        HeadScanner scanner = heap HeadScanner(limits);
+        ByteBuffer buf = heap ByteBuffer(16384);
         int8[] one = heap int8[1];
-        while (!parser.isComplete()) {
-            int32 n = reader.read(one, 0, 1);
-            if (n == 0) {
-                parser.endInput();      // truncated head -> UnexpectedEof
-                break;
+        int32 h = -1;
+        while (h < 0) {
+            if (reader.read(one, 0, 1) == 0) {
+                throw heap HandshakeRejectedException("connection closed during the handshake", 400);
             }
-            parser.feed(one, 1);
+            buf.put(one[0]);
+            h = scanner.scan(buf);
         }
-        HttpRequest request #= parser.takeRequest();
-        int8[] leftover #= parser.leftover();
-        int32 llen = parser.leftoverLength();
-        if (llen > 0) {
-            reader.stage(leftover, llen);
-        }
-        return #request;
-    }
-
-    /**
-     * Read one HTTP/1.1 **response** head off `reader` (the
-     * [`readRequest`](#readRequest) twin), detaching it and re-staging any
-     * post-head bytes (the server's first frame) for the
-     * [`WebSocket`](WebSocket.cajeta).
-     */
-    static #HttpResponse readResponse(AsyncReader reader) {
-        HttpParser parser #= HttpParser.forResponse();
-        int8[] one = heap int8[1];
-        while (!parser.isComplete()) {
-            int32 n = reader.read(one, 0, 1);
-            if (n == 0) {
-                parser.endInput();
-                break;
-            }
-            parser.feed(one, 1);
-        }
-        HttpResponse response #= parser.takeResponse();
-        int8[] leftover #= parser.leftover();
-        int32 llen = parser.leftoverLength();
-        if (llen > 0) {
-            reader.stage(leftover, llen);
-        }
-        return #response;
+        return #buf;
     }
 }

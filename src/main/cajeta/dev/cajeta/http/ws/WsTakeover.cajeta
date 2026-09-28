@@ -1,0 +1,26 @@
+package dev.cajeta.http.ws;
+
+import cajeta.io.net.AsyncReader;
+import cajeta.io.net.AsyncWriter;
+import dev.cajeta.http.Takeover;
+
+/**
+ * The takeover `WsUpgrade.accept` registers: once the 101 is sent, it runs the
+ * handler over the switched connection. The handler is borrowed from the
+ * application, which keeps it for the server's life.
+ */
+public final class WsTakeover extends Takeover {
+    WebSocketHandler handler;
+    PmdParams params;
+
+    public WsTakeover(WebSocketHandler handler, #PmdParams params) {
+        this.handler #= handler;
+        this.params #= params;
+    }
+
+    public void run(AsyncReader reader, AsyncWriter writer) {
+        WebSocket ws #= WebSocket.forServer(reader, writer);
+        ws.enableCompression(this.params);
+        WsUpgrade.run(#ws, this.handler);
+    }
+}

@@ -1,0 +1,202 @@
+package dev.cajeta.http.test;
+
+import cajeta.lang.String;
+import cajeta.io.net.ByteBuffer;
+import cajeta.io.net.Server;
+import cajeta.io.net.TcpStream;
+import cajeta.concurrent.Tasks;
+import cajeta.io.net.AsyncReader;
+import cajeta.io.net.AsyncWriter;
+import cajeta.io.net.uri.Uri;
+import dev.cajeta.http.Bytes;
+import dev.cajeta.http.HeadScanner;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.h1.HttpParserLimits;
+import dev.cajeta.http.server.HttpServer;
+import dev.cajeta.http.server.HttpServerBuilder;
+import dev.cajeta.http.ws.HandshakeRejectedException;
+import dev.cajeta.http.ws.WebSocket;
+import dev.cajeta.http.ws.WebSocketConnection;
+import dev.cajeta.http.ws.WebSocketHandler;
+import dev.cajeta.http.ws.WsMessage;
+import dev.cajeta.http.ws.WsServerHandshake;
+import dev.cajeta.http.ws.WsUpgrade;
+
+/** Echoes every text message and counts closes. */
+final class EchoWsHandler implements WebSocketHandler {
+    public int32 closes;
+
+    public EchoWsHandler() {
+        this.closes = 0;
+    }
+
+    public void onConnect(WebSocketConnection conn) {
+    }
+
+    public void onMessage(WebSocketConnection conn, WsMessage message) {
+        String t #= message.text();
+        conn.send(t);
+    }
+
+    public void onClose(WebSocketConnection conn, int32 code) {
+        this.closes = this.closes + 1;
+    }
+}
+
+/**
+ * The WebSocket handshake over request views, and an upgrade answered by an
+ * `HttpServer` handler that hands the connection to a `WebSocketHandler`.
+ */
+public final class WsServerUpgradeTests {
+    static EchoWsHandler ECHO = heap EchoWsHandler();
+
+    static void handle(HttpRequest q, HttpResponse r) {
+        if (Bytes.equals(q.path(), "/ws")) {
+            WsUpgrade.accept(q, r, WsServerUpgradeTests.ECHO, false);
+            return;
+        }
+        r.body("plain");
+    }
+
+    static #HttpServer server() {
+        HttpServerBuilder b #= HttpServer.builder();
+        b.bind("127.0.0.1:0");
+        b.handler((HttpRequest q, HttpResponse r) -> WsServerUpgradeTests.handle(q, r));
+        return b.build();
+    }
+
+    public static async int32 acceptLoop(Server core) {
+        int32 n = 0;
+        boolean going = true;
+        while (going) {
+            TcpStream conn #= core.acceptNext();
+            if (conn == null) {
+                going = false;
+            } else {
+                core.dispatch(#conn);
+                n = n + 1;
+            }
+        }
+        return n;
+    }
+
+    public static async int32 echoTwice(int32 port) {
+        WebSocket ws #= WebSocket.connect("ws://127.0.0.1:" + port + "/ws");
+        ws.send("first");
+        WsMessage a #= ws.receive();
+        String ta #= a.text();
+        ws.send("second");
+        WsMessage b #= ws.receive();
+        String tb #= b.text();
+        ws.close(1000, "done");
+        if (ta.equals("first") && tb.equals("second")) {
+            return 1;
+        }
+        return 0;
+    }
+
+    // The RFC 6455 §1.3 sample key and the accept it must produce.
+    static void acceptKeyFromRequestView(Check c) {
+        String text = "GET /chat HTTP/1.1\r\nHost: server.example.com\r\nUpgrade: websocket\r\n"
+            + "Connection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+            + "Sec-WebSocket-Version: 13\r\n\r\n";
+        int8[] a #= text.toBytes();
+        HttpParserLimits limits = heap HttpParserLimits();
+        HttpRequest q = heap HttpRequest(limits.maxHeaderCount);
+        HeadScanner.parseRequest(a, 0, text.byteLength(), q);
+        c.that(WsServerHandshake.isUpgradeRequest(q), "a well-formed upgrade is recognised");
+        ByteBuffer out = heap ByteBuffer(8192);
+        HttpResponse r = heap HttpResponse(out, null, 4096, 64);
+        WsServerHandshake.accept(q, r);
+        c.eqInt((int64) r.status(), 101, "accept answers 101");
+        c.that(Bytes.equals(r.header("Sec-WebSocket-Accept"), "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="),
+               "the accept key matches RFC 6455's example");
+        c.that(Bytes.equals(r.header("Upgrade"), "websocket"), "the 101 names websocket");
+    }
+
+    static int32 rejectionStatus(String text) {
+        int8[] a #= text.toBytes();
+        HttpParserLimits limits = heap HttpParserLimits();
+        HttpRequest q = heap HttpRequest(limits.maxHeaderCount);
+        HeadScanner.parseRequest(a, 0, text.byteLength(), q);
+        ByteBuffer out = heap ByteBuffer(8192);
+        HttpResponse r = heap HttpResponse(out, null, 4096, 64);
+        boolean ok = WsUpgrade.accept(q, r, WsServerUpgradeTests.ECHO, false);
+        if (ok || r.upgrades()) {
+            return -1;
+        }
+        if (r.status() == 426 && !Bytes.equals(r.header("Sec-WebSocket-Version"), "13")) {
+            return -2;
+        }
+        return r.status();
+    }
+
+    static void rejections(Check c) {
+        c.eqInt((int64) WsServerUpgradeTests.rejectionStatus(
+            "GET /ws HTTP/1.1\r\nHost: h\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+            + "Sec-WebSocket-Version: 13\r\n\r\n"), 400, "a missing key is a 400");
+        c.eqInt((int64) WsServerUpgradeTests.rejectionStatus(
+            "GET /ws HTTP/1.1\r\nHost: h\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+            + "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 12\r\n\r\n"),
+            426, "version 12 is a 426 naming version 13");
+        c.eqInt((int64) WsServerUpgradeTests.rejectionStatus(
+            "POST /ws HTTP/1.1\r\nHost: h\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+            + "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"),
+            400, "a POST is a 400");
+    }
+
+    static void upgradeThroughTheServer(Check c) {
+        scope {
+            HttpServer srv #= WsServerUpgradeTests.server();
+            Server core = srv.server;
+            int32 port = core.listener.boundPort();
+            int32 closesBefore = WsServerUpgradeTests.ECHO.closes;
+            Task<int32> s1 = spawn acceptLoop(core);
+            Task<int32> t1 = spawn echoTwice(port);
+            c.eqInt((int64) await t1, 1, "a handler upgrade echoes on the switched connection");
+            String plain #= Loopback.roundTrip(port,
+                "GET /other HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n");
+            c.that(plain.contains("plain"), "other paths stay plain HTTP on the same server");
+            core.listener.close();
+            await s1;
+            int32 waited = 0;
+            while (WsServerUpgradeTests.ECHO.closes == closesBefore && waited < 200) {
+                Tasks.sleepMillis(10);
+                waited = waited + 1;
+            }
+            c.that(WsServerUpgradeTests.ECHO.closes > closesBefore,
+                   "the handler saw the close");
+        }
+    }
+
+    // A 101 whose accept key does not match the sent key fails the client handshake.
+    static void clientRejectsWrongAccept(Check c) {
+        String reply = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
+            + "Connection: Upgrade\r\nSec-WebSocket-Accept: bm90IHRoZSBrZXk=\r\n\r\n";
+        int8[] rb #= reply.toBytes();
+        MemChannel rin = heap MemChannel();
+        AsyncReader reader = heap AsyncReader(rin);
+        reader.stage(rb, reply.byteLength());
+        reader.markEof();
+        MemChannel rout = heap MemChannel();
+        AsyncWriter writer = heap AsyncWriter(rout);
+        Uri uri #= Uri.builder().scheme("ws").host("127.0.0.1").port(80).path("/").build();
+        boolean threw = false;
+        try {
+            WebSocket ws #= WsUpgrade.connectClient(reader, writer, uri, 7);
+        } catch (HandshakeRejectedException e) {
+            threw = true;
+        }
+        c.that(threw, "a 101 with the wrong accept key fails the client handshake");
+    }
+
+    public static void run(Check c) {
+        System.stdout.println("-- ws server: handshake over request views --");
+        WsServerUpgradeTests.acceptKeyFromRequestView(c);
+        WsServerUpgradeTests.rejections(c);
+        WsServerUpgradeTests.clientRejectsWrongAccept(c);
+        System.stdout.println("-- ws server: upgrade through HttpServer --");
+        WsServerUpgradeTests.upgradeThroughTheServer(c);
+    }
+}

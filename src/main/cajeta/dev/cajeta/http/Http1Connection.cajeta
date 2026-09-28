@@ -2,6 +2,8 @@ package dev.cajeta.http;
 
 import cajeta.lang.String;
 import cajeta.lang.Slice;
+import cajeta.io.net.AsyncReader;
+import cajeta.io.net.AsyncWriter;
 import cajeta.io.net.ByteBuffer;
 import cajeta.io.net.ByteChannel;
 import cajeta.io.net.TimedOutException;
@@ -303,6 +305,19 @@ public final class Http1Connection {
         }
     }
 
+    // Runs the response's takeover over this channel, bytes already read first.
+    void switchProtocols() {
+        Takeover t #= this.res.takeUpgrade();
+        int32 cap = this.in.readable() > 8192 ? this.in.readable() : 8192;
+        AsyncReader reader = heap AsyncReader(this.ch, cap);
+        if (this.in.readable() > 0) {
+            reader.stage(this.in.array(), this.in.readable());
+            this.in.advanceRead(this.in.readable());
+        }
+        AsyncWriter writer = heap AsyncWriter(this.ch);
+        t.run(reader, writer);
+    }
+
     /** Serves one request. Returns false when the connection should close. */
     boolean serveOne() {
         this.scanner.reset();
@@ -328,6 +343,10 @@ public final class Http1Connection {
         boolean keep = this.res.keepsAlive();
         this.in.advanceRead(this.consumed - this.in.readPosition());
         this.in.compact();
+        if (this.res.upgrades()) {
+            this.switchProtocols();
+            return false;
+        }
         return keep;
     }
 }

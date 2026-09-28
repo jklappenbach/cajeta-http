@@ -38,6 +38,7 @@ public final class HttpResponse {
     ResponseTransport transport;
     PushEntry[] pushes;
     int32 pushLen;
+    Takeover takeover;
 
     /**
      * A writer over `out` with `fieldBytes` of header space and at most
@@ -53,6 +54,7 @@ public final class HttpResponse {
         this.room = fieldBytes + 128;
         this.transport = null;
         this.pushes = null;
+        this.takeover = null;
         this.reset();
     }
 
@@ -70,6 +72,28 @@ public final class HttpResponse {
         this.peer = Version.HTTP_1_1;
         this.stream = null;
         this.pushLen = 0;
+        this.takeover = null;
+    }
+
+    /**
+     * Hands the connection to `t` once this response is sent. The status must be
+     * 101, and the head then carries `Connection: Upgrade`.
+     */
+    public HttpResponse upgrade(#Takeover t) {
+        this.takeover #= t;
+        return this;
+    }
+
+    /** Whether this response switches the connection to another protocol. */
+    public boolean upgrades() {
+        return this.takeover != null && this.code == 101;
+    }
+
+    /** The takeover, now owned by the caller that runs it. */
+    public #Takeover takeUpgrade() {
+        Takeover t #= this.takeover;
+        this.takeover = null;
+        return #t;
     }
 
     /** Sets the status code. */
@@ -437,7 +461,9 @@ public final class HttpResponse {
         if (this.chunked) {
             n = n + 19 + 7 + 2;
         }
-        if (!this.reuse) {
+        if (this.upgrades()) {
+            n = n + 12 + 7 + 2;
+        } else if (!this.reuse) {
             n = n + 12 + 5 + 2;
         } else if (this.peer == Version.HTTP_1_0) {
             n = n + 12 + 10 + 2;
@@ -472,7 +498,9 @@ public final class HttpResponse {
         if (this.chunked) {
             p = HttpResponse.put(a, p, "transfer-encoding: chunked\r\n");
         }
-        if (!this.reuse) {
+        if (this.upgrades()) {
+            p = HttpResponse.put(a, p, "Connection: Upgrade\r\n");
+        } else if (!this.reuse) {
             p = HttpResponse.put(a, p, "Connection: close\r\n");
         } else if (this.peer == Version.HTTP_1_0) {
             p = HttpResponse.put(a, p, "Connection: keep-alive\r\n");
