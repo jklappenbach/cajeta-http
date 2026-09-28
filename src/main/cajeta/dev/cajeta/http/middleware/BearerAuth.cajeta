@@ -10,7 +10,7 @@ import dev.cajeta.http.HttpResponse;
  * Bearer token authentication. The token goes to a verifier, and a missing,
  * empty or refused token answers 401 with a `WWW-Authenticate` challenge.
  */
-public class BearerAuth {
+public class BearerAuth implements MiddlewareConfig {
     String realm;
     (String) -> boolean verify;
 
@@ -31,11 +31,11 @@ public class BearerAuth {
         return this;
     }
 
-    /** Builds the middleware for `cfg`, which must outlive the chain. */
-    public static #Middleware middleware(BearerAuth cfg) {
+    /** Builds the middleware for `cfg`, which the middleware then owns. */
+    public static #Middleware middleware(#BearerAuth cfg) {
         (HttpRequest, HttpResponse, (HttpRequest, HttpResponse) -> void) -> void f =
             (HttpRequest q, HttpResponse r, (HttpRequest, HttpResponse) -> void next) -> BearerAuth.apply(cfg, q, r, next);
-        return Middleware.of(#f);
+        return Middleware.owning(#f, #cfg);
     }
 
     static void apply(BearerAuth cfg, HttpRequest q, HttpResponse r,

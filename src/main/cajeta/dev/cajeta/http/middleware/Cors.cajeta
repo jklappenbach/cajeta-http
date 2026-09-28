@@ -14,7 +14,7 @@ import dev.cajeta.http.Method;
  * response. A credentialed wildcard reflects the origin rather than `*`, and a
  * disallowed origin gets no allow headers at all.
  */
-public class Cors {
+public class Cors implements MiddlewareConfig {
     String[] origins;
     int32 originCount;
     boolean anyOrigin;
@@ -124,11 +124,11 @@ public class Cors {
         }
     }
 
-    /** Builds the middleware for `cfg`, which must outlive the chain. */
-    public static #Middleware middleware(Cors cfg) {
+    /** Builds the middleware for `cfg`, which the middleware then owns. */
+    public static #Middleware middleware(#Cors cfg) {
         (HttpRequest, HttpResponse, (HttpRequest, HttpResponse) -> void) -> void f =
             (HttpRequest q, HttpResponse r, (HttpRequest, HttpResponse) -> void next) -> Cors.apply(cfg, q, r, next);
-        return Middleware.of(#f);
+        return Middleware.owning(#f, #cfg);
     }
 
     static void apply(Cors cfg, HttpRequest q, HttpResponse r,

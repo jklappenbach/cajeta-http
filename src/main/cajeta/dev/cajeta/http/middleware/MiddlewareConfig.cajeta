@@ -1,0 +1,5 @@
+package dev.cajeta.http.middleware;
+
+/** A middleware's configuration, owned by the `Middleware` built from it. */
+public interface MiddlewareConfig {
+}

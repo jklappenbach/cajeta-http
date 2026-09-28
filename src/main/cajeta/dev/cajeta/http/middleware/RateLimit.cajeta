@@ -12,7 +12,7 @@ import dev.cajeta.http.HttpResponse;
  * configured otherwise. Requests without the header share one bucket. An
  * empty bucket answers 429 with `Retry-After`. A known key allocates nothing.
  */
-public class RateLimit {
+public class RateLimit implements MiddlewareConfig {
     int64 capacity;
     int64 refillPerSec;
     String keyHeader;
@@ -41,11 +41,11 @@ public class RateLimit {
         return this;
     }
 
-    /** Builds the middleware for `cfg`, which must outlive the chain. */
-    public static #Middleware middleware(RateLimit cfg) {
+    /** Builds the middleware for `cfg`, which the middleware then owns. */
+    public static #Middleware middleware(#RateLimit cfg) {
         (HttpRequest, HttpResponse, (HttpRequest, HttpResponse) -> void) -> void f =
             (HttpRequest q, HttpResponse r, (HttpRequest, HttpResponse) -> void next) -> RateLimit.apply(cfg, q, r, next);
-        return Middleware.of(#f);
+        return Middleware.owning(#f, #cfg);
     }
 
     static void apply(RateLimit cfg, HttpRequest q, HttpResponse r,

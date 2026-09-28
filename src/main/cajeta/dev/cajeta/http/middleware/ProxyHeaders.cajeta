@@ -11,7 +11,7 @@ import dev.cajeta.http.HttpResponse;
  * becomes `X-Real-IP`. Otherwise the forwarding headers are removed so a
  * client cannot spoof them.
  */
-public class ProxyHeaders {
+public class ProxyHeaders implements MiddlewareConfig {
     boolean trust;
 
     /** A policy that trusts the proxy when `trust` is true. */
@@ -29,11 +29,11 @@ public class ProxyHeaders {
         return heap ProxyHeaders(false);
     }
 
-    /** Builds the middleware for `cfg`, which must outlive the chain. */
-    public static #Middleware middleware(ProxyHeaders cfg) {
+    /** Builds the middleware for `cfg`, which the middleware then owns. */
+    public static #Middleware middleware(#ProxyHeaders cfg) {
         (HttpRequest, HttpResponse, (HttpRequest, HttpResponse) -> void) -> void f =
             (HttpRequest q, HttpResponse r, (HttpRequest, HttpResponse) -> void next) -> ProxyHeaders.apply(cfg, q, r, next);
-        return Middleware.of(#f);
+        return Middleware.owning(#f, #cfg);
     }
 
     static void apply(ProxyHeaders cfg, HttpRequest q, HttpResponse r,

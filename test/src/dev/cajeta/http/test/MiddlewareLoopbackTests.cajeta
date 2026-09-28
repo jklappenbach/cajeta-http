@@ -131,8 +131,8 @@ public final class MiddlewareLoopbackTests {
         cors.allowOrigin("http://example.com").allowMethods("GET, POST");
         Compression comp #= Compression.create();
         MiddlewareChain chain = heap MiddlewareChain();
-        chain.use(#Recover.middleware()).use(#RequestId.middleware()).use(#ProxyHeaders.middleware(ph))
-             .use(#Cors.middleware(cors)).use(#Compression.middleware(comp)).use(#ETag.middleware());
+        chain.use(#Recover.middleware()).use(#RequestId.middleware()).use(#ProxyHeaders.middleware(#ph))
+             .use(#Cors.middleware(#cors)).use(#Compression.middleware(#comp)).use(#ETag.middleware());
         (HttpRequest, HttpResponse) -> void termi = (HttpRequest q, HttpResponse r) -> MiddlewareLoopbackTests.handleStack(q, r);
         chain.build(termi);
         scope {
@@ -182,7 +182,7 @@ public final class MiddlewareLoopbackTests {
         ba.verifier(#vf);
         RateLimit rl #= RateLimit.create((int64) 2, (int64) 0);
         MiddlewareChain chain = heap MiddlewareChain();
-        chain.use(#BearerAuth.middleware(ba)).use(#RateLimit.middleware(rl)).use(#Timeout.middleware((int64) 60));
+        chain.use(#BearerAuth.middleware(#ba)).use(#RateLimit.middleware(#rl)).use(#Timeout.middleware((int64) 60));
         (HttpRequest, HttpResponse) -> void termi = (HttpRequest q, HttpResponse r) -> MiddlewareLoopbackTests.handleGated(q, r);
         chain.build(termi);
         scope {
@@ -216,7 +216,7 @@ public final class MiddlewareLoopbackTests {
         ba.verifier(#vf);
         Decompression dec #= Decompression.create();
         MiddlewareChain chain = heap MiddlewareChain();
-        chain.use(#BasicAuth.middleware(ba)).use(#Decompression.middleware(dec));
+        chain.use(#BasicAuth.middleware(#ba)).use(#Decompression.middleware(#dec));
         (HttpRequest, HttpResponse) -> void termi = (HttpRequest q, HttpResponse r) -> {
             r.writeBytes(q.body());
         };
@@ -246,7 +246,7 @@ public final class MiddlewareLoopbackTests {
         File.writeAllBytes(root + "/a.txt", a.toBytes(), a.byteLength());
         StaticFile sf #= StaticFile.create(root);
         MiddlewareChain chain = heap MiddlewareChain();
-        chain.use(#StaticFile.middleware(sf));
+        chain.use(#StaticFile.middleware(#sf));
         (HttpRequest, HttpResponse) -> void termi = (HttpRequest q, HttpResponse r) -> {
             r.status(599);
         };

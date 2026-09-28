@@ -128,6 +128,11 @@ chain.build(handler);
 
 `routeMw(method, pattern, #chain, handler)` gives one route its own chain.
 
+A config such as `Cors` or `RateLimit` is handed to its middleware with `#`,
+and the middleware owns it, so it lives exactly as long as the chain. A
+middleware of your own does the same: its config implements `MiddlewareConfig`,
+and `Middleware.owning(fn, #config)` keeps it while `fn` reads it.
+
 ## The client
 
 A request is a `ClientRequest` and the answer a `ClientResponse`.

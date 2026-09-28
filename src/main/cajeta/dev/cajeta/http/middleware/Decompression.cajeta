@@ -15,7 +15,7 @@ import dev.cajeta.http.coding.ContentCodings;
  * decoded body with the encoding header removed and the length updated. An
  * unknown coding answers 415, a body over the cap 413, and a corrupt one 400.
  */
-public class Decompression {
+public class Decompression implements MiddlewareConfig {
     int64 maxBytes;
 
     /** A decoder capped at 10 MiB of output. */
@@ -34,11 +34,11 @@ public class Decompression {
         return this;
     }
 
-    /** Builds the middleware for `cfg`, which must outlive the chain. */
-    public static #Middleware middleware(Decompression cfg) {
+    /** Builds the middleware for `cfg`, which the middleware then owns. */
+    public static #Middleware middleware(#Decompression cfg) {
         (HttpRequest, HttpResponse, (HttpRequest, HttpResponse) -> void) -> void f =
             (HttpRequest q, HttpResponse r, (HttpRequest, HttpResponse) -> void next) -> Decompression.apply(cfg, q, r, next);
-        return Middleware.of(#f);
+        return Middleware.owning(#f, #cfg);
     }
 
     static void apply(Decompression cfg, HttpRequest q, HttpResponse r,

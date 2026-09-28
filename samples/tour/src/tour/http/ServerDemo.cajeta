@@ -215,14 +215,14 @@ public class ServerDemo extends DemoClass {
             (String) -> boolean opsToken = (String t) -> Credentials.constantTimeEquals(t, "ops-token");
             ops.verifier(#opsToken);
             MiddlewareChain adminChain = heap MiddlewareChain();
-            adminChain.use(#BearerAuth.middleware(ops));
+            adminChain.use(#BearerAuth.middleware(#ops));
             router.routeMw("DELETE", "/admin/cache", #adminChain,
                 (HttpRequest q, HttpResponse r) -> ServerDemo.purge(q, r));
 
             Decompression dz #= Decompression.create();
             MiddlewareChain chain = heap MiddlewareChain();
             chain.use(#Recover.middleware()).use(#RequestId.middleware())
-                 .use(#Decompression.middleware(dz));
+                 .use(#Decompression.middleware(#dz));
             (HttpRequest, HttpResponse) -> void dispatch =
                 (HttpRequest q, HttpResponse r) -> router.dispatch(q, r);
             chain.build(dispatch);

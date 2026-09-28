@@ -7,18 +7,29 @@ import dev.cajeta.http.HttpResponse;
 /**
  * One layer around a handler. `fn` receives the request, the response and
  * the next step, and either calls the next step or completes the response
- * itself.
+ * itself. A layer built from a configuration owns it, so `fn` can read it for
+ * as long as the layer lives.
  */
 public class Middleware {
     public (HttpRequest, HttpResponse, (HttpRequest, HttpResponse) -> void) -> void fn;
+    MiddlewareConfig config;
 
     /** A layer running `fn`. */
     public Middleware((HttpRequest, HttpResponse, (HttpRequest, HttpResponse) -> void) -> void fn) {
         this.fn #= fn;
+        this.config = null;
     }
 
     /** A layer running `fn`. */
     public static #Middleware of((HttpRequest, HttpResponse, (HttpRequest, HttpResponse) -> void) -> void fn) {
         return heap Middleware(#fn);
+    }
+
+    /** A layer running `fn` that owns `config`, which `fn` reads. */
+    public static #Middleware owning((HttpRequest, HttpResponse, (HttpRequest, HttpResponse) -> void) -> void fn,
+                                     #MiddlewareConfig config) {
+        Middleware m = heap Middleware(#fn);
+        m.config = #config;
+        return #m;
     }
 }

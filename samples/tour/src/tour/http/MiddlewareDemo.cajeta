@@ -6,6 +6,7 @@ import dev.cajeta.http.HttpResponse;
 import dev.cajeta.http.coding.ContentCoding;
 import dev.cajeta.http.middleware.Middleware;
 import dev.cajeta.http.middleware.MiddlewareChain;
+import dev.cajeta.http.middleware.MiddlewareConfig;
 import dev.cajeta.http.middleware.Logging;
 import dev.cajeta.http.middleware.LogSink;
 import dev.cajeta.http.middleware.RequestId;
@@ -28,6 +29,27 @@ import cajeta.concurrent.Tasks;
 import cajeta.io.file.File;
 import cajeta.io.file.Path;
 
+// support: a configurable middleware of our own. Its config implements
+// MiddlewareConfig so the Middleware can own it, and the lambda reads it from there.
+final class ApiVersion implements MiddlewareConfig {
+    String version;
+
+    ApiVersion(String version) {
+        this.version #= version.substring(0, version.byteLength());
+    }
+
+    static #Middleware middleware(#ApiVersion cfg) {
+        (HttpRequest, HttpResponse, (HttpRequest, HttpResponse) -> void) -> void f =
+            (HttpRequest q, HttpResponse r, (HttpRequest, HttpResponse) -> void next) -> ApiVersion.apply(cfg, q, r, next);
+        return Middleware.owning(#f, #cfg);
+    }
+
+    static void apply(ApiVersion cfg, HttpRequest q, HttpResponse r, (HttpRequest, HttpResponse) -> void next) {
+        next(q, r);
+        r.header("X-Api-Version", cfg.version);
+    }
+}
+
 // The middleware stack — dev.cajeta.http.middleware. A middleware is a
 // function around the rest of the chain:
 //
@@ -37,9 +59,9 @@ import cajeta.io.file.Path;
 // MiddlewareChain.use(...) stacks them (first use() = outermost),
 // build(handler) composes them once around the terminal handler, and
 // run(q, r) enters the outermost layer. Running allocates nothing: the
-// composition is made at build time and kept by the chain. Config objects
-// (Cors, BasicAuth, ...) are captured BY REFERENCE by their middleware, so
-// they must outlive the chain.
+// composition is made at build time and kept by the chain. A config object
+// (Cors, BasicAuth, ...) is handed over with `#` and owned by the middleware
+// built from it, so it lives exactly as long as the chain.
 //
 // Every exchange here is a scripted request served through a real HTTP/1.1
 // connection (Served.run), so what is checked is the actual wire. ServerDemo
@@ -117,6 +139,14 @@ public class MiddlewareDemo extends DemoClass {
             "four layers run; RequestId stamps X-Request-Id; the custom layer saw 200");
         this.check(sink.count() == 1 && sink.at(0).contains("GET /orders 200"),
             "Logging wrote one access line into the capturing sink");
+        MiddlewareChain versioned = heap MiddlewareChain();
+        versioned.use(#ApiVersion.middleware(heap ApiVersion("2026-09")));
+        versioned.build(term);
+        (HttpRequest, HttpResponse) -> void vApp = (HttpRequest q, HttpResponse r) -> versioned.run(q, r);
+        String vw #= Served.run("GET /orders HTTP/1.1\r\n\r\n", vApp);
+        String stampedVersion #= Served.header(vw, "X-Api-Version");
+        this.check(stampedVersion.equals("2026-09"),
+            "a middleware of our own owns its config through Middleware.owning");
         // Recover turns a handler throw into a 500 instead of a dead fiber.
         (HttpRequest, HttpResponse) -> void boomT = (HttpRequest q, HttpResponse r) -> MiddlewareDemo.boom(q, r);
         MiddlewareChain crash = heap MiddlewareChain();
@@ -135,7 +165,7 @@ public class MiddlewareDemo extends DemoClass {
             u.equals("ada") && Credentials.constantTimeEquals(pw, "s3cr:et");
         ba.verifier(#verify);
         MiddlewareChain auth = heap MiddlewareChain();
-        auth.use(#BasicAuth.middleware(ba));
+        auth.use(#BasicAuth.middleware(#ba));
         auth.build(term);
         (HttpRequest, HttpResponse) -> void authApp = (HttpRequest q, HttpResponse r) -> auth.run(q, r);
         String creds = "ada:s3cr:et";
@@ -152,7 +182,7 @@ public class MiddlewareDemo extends DemoClass {
         (String) -> boolean tok = (String t) -> Credentials.constantTimeEquals(t, "tok-live-42");
         bt.verifier(#tok);
         MiddlewareChain bearer = heap MiddlewareChain();
-        bearer.use(#BearerAuth.middleware(bt));
+        bearer.use(#BearerAuth.middleware(#bt));
         bearer.build(term);
         (HttpRequest, HttpResponse) -> void bearerApp = (HttpRequest q, HttpResponse r) -> bearer.run(q, r);
         String btOk #= Served.run(
@@ -166,7 +196,7 @@ public class MiddlewareDemo extends DemoClass {
         //    429s with Retry-After.
         RateLimit rl #= RateLimit.create((int64) 2, (int64) 1);
         MiddlewareChain limited = heap MiddlewareChain();
-        limited.use(#RateLimit.middleware(rl));
+        limited.use(#RateLimit.middleware(#rl));
         limited.build(term);
         (HttpRequest, HttpResponse) -> void limApp = (HttpRequest q, HttpResponse r) -> limited.run(q, r);
         String fromClient = "GET /orders HTTP/1.1\r\nX-Forwarded-For: 10.0.0.9\r\n\r\n";
@@ -203,7 +233,7 @@ public class MiddlewareDemo extends DemoClass {
         Cors cors #= Cors.create();
         cors.allowOrigin("https://app.example").allowMethods("GET, POST");
         MiddlewareChain corsChain = heap MiddlewareChain();
-        corsChain.use(#Cors.middleware(cors));
+        corsChain.use(#Cors.middleware(#cors));
         corsChain.build(term);
         (HttpRequest, HttpResponse) -> void corsApp = (HttpRequest q, HttpResponse r) -> corsChain.run(q, r);
         String pre #= Served.run("OPTIONS /orders HTTP/1.1\r\nOrigin: https://app.example\r\n"
@@ -230,7 +260,7 @@ public class MiddlewareDemo extends DemoClass {
             "ETag: matching If-None-Match answers a bodyless 304");
         Compression comp #= Compression.create();
         MiddlewareChain zipChain = heap MiddlewareChain();
-        zipChain.use(#Compression.middleware(comp));
+        zipChain.use(#Compression.middleware(#comp));
         zipChain.build(term);
         (HttpRequest, HttpResponse) -> void zipApp = (HttpRequest q, HttpResponse r) -> zipChain.run(q, r);
         String zipped #= Served.run("GET /orders HTTP/1.1\r\nAccept-Encoding: gzip\r\n\r\n", zipApp);
@@ -252,7 +282,7 @@ public class MiddlewareDemo extends DemoClass {
         Decompression dz #= Decompression.create();
         dz.maxSize((int64) 65536);
         MiddlewareChain dzChain = heap MiddlewareChain();
-        dzChain.use(#Decompression.middleware(dz));
+        dzChain.use(#Decompression.middleware(#dz));
         dzChain.build(echo);
         (HttpRequest, HttpResponse) -> void dzApp = (HttpRequest q, HttpResponse r) -> dzChain.run(q, r);
         int8[] gz #= ContentCoding.encode("gzip", pb, plain.byteLength());
@@ -272,7 +302,7 @@ public class MiddlewareDemo extends DemoClass {
         StaticFile sf #= StaticFile.create(root);
         (HttpRequest, HttpResponse) -> void missing = (HttpRequest q, HttpResponse r) -> MiddlewareDemo.notFound(q, r);
         MiddlewareChain fileChain = heap MiddlewareChain();
-        fileChain.use(#StaticFile.middleware(sf));
+        fileChain.use(#StaticFile.middleware(#sf));
         fileChain.build(missing);
         (HttpRequest, HttpResponse) -> void fileApp = (HttpRequest q, HttpResponse r) -> fileChain.run(q, r);
         String idx #= Served.run("GET / HTTP/1.1\r\n\r\n", fileApp);
@@ -292,7 +322,7 @@ public class MiddlewareDemo extends DemoClass {
         (HttpRequest, HttpResponse) -> void ipT = (HttpRequest q, HttpResponse r) -> MiddlewareDemo.echoIp(q, r);
         ProxyHeaders ph #= ProxyHeaders.trusted();
         MiddlewareChain proxied = heap MiddlewareChain();
-        proxied.use(#ProxyHeaders.middleware(ph));
+        proxied.use(#ProxyHeaders.middleware(#ph));
         proxied.build(ipT);
         (HttpRequest, HttpResponse) -> void ipApp = (HttpRequest q, HttpResponse r) -> proxied.run(q, r);
         String fwd #= Served.run(
@@ -302,7 +332,7 @@ public class MiddlewareDemo extends DemoClass {
             "trusted ProxyHeaders resolves the client IP from hop 0");
         ProxyHeaders open #= ProxyHeaders.untrusted();
         MiddlewareChain stripped = heap MiddlewareChain();
-        stripped.use(#ProxyHeaders.middleware(open));
+        stripped.use(#ProxyHeaders.middleware(#open));
         stripped.build(ipT);
         (HttpRequest, HttpResponse) -> void stripApp = (HttpRequest q, HttpResponse r) -> stripped.run(q, r);
         String spoof #= Served.run("GET /ip HTTP/1.1\r\nX-Real-IP: 1.2.3.4\r\n\r\n", stripApp);

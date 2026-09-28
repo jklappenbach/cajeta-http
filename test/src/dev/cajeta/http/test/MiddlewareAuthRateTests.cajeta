@@ -56,7 +56,7 @@ public final class MiddlewareAuthRateTests {
     static void rateLimitMiddleware(Check c) {
         RateLimit rl #= RateLimit.create((int64) 1, (int64) 1);
         MiddlewareChain chain = heap MiddlewareChain();
-        chain.use(#RateLimit.middleware(rl));
+        chain.use(#RateLimit.middleware(#rl));
         (HttpRequest, HttpResponse) -> void term = (HttpRequest q, HttpResponse r) -> MiddlewareAuthRateTests.ok(q, r);
         chain.build(term);
         (HttpRequest, HttpResponse) -> void app = (HttpRequest q, HttpResponse r) -> chain.run(q, r);
@@ -74,7 +74,7 @@ public final class MiddlewareAuthRateTests {
 
         RateLimit wide #= RateLimit.create((int64) 1000000, (int64) 1000000);
         MiddlewareChain wc = heap MiddlewareChain();
-        wc.use(#RateLimit.middleware(wide));
+        wc.use(#RateLimit.middleware(#wide));
         wc.build(term);
         (HttpRequest, HttpResponse) -> void wapp = (HttpRequest q, HttpResponse r) -> wc.run(q, r);
         String one = "GET /x HTTP/1.1\r\nX-Forwarded-For: 3.3.3.3\r\n\r\n";
@@ -103,7 +103,7 @@ public final class MiddlewareAuthRateTests {
             u.equals("alice") && Credentials.constantTimeEquals(p, "s3cr:et");
         ba.verifier(#verify);
         MiddlewareChain chain = heap MiddlewareChain();
-        chain.use(#BasicAuth.middleware(ba));
+        chain.use(#BasicAuth.middleware(#ba));
         (HttpRequest, HttpResponse) -> void term = (HttpRequest q, HttpResponse r) -> MiddlewareAuthRateTests.ok(q, r);
         chain.build(term);
         (HttpRequest, HttpResponse) -> void app = (HttpRequest q, HttpResponse r) -> chain.run(q, r);
@@ -123,7 +123,7 @@ public final class MiddlewareAuthRateTests {
         (String) -> boolean verify = (String t) -> Credentials.constantTimeEquals(t, "tok-abc");
         ba.verifier(#verify);
         MiddlewareChain chain = heap MiddlewareChain();
-        chain.use(#BearerAuth.middleware(ba));
+        chain.use(#BearerAuth.middleware(#ba));
         (HttpRequest, HttpResponse) -> void term = (HttpRequest q, HttpResponse r) -> MiddlewareAuthRateTests.ok(q, r);
         chain.build(term);
         (HttpRequest, HttpResponse) -> void app = (HttpRequest q, HttpResponse r) -> chain.run(q, r);

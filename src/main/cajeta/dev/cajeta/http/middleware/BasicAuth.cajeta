@@ -12,7 +12,7 @@ import dev.cajeta.http.HttpResponse;
  * and a missing, malformed or refused credential answers 401 with a
  * `WWW-Authenticate` challenge for the realm.
  */
-public class BasicAuth {
+public class BasicAuth implements MiddlewareConfig {
     String realm;
     (String, String) -> boolean verify;
 
@@ -33,11 +33,11 @@ public class BasicAuth {
         return this;
     }
 
-    /** Builds the middleware for `cfg`, which must outlive the chain. */
-    public static #Middleware middleware(BasicAuth cfg) {
+    /** Builds the middleware for `cfg`, which the middleware then owns. */
+    public static #Middleware middleware(#BasicAuth cfg) {
         (HttpRequest, HttpResponse, (HttpRequest, HttpResponse) -> void) -> void f =
             (HttpRequest q, HttpResponse r, (HttpRequest, HttpResponse) -> void next) -> BasicAuth.apply(cfg, q, r, next);
-        return Middleware.of(#f);
+        return Middleware.owning(#f, #cfg);
     }
 
     static void apply(BasicAuth cfg, HttpRequest q, HttpResponse r,

@@ -6,6 +6,7 @@ import dev.cajeta.http.HttpResponse;
 import dev.cajeta.http.HttpException;
 import dev.cajeta.http.middleware.Middleware;
 import dev.cajeta.http.middleware.MiddlewareChain;
+import dev.cajeta.http.middleware.Cors;
 import dev.cajeta.http.routing.Router;
 
 /** Chain composition: order, short-circuit, exceptions, per-route chains. */
@@ -17,6 +18,47 @@ public final class MiddlewareTests {
         MiddlewareTests.exceptionCrossing(c);
         MiddlewareTests.perRouteInsideGlobal(c);
         MiddlewareTests.allocation(c);
+        MiddlewareTests.ownedConfig(c);
+    }
+
+    // A chain whose Cors policy is made here and never returned: the middleware owns it.
+    static #MiddlewareChain corsChain((HttpRequest, HttpResponse) -> void handler) {
+        Cors policy #= Cors.create();
+        policy.allowOrigin("https://good.example");
+        MiddlewareChain chain = heap MiddlewareChain();
+        chain.use(#Cors.middleware(#policy));
+        chain.build(handler);
+        return #chain;
+    }
+
+    static void ownedConfig(Check c) {
+        (HttpRequest, HttpResponse) -> void ok = (HttpRequest q, HttpResponse r) -> {
+            r.body("ok");
+        };
+        MiddlewareTests.corsChain(ok);
+        int64 idle = Cajeta.liveCount();
+        {
+            MiddlewareChain chain #= MiddlewareTests.corsChain(ok);
+        }
+        c.eqInt(Cajeta.liveCount() - idle, (int64) 0, "a chain and the config it owns are freed together");
+
+        boolean right = false;
+        int64 before = Cajeta.liveCount();
+        {
+            MiddlewareChain chain #= MiddlewareTests.corsChain(ok);
+            int32 i = 0;
+            while (i < 64) {
+                String junk #= "churn-" + i;
+                i = i + 1;
+            }
+            (HttpRequest, HttpResponse) -> void app = (HttpRequest q, HttpResponse r) -> chain.run(q, r);
+            String got #= Wire.serve("OPTIONS /x HTTP/1.1\r\nOrigin: https://good.example\r\n"
+                + "Access-Control-Request-Method: POST\r\n\r\n", app);
+            String allowed #= Wire.header(got, "Access-Control-Allow-Origin");
+            right = allowed.equals("https://good.example");
+        }
+        c.that(right, "a config made inside a factory lives as long as its middleware");
+        c.eqInt(Cajeta.liveCount() - before, (int64) 0, "serving through it leaves nothing behind");
     }
 
     static #Middleware tracer(Trace t, int8 in, int8 out) {

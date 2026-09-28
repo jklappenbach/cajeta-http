@@ -35,6 +35,12 @@ now receives the response as a parameter instead of returning one.
   each read.
 - **`HttpRequest` and `HttpResponse` are `final`.** Code that subclassed them
   needs a wrapper or a middleware instead.
+- **A middleware owns its config.** `Cors.middleware(#cors)` and the other
+  config factories take the config with `#`, and the middleware frees it when
+  the chain goes. In 0.3 the config was borrowed and had to outlive the chain.
+  One config now serves one chain, so build a fresh config for each chain.
+  `Logging.middleware(sink)` still borrows its `LogSink`, which the caller
+  reads.
 
 ## Before and after
 
@@ -598,6 +604,8 @@ response is now a `ClientResponse`.
 | `Middleware.identity()` | Removed. A chain with no layers runs the handler directly | Not needed. |
 | `Middleware.wrapOne(m, inner)` | Removed. `MiddlewareChain.build(handler)` composes every layer once | Composition happens at build time. |
 | `MiddlewareChain.compose(terminal)` | `build(handler)`, then `run(q, r)` | The chain keeps the composition, so running allocates nothing. |
+| `BasicAuth`, `BearerAuth`, `Cors`, `Compression`, `Decompression`, `RateLimit`, `StaticFile`, `ProxyHeaders` `.middleware(cfg)` | `.middleware(#cfg)`, one config per chain | The middleware owns its config, so a config made in a helper cannot be freed under the chain. |
+| (new) | `MiddlewareConfig`, `Middleware.owning(fn, #config)` | How a middleware of your own owns its configuration. |
 
 ### dev.cajeta.http.routing
 

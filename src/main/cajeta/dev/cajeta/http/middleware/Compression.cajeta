@@ -16,7 +16,7 @@ import dev.cajeta.http.coding.AcceptEncoding;
  * when encoding does not shrink it. A streamed body is encoded as it is read.
  * `Vary: Accept-Encoding` is always added.
  */
-public class Compression {
+public class Compression implements MiddlewareConfig {
     int32 minBytes;
     int32 compLevel;
 
@@ -43,11 +43,11 @@ public class Compression {
         return this;
     }
 
-    /** Builds the middleware for `cfg`, which must outlive the chain. */
-    public static #Middleware middleware(Compression cfg) {
+    /** Builds the middleware for `cfg`, which the middleware then owns. */
+    public static #Middleware middleware(#Compression cfg) {
         (HttpRequest, HttpResponse, (HttpRequest, HttpResponse) -> void) -> void f =
             (HttpRequest q, HttpResponse r, (HttpRequest, HttpResponse) -> void next) -> Compression.apply(cfg, q, r, next);
-        return Middleware.of(#f);
+        return Middleware.owning(#f, #cfg);
     }
 
     static void apply(Compression cfg, HttpRequest q, HttpResponse r,

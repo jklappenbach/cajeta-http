@@ -51,7 +51,7 @@ public final class MiddlewareTimeoutCorsTests {
         (HttpRequest, HttpResponse) -> void okT = (HttpRequest q, HttpResponse r) -> MiddlewareTimeoutCorsTests.fast(q, r);
         Cors good #= Cors.create();
         good.allowOrigin("https://good.example").allowMethods("GET, POST").maxAge((int64) 600);
-        String got #= Wire.through(#Cors.middleware(good), okT,
+        String got #= Wire.through(#Cors.middleware(#good), okT,
             "OPTIONS /x HTTP/1.1\r\nOrigin: https://good.example\r\nAccess-Control-Request-Method: POST\r\n\r\n");
         c.eqInt((int64) Wire.status(got), 204, "cors preflight: an allowed origin gets 204");
         Wire.same(c, Wire.header(got, "Access-Control-Allow-Origin"), "https://good.example",
@@ -61,25 +61,35 @@ public final class MiddlewareTimeoutCorsTests {
         Wire.same(c, Wire.header(got, "Access-Control-Max-Age"), "600", "cors preflight: carries max-age");
         Wire.same(c, Wire.bodyOf(got), "", "cors preflight: the handler did not run");
 
-        Cors onlyGood #= Cors.create();
-        onlyGood.allowOrigin("https://good.example");
-        got #= Wire.through(#Cors.middleware(onlyGood), okT,
+        got #= Wire.through(#Cors.middleware(#MiddlewareTimeoutCorsTests.onlyGood()), okT,
             "OPTIONS /x HTTP/1.1\r\nOrigin: https://evil.example\r\nAccess-Control-Request-Method: POST\r\n\r\n");
         Wire.same(c, Wire.header(got, "Access-Control-Allow-Origin"), "",
             "cors preflight: a disallowed origin gets no Allow-Origin header");
 
-        got #= Wire.through(#Cors.middleware(onlyGood), okT,
+        got #= Wire.through(#Cors.middleware(#MiddlewareTimeoutCorsTests.onlyGood()), okT,
             "OPTIONS /x HTTP/1.1\r\nOrigin: https://good.example\r\nAccess-Control-Request-Method: POST\r\n"
             + "Access-Control-Request-Headers: X-Custom, Content-Type\r\n\r\n");
         Wire.same(c, Wire.header(got, "Access-Control-Allow-Headers"), "X-Custom, Content-Type",
             "cors preflight: echoes the requested headers when none are configured");
     }
 
+    // A policy allowing only https://good.example.
+    static #Cors onlyGood() {
+        Cors c #= Cors.create();
+        c.allowOrigin("https://good.example");
+        return #c;
+    }
+
+    // onlyGood, also exposing X-Total-Count.
+    static #Cors exposing() {
+        Cors c #= Cors.create();
+        c.allowOrigin("https://good.example").exposeHeaders("X-Total-Count");
+        return #c;
+    }
+
     static void actual(Check c) {
         (HttpRequest, HttpResponse) -> void okT = (HttpRequest q, HttpResponse r) -> MiddlewareTimeoutCorsTests.fast(q, r);
-        Cors expose #= Cors.create();
-        expose.allowOrigin("https://good.example").exposeHeaders("X-Total-Count");
-        String got #= Wire.through(#Cors.middleware(expose), okT,
+        String got #= Wire.through(#Cors.middleware(#MiddlewareTimeoutCorsTests.exposing()), okT,
             "GET /x HTTP/1.1\r\nOrigin: https://good.example\r\n\r\n");
         Wire.same(c, Wire.bodyOf(got), "ok", "cors actual: the handler ran");
         Wire.same(c, Wire.header(got, "Access-Control-Allow-Origin"), "https://good.example",
@@ -87,18 +97,18 @@ public final class MiddlewareTimeoutCorsTests {
         Wire.same(c, Wire.header(got, "Access-Control-Expose-Headers"), "X-Total-Count",
             "cors actual: exposes the configured headers");
 
-        got #= Wire.through(#Cors.middleware(expose), okT, "GET /x HTTP/1.1\r\n\r\n");
+        got #= Wire.through(#Cors.middleware(#MiddlewareTimeoutCorsTests.exposing()), okT, "GET /x HTTP/1.1\r\n\r\n");
         c.eqInt((int64) Wire.status(got), 200, "cors actual: a same-origin request passes");
         Wire.same(c, Wire.header(got, "Access-Control-Allow-Origin"), "", "cors actual: no Origin, no CORS headers");
 
         Cors any #= Cors.create();
         any.allowAnyOrigin();
-        got #= Wire.through(#Cors.middleware(any), okT, "GET /x HTTP/1.1\r\nOrigin: https://any.example\r\n\r\n");
+        got #= Wire.through(#Cors.middleware(#any), okT, "GET /x HTTP/1.1\r\nOrigin: https://any.example\r\n\r\n");
         Wire.same(c, Wire.header(got, "Access-Control-Allow-Origin"), "*", "cors wildcard: uncredentialed emits *");
 
         Cors creds #= Cors.create();
         creds.allowAnyOrigin().allowCredentials(true);
-        got #= Wire.through(#Cors.middleware(creds), okT, "GET /x HTTP/1.1\r\nOrigin: https://app.example\r\n\r\n");
+        got #= Wire.through(#Cors.middleware(#creds), okT, "GET /x HTTP/1.1\r\nOrigin: https://app.example\r\n\r\n");
         Wire.same(c, Wire.header(got, "Access-Control-Allow-Origin"), "https://app.example",
             "cors credentialed wildcard: reflects the origin, not *");
         Wire.same(c, Wire.header(got, "Access-Control-Allow-Credentials"), "true",
@@ -106,7 +116,7 @@ public final class MiddlewareTimeoutCorsTests {
         Wire.same(c, Wire.header(got, "Vary"), "Origin", "cors credentialed wildcard: adds Vary: Origin");
 
         MiddlewareChain chain = heap MiddlewareChain();
-        chain.use(#Cors.middleware(expose));
+        chain.use(#Cors.middleware(#MiddlewareTimeoutCorsTests.exposing()));
         chain.build(okT);
         (HttpRequest, HttpResponse) -> void app = (HttpRequest q, HttpResponse r) -> chain.run(q, r);
         String one = "GET /x HTTP/1.1\r\nOrigin: https://good.example\r\n\r\n";

@@ -16,7 +16,7 @@ import dev.cajeta.http.middleware.StaticPath;
  *
  * ```
  * StaticFile sf = StaticFile.create("public").indexFile("index.html");
- * chain.use(StaticFile.middleware(sf));
+ * chain.use(StaticFile.middleware(#sf));
  * ```
  *
  * ## The jail is two layers
@@ -36,7 +36,7 @@ import dev.cajeta.http.middleware.StaticPath;
  * v1 reads the whole file into memory ([`File.readAllBytes`](../../../io/file/File.cajeta));
  * range requests and streamed sends of huge files are a later increment.
  */
-public class StaticFile {
+public class StaticFile implements MiddlewareConfig {
     String rootStr;
     String rootCanon;
     boolean canonReady;
@@ -60,11 +60,11 @@ public class StaticFile {
         return this;
     }
 
-    /** Build the middleware from config `cfg` (captured by the lambda). */
-    public static #Middleware middleware(StaticFile cfg) {
+    /** Builds the middleware for `cfg`, which the middleware then owns. */
+    public static #Middleware middleware(#StaticFile cfg) {
         (HttpRequest, HttpResponse, (HttpRequest, HttpResponse) -> void) -> void f =
             (HttpRequest q, HttpResponse r, (HttpRequest, HttpResponse) -> void next) -> StaticFile.apply(cfg, q, r, next);
-        return Middleware.of(#f);
+        return Middleware.owning(#f, #cfg);
     }
 
     static void apply(StaticFile cfg, HttpRequest q, HttpResponse r,

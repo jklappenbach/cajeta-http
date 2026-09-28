@@ -181,12 +181,11 @@ public final class CodingRegistryTests {
         c.eqStr(AcceptEncoding.best("rle, gzip"), "gzip", "a tie goes to the coding registered first");
 
         String plain #= CodingRegistryTests.runs(3000);
-        Compression cmp #= Compression.create();
         (HttpRequest, HttpResponse) -> void text = (HttpRequest q, HttpResponse r) -> {
             r.setHeader("Content-Type", "text/plain");
             r.body(plain);
         };
-        String wire #= Wire.through(#Compression.middleware(cmp), text,
+        String wire #= Wire.through(#Compression.middleware(#Compression.create()), text,
             "GET /x HTTP/1.1\r\nAccept-Encoding: rle\r\n\r\n");
         Wire.same(c, Wire.header(wire, "Content-Encoding"), "rle", "Compression encodes with the registered coding");
         String coded #= Wire.bodyOf(wire);
@@ -194,16 +193,15 @@ public final class CodingRegistryTests {
         int8[] back #= ContentCoding.decode("rle", cb, coded.byteLength(), (int64) 100000);
         c.eqBytes(back, back.count(), plain, "and the body decodes to the original");
 
-        Decompression dz #= Decompression.create();
         (HttpRequest, HttpResponse) -> void echo = (HttpRequest q, HttpResponse r) -> CodingRegistryTests.echo(q, r);
         int8[] pb #= plain.toBytes();
         int8[] rle #= ContentCoding.encode("rle", pb, plain.byteLength());
         String upload #= "POST /x HTTP/1.1\r\nContent-Encoding: rle\r\nContent-Length: " + rle.count()
             + "\r\n\r\n" + Bytes.toString(rle[0:rle.count()]);
-        String got #= Wire.through(#Decompression.middleware(dz), echo, upload);
+        String got #= Wire.through(#Decompression.middleware(#Decompression.create()), echo, upload);
         Wire.same(c, Wire.bodyOf(got), plain, "Decompression decodes a registered coding before the handler");
 
-        String unknown #= Wire.through(#Decompression.middleware(dz), echo,
+        String unknown #= Wire.through(#Decompression.middleware(#Decompression.create()), echo,
             "POST /x HTTP/1.1\r\nContent-Encoding: br\r\nContent-Length: 2\r\n\r\nhi");
         c.eqInt((int64) Wire.status(unknown), 415, "an unregistered request coding is 415");
         String accepted #= Wire.header(unknown, "Accept-Encoding");
@@ -222,12 +220,11 @@ public final class CodingRegistryTests {
 
     static void streams(Check c) {
         String plain #= CodingRegistryTests.runs(20000);
-        Compression cmp #= Compression.create();
         (HttpRequest, HttpResponse) -> void stream = (HttpRequest q, HttpResponse r) -> {
             r.setHeader("Content-Type", "text/plain");
             r.body(#StreamBody.of(#CodingRegistryTests.reader(plain)));
         };
-        String deflated #= Wire.through(#Compression.middleware(cmp), stream,
+        String deflated #= Wire.through(#Compression.middleware(#Compression.create()), stream,
             "GET /x HTTP/1.1\r\nAccept-Encoding: deflate\r\n\r\n");
         Wire.same(c, Wire.header(deflated, "Content-Encoding"), "deflate", "a streamed body is deflate-encoded");
         String dbody #= Wire.bodyOf(deflated);
@@ -235,7 +232,7 @@ public final class CodingRegistryTests {
         int8[] dback #= ContentCoding.decode("deflate", db, dbody.byteLength(), (int64) 100000);
         c.eqBytes(dback, dback.count(), plain, "the zlib stream's framing and Adler-32 decode to the original");
 
-        String rled #= Wire.through(#Compression.middleware(cmp), stream,
+        String rled #= Wire.through(#Compression.middleware(#Compression.create()), stream,
             "GET /x HTTP/1.1\r\nAccept-Encoding: rle\r\n\r\n");
         String rbody #= Wire.bodyOf(rled);
         int8[] rb #= rbody.toBytes();
@@ -255,7 +252,7 @@ public final class CodingRegistryTests {
             r.setHeader("Content-Type", "text/plain");
             r.body(noisy);
         };
-        String raw #= Wire.through(#Compression.middleware(cmp), rough,
+        String raw #= Wire.through(#Compression.middleware(#Compression.create()), rough,
             "GET /x HTTP/1.1\r\nAccept-Encoding: rle\r\n\r\n");
         Wire.same(c, Wire.header(raw, "Content-Encoding"), "", "a held body that does not shrink goes out as identity");
         Wire.same(c, Wire.bodyOf(raw), noisy, "unchanged");
