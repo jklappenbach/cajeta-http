@@ -16,4 +16,6 @@ public interface Body {
 
     /** Stops the producer when the peer can no longer take the body. */
     void abort();
+    /** Whether the body is produced over time, so each piece is sent as it comes. */
+    boolean live();
 }

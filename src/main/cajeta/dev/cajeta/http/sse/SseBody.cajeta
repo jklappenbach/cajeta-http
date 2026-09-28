@@ -1,0 +1,58 @@
+package dev.cajeta.http.sse;
+
+import cajeta.io.net.AsyncReader;
+import dev.cajeta.http.MediaType;
+import dev.cajeta.http.body.Body;
+
+/**
+ * An SSE event stream as a response body: unknown length, so the response is
+ * chunked and each event is sent as soon as the channel produces it.
+ */
+public final class SseBody implements Body {
+    SseByteChannel chan;
+    AsyncReader rdr;
+    MediaType type;
+
+    SseBody() {
+        this.chan = null;
+        this.rdr = null;
+        this.type = null;
+    }
+
+    /** A body reading `chan`, which it owns. */
+    public static #SseBody of(#SseByteChannel chan) {
+        SseBody b = heap SseBody();
+        AsyncReader r = heap AsyncReader(chan);
+        b.chan = #chan;
+        b.rdr = #r;
+        b.type #= MediaType.parse("text/event-stream");
+        return #b;
+    }
+
+    public int64 contentLength() {
+        return (int64) 0 - (int64) 1;
+    }
+
+    public MediaType contentType() {
+        return this.type;
+    }
+
+    public AsyncReader reader() {
+        return this.rdr;
+    }
+
+    public boolean live() {
+        return true;
+    }
+
+    public void abort() {
+        if (this.chan != null) {
+            this.chan.cancel();
+        }
+    }
+
+    /** The byte channel the events are encoded into. */
+    public SseByteChannel channel() {
+        return this.chan;
+    }
+}

@@ -2,6 +2,7 @@ package dev.cajeta.http;
 
 import cajeta.lang.String;
 import cajeta.lang.Slice;
+import cajeta.io.net.AsyncReader;
 import cajeta.io.net.ByteBuffer;
 import dev.cajeta.http.h1.HttpParserLimits;
 
@@ -105,6 +106,27 @@ public final class HeadScanner {
 
     static boolean isOws(int8 b) {
         return b == (int8) 32 || b == (int8) 9;
+    }
+
+    /**
+     * Reads exactly one message head from `reader`, one byte at a time so nothing
+     * past its blank line is taken. Throws `UnexpectedEofException` when the peer
+     * closes first, and `HeadersTooLargeException` past the limits.
+     */
+    public static #ByteBuffer readHead(AsyncReader reader, HttpParserLimits limits) {
+        HeadScanner scanner = heap HeadScanner(limits);
+        ByteBuffer buf = heap ByteBuffer(16384);
+        int8[] one = heap int8[1];
+        int32 h = -1;
+        while (h < 0) {
+            if (reader.read(one, 0, 1) == 0) {
+                throw heap UnexpectedEofException("the connection closed inside a message head",
+                                                  (int64) buf.readable());
+            }
+            buf.put(one[0]);
+            h = scanner.scan(buf);
+        }
+        return #buf;
     }
 
     /**

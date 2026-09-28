@@ -1,0 +1,50 @@
+package dev.cajeta.http.sse;
+
+import cajeta.lang.String;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+
+/**
+ * Starts a Server-Sent Events response from a handler: 200,
+ * `Content-Type: text/event-stream`, `Cache-Control: no-cache`, and a chunked
+ * body that sends each event as it is produced.
+ */
+public final class SseResponse {
+    SseResponse() {
+        return;
+    }
+
+    /** Sends `events[0 .. n)` and ends the stream. */
+    public static void stream(HttpResponse r, #SseEvent[] events, int32 n) {
+        SseByteChannel bc #= SseByteChannel.overEvents(#events, n);
+        SseResponse.start(r, #bc);
+    }
+
+    /** Streams what `ch` produces until it closes. `ch` must outlive the response. */
+    public static void channel(HttpResponse r, SseChannel ch) {
+        SseByteChannel bc #= SseByteChannel.overChannel(ch);
+        SseResponse.start(r, #bc);
+    }
+
+    /** As `channel`, sending a keep-alive comment after `keepAliveMillis` of quiet. */
+    public static void channel(HttpResponse r, SseChannel ch, int32 keepAliveMillis) {
+        SseByteChannel bc #= SseByteChannel.overChannel(ch, keepAliveMillis);
+        SseResponse.start(r, #bc);
+    }
+
+    static void start(HttpResponse r, #SseByteChannel bc) {
+        SseBody body #= SseBody.of(#bc);
+        r.status(200);
+        r.header("Content-Type", "text/event-stream");
+        r.header("Cache-Control", "no-cache");
+        r.body(#body);
+    }
+
+    /** The client's `Last-Event-ID`, copied, or null when it sent none. */
+    public static #String lastEventId(HttpRequest q) {
+        if (!q.hasHeader("Last-Event-ID")) {
+            return null;
+        }
+        return q.headerString("Last-Event-ID");
+    }
+}

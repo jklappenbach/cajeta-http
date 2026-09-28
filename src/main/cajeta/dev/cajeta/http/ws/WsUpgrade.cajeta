@@ -51,7 +51,7 @@ public final class WsUpgrade {
     public static #WebSocket acceptServer(AsyncReader reader, AsyncWriter writer,
                                           boolean allowCompression) {
         HttpParserLimits limits = heap HttpParserLimits();
-        ByteBuffer head #= WsUpgrade.readHead(reader, limits);
+        ByteBuffer head #= HeadScanner.readHead(reader, limits);
         HttpRequest q = heap HttpRequest(limits.maxHeaderCount);
         HeadScanner.parseRequest(head.array(), 0, head.readable(), q);
         ByteBuffer out = heap ByteBuffer(8192);
@@ -159,7 +159,7 @@ public final class WsUpgrade {
         writer.writeAll(bytes, 0, head.byteLength());
         writer.flush();
         HttpParserLimits limits = heap HttpParserLimits();
-        ByteBuffer buf #= WsUpgrade.readHead(reader, limits);
+        ByteBuffer buf #= HeadScanner.readHead(reader, limits);
         HeadScanner.parseResponse(buf.array(), 0, buf.readable(), response);
         response.adopt(#buf);
         WsClientHandshake.requireAccept(response, key);
@@ -172,24 +172,5 @@ public final class WsUpgrade {
         }
         String ext #= response.headerString("Sec-WebSocket-Extensions");
         return WsCompression.confirmClient(ext);
-    }
-
-    /**
-     * Reads exactly one message head, one byte at a time so nothing past its
-     * blank line is taken from `reader`. Throws on a head longer than the limits.
-     */
-    static #ByteBuffer readHead(AsyncReader reader, HttpParserLimits limits) {
-        HeadScanner scanner = heap HeadScanner(limits);
-        ByteBuffer buf = heap ByteBuffer(16384);
-        int8[] one = heap int8[1];
-        int32 h = -1;
-        while (h < 0) {
-            if (reader.read(one, 0, 1) == 0) {
-                throw heap HandshakeRejectedException("connection closed during the handshake", 400);
-            }
-            buf.put(one[0]);
-            h = scanner.scan(buf);
-        }
-        return #buf;
     }
 }

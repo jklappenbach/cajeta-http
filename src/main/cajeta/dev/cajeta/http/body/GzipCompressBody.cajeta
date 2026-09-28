@@ -63,6 +63,10 @@ public final class GzipCompressBody implements Body {
     }
 
     /** Nothing to stop: the content is produced on demand. */
+    public boolean live() {
+        return this.source.live();
+    }
+
     public void abort() {
     }
 }

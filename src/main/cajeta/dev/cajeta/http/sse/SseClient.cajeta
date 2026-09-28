@@ -9,13 +9,14 @@ import cajeta.io.net.dns.ResolveFamily;
 import cajeta.io.net.TcpStream;
 import cajeta.io.net.uri.Uri;
 import cajeta.lang.String;
-import dev.cajeta.http.HttpRequest;
-import dev.cajeta.http.HttpResponse;
-import dev.cajeta.http.MediaType;
+import cajeta.io.net.AsyncReader;
+import cajeta.io.net.ByteBuffer;
+import dev.cajeta.http.Bytes;
+import dev.cajeta.http.ClientResponse;
+import dev.cajeta.http.HeadScanner;
 import dev.cajeta.http.h1.BodyFraming;
 import dev.cajeta.http.h1.BodyReader;
-import dev.cajeta.http.h1.HttpParser;
-import dev.cajeta.http.h1.HttpSerializer;
+import dev.cajeta.http.h1.HttpParserLimits;
 
 /**
  * A **Server-Sent Events client** (plan item **4.4c**) — subscribe to a
@@ -35,7 +36,7 @@ import dev.cajeta.http.h1.HttpSerializer;
  *     **terminal** [`SseException`](SseException.cajeta) (not a reconnect).
  *
  * The decode + reconnection **state** lives in an [`SseDecoder`](SseDecoder.cajeta)
- * (last id, retry), so [`buildRequest`](#buildRequest) /
+ * (last id, retry), so [`requestHead`](#requestHead) /
  * [`checkHead`](#checkHead) / [`reconnectDelayMillis`](#reconnectDelayMillis)
  * are pure and testable without a socket. v1 is **plaintext** (`http`); TLS
  * (`https`) SSE is a follow-up.
@@ -78,36 +79,35 @@ public final class SseClient {
 
     // -- pure policy (socket-free) -----------------------------------------
 
-    /**
-     * The `GET` this client issues: origin-form target + `Host` from the URL,
-     * `Accept: text/event-stream`, `Cache-Control: no-cache`, and —
-     * when resuming — `Last-Event-ID` set to the last seen event id.
-     */
-    public #HttpRequest buildRequest() {
-        HttpRequest req #= HttpRequest.fromUri("GET", this.uri);
-        req.setHeader("Accept", "text/event-stream");
-        req.setHeader("Cache-Control", "no-cache");
-        String last #= this.decoder.lastEventId();
-        if (last != null) {
-            req.setHeader("Last-Event-ID", last);
+    /** The GET request head, carrying `Last-Event-ID` once an id has been seen. */
+    public #String requestHead() {
+        String path = this.uri.getPath();
+        String target = "/";
+        if (path != null && path.byteLength() > 0) {
+            target = path;
         }
-        return #req;
+        String query = this.uri.getQuery();
+        String head = "GET " + target;
+        if (query != null && query.byteLength() > 0) {
+            head = head + "?" + query;
+        }
+        head = head + " HTTP/1.1\r\nHost: " + this.host + ":" + this.port
+            + "\r\nAccept: text/event-stream\r\nCache-Control: no-cache\r\n";
+        String last = this.decoder.lastEventId();
+        if (last != null) {
+            head = head + "Last-Event-ID: " + last + "\r\n";
+        }
+        return head + "\r\n";
     }
 
-    /**
-     * Validate a response head: a `200` whose `Content-Type` is
-     * `text/event-stream`. Anything else is a terminal
-     * [`SseException`](SseException.cajeta) — the caller must not reconnect.
-     */
-    public void checkHead(HttpResponse resp) {
-        if (resp.statusCode() != 200) {
-            throw heap SseException("SSE: non-200 response ("
-                + resp.statusCode() + ")");
+    /** Throws `SseException` unless `resp` is a 200 `text/event-stream`. */
+    public void checkHead(ClientResponse resp) {
+        if (resp.status() != 200) {
+            throw heap SseException("SSE: non-200 response (" + resp.status() + ")");
         }
-        MediaType ct #= resp.contentType();
-        if (ct == null || !ct.is("text", "event-stream")) {
-            throw heap SseException(
-                "SSE: response is not text/event-stream");
+        if (!resp.hasHeader("Content-Type")
+                || !Bytes.startsWith(resp.header("Content-Type"), "text/event-stream")) {
+            throw heap SseException("SSE: response is not text/event-stream");
         }
     }
 
@@ -172,54 +172,46 @@ public final class SseClient {
     void runOnce((SseEvent) -> void onEvent) {
         TcpStream conn #= SseClient.connect(this.host, this.port);
         try {
-            int8[] reqBytes #= HttpSerializer.request(this.buildRequest());
-            conn.writeAllAsync(reqBytes, (int64) 0, (int64) reqBytes.count());
-
-            HttpParser parser #= HttpParser.forResponse();
-            int8[] scratch = heap int8[8192];
-            boolean heading = true;
-            while (heading) {
-                if (parser.isComplete()) {
-                    heading = false;
-                } else {
-                    int64 n = conn.readAsync(scratch, (int64) 0, (int64) 8192);
-                    if (n <= (int64) 0) {
-                        parser.endInput();
-                        heading = false;
-                    } else {
-                        parser.feed(scratch, (int32) n);
-                    }
-                }
-            }
-
-            HttpResponse resp #= parser.takeResponse();
+            String head #= this.requestHead();
+            int8[] hb #= head.toBytes();
+            conn.writeAllAsync(hb, (int64) 0, (int64) head.byteLength());
+            AsyncReader reader = heap AsyncReader(conn);
+            HttpParserLimits limits = heap HttpParserLimits();
+            ByteBuffer hbuf #= HeadScanner.readHead(reader, limits);
+            ClientResponse resp = heap ClientResponse();
+            HeadScanner.parseResponse(hbuf.array(), 0, hbuf.readable(), resp);
+            resp.adopt(#hbuf);
             this.checkHead(resp);
-
-            BodyFraming framing = parser.getFraming();
+            BodyFraming framing #= SseClient.framingOf(resp);
             BodyReader body #= BodyReader.forFraming(framing);
-            int32 lo = parser.leftoverLength();
-            if (lo > 0) {
-                body.feed(parser.leftover(), lo);
-            }
-            this.pumpBody(body, conn, scratch, onEvent);
+            this.pumpBody(body, reader, onEvent);
         } finally {
             conn.close();
         }
     }
 
-    void pumpBody(BodyReader body, TcpStream conn, int8[] scratch,
-                  (SseEvent) -> void onEvent) {
-        this.drainToEvents(body, onEvent);
+    static #BodyFraming framingOf(ClientResponse resp) {
+        if (resp.headerHasToken("Transfer-Encoding", "chunked")) {
+            return BodyFraming.chunked(false);
+        }
+        if (resp.hasHeader("Content-Length")) {
+            return BodyFraming.contentLength(resp.headerInt64("Content-Length", (int64) 0), false);
+        }
+        return BodyFraming.closeDelimited();
+    }
+
+    void pumpBody(BodyReader body, AsyncReader reader, (SseEvent) -> void onEvent) {
+        int8[] scratch = heap int8[8192];
         boolean going = true;
         while (going) {
             if (body.isComplete() || this.stopped) {
                 going = false;
             } else {
-                int64 n = conn.readAsync(scratch, (int64) 0, (int64) 8192);
-                if (n <= (int64) 0) {
+                int32 n = reader.read(scratch, 0, 8192);
+                if (n <= 0) {
                     body.endInput();
                 } else {
-                    body.feed(scratch, (int32) n);
+                    body.feed(scratch, n);
                 }
                 this.drainToEvents(body, onEvent);
             }

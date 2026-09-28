@@ -81,6 +81,10 @@ public final class StreamBody implements Body {
     }
 
     /** Nothing to stop: the content is produced on demand. */
+    public boolean live() {
+        return false;
+    }
+
     public void abort() {
     }
 }
