@@ -38,7 +38,6 @@ public enum Version {
         return Version.HTTP_1_1;
     }
 
-    /** The wire form (`"HTTP/1.1"`). */
     /** The version named by a byte window. An unrecognised one reads as HTTP/1.1. */
     public static Version ofBytes(Slice<int8> w) {
         if (Bytes.equals(w, "HTTP/1.1")) { return Version.HTTP_1_1; }
@@ -49,6 +48,7 @@ public enum Version {
         return Version.HTTP_1_1;
     }
 
+    /** The wire form (`"HTTP/1.1"`). */
     public String wireString() {
         if (this == Version.HTTP_1_0) { return "HTTP/1.0"; }
         if (this == Version.HTTP_1_1) { return "HTTP/1.1"; }

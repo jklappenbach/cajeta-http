@@ -6,6 +6,9 @@ import dev.cajeta.http.Status;
 import dev.cajeta.http.MediaType;
 import dev.cajeta.http.HttpRequest;
 import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.Bytes;
+import dev.cajeta.http.HeadScanner;
+import cajeta.io.net.ByteBuffer;
 
 /**
  * http:1.2 — the core HTTP value types (spec §Core types). Pure logic
@@ -29,9 +32,9 @@ public final class CoreTypeTests {
         mediaTypeParse(c);
         mediaTypeParams(c);
         mediaTypeConstants(c);
-        System.stdout.println("-- core types: message adoption --");
+        System.stdout.println("-- core types: typed reads --");
         requestTypedAccessors(c);
-        responseTypedAccessors(c);
+        responseStatus(c);
     }
 
     static void methodTokens(Check c) {
@@ -180,44 +183,48 @@ public final class CoreTypeTests {
     }
 
     // 1.2b — the typed views over the raw message fields. The raw
-    // String/int32 fields stay (wire fidelity: extension tokens are legal);
-    // these accessors layer the semantic types on top.
-    static void requestTypedAccessors(Check c) {
-        HttpRequest req #= HttpRequest.post("/echo");
-        c.that(req.methodType() == Method.POST, "methodType POST");
-        c.that(req.versionType() == Version.HTTP_1_1, "versionType 1.1 default");
-        c.that(HttpRequest.of("BREW", "/pot").methodType() == Method.EXTENSION,
-               "extension token -> EXTENSION");
-
-        c.eqInt(req.contentLength(), (int64) -1, "no Content-Length: -1");
-        c.that(req.contentType() == null, "no Content-Type: null");
-        req.setHeader("Content-Length", "42");
-        req.setHeader("Content-Type", "application/json; charset=utf-8");
-        c.eqInt(req.contentLength(), (int64) 42, "Content-Length parsed");
-        MediaType mt #= req.contentType();
-        c.that(mt != null && mt.is("application", "json"), "Content-Type parsed");
-        c.eqStr(mt.parameter("charset"), "utf-8", "Content-Type params ride along");
-        req.setHeader("Content-Length", "12x");
-        c.eqInt(req.contentLength(), (int64) -1, "malformed Content-Length: -1");
+    static #HttpRequest parsed(String head) {
+        int8[] b #= head.toBytes();
+        HttpRequest q = heap HttpRequest(100);
+        HeadScanner.parseRequest(b, 0, head.byteLength(), q);
+        return #q;
     }
 
-    static void responseTypedAccessors(Check c) {
-        HttpResponse resp #= HttpResponse.of(404);
-        Status st #= resp.statusType();
-        c.eqInt((int64) st.code(), 404, "statusType code");
-        c.eqStr(st.reason(), "Not Found", "statusType canonical reason");
-        c.that(st.isClientError(), "statusType class predicate");
-        c.that(resp.versionType() == Version.HTTP_1_1, "response versionType");
+    static void requestTypedAccessors(Check c) {
+        String plain = "POST /echo HTTP/1.1\r\nHost: t\r\n\r\n";
+        HttpRequest q #= CoreTypeTests.parsed(plain);
+        c.that(q.method() == Method.POST, "a parsed request's method is POST");
+        c.that(q.version() == Version.HTTP_1_1, "a parsed request's version is 1.1");
+        MediaType none #= q.contentType();
+        c.that(none == null, "no Content-Type reads as null");
+        String typed = "POST /echo HTTP/1.1\r\nContent-Type: application/json; charset=utf-8\r\n\r\n";
+        HttpRequest t #= CoreTypeTests.parsed(typed);
+        MediaType mt #= t.contentType();
+        c.that(mt != null && mt.is("application", "json"), "Content-Type reads as a media type");
+        String cs #= mt.parameter("charset");
+        c.eqStr(cs, "utf-8", "its parameters ride along");
+        String odd = "POST /echo HTTP/1.1\r\nContent-Type: TEXT/Html\r\n\r\n";
+        HttpRequest o #= CoreTypeTests.parsed(odd);
+        MediaType folded #= o.contentType();
+        c.that(folded != null && folded.is("text", "html"), "the media type is case-folded");
+    }
 
-        // The registry consolidated into Status: codes HttpResponse's old
-        // table lacked now carry their canonical phrase.
-        c.eqStr(HttpResponse.of(203).reason,
-                "Non-Authoritative Information", "203 via Status registry");
-        c.eqStr(HttpResponse.of(429).reason, "Too Many Requests", "429 phrase");
+    static #String finished(int32 status) {
+        ByteBuffer out = heap ByteBuffer(4096);
+        HttpResponse r = heap HttpResponse(out, null, 1024, 32);
+        r.status(status);
+        r.finish(true, Version.HTTP_1_1, false);
+        return Bytes.toString(out.array()[out.readPosition():out.readPosition() + out.readable()]);
+    }
 
-        resp.setHeader("Content-Type", "TEXT/Html");
-        MediaType mt #= resp.contentType();
-        c.that(mt != null && mt.is("text", "html"), "response Content-Type, case-folded");
-        c.eqInt(resp.contentLength(), (int64) -1, "response without Content-Length");
+    static void responseStatus(Check c) {
+        Status st #= Status.of(404);
+        c.eqInt((int64) st.code(), 404, "Status.of keeps the code");
+        c.eqStr(st.reason(), "Not Found", "and carries the canonical reason");
+        c.that(st.isClientError(), "and its class");
+        String a #= CoreTypeTests.finished(203);
+        String b #= CoreTypeTests.finished(429);
+        c.that(a.startsWith("HTTP/1.1 203 Non-Authoritative Information\r\n"), "203 carries its phrase on the wire");
+        c.that(b.startsWith("HTTP/1.1 429 Too Many Requests\r\n"), "429 carries its phrase on the wire");
     }
 }

@@ -62,7 +62,6 @@ public enum Method {
         return Method.EXTENSION;
     }
 
-    /** True iff `token` names one of the nine registered methods (verbatim). */
     /** The method named by a byte window, or EXTENSION when unregistered. */
     public static Method ofBytes(Slice<int8> t) {
         if (Bytes.equals(t, "GET")) { return Method.GET; }
@@ -77,6 +76,7 @@ public enum Method {
         return Method.EXTENSION;
     }
 
+    /** True iff `token` names one of the nine registered methods (verbatim). */
     public static boolean isRegistered(String token) {
         if (token == null) { return false; }
         return Method.of(token) != Method.EXTENSION;

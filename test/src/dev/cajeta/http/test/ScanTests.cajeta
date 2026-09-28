@@ -10,6 +10,7 @@ import dev.cajeta.http.HttpRequest;
 import dev.cajeta.http.HttpException;
 import dev.cajeta.http.Method;
 import dev.cajeta.http.Version;
+import dev.cajeta.http.h1.BodyReader;
 import dev.cajeta.http.h1.HttpParserLimits;
 
 public final class ScanTests {
@@ -78,6 +79,45 @@ public final class ScanTests {
         c.that(r.version() == Version.HTTP_1_0, "version 1.0");
         c.that(r.keepAlive(), "1.0 with keep-alive token reuses");
         c.that(r.contentLength() == 12, "content-length parsed in place");
+        String bare = "GET / HTTP/1.0\r\n\r\n";
+        ByteBuffer b2 = heap ByteBuffer(4096);
+        HeadScanner s2 = heap HeadScanner(heap HttpParserLimits());
+        HttpRequest r2 = heap HttpRequest(100);
+        ScanTests.load(b2, bare);
+        HeadScanner.parseRequest(b2.array(), 0, ScanTests.scanWhole(s2, b2), r2);
+        c.that(!r2.keepAlive(), "1.0 without a Connection header ends reuse");
+    }
+
+    // Feeds `wire` to a chunked BodyReader `step` bytes at a time and returns the decoded body.
+    static #String dechunk(String wire, int32 step, Check c, String label) {
+        BodyReader br #= BodyReader.forChunked();
+        int8[] all #= wire.toBytes();
+        int32 at = 0;
+        boolean done = false;
+        while (at < wire.byteLength()) {
+            int32 n = wire.byteLength() - at < step ? wire.byteLength() - at : step;
+            int8[] piece = heap int8[n];
+            int32 i = 0;
+            while (i < n) {
+                piece[i] = all[at + i];
+                i = i + 1;
+            }
+            done = br.feed(piece, n);
+            at = at + n;
+        }
+        c.that(done && br.isComplete(), label);
+        int32 len = br.decodedLength();
+        int8[] out #= br.drain();
+        return Bytes.toString(out[0:len]);
+    }
+
+    static void bodyReader(Check c) {
+        String vector = "4\r\nWiki\r\n7\r\npedia i\r\nB\r\nn \r\nchunks.\r\n0\r\n\r\n";
+        String a #= ScanTests.dechunk(vector, 4096, c, "the chunked vector with CRLF in its data completes");
+        c.eqStr(a, "Wikipedia in \r\nchunks.", "and decodes, CRLF inside the data kept");
+        String ext = "5;name=value\r\nhello\r\n0\r\nX-Trailer: done\r\n\r\n";
+        String b #= ScanTests.dechunk(ext, 1, c, "an extension and a trailer, one byte at a time, complete");
+        c.eqStr(b, "hello", "the extension and trailer stay out of the body");
     }
 
     static void closeAndChunked(Check c) {
@@ -166,6 +206,8 @@ public final class ScanTests {
         ScanTests.extensionAndVersion(c);
         System.stdout.println("-- scan: close and chunked --");
         ScanTests.closeAndChunked(c);
+        System.stdout.println("-- scan: chunked body reader --");
+        ScanTests.bodyReader(c);
         System.stdout.println("-- scan: malformed and limits --");
         ScanTests.malformedAndLimits(c);
         System.stdout.println("-- scan: no allocation --");
