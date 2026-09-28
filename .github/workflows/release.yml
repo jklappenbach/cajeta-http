@@ -79,11 +79,9 @@ jobs:
       # released binary with .cajeta/cache cleared: 1445 suite tests, 150 tour
       # checks, 128 of 128 public types covered.
       #
-      # Raised to v0.30.1 for the closure-field, closure-return and slice fixes
-      # the view model relies on. On the view-model branch the library builds
-      # and the view tour passes 12 of 12 on the released binary. The suite
-      # joins the gate when the ported tests land.
-      cajeta-version: v0.30.1
+      # Raised to v0.31.0 for the view model: slice windows, exception titles,
+      # interface-slot moves and the builder handing its handler to the server.
+      cajeta-version: v0.31.0
       # Suite + tour + tour-coverage gate, chained in scripts/ci-checks.sh.
       # (`./run-tests.sh` rather than `cajeta test` because the suite needs the
       # codec's native zlib backend extracted out of its .cja with
