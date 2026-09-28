@@ -1,0 +1,313 @@
+package dev.cajeta.http.test;
+
+import cajeta.lang.String;
+import cajeta.lang.Slice;
+import cajeta.io.net.ByteBuffer;
+import dev.cajeta.http.Bytes;
+import dev.cajeta.http.HeadScanner;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.middleware.Middleware;
+import dev.cajeta.http.middleware.MiddlewareChain;
+import dev.cajeta.http.routing.Route;
+import dev.cajeta.http.routing.Router;
+
+/** What one dispatch answered, copied out of the response writer. */
+final class Routed {
+    public int32 status;
+    public String body;
+    public String allow;
+    public String tag;
+
+    public Routed() {
+        this.status = 0;
+        this.body = "";
+        this.allow = "";
+        this.tag = "";
+    }
+}
+
+/** Typed params, wildcard precedence, mounts and per-route caps, dispatched without a connection. */
+public final class RouterTests {
+    public static void run(Check c) {
+        System.stdout.println("-- router: typed params --");
+        RouterTests.typedParams(c);
+        System.stdout.println("-- router: wildcards --");
+        RouterTests.wildcards(c);
+        System.stdout.println("-- router: mount --");
+        RouterTests.mounts(c);
+        System.stdout.println("-- router: per-route caps --");
+        RouterTests.perRouteLimits(c);
+    }
+
+    static #String copy(Slice<int8> s) {
+        return Bytes.toString(s);
+    }
+
+    // Dispatches `method target` with `n` body bytes, or only a declared length when `declared` >= 0.
+    static #Routed go(Router router, String method, String target, int32 n, int64 declared) {
+        String head = method + " " + target + " HTTP/1.1\r\nHost: t\r\n";
+        if (n > 0) {
+            head = head + "Content-Length: " + n + "\r\n";
+        } else if (declared >= 0) {
+            head = head + "Content-Length: " + declared + "\r\n";
+        }
+        head = head + "\r\n";
+        int32 h = head.byteLength();
+        int8[] bytes = heap int8[h + n];
+        int8[] hb #= head.toBytes();
+        int32 i = 0;
+        while (i < h) {
+            bytes[i] = hb[i];
+            i = i + 1;
+        }
+        HttpRequest q = heap HttpRequest(100);
+        HeadScanner.parseRequest(bytes, 0, h, q);
+        if (n > 0) {
+            q.bindBody(h, n);
+        }
+        ByteBuffer out = heap ByteBuffer(8192);
+        HttpResponse r = heap HttpResponse(out, null, 1024, 32);
+        router.dispatch(q, r);
+        Routed res = heap Routed();
+        res.status = r.status();
+        res.body #= RouterTests.copy(r.body());
+        if (r.hasHeader("Allow")) {
+            res.allow #= RouterTests.copy(r.header("Allow"));
+        }
+        if (r.hasHeader("X-Tag")) {
+            res.tag #= RouterTests.copy(r.header("X-Tag"));
+        }
+        return #res;
+    }
+
+    static int32 status(Router router, String method, String target) {
+        Routed res #= RouterTests.go(router, method, target, 0, (int64) -1);
+        return res.status;
+    }
+
+    static #String body(Router router, String method, String target) {
+        Routed res #= RouterTests.go(router, method, target, 0, (int64) -1);
+        return res.body.substring(0, res.body.byteLength());
+    }
+
+    static void typedParams(Check c) {
+        (HttpRequest, HttpResponse) -> void i64Echo = (HttpRequest q, HttpResponse r) -> {
+            r.write("" + q.paramInt64("v", (int64) -999));
+        };
+        (HttpRequest, HttpResponse) -> void i32Echo = (HttpRequest q, HttpResponse r) -> {
+            r.write("" + q.paramInt32("v", -999));
+        };
+        (HttpRequest, HttpResponse) -> void boolEcho = (HttpRequest q, HttpResponse r) -> {
+            r.status(q.paramBool("v", false) ? 222 : 223);
+        };
+        (HttpRequest, HttpResponse) -> void strEcho = (HttpRequest q, HttpResponse r) -> {
+            String v #= q.paramString("v");
+            r.write(v);
+        };
+        Router r = heap Router();
+        r.route("GET", "/i64/{v:int64}", i64Echo);
+        r.route("GET", "/i32/{v:int32}", i32Echo);
+        r.route("GET", "/u32/{v:uint32}", i64Echo);
+        r.route("GET", "/i8/{v:int8}", i64Echo);
+        r.route("GET", "/b/{v:bool}", boolEcho);
+        r.route("GET", "/s/{v}", strEcho);
+        r.route("GET", "/s2/{v:string}", strEcho);
+
+        c.eqStr(RouterTests.body(r, "GET", "/i64/42"), "42", "int64 matches and round-trips");
+        c.eqStr(RouterTests.body(r, "GET", "/i64/-7"), "-7", "int64 negative round-trips");
+        c.eqStr(RouterTests.body(r, "GET", "/i64/0"), "0", "int64 zero round-trips");
+        c.eqStr(RouterTests.body(r, "GET", "/i64/9223372036854775807"), "9223372036854775807",
+            "int64 max round-trips (19 digits)");
+        c.eqStr(RouterTests.body(r, "GET", "/i64/-9223372036854775808"), "-9223372036854775808",
+            "int64 min round-trips");
+        c.eqStr(RouterTests.body(r, "GET", "/i64/1000000000000000000"), "1000000000000000000",
+            "int64 10^18 round-trips");
+        c.eqInt((int64) RouterTests.status(r, "GET", "/i64/abc"), 404, "int64 non-numeric is 404");
+        c.eqInt((int64) RouterTests.status(r, "GET", "/i64/007"), 404, "int64 leading zero is 404");
+        c.eqInt((int64) RouterTests.status(r, "GET", "/i64/-0"), 404, "int64 negative zero is 404");
+        c.eqInt((int64) RouterTests.status(r, "GET", "/i64/12x"), 404, "int64 trailing garbage is 404");
+        c.eqInt((int64) RouterTests.status(r, "GET", "/i64/9223372036854775808"), 404, "int64 max+1 is 404");
+        c.eqInt((int64) RouterTests.status(r, "GET", "/i64/99999999999999999999"), 404, "int64 20 digits is 404");
+        c.eqInt((int64) RouterTests.status(r, "GET", "/i64/"), 404, "int64 empty segment is 404");
+
+        c.eqInt((int64) RouterTests.status(r, "GET", "/i32/2147483647"), 200, "int32 max matches");
+        c.eqStr(RouterTests.body(r, "GET", "/i32/-2147483648"), "-2147483648", "int32 min round-trips");
+        c.eqInt((int64) RouterTests.status(r, "GET", "/i32/2147483648"), 404, "int32 max+1 is 404");
+        c.eqInt((int64) RouterTests.status(r, "GET", "/i32/-2147483649"), 404, "int32 min-1 is 404");
+
+        c.eqInt((int64) RouterTests.status(r, "GET", "/i8/127"), 200, "int8 max matches");
+        c.eqInt((int64) RouterTests.status(r, "GET", "/i8/-128"), 200, "int8 min matches");
+        c.eqInt((int64) RouterTests.status(r, "GET", "/i8/128"), 404, "int8 overflow is 404");
+
+        c.eqInt((int64) RouterTests.status(r, "GET", "/u32/0"), 200, "uint32 zero matches");
+        c.eqInt((int64) RouterTests.status(r, "GET", "/u32/4294967295"), 200, "uint32 max matches");
+        c.eqInt((int64) RouterTests.status(r, "GET", "/u32/-1"), 404, "uint32 negative is 404");
+        c.eqInt((int64) RouterTests.status(r, "GET", "/u32/4294967296"), 404, "uint32 overflow is 404");
+
+        c.eqInt((int64) RouterTests.status(r, "GET", "/b/true"), 222, "bool true matches, getter true");
+        c.eqInt((int64) RouterTests.status(r, "GET", "/b/false"), 223, "bool false matches, getter false");
+        c.eqInt((int64) RouterTests.status(r, "GET", "/b/1"), 404, "bool non-literal is 404");
+        c.eqInt((int64) RouterTests.status(r, "GET", "/b/True"), 404, "bool is case-sensitive");
+
+        c.eqStr(RouterTests.body(r, "GET", "/s/hello"), "hello", "string param bound");
+        c.eqStr(RouterTests.body(r, "GET", "/s/a%2Fb"), "a/b", "string param percent-decoded");
+        c.eqStr(RouterTests.body(r, "GET", "/s/42"), "42", "string param accepts digits");
+        c.eqStr(RouterTests.body(r, "GET", "/s2/world"), "world", "explicit string type behaves like {v}");
+
+        Routed m405 #= RouterTests.go(r, "POST", "/i64/42", 0, (int64) -1);
+        c.eqInt((int64) m405.status, 405, "typed path with the wrong method is 405");
+        c.eqStr(m405.allow, "GET", "the typed 405 carries Allow: GET");
+        c.eqInt((int64) RouterTests.status(r, "POST", "/i64/abc"), 404, "a typed mismatch is 404, never 405");
+    }
+
+    static void wildcards(Check c) {
+        (HttpRequest, HttpResponse) -> void lit = (HttpRequest q, HttpResponse r) -> {
+            r.write("LIT");
+        };
+        (HttpRequest, HttpResponse) -> void par = (HttpRequest q, HttpResponse r) -> {
+            r.write("PARAM:");
+            r.writeBytes(q.param("id"));
+        };
+        (HttpRequest, HttpResponse) -> void star = (HttpRequest q, HttpResponse r) -> {
+            r.write("STAR:");
+            r.writeBytes(q.param("w"));
+        };
+        (HttpRequest, HttpResponse) -> void dstar = (HttpRequest q, HttpResponse r) -> {
+            r.write("REST:");
+            r.writeBytes(q.param("rest"));
+        };
+
+        Router ra = heap Router();
+        ra.route("GET", "/a/{id}", par);
+        ra.route("GET", "/a/x", lit);
+        c.eqStr(RouterTests.body(ra, "GET", "/a/x"), "LIT", "literal beats param regardless of registration order");
+        c.eqStr(RouterTests.body(ra, "GET", "/a/y"), "PARAM:y", "param matches a non-literal segment");
+
+        Router rb = heap Router();
+        rb.route("GET", "/b/{w:*}", star);
+        rb.route("GET", "/b/{id}", par);
+        c.eqStr(RouterTests.body(rb, "GET", "/b/z"), "PARAM:z", "param beats single wildcard");
+
+        Router rc = heap Router();
+        rc.route("GET", "/c/{rest:**}", dstar);
+        rc.route("GET", "/c/{w:*}", star);
+        c.eqStr(RouterTests.body(rc, "GET", "/c/z"), "STAR:z", "single wildcard beats ** for one segment");
+        c.eqStr(RouterTests.body(rc, "GET", "/c/z/y"), "REST:z/y", "** matches several segments");
+
+        Router rd = heap Router();
+        rd.route("GET", "/d/{rest:**}", dstar);
+        rd.route("GET", "/d/config", lit);
+        c.eqStr(RouterTests.body(rd, "GET", "/d/config"), "LIT", "literal beats **");
+        c.eqStr(RouterTests.body(rd, "GET", "/d/other"), "REST:other", "** catches one non-literal segment");
+        c.eqStr(RouterTests.body(rd, "GET", "/d/a/b/c"), "REST:a/b/c", "** keeps the separators");
+
+        Router re = heap Router();
+        re.route("GET", "/e/{rest:**}", dstar);
+        c.eqStr(RouterTests.body(re, "GET", "/e"), "REST:", "** binds an empty rest at the prefix");
+        c.eqStr(RouterTests.body(re, "GET", "/e/a/b"), "REST:a/b", "** binds a multi-segment rest");
+        c.eqInt((int64) RouterTests.status(re, "GET", "/zzz"), 404, "a non-matching prefix is 404");
+
+        String e1 #= Route.patternError("/a/x");
+        String e2 #= Route.patternError("/a/{id:int64}");
+        String e3 #= Route.patternError("/a/{w:*}");
+        String e4 #= Route.patternError("/a/{rest:**}");
+        String e5 #= Route.patternError("/a/{rest:**}/b");
+        String e6 #= Route.patternError("/a/{x:bogus}");
+        c.that(e1 == null && e2 == null && e3 == null && e4 == null,
+            "literal, typed, * and trailing ** patterns are accepted");
+        c.that(e5 != null, "a non-terminal ** is rejected");
+        c.that(e6 != null, "an unknown param type is rejected");
+    }
+
+    static void tagged(HttpRequest q, HttpResponse r, (HttpRequest, HttpResponse) -> void next) {
+        next(q, r);
+        r.header("X-Tag", "sub-chain");
+    }
+
+    static void mounts(Check c) {
+        (HttpRequest, HttpResponse) -> void userH = (HttpRequest q, HttpResponse r) -> {
+            r.write("T:");
+            r.writeBytes(q.param("tid"));
+            r.write(",U:");
+            r.writeBytes(q.param("id"));
+        };
+        (HttpRequest, HttpResponse) -> void healthH = (HttpRequest q, HttpResponse r) -> {
+            r.write("HEALTH");
+        };
+        (HttpRequest, HttpResponse) -> void listH = (HttpRequest q, HttpResponse r) -> {
+            r.write("LIST:");
+            r.writeBytes(q.param("id"));
+        };
+
+        Router sub = heap Router();
+        sub.route("GET", "/users/{id}", userH);
+        sub.route("GET", "/health", healthH);
+        Router parent = heap Router();
+        parent.mount("/tenant/{tid}", sub);
+        c.eqStr(RouterTests.body(parent, "GET", "/tenant/acme/users/42"), "T:acme,U:42",
+            "mount binds the prefix param and the sub param");
+        c.eqStr(RouterTests.body(parent, "GET", "/tenant/acme/health"), "HEALTH", "a mounted literal route dispatches");
+        c.eqInt((int64) RouterTests.status(parent, "GET", "/tenant/acme/nope"), 404, "an unknown sub-path is 404");
+        c.eqInt((int64) RouterTests.status(parent, "GET", "/other/acme/health"), 404, "a prefix mismatch is 404");
+
+        Router sub2 = heap Router();
+        sub2.route("GET", "/{id}", listH);
+        Router p2 = heap Router();
+        p2.route("GET", "/api/health", healthH);
+        p2.mount("/api", sub2);
+        c.eqStr(RouterTests.body(p2, "GET", "/api/health"), "HEALTH", "a parent literal shadows a mounted param route");
+        c.eqStr(RouterTests.body(p2, "GET", "/api/xyz"), "LIST:xyz", "the mounted param route takes the rest");
+
+        Router sub3 = heap Router();
+        sub3.route("POST", "/{id}", listH);
+        Router p3 = heap Router();
+        p3.route("GET", "/api2/{id}", healthH);
+        p3.mount("/api2", sub3);
+        Routed d #= RouterTests.go(p3, "DELETE", "/api2/5", 0, (int64) -1);
+        c.eqInt((int64) d.status, 405, "an unmatched method across the merged tree is 405");
+        c.eqStr(d.allow, "GET, POST", "Allow aggregates direct and mounted routes");
+
+        (HttpRequest, HttpResponse, (HttpRequest, HttpResponse) -> void) -> void tagFn =
+            (HttpRequest q, HttpResponse r, (HttpRequest, HttpResponse) -> void next) -> RouterTests.tagged(q, r, next);
+        MiddlewareChain chain = heap MiddlewareChain();
+        chain.use(#Middleware.of(#tagFn));
+        Router sub4 = heap Router();
+        sub4.routeMw("GET", "/secret", #chain, healthH);
+        Router p4 = heap Router();
+        p4.mount("/admin", sub4);
+        Routed m #= RouterTests.go(p4, "GET", "/admin/secret", 0, (int64) -1);
+        c.that(m.body.equals("HEALTH") && m.tag.equals("sub-chain"),
+            "a mounted route keeps its routeMw chain");
+    }
+
+    static void perRouteLimits(Check c) {
+        (HttpRequest, HttpResponse) -> void okH = (HttpRequest q, HttpResponse r) -> {
+            r.write("OK");
+        };
+        Router r = heap Router();
+        r.routeLimited("POST", "/upload", (int64) 100, okH);
+        r.route("POST", "/free", okH);
+        Routed big #= RouterTests.go(r, "POST", "/upload", 500, (int64) -1);
+        Routed small #= RouterTests.go(r, "POST", "/upload", 50, (int64) -1);
+        Routed exact #= RouterTests.go(r, "POST", "/upload", 100, (int64) -1);
+        Routed free #= RouterTests.go(r, "POST", "/free", 100000, (int64) -1);
+        c.eqInt((int64) big.status, 413, "a per-route cap 413s an over-cap body");
+        c.eqInt((int64) small.status, 200, "a within-cap body runs the handler");
+        c.eqInt((int64) exact.status, 200, "a body exactly at the cap is allowed");
+        c.eqInt((int64) free.status, 200, "a route without a cap admits a large body");
+        Routed declared #= RouterTests.go(r, "POST", "/upload", 0, (int64) 1000);
+        Routed declaredFree #= RouterTests.go(r, "POST", "/free", 0, (int64) 1000);
+        c.eqInt((int64) declared.status, 413, "a declared Content-Length over the cap is 413");
+        c.eqInt((int64) declaredFree.status, 200, "a route without a cap admits the same declared length");
+
+        Router sub = heap Router();
+        sub.routeLimited("POST", "/avatar", (int64) 100, okH);
+        Router parent = heap Router();
+        parent.mount("/users/{id}", sub);
+        Routed mBig #= RouterTests.go(parent, "POST", "/users/7/avatar", 500, (int64) -1);
+        Routed mSmall #= RouterTests.go(parent, "POST", "/users/7/avatar", 50, (int64) -1);
+        c.eqInt((int64) mBig.status, 413, "a mounted route keeps its per-route cap");
+        c.eqInt((int64) mSmall.status, 200, "a mounted route admits a within-cap body");
+    }
+}

@@ -86,10 +86,20 @@ public class Router {
         while (i < sub.routeCount) {
             Route r = sub.routes[i];
             String combined #= Router.joinPattern(prefix, r.pattern);
-            this.routeLimited(r.method, combined, r.maxBodyBytes, r.terminal);
+            this.mountRoute(r.method, combined, r.maxBodyBytes, r.terminal, r.mw);
             i = i + 1;
         }
         return this;
+    }
+
+    // A route running the mounted route's handler inside its chain, which the sub-router keeps.
+    void mountRoute(String method, String pattern, int64 maxBodyBytes,
+                    (HttpRequest, HttpResponse) -> void handler, MiddlewareChain chain) {
+        Router.check(pattern);
+        Route r = heap Route(method, pattern, #handler);
+        r.maxBodyBytes = maxBodyBytes;
+        r.mw #= chain;
+        this.append(#r);
     }
 
     static #String joinPattern(String prefix, String sub) {

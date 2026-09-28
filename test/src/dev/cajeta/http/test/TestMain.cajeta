@@ -19,6 +19,7 @@ public final class TestMain {
         if (sel.want("ViewEditTests")) { ViewEditTests.run(c); }
         if (sel.want("StatusCatalogueTests")) { StatusCatalogueTests.run(c); }
         if (sel.want("RouterSelectTests")) { RouterSelectTests.run(c); }
+        if (sel.want("RouterTests")) { RouterTests.run(c); }
         if (sel.want("BodyTests")) { BodyTests.run(c); }
         if (sel.want("FormTests")) { FormTests.run(c); }
         if (sel.want("MultipartTests")) { MultipartTests.run(c); }
