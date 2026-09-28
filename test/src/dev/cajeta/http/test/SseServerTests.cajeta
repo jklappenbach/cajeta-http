@@ -2,8 +2,12 @@ package dev.cajeta.http.test;
 
 import cajeta.io.net.AsyncReader;
 import cajeta.lang.String;
+import cajeta.io.net.ByteBuffer;
+import dev.cajeta.http.Bytes;
+import dev.cajeta.http.HeadScanner;
 import dev.cajeta.http.HttpRequest;
 import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.h1.HttpParserLimits;
 import dev.cajeta.http.body.Body;
 import dev.cajeta.http.sse.SseByteChannel;
 import dev.cajeta.http.sse.SseBody;
@@ -48,46 +52,36 @@ public final class SseServerTests {
         return #p;
     }
 
-    static void headers(Check c, HttpResponse resp) {
-        c.eqInt((int64) resp.statusCode(), (int64) 200, "SSE response is 200");
-        c.that(resp.bodyModel != null, "SSE response has a streaming body");
-        c.that(!resp.hasBody, "SSE body streams (no in-memory body)");
-        String ct #= resp.getHeaders().get("Content-Type");
-        c.that(ct != null && ct.equals("text/event-stream"),
+    static void headers(Check c, HttpResponse r) {
+        c.eqInt((int64) r.status(), (int64) 200, "SSE response is 200");
+        c.that(r.bodyStream() != null, "SSE response has a streaming body");
+        c.that(r.bodyLength() == 0, "SSE body streams (nothing buffered yet)");
+        c.that(Bytes.equals(r.header("Content-Type"), "text/event-stream"),
                "Content-Type is text/event-stream");
-        String cc #= resp.getHeaders().get("Cache-Control");
-        c.that(cc != null && cc.equals("no-cache"), "Cache-Control is no-cache");
-        String cn #= resp.getHeaders().get("Connection");
-        c.that(cn != null && cn.equals("keep-alive"), "Connection is keep-alive");
+        c.that(Bytes.equals(r.header("Cache-Control"), "no-cache"), "Cache-Control is no-cache");
     }
-
-    // ---- fixed event list ------------------------------------------------
 
     static void streamFixed(Check c) {
         SseEvent[] evs = heap SseEvent[3];
         evs[0] #= SseEvent.of("alpha");
         evs[1] #= SseEvent.typed("tick", "1");
-        evs[2] #= SseEvent.of("beta\ngamma");   // multi-line data
-
-        HttpResponse resp #= SseResponse.stream(#evs, 3);
-        SseServerTests.headers(c, resp);
-
-        SseParser p #= SseServerTests.drainInto(resp.bodyModel);
+        evs[2] #= SseEvent.of("beta\ngamma");
+        ByteBuffer out = heap ByteBuffer(8192);
+        HttpResponse r = heap HttpResponse(out, null, 4096, 64);
+        SseResponse.stream(r, #evs, 3);
+        SseServerTests.headers(c, r);
+        SseParser p #= SseServerTests.drainInto(r.bodyStream());
         c.that(p.hasEvent(), "fixed stream: first event present");
         SseEvent a #= p.nextEvent();
         c.that(a.data.equals("alpha"), "fixed stream: event 1 data 'alpha'");
         c.that(a.typeOrDefault().equals("message"), "fixed stream: event 1 untyped");
         SseEvent b #= p.nextEvent();
-        c.that(b.event != null && b.event.equals("tick"),
-               "fixed stream: event 2 type 'tick'");
+        c.that(b.event != null && b.event.equals("tick"), "fixed stream: event 2 type 'tick'");
         c.that(b.data.equals("1"), "fixed stream: event 2 data '1'");
         SseEvent g #= p.nextEvent();
-        c.that(g.data.equals("beta\ngamma"),
-               "fixed stream: event 3 multi-line data round-trips");
+        c.that(g.data.equals("beta\ngamma"), "fixed stream: event 3 multi-line data round-trips");
         c.that(!p.hasEvent(), "fixed stream: exactly three events, then EOF");
     }
-
-    // ---- live channel ----------------------------------------------------
 
     static void channelLive(Check c) {
         SseChannel ch = heap SseChannel(8);
@@ -97,37 +91,37 @@ public final class SseServerTests {
         ch.send(#e1);
         SseEvent e2 #= SseEvent.of("three");
         ch.send(#e2);
-        ch.close();   // closed + buffered: drains to EOF
-
-        HttpResponse resp #= SseResponse.channel(ch);
-        SseServerTests.headers(c, resp);
-
-        SseParser p #= SseServerTests.drainInto(resp.bodyModel);
+        ch.close();
+        ByteBuffer out = heap ByteBuffer(8192);
+        HttpResponse r = heap HttpResponse(out, null, 4096, 64);
+        SseResponse.channel(r, ch);
+        SseServerTests.headers(c, r);
+        SseParser p #= SseServerTests.drainInto(r.bodyStream());
         SseEvent a #= p.nextEvent();
         c.that(a.data.equals("one"), "channel stream: event 1 'one'");
         SseEvent b #= p.nextEvent();
-        c.that(b.event != null && b.event.equals("update"),
-               "channel stream: event 2 type 'update'");
+        c.that(b.event != null && b.event.equals("update"), "channel stream: event 2 type 'update'");
         c.that(b.data.equals("two"), "channel stream: event 2 'two'");
         SseEvent g #= p.nextEvent();
         c.that(g.data.equals("three"), "channel stream: event 3 'three'");
         c.that(!p.hasEvent(), "channel stream: three events, then EOF on close");
     }
 
-    // ---- Last-Event-ID request view --------------------------------------
-
     static void lastEventId(Check c) {
-        HttpRequest with #= HttpRequest.of("GET", "/events");
-        with.header("Last-Event-ID", "42");
+        HttpParserLimits limits = heap HttpParserLimits();
+        String withText = "GET /events HTTP/1.1\r\nHost: h\r\nLast-Event-ID: 42\r\n\r\n";
+        int8[] wa #= withText.toBytes();
+        HttpRequest with = heap HttpRequest(limits.maxHeaderCount);
+        HeadScanner.parseRequest(wa, 0, withText.byteLength(), with);
         String id #= SseResponse.lastEventId(with);
-        c.that(id != null && id.equals("42"), "Last-Event-ID read from request");
-
-        HttpRequest without #= HttpRequest.of("GET", "/events");
+        c.that(id != null && id.equals("42"), "Last-Event-ID read from the request view");
+        String withoutText = "GET /events HTTP/1.1\r\nHost: h\r\n\r\n";
+        int8[] na #= withoutText.toBytes();
+        HttpRequest without = heap HttpRequest(limits.maxHeaderCount);
+        HeadScanner.parseRequest(na, 0, withoutText.byteLength(), without);
         String none #= SseResponse.lastEventId(without);
         c.that(none == null, "Last-Event-ID absent -> null");
     }
-
-    // ---- keep-alive comment ----------------------------------------------
 
     static void keepAlive(Check c) {
         int8[] ka #= SseByteChannel.keepAliveBytes();

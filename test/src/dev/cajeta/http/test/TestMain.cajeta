@@ -25,6 +25,8 @@ public final class TestMain {
         if (sel.want("SseTests")) { SseTests.run(c); }
         if (sel.want("SseClientLoopbackTests")) { SseClientLoopbackTests.run(c); }
         if (sel.want("SseServerLoopbackTests")) { SseServerLoopbackTests.run(c); }
+        if (sel.want("SseClientTests")) { SseClientTests.run(c); }
+        if (sel.want("SseServerTests")) { SseServerTests.run(c); }
         if (sel.want("MiddlewareTests")) { MiddlewareTests.run(c); }
         if (sel.want("MiddlewareBundleTests")) { MiddlewareBundleTests.run(c); }
         if (sel.want("MiddlewareTimeoutCorsTests")) { MiddlewareTimeoutCorsTests.run(c); }

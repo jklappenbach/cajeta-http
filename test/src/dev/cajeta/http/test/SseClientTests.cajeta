@@ -1,8 +1,9 @@
 package dev.cajeta.http.test;
 
 import cajeta.lang.String;
-import dev.cajeta.http.HttpRequest;
-import dev.cajeta.http.HttpResponse;
+import cajeta.io.net.ByteBuffer;
+import dev.cajeta.http.ClientResponse;
+import dev.cajeta.http.HeadScanner;
 import dev.cajeta.http.sse.SseClient;
 import dev.cajeta.http.sse.SseDecoder;
 import dev.cajeta.http.sse.SseEvent;
@@ -52,72 +53,57 @@ public final class SseClientTests {
 
     static void buildRequest(Check c) {
         SseClient sc = heap SseClient("http://events.test/stream");
-        HttpRequest req #= sc.buildRequest();
-        c.that(req.getMethod().equals("GET"), "request: GET");
-        c.that(req.getTarget().equals("/stream"), "request: origin-form target");
-        String accept #= req.getHeaders().get("Accept");
-        c.that(accept != null && accept.equals("text/event-stream"),
-               "request: Accept: text/event-stream");
-        String cc #= req.getHeaders().get("Cache-Control");
-        c.that(cc != null && cc.equals("no-cache"), "request: Cache-Control: no-cache");
-        String host #= req.getHeaders().get("Host");
-        c.that(host != null && host.equals("events.test"), "request: Host from URL");
-        String le #= req.getHeaders().get("Last-Event-ID");
-        c.that(le == null, "request: no Last-Event-ID on the first connect");
-
-        // After resuming, the request replays the last id.
+        String head #= sc.requestHead();
+        c.that(head.startsWith("GET /stream HTTP/1.1\r\n"), "request: GET with an origin-form target");
+        c.that(head.contains("\r\nAccept: text/event-stream\r\n"), "request: Accept: text/event-stream");
+        c.that(head.contains("\r\nCache-Control: no-cache\r\n"), "request: Cache-Control: no-cache");
+        c.that(head.contains("\r\nHost: events.test\r\n"), "request: Host from the URL, no default port");
+        c.that(!head.contains("Last-Event-ID"), "request: no Last-Event-ID on the first connect");
+        c.that(head.endsWith("\r\n\r\n"), "request: the head ends with a blank line");
         sc.resumeFrom("99");
-        HttpRequest req2 #= sc.buildRequest();
-        String le2 #= req2.getHeaders().get("Last-Event-ID");
-        c.that(le2 != null && le2.equals("99"), "request: Last-Event-ID replayed on resume");
+        String head2 #= sc.requestHead();
+        c.that(head2.contains("\r\nLast-Event-ID: 99\r\n"), "request: Last-Event-ID replayed on resume");
+    }
+
+    // A response view over `head`, which it owns.
+    static #ClientResponse response(String head) {
+        int8[] bytes #= head.toBytes();
+        ByteBuffer buf = heap ByteBuffer(4096);
+        int32 i = 0;
+        while (i < head.byteLength()) {
+            buf.put(bytes[i]);
+            i = i + 1;
+        }
+        ClientResponse r = heap ClientResponse();
+        HeadScanner.parseResponse(buf.array(), 0, head.byteLength(), r);
+        r.adopt(#buf);
+        return #r;
+    }
+
+    static boolean refused(SseClient sc, String head) {
+        ClientResponse r #= SseClientTests.response(head);
+        try {
+            sc.checkHead(r);
+        } catch (Exception e) {
+            return true;
+        }
+        return false;
     }
 
     static void checkHead(Check c) {
         SseClient sc = heap SseClient("http://events.test/stream");
-
-        // A good head: 200 + text/event-stream — no throw.
-        HttpResponse ok #= HttpResponse.ok();
-        ok.setHeader("Content-Type", "text/event-stream");
-        boolean threwOk = false;
-        try {
-            sc.checkHead(ok);
-        } catch (Exception e) {
-            threwOk = true;
-        }
-        c.that(!threwOk, "checkHead: 200 text/event-stream accepted");
-
-        // Wrong status.
-        HttpResponse notFound #= HttpResponse.of(404);
-        notFound.setHeader("Content-Type", "text/event-stream");
-        boolean threw404 = false;
-        try {
-            sc.checkHead(notFound);
-        } catch (Exception e) {
-            threw404 = true;
-        }
-        c.that(threw404, "checkHead: non-200 is a terminal SseException");
-
-        // Wrong content type.
-        HttpResponse wrongType #= HttpResponse.ok();
-        wrongType.setHeader("Content-Type", "text/plain");
-        boolean threwType = false;
-        try {
-            sc.checkHead(wrongType);
-        } catch (Exception e) {
-            threwType = true;
-        }
-        c.that(threwType, "checkHead: wrong content-type is a terminal SseException");
-
-        // Content-Type with a charset parameter still matches on essence.
-        HttpResponse withCharset #= HttpResponse.ok();
-        withCharset.setHeader("Content-Type", "text/event-stream; charset=utf-8");
-        boolean threwCharset = false;
-        try {
-            sc.checkHead(withCharset);
-        } catch (Exception e) {
-            threwCharset = true;
-        }
-        c.that(!threwCharset, "checkHead: essence match ignores the charset param");
+        c.that(!SseClientTests.refused(sc,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n"),
+               "checkHead: 200 text/event-stream accepted");
+        c.that(SseClientTests.refused(sc,
+                "HTTP/1.1 404 Not Found\r\nContent-Type: text/event-stream\r\n\r\n"),
+               "checkHead: non-200 is a terminal SseException");
+        c.that(SseClientTests.refused(sc,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n"),
+               "checkHead: wrong content-type is a terminal SseException");
+        c.that(!SseClientTests.refused(sc,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\n\r\n"),
+               "checkHead: essence match ignores the charset param");
     }
 
     static void reconnectDelay(Check c) {

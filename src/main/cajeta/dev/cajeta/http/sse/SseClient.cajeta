@@ -91,8 +91,11 @@ public final class SseClient {
         if (query != null && query.byteLength() > 0) {
             head = head + "?" + query;
         }
-        head = head + " HTTP/1.1\r\nHost: " + this.host + ":" + this.port
-            + "\r\nAccept: text/event-stream\r\nCache-Control: no-cache\r\n";
+        head = head + " HTTP/1.1\r\nHost: " + this.host;
+        if (this.port != 80) {
+            head = head + ":" + this.port;
+        }
+        head = head + "\r\nAccept: text/event-stream\r\nCache-Control: no-cache\r\n";
         String last = this.decoder.lastEventId();
         if (last != null) {
             head = head + "Last-Event-ID: " + last + "\r\n";
