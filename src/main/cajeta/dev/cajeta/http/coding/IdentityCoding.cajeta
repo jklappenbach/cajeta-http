@@ -1,0 +1,79 @@
+package dev.cajeta.http.coding;
+
+import cajeta.lang.String;
+import cajeta.wire.Compressor;
+import cajeta.wire.Decompressor;
+import cajeta.wire.CompressStream;
+import cajeta.wire.DecompressionLimitException;
+
+/** The identity coding: bytes pass through unchanged. */
+public final class IdentityCoding implements Compressor, Decompressor {
+    public IdentityCoding() {
+    }
+
+    public #int8[] compress(int8[] src) {
+        return CodingBytes.copy(src, src.count());
+    }
+
+    public #int8[] compress(int8[] src, int64 len, int32 level) {
+        return CodingBytes.copy(src, len);
+    }
+
+    public #CompressStream stream(int32 level) {
+        return heap IdentityStream();
+    }
+
+    public #int8[] decompress(int8[] src, int64 expandedLen) {
+        return CodingBytes.copy(src, expandedLen);
+    }
+
+    public #int8[] decompress(int8[] src, int64 len, int64 maxOut) {
+        if (len > maxOut) {
+            throw heap DecompressionLimitException("identity body exceeds the decode cap", maxOut);
+        }
+        return CodingBytes.copy(src, len);
+    }
+}
+
+/** Hands back what was written since the last call. */
+final class IdentityStream implements CompressStream {
+    int8[] held;
+    int64 n;
+
+    IdentityStream() {
+        this.held = heap int8[1024];
+        this.n = 0;
+    }
+
+    public void write(int8[] src, int64 len) {
+        if (this.n + len > (int64) this.held.count()) {
+            int64 cap = (int64) this.held.count() * 2;
+            while (cap < this.n + len) {
+                cap = cap * 2;
+            }
+            int8[] grown = heap int8[cap];
+            int64 j = 0;
+            while (j < this.n) {
+                grown[j] = this.held[j];
+                j = j + 1;
+            }
+            this.held #= grown;
+        }
+        int64 i = 0;
+        while (i < len) {
+            this.held[this.n + i] = src[i];
+            i = i + 1;
+        }
+        this.n = this.n + len;
+    }
+
+    public #int8[] flush() {
+        int8[] out #= CodingBytes.copy(this.held, this.n);
+        this.n = 0;
+        return #out;
+    }
+
+    public #int8[] finish() {
+        return this.flush();
+    }
+}

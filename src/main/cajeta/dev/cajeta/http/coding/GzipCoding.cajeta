@@ -1,0 +1,110 @@
+package dev.cajeta.http.coding;
+
+import cajeta.lang.String;
+import cajeta.error.RecoverableException;
+import cajeta.wire.Compressor;
+import cajeta.wire.Decompressor;
+import cajeta.wire.CompressStream;
+import cajeta.wire.DecompressionLimitException;
+import dev.cajeta.codec.compress.Gzip;
+import dev.cajeta.codec.compress.DeflateStream;
+
+/** The gzip content coding (RFC 1952), CRC-32 and length verified on decode. */
+public final class GzipCoding implements Compressor, Decompressor {
+    public GzipCoding() {
+    }
+
+    public #int8[] compress(int8[] src) {
+        return Gzip.compress(src, src.count(), 1);
+    }
+
+    public #int8[] compress(int8[] src, int64 len, int32 level) {
+        return Gzip.compress(src, len, level);
+    }
+
+    public #CompressStream stream(int32 level) {
+        return heap GzipStream(level);
+    }
+
+    public #int8[] decompress(int8[] src, int64 expandedLen) {
+        int8[] out #= this.decompress(src, src.count(), expandedLen);
+        if ((int64) out.count() != expandedLen) {
+            throw heap ContentCodingException("decoded length differs from the expected " + expandedLen);
+        }
+        return #out;
+    }
+
+    public #int8[] decompress(int8[] src, int64 len, int64 maxOut) {
+        int8[] out = null;
+        try {
+            out #= Gzip.decompress(src, len);
+        } catch (RecoverableException e) {
+            throw heap ContentCodingException("gzip decode failed: " + e.getMessage());
+        }
+        if ((int64) out.count() > maxOut) {
+            throw heap DecompressionLimitException("decoded body exceeds the decode cap", maxOut);
+        }
+        return #out;
+    }
+}
+
+/** gzip framing around a DEFLATE stream: the header first, then CRC-32 and length at the end. */
+final class GzipStream implements CompressStream {
+    DeflateStream def;
+    Crc32 crc;
+    int64 isize;
+    boolean started;
+
+    GzipStream(int32 level) {
+        this.def = heap DeflateStream(level);
+        this.crc = heap Crc32();
+        this.isize = 0;
+        this.started = false;
+    }
+
+    public void write(int8[] src, int64 len) {
+        this.crc.update(src, (int32) len);
+        this.isize = this.isize + len;
+        this.def.write(src, (int32) len);
+    }
+
+    public #int8[] flush() {
+        int8[] body #= this.def.syncFlush();
+        return this.lead(#body);
+    }
+
+    public #int8[] finish() {
+        int8[] tail #= this.def.finish();
+        int64 c = this.crc.value();
+        int64 sz = this.isize & (int64) 0xFFFFFFFF;
+        int32 n = tail.count();
+        int8[] out = heap int8[n + 8];
+        int32 i = 0;
+        while (i < n) {
+            out[i] = tail[i];
+            i = i + 1;
+        }
+        CodingBytes.le32(out, n, c);
+        CodingBytes.le32(out, n + 4, sz);
+        return this.lead(#out);
+    }
+
+    #int8[] lead(#int8[] b) {
+        if (this.started) {
+            return #b;
+        }
+        this.started = true;
+        int32 n = b.count();
+        int8[] out = heap int8[n + 10];
+        out[0] = (int8) 0x1f;
+        out[1] = (int8) 0x8b;
+        out[2] = (int8) 0x08;
+        out[9] = (int8) 0xff;
+        int32 i = 0;
+        while (i < n) {
+            out[10 + i] = b[i];
+            i = i + 1;
+        }
+        return #out;
+    }
+}

@@ -5,7 +5,10 @@ import cajeta.lang.Slice;
 import dev.cajeta.http.Bytes;
 import dev.cajeta.http.HttpRequest;
 import dev.cajeta.http.HttpResponse;
-import dev.cajeta.http.coding.ContentCoding;
+import cajeta.error.Exception;
+import cajeta.wire.Decompressor;
+import cajeta.wire.DecompressionLimitException;
+import dev.cajeta.http.coding.ContentCodings;
 
 /**
  * Decodes a request body sent with `Content-Encoding`. The handler sees the
@@ -50,20 +53,24 @@ public class Decompression {
             return;
         }
         String coding #= Bytes.toString(ce).toLowerCase();
-        if (!ContentCoding.isSupported(coding)) {
+        Decompressor d = ContentCodings.decompressor(coding);
+        if (d == null) {
             r.status(415);
+            r.header("Accept-Encoding", ContentCodings.supported());
             return;
         }
         try {
             int8[] raw #= Bytes.copyOf(q.body());
-            int8[] decoded #= ContentCoding.decode(coding, raw, raw.count(), cfg.maxBytes);
+            int8[] decoded #= d.decompress(raw, raw.count(), cfg.maxBytes);
             int32 dn = decoded.count();
             q.replaceBody(#decoded, dn);
             q.removeHeader("Content-Encoding");
             q.setHeader("Content-Length", "" + dn);
+        } catch (DecompressionLimitException e) {
+            r.status(413);
+            return;
         } catch (Exception e) {
-            String m = e.getMessage();
-            r.status(m != null && m.contains("cap") ? 413 : 400);
+            r.status(400);
             return;
         }
         next(q, r);

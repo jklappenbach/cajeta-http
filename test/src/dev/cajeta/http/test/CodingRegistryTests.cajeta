@@ -1,0 +1,263 @@
+package dev.cajeta.http.test;
+
+import cajeta.lang.String;
+import cajeta.io.net.AsyncReader;
+import cajeta.wire.Compressor;
+import cajeta.wire.Decompressor;
+import cajeta.wire.CompressStream;
+import cajeta.wire.DecompressionLimitException;
+import dev.cajeta.http.Bytes;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.body.BytesBody;
+import dev.cajeta.http.body.StreamBody;
+import dev.cajeta.http.coding.AcceptEncoding;
+import dev.cajeta.http.coding.ContentCoding;
+import dev.cajeta.http.coding.ContentCodingException;
+import dev.cajeta.http.coding.ContentCodings;
+import dev.cajeta.http.middleware.Compression;
+import dev.cajeta.http.middleware.Decompression;
+
+/** A test-only run-length coding: (count, byte) pairs, so a run of one byte shrinks to two. */
+final class RunLength implements Compressor, Decompressor {
+    public RunLength() {
+    }
+
+    static #int8[] encode(int8[] src, int64 len) {
+        int8[] out = heap int8[len * 2 + 2];
+        int64 o = 0;
+        int64 i = 0;
+        while (i < len) {
+            int8 b = src[i];
+            int64 run = 1;
+            while (i + run < len && src[i + run] == b && run < 255) {
+                run = run + 1;
+            }
+            out[o] = (int8) run;
+            out[o + 1] = b;
+            o = o + 2;
+            i = i + run;
+        }
+        int8[] exact = heap int8[o];
+        int64 k = 0;
+        while (k < o) {
+            exact[k] = out[k];
+            k = k + 1;
+        }
+        return #exact;
+    }
+
+    public #int8[] compress(int8[] src) {
+        return RunLength.encode(src, src.count());
+    }
+
+    public #int8[] compress(int8[] src, int64 len, int32 level) {
+        return RunLength.encode(src, len);
+    }
+
+    public #CompressStream stream(int32 level) {
+        return heap RunLengthStream();
+    }
+
+    public #int8[] decompress(int8[] src, int64 expandedLen) {
+        return this.decompress(src, src.count(), expandedLen);
+    }
+
+    public #int8[] decompress(int8[] src, int64 len, int64 maxOut) {
+        int64 total = 0;
+        int64 i = 0;
+        while (i + 1 < len) {
+            total = total + (int64) (((int32) src[i]) & 255);
+            i = i + 2;
+        }
+        if (total > maxOut) {
+            throw heap DecompressionLimitException("run-length output over the cap", maxOut);
+        }
+        int8[] out = heap int8[total];
+        int64 o = 0;
+        i = 0;
+        while (i + 1 < len) {
+            int64 run = (int64) (((int32) src[i]) & 255);
+            int64 k = 0;
+            while (k < run) {
+                out[o + k] = src[i + 1];
+                k = k + 1;
+            }
+            o = o + run;
+            i = i + 2;
+        }
+        return #out;
+    }
+}
+
+/** Encodes each flushed piece on its own, which concatenates into a valid run-length body. */
+final class RunLengthStream implements CompressStream {
+    int8[] held;
+    int64 n;
+
+    RunLengthStream() {
+        this.held = heap int8[16384];
+        this.n = 0;
+    }
+
+    public void write(int8[] src, int64 len) {
+        int64 i = 0;
+        while (i < len) {
+            this.held[this.n + i] = src[i];
+            i = i + 1;
+        }
+        this.n = this.n + len;
+    }
+
+    public #int8[] flush() {
+        int8[] out #= RunLength.encode(this.held, this.n);
+        this.n = 0;
+        return #out;
+    }
+
+    public #int8[] finish() {
+        return this.flush();
+    }
+}
+
+/** The coding registry: built-ins, a registered coding negotiated end to end, and the decode cap. */
+public final class CodingRegistryTests {
+    public static void run(Check c) {
+        System.stdout.println("-- coding registry: built-ins --");
+        CodingRegistryTests.builtIns(c);
+        System.stdout.println("-- coding registry: a registered coding --");
+        CodingRegistryTests.registered(c);
+        System.stdout.println("-- coding registry: streams and fallback --");
+        CodingRegistryTests.streams(c);
+    }
+
+    static #String runs(int32 n) {
+        int8[] a = heap int8[n];
+        int32 i = 0;
+        while (i < n) {
+            a[i] = (int8) (97 + (i / 100) % 26);
+            i = i + 1;
+        }
+        return heap String(#a, n);
+    }
+
+    static void builtIns(Check c) {
+        c.that(ContentCodings.isSupported("gzip") && ContentCodings.isSupported("x-gzip")
+            && ContentCodings.isSupported("deflate") && ContentCodings.isSupported("identity"),
+            "gzip, x-gzip, deflate and identity are built in");
+        c.that(!ContentCodings.isSupported("br"), "an unregistered token is not supported");
+        String listed #= ContentCodings.supported();
+        c.that(listed.startsWith("gzip, x-gzip, deflate, identity"), "supported() lists the built-ins in order");
+        String plain #= CodingRegistryTests.runs(2000);
+        int8[] pb #= plain.toBytes();
+        boolean capped = false;
+        try {
+            int8[] z #= ContentCoding.encode("gzip", pb, plain.byteLength());
+            int8[] back #= ContentCoding.decode("gzip", z, z.count(), (int64) 100);
+        } catch (ContentCodingException e) {
+            capped = e.getMessage().contains("cap");
+        }
+        c.that(capped, "a decode over its cap raises ContentCodingException naming the cap");
+        boolean typed = false;
+        try {
+            int8[] z #= ContentCodings.compressor("deflate").compress(pb, (int64) plain.byteLength(), 6);
+            int8[] back #= ContentCodings.decompressor("deflate").decompress(z, z.count(), (int64) 100);
+        } catch (DecompressionLimitException e) {
+            typed = e.limit == (int64) 100;
+        }
+        c.that(typed, "through the registry the cap is a typed DecompressionLimitException");
+    }
+
+    static void echo(HttpRequest q, HttpResponse r) {
+        r.setHeader("Content-Type", "text/plain");
+        r.bodyBytes(q.body());
+    }
+
+    static void registered(Check c) {
+        ContentCodings.register("rle", heap RunLength(), heap RunLength());
+        c.that(ContentCodings.isSupported("rle"), "a registered coding is supported");
+        c.eqStr(AcceptEncoding.best("rle"), "rle", "negotiation offers a registered coding");
+        c.eqStr(AcceptEncoding.best("gzip;q=0.5, rle"), "rle", "the registered coding's higher q wins");
+        c.eqStr(AcceptEncoding.best("rle, gzip"), "gzip", "a tie goes to the coding registered first");
+
+        String plain #= CodingRegistryTests.runs(3000);
+        Compression cmp #= Compression.create();
+        (HttpRequest, HttpResponse) -> void text = (HttpRequest q, HttpResponse r) -> {
+            r.setHeader("Content-Type", "text/plain");
+            r.body(plain);
+        };
+        String wire #= Wire.through(#Compression.middleware(cmp), text,
+            "GET /x HTTP/1.1\r\nAccept-Encoding: rle\r\n\r\n");
+        Wire.same(c, Wire.header(wire, "Content-Encoding"), "rle", "Compression encodes with the registered coding");
+        String coded #= Wire.bodyOf(wire);
+        int8[] cb #= coded.toBytes();
+        int8[] back #= ContentCoding.decode("rle", cb, coded.byteLength(), (int64) 100000);
+        c.eqBytes(back, back.count(), plain, "and the body decodes to the original");
+
+        Decompression dz #= Decompression.create();
+        (HttpRequest, HttpResponse) -> void echo = (HttpRequest q, HttpResponse r) -> CodingRegistryTests.echo(q, r);
+        int8[] pb #= plain.toBytes();
+        int8[] rle #= ContentCoding.encode("rle", pb, plain.byteLength());
+        String upload #= "POST /x HTTP/1.1\r\nContent-Encoding: rle\r\nContent-Length: " + rle.count()
+            + "\r\n\r\n" + Bytes.toString(rle[0:rle.count()]);
+        String got #= Wire.through(#Decompression.middleware(dz), echo, upload);
+        Wire.same(c, Wire.bodyOf(got), plain, "Decompression decodes a registered coding before the handler");
+
+        String unknown #= Wire.through(#Decompression.middleware(dz), echo,
+            "POST /x HTTP/1.1\r\nContent-Encoding: br\r\nContent-Length: 2\r\n\r\nhi");
+        c.eqInt((int64) Wire.status(unknown), 415, "an unregistered request coding is 415");
+        String accepted #= Wire.header(unknown, "Accept-Encoding");
+        c.that(accepted.contains("gzip") && accepted.contains("rle"), "and the 415 names every supported coding");
+    }
+
+    // Stages the bytes in the reader itself, so nothing it reads through outlives this call.
+    static #AsyncReader reader(String s) {
+        MemChannel ch = heap MemChannel();
+        AsyncReader rd = heap AsyncReader(ch, s.byteLength() + 16);
+        int8[] b #= s.toBytes();
+        rd.stage(b, s.byteLength());
+        rd.markEof();
+        return #rd;
+    }
+
+    static void streams(Check c) {
+        String plain #= CodingRegistryTests.runs(20000);
+        Compression cmp #= Compression.create();
+        (HttpRequest, HttpResponse) -> void stream = (HttpRequest q, HttpResponse r) -> {
+            r.setHeader("Content-Type", "text/plain");
+            r.body(#StreamBody.of(#CodingRegistryTests.reader(plain)));
+        };
+        String deflated #= Wire.through(#Compression.middleware(cmp), stream,
+            "GET /x HTTP/1.1\r\nAccept-Encoding: deflate\r\n\r\n");
+        Wire.same(c, Wire.header(deflated, "Content-Encoding"), "deflate", "a streamed body is deflate-encoded");
+        String dbody #= Wire.bodyOf(deflated);
+        int8[] db #= dbody.toBytes();
+        int8[] dback #= ContentCoding.decode("deflate", db, dbody.byteLength(), (int64) 100000);
+        c.eqBytes(dback, dback.count(), plain, "the zlib stream's framing and Adler-32 decode to the original");
+
+        String rled #= Wire.through(#Compression.middleware(cmp), stream,
+            "GET /x HTTP/1.1\r\nAccept-Encoding: rle\r\n\r\n");
+        String rbody #= Wire.bodyOf(rled);
+        int8[] rb #= rbody.toBytes();
+        int8[] rback #= ContentCoding.decode("rle", rb, rbody.byteLength(), (int64) 100000);
+        c.eqBytes(rback, rback.count(), plain, "a registered coding streams a body too");
+
+        int8[] noise = heap int8[600];
+        int32 i = 0;
+        int32 x = 12345;
+        while (i < 600) {
+            x = (x * 1103 + 12345) % 65536;
+            noise[i] = (int8) (x % 251);
+            i = i + 1;
+        }
+        String noisy #= Bytes.toString(noise[0:600]);
+        (HttpRequest, HttpResponse) -> void rough = (HttpRequest q, HttpResponse r) -> {
+            r.setHeader("Content-Type", "text/plain");
+            r.body(noisy);
+        };
+        String raw #= Wire.through(#Compression.middleware(cmp), rough,
+            "GET /x HTTP/1.1\r\nAccept-Encoding: rle\r\n\r\n");
+        Wire.same(c, Wire.header(raw, "Content-Encoding"), "", "a held body that does not shrink goes out as identity");
+        Wire.same(c, Wire.bodyOf(raw), noisy, "unchanged");
+    }
+}

@@ -1,0 +1,146 @@
+package dev.cajeta.http.coding;
+
+import cajeta.lang.String;
+import cajeta.wire.Compressor;
+import cajeta.wire.Decompressor;
+
+/**
+ * The content codings this process negotiates, by lowercase token. gzip (with
+ * its alias x-gzip), deflate and identity are always present. A dependency adds
+ * a coding with `register` before a server or client uses it.
+ */
+public final class ContentCodings {
+    static String[] tokens = null;
+    static String[] primaries = null;
+    static Compressor[] compressors = null;
+    static Decompressor[] decompressors = null;
+    static int32 count = 0;
+    static boolean ready = false;
+
+    static void ensure() {
+        if (ContentCodings.ready) {
+            return;
+        }
+        ContentCodings.ready = true;
+        ContentCodings.tokens = heap String[8];
+        ContentCodings.primaries = heap String[8];
+        ContentCodings.compressors = heap Compressor[8];
+        ContentCodings.decompressors = heap Decompressor[8];
+        ContentCodings.add("gzip", "gzip", heap GzipCoding(), heap GzipCoding());
+        ContentCodings.add("x-gzip", "gzip", heap GzipCoding(), heap GzipCoding());
+        ContentCodings.add("deflate", "deflate", heap DeflateCoding(), heap DeflateCoding());
+        ContentCodings.add("identity", "identity", heap IdentityCoding(), heap IdentityCoding());
+    }
+
+    static int32 indexOf(String token) {
+        int32 i = 0;
+        while (i < ContentCodings.count) {
+            if (ContentCodings.tokens[i].equals(token)) {
+                return i;
+            }
+            i = i + 1;
+        }
+        return -1;
+    }
+
+    static void grow() {
+        int32 n = ContentCodings.tokens.count() * 2;
+        String[] t = heap String[n];
+        String[] p = heap String[n];
+        Compressor[] c = heap Compressor[n];
+        Decompressor[] d = heap Decompressor[n];
+        int32 i = 0;
+        while (i < ContentCodings.count) {
+            t[i] #= ContentCodings.tokens[i];
+            p[i] #= ContentCodings.primaries[i];
+            c[i] #= ContentCodings.compressors[i];
+            d[i] #= ContentCodings.decompressors[i];
+            i = i + 1;
+        }
+        ContentCodings.tokens #= t;
+        ContentCodings.primaries #= p;
+        ContentCodings.compressors #= c;
+        ContentCodings.decompressors #= d;
+    }
+
+    static void add(String token, String primary, #Compressor c, #Decompressor d) {
+        String key #= token.toLowerCase();
+        int32 i = ContentCodings.indexOf(key);
+        if (i < 0) {
+            if (ContentCodings.count >= ContentCodings.tokens.count()) {
+                ContentCodings.grow();
+            }
+            i = ContentCodings.count;
+            ContentCodings.count = ContentCodings.count + 1;
+        }
+        ContentCodings.tokens[i] #= key;
+        ContentCodings.primaries[i] #= primary.toLowerCase();
+        ContentCodings.compressors[i] = #c;
+        ContentCodings.decompressors[i] = #d;
+    }
+
+    /** Registers `token`, replacing any coding already under it. */
+    public static void register(String token, #Compressor c, #Decompressor d) {
+        ContentCodings.ensure();
+        ContentCodings.add(token, token, #c, #d);
+    }
+
+    /** True when `token` (lowercase) names a registered coding. */
+    public static boolean isSupported(String token) {
+        ContentCodings.ensure();
+        return ContentCodings.indexOf(token) >= 0;
+    }
+
+    /** The compressor for `token`, or null when none is registered. */
+    public static Compressor compressor(String token) {
+        ContentCodings.ensure();
+        int32 i = ContentCodings.indexOf(token);
+        if (i < 0) {
+            return null;
+        }
+        return ContentCodings.compressors[i];
+    }
+
+    /** The decompressor for `token`, or null when none is registered. */
+    public static Decompressor decompressor(String token) {
+        ContentCodings.ensure();
+        int32 i = ContentCodings.indexOf(token);
+        if (i < 0) {
+            return null;
+        }
+        return ContentCodings.decompressors[i];
+    }
+
+    /** The number of registered tokens, aliases included. */
+    public static int32 count() {
+        ContentCodings.ensure();
+        return ContentCodings.count;
+    }
+
+    /** The token registered `i`th, in registration order. */
+    public static String tokenAt(int32 i) {
+        ContentCodings.ensure();
+        return ContentCodings.tokens[i];
+    }
+
+    /** The coding token `i` stands for: itself, or the primary of an alias. */
+    public static String primaryAt(int32 i) {
+        ContentCodings.ensure();
+        return ContentCodings.primaries[i];
+    }
+
+    /** The registered tokens as an `Accept-Encoding` value, such as `gzip, x-gzip, deflate, identity`. */
+    public static #String supported() {
+        ContentCodings.ensure();
+        String out = "";
+        int32 i = 0;
+        while (i < ContentCodings.count) {
+            if (i > 0) {
+                out = out + ", ";
+            }
+            out = out + ContentCodings.tokens[i];
+            i = i + 1;
+        }
+        return #out;
+    }
+}

@@ -6,14 +6,15 @@ import dev.cajeta.http.Bytes;
 import dev.cajeta.http.HttpRequest;
 import dev.cajeta.http.HttpResponse;
 import dev.cajeta.http.body.Body;
-import dev.cajeta.http.body.GzipCompressBody;
+import dev.cajeta.http.body.CodedBody;
 import dev.cajeta.http.coding.ContentCoding;
 import dev.cajeta.http.coding.AcceptEncoding;
 
 /**
- * Compresses compressible responses for clients that accept a coding. A held
- * body of at least the minimum size is encoded in place, and a streamed body
- * is wrapped in a gzip stream. `Vary: Accept-Encoding` is always added.
+ * Compresses compressible responses for clients that accept a registered
+ * coding. A held body of at least the minimum size is encoded, and sent as is
+ * when encoding does not shrink it. A streamed body is encoded as it is read.
+ * `Vary: Accept-Encoding` is always added.
  */
 public class Compression {
     int32 minBytes;
@@ -72,16 +73,17 @@ public class Compression {
             return;
         }
         if (streamed) {
-            if (coding.equals("gzip")) {
-                Body src #= r.takeBodyStream();
-                r.body(#GzipCompressBody.of(#src, cfg.compLevel));
-                r.setHeader("Content-Encoding", "gzip");
-                r.removeHeader("Content-Length");
-            }
+            Body src #= r.takeBodyStream();
+            r.body(#CodedBody.of(#src, coding, cfg.compLevel));
+            r.setHeader("Content-Encoding", coding);
+            r.removeHeader("Content-Length");
             return;
         }
         int8[] raw #= Bytes.copyOf(r.body());
         int8[] encoded #= ContentCoding.encode(coding, raw, raw.count(), cfg.compLevel);
+        if (encoded.count() >= raw.count()) {
+            return;
+        }
         r.body(encoded, encoded.count());
         r.setHeader("Content-Encoding", coding);
         r.removeHeader("Content-Length");

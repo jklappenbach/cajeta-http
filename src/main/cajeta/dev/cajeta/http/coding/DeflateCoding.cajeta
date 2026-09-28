@@ -1,0 +1,125 @@
+package dev.cajeta.http.coding;
+
+import cajeta.lang.String;
+import cajeta.error.RecoverableException;
+import cajeta.wire.Compressor;
+import cajeta.wire.Decompressor;
+import cajeta.wire.CompressStream;
+import cajeta.wire.DecompressionLimitException;
+import dev.cajeta.codec.compress.Zlib;
+import dev.cajeta.codec.compress.DeflateStream;
+
+/** The deflate content coding, which RFC 9110 §8.4.1.2 defines as the zlib container (RFC 1950). */
+public final class DeflateCoding implements Compressor, Decompressor {
+    public DeflateCoding() {
+    }
+
+    public #int8[] compress(int8[] src) {
+        return Zlib.compress(src, src.count(), 1);
+    }
+
+    public #int8[] compress(int8[] src, int64 len, int32 level) {
+        return Zlib.compress(src, len, level);
+    }
+
+    public #CompressStream stream(int32 level) {
+        return heap ZlibStream(level);
+    }
+
+    public #int8[] decompress(int8[] src, int64 expandedLen) {
+        int8[] out #= this.decompress(src, src.count(), expandedLen);
+        if ((int64) out.count() != expandedLen) {
+            throw heap ContentCodingException("decoded length differs from the expected " + expandedLen);
+        }
+        return #out;
+    }
+
+    public #int8[] decompress(int8[] src, int64 len, int64 maxOut) {
+        int64 hint = len * (int64) 4;
+        if (hint < (int64) 64) {
+            hint = (int64) 64;
+        }
+        int8[] out = null;
+        try {
+            out #= Zlib.decompress(src, len, hint);
+        } catch (RecoverableException e) {
+            throw heap ContentCodingException("deflate decode failed: " + e.getMessage());
+        }
+        if ((int64) out.count() > maxOut) {
+            throw heap DecompressionLimitException("decoded body exceeds the decode cap", maxOut);
+        }
+        return #out;
+    }
+}
+
+/** zlib framing around a DEFLATE stream: a two-byte header, then the Adler-32 of the input. */
+final class ZlibStream implements CompressStream {
+    DeflateStream def;
+    int64 a;
+    int64 b;
+    boolean started;
+
+    ZlibStream(int32 level) {
+        this.def = heap DeflateStream(level);
+        this.a = 1;
+        this.b = 0;
+        this.started = false;
+    }
+
+    public void write(int8[] src, int64 len) {
+        int64 i = 0;
+        while (i < len) {
+            int64 stop = i + (int64) 5552;
+            if (stop > len) {
+                stop = len;
+            }
+            while (i < stop) {
+                this.a = this.a + (int64) (((int32) src[i]) & 255);
+                this.b = this.b + this.a;
+                i = i + 1;
+            }
+            this.a = this.a % (int64) 65521;
+            this.b = this.b % (int64) 65521;
+        }
+        this.def.write(src, (int32) len);
+    }
+
+    public #int8[] flush() {
+        int8[] body #= this.def.syncFlush();
+        return this.lead(#body);
+    }
+
+    public #int8[] finish() {
+        int8[] tail #= this.def.finish();
+        int64 adler = (this.b << (int64) 16) | this.a;
+        int32 n = tail.count();
+        int8[] out = heap int8[n + 4];
+        int32 i = 0;
+        while (i < n) {
+            out[i] = tail[i];
+            i = i + 1;
+        }
+        out[n] = (int8) ((adler >> (int64) 24) & (int64) 255);
+        out[n + 1] = (int8) ((adler >> (int64) 16) & (int64) 255);
+        out[n + 2] = (int8) ((adler >> (int64) 8) & (int64) 255);
+        out[n + 3] = (int8) (adler & (int64) 255);
+        return this.lead(#out);
+    }
+
+    #int8[] lead(#int8[] b) {
+        if (this.started) {
+            return #b;
+        }
+        this.started = true;
+        int32 n = b.count();
+        int8[] out = heap int8[n + 2];
+        out[0] = (int8) 0x78;
+        out[1] = (int8) 0x9c;
+        int32 i = 0;
+        while (i < n) {
+            out[2 + i] = b[i];
+            i = i + 1;
+        }
+        return #out;
+    }
+}

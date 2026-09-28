@@ -3,63 +3,59 @@ package dev.cajeta.http.coding;
 import cajeta.lang.String;
 
 /**
- * `Accept-Encoding` negotiation (http:2.2c) — pick the content-coding a
- * response should use, given the client's `Accept-Encoding` and the codings
- * this boundary supports (`gzip`, `deflate`, `identity`; `x-gzip` as a gzip
- * alias).
- *
- * ## The rules ([`best`](#best))
- *
- *   - Each listed coding carries an optional quality `;q=<0..1>` (default
- *     `1`); `q=0` means **forbidden**. A `*` entry supplies the quality for
- *     any coding **not** explicitly listed. A coding neither listed nor
- *     covered by `*` is not acceptable.
- *   - Among the compression codings acceptable at `q>0`, the highest quality
- *     wins; **`gzip` beats `deflate`** on a tie (server preference — gzip's
- *     framing is universally understood and its container is self-describing).
- *   - No acceptable compression coding → `identity` (send uncompressed). This
- *     boundary never 406s on encoding; an uncompressed body is always a valid
- *     answer.
- *
- * Qualities are parsed to **milli-units** (`0..1000`) so the whole path is
- * integer — no float in a header hot path, and `identity;q=0` vs `q=0.001`
- * stay distinct.
+ * `Accept-Encoding` negotiation: the registered coding a response should use.
+ * Each listed coding carries a quality (`q`, default 1, and 0 forbids it), and
+ * `*` supplies the quality of any coding not listed. The highest quality wins,
+ * and a tie goes to the coding registered first, so gzip beats deflate. An
+ * alias counts toward its coding. With nothing acceptable the answer is
+ * `identity`, which is always a valid response. Qualities are integer
+ * milli-units, so no float is parsed on the request path.
  */
 public final class AcceptEncoding {
 
-    /**
-     * The coding to encode a response with for this `Accept-Encoding` value:
-     * `"gzip"`, `"deflate"`, or `"identity"` (a borrowed literal). A null or
-     * empty header yields `identity`.
-     */
+    /** The coding to encode a response with for this `Accept-Encoding` value, or `identity`. */
     public static String best(String header) {
         if (header == null) {
             return "identity";
         }
         String h #= header.toLowerCase();
         int32 starQ = AcceptEncoding.milliQ(h, "*");
+        String chosen = "identity";
+        int32 chosenQ = 0;
+        int32 n = ContentCodings.count();
+        int32 i = 0;
+        while (i < n) {
+            String primary = ContentCodings.primaryAt(i);
+            if (!primary.equals("identity") && ContentCodings.tokenAt(i).equals(primary)) {
+                int32 q = AcceptEncoding.qualityOf(h, primary, starQ);
+                if (q > chosenQ) {
+                    chosen = primary;
+                    chosenQ = q;
+                }
+            }
+            i = i + 1;
+        }
+        return chosen;
+    }
 
-        int32 gzipQ = AcceptEncoding.milliQ(h, "gzip");
-        int32 xgzipQ = AcceptEncoding.milliQ(h, "x-gzip");
-        if (xgzipQ > gzipQ) {
-            gzipQ = xgzipQ;
+    // The quality of `primary`: the best of its own token and its aliases, else `*`'s.
+    static int32 qualityOf(String h, String primary, int32 starQ) {
+        int32 q = -1;
+        int32 n = ContentCodings.count();
+        int32 i = 0;
+        while (i < n) {
+            if (ContentCodings.primaryAt(i).equals(primary)) {
+                int32 t = AcceptEncoding.milliQ(h, ContentCodings.tokenAt(i));
+                if (t > q) {
+                    q = t;
+                }
+            }
+            i = i + 1;
         }
-        if (gzipQ < 0) {
-            gzipQ = starQ;
+        if (q < 0) {
+            return starQ;
         }
-
-        int32 deflateQ = AcceptEncoding.milliQ(h, "deflate");
-        if (deflateQ < 0) {
-            deflateQ = starQ;
-        }
-
-        if (gzipQ > 0 && gzipQ >= deflateQ) {
-            return "gzip";
-        }
-        if (deflateQ > 0) {
-            return "deflate";
-        }
-        return "identity";
+        return q;
     }
 
     /** Milli-quality (0..1000) for `token` in `h`, or `-1` if not listed. */

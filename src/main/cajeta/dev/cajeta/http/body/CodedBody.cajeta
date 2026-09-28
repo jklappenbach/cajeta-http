@@ -1,0 +1,135 @@
+package dev.cajeta.http.body;
+
+import cajeta.lang.String;
+import cajeta.io.net.AsyncReader;
+import cajeta.io.net.ByteChannel;
+import cajeta.wire.Compressor;
+import cajeta.wire.CompressStream;
+import dev.cajeta.http.HttpException;
+import dev.cajeta.http.MediaType;
+import dev.cajeta.http.coding.ContentCodingException;
+import dev.cajeta.http.coding.ContentCodings;
+
+/**
+ * A body encoded as it is read, under any registered content coding. Each piece
+ * of the source is compressed and flushed, so a live source reaches the peer as
+ * it is produced. Its length is unknown, so it goes out chunked.
+ */
+public final class CodedBody implements Body {
+    Body source;
+    CodedChannel channel;
+    AsyncReader rdr;
+
+    CodedBody() {
+        this.source = null;
+        this.channel = null;
+        this.rdr = null;
+    }
+
+    /** `source` encoded under `token` at `level`. Raises when no coding is registered under `token`. */
+    public static #CodedBody of(#Body source, String token, int32 level) {
+        Compressor c = ContentCodings.compressor(token);
+        if (c == null) {
+            throw heap ContentCodingException("unsupported content-coding: " + token);
+        }
+        CodedBody b = heap CodedBody();
+        b.source = #source;
+        CodedChannel ch = heap CodedChannel(b.source.reader(), c.stream(level));
+        b.channel = #ch;
+        AsyncReader r = heap AsyncReader(b.channel);
+        b.rdr = #r;
+        return #b;
+    }
+
+    public int64 contentLength() {
+        return (int64) -1;
+    }
+
+    public MediaType contentType() {
+        return this.source.contentType();
+    }
+
+    public AsyncReader reader() {
+        return this.rdr;
+    }
+
+    public boolean live() {
+        return this.source.live();
+    }
+
+    public void abort() {
+        this.source.abort();
+    }
+}
+
+/** Reads the source, compresses each piece and hands out the compressed bytes. */
+final class CodedChannel implements ByteChannel {
+    AsyncReader src;
+    CompressStream enc;
+    int8[] inbuf;
+    int8[] pending;
+    int32 pendPos;
+    int32 pendLen;
+    boolean finished;
+
+    CodedChannel(AsyncReader src, #CompressStream enc) {
+        this.src #= src;
+        this.enc = #enc;
+        this.inbuf = heap int8[8192];
+        this.pending = null;
+        this.pendPos = 0;
+        this.pendLen = 0;
+        this.finished = false;
+    }
+
+    boolean produce() {
+        if (this.finished) {
+            return false;
+        }
+        int32 got = this.src.read(this.inbuf, 0, 8192);
+        if (got > 0) {
+            this.enc.write(this.inbuf, (int64) got);
+            int8[] out #= this.enc.flush();
+            this.pendLen = out.count();
+            this.pending #= out;
+        } else {
+            int8[] tail #= this.enc.finish();
+            this.pendLen = tail.count();
+            this.pending #= tail;
+            this.finished = true;
+        }
+        this.pendPos = 0;
+        return true;
+    }
+
+    public int64 readAsync(int8[] buf, int64 offset, int64 length) {
+        while (this.pendPos >= this.pendLen) {
+            if (!this.produce()) {
+                return (int64) 0;
+            }
+        }
+        int64 n = (int64) (this.pendLen - this.pendPos);
+        if (n > length) {
+            n = length;
+        }
+        int64 i = 0;
+        while (i < n) {
+            buf[offset + i] = this.pending[this.pendPos + (int32) i];
+            i = i + 1;
+        }
+        this.pendPos = this.pendPos + (int32) n;
+        return n;
+    }
+
+    public int64 readWithin(int8[] buf, int64 offset, int64 length, int32 timeoutMs) {
+        return this.readAsync(buf, offset, length);
+    }
+
+    public void writeAllAsync(int8[] data, int64 offset, int64 length) {
+        throw heap HttpException("a coded body is read-only");
+    }
+
+    public void close() {
+        this.finished = true;
+    }
+}

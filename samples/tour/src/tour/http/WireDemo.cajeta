@@ -30,6 +30,17 @@ import dev.cajeta.http.coding.ContentCoding;
 import dev.cajeta.http.coding.AcceptEncoding;
 import dev.cajeta.http.coding.ContentCodingException;
 import dev.cajeta.http.coding.Crc32;
+import dev.cajeta.http.coding.ContentCodings;
+import dev.cajeta.http.coding.GzipCoding;
+import dev.cajeta.http.coding.DeflateCoding;
+import dev.cajeta.http.coding.IdentityCoding;
+import dev.cajeta.http.body.CodedBody;
+import dev.cajeta.http.body.StringBody;
+import cajeta.io.net.AsyncReader;
+import cajeta.wire.Compressor;
+import cajeta.wire.Decompressor;
+import cajeta.wire.CompressStream;
+import cajeta.wire.DecompressionLimitException;
 import dev.cajeta.http.server.ConnectionBuffers;
 import cajeta.io.net.BufferPool;
 
@@ -79,6 +90,76 @@ final class RecordingTransport implements ResponseTransport {
         this.bodyBytes = this.bodyBytes + (int64) len;
         this.pieces = this.pieces + 1;
         this.ended = endStream;
+    }
+}
+
+// support: a toy content coding for the tour's registry section. Each byte
+// moves up by one, so it streams piece by piece and decodes exactly.
+final class ShiftCoding implements Compressor, Decompressor {
+    public ShiftCoding() {
+    }
+
+    static #int8[] shift(int8[] src, int64 len, int32 by) {
+        int8[] out = heap int8[len];
+        int64 i = 0;
+        while (i < len) {
+            out[i] = (int8) (((int32) src[i]) + by);
+            i = i + 1;
+        }
+        return #out;
+    }
+
+    public #int8[] compress(int8[] src) {
+        return ShiftCoding.shift(src, src.count(), 1);
+    }
+
+    public #int8[] compress(int8[] src, int64 len, int32 level) {
+        return ShiftCoding.shift(src, len, 1);
+    }
+
+    public #CompressStream stream(int32 level) {
+        return heap ShiftStream();
+    }
+
+    public #int8[] decompress(int8[] src, int64 expandedLen) {
+        return ShiftCoding.shift(src, expandedLen, -1);
+    }
+
+    public #int8[] decompress(int8[] src, int64 len, int64 maxOut) {
+        if (len > maxOut) {
+            throw heap DecompressionLimitException("shifted body over the cap", maxOut);
+        }
+        return ShiftCoding.shift(src, len, -1);
+    }
+}
+
+// support: the toy coding's stream, shifting each piece as it is flushed.
+final class ShiftStream implements CompressStream {
+    int8[] held;
+    int64 n;
+
+    ShiftStream() {
+        this.held = heap int8[8192];
+        this.n = 0;
+    }
+
+    public void write(int8[] src, int64 len) {
+        int64 i = 0;
+        while (i < len) {
+            this.held[this.n + i] = src[i];
+            i = i + 1;
+        }
+        this.n = this.n + len;
+    }
+
+    public #int8[] flush() {
+        int8[] out #= ShiftCoding.shift(this.held, this.n, 1);
+        this.n = 0;
+        return #out;
+    }
+
+    public #int8[] finish() {
+        return this.flush();
     }
 }
 
@@ -245,6 +326,52 @@ public class WireDemo extends DemoClass {
         crc.update(probe.toBytes(), probe.byteLength());
         this.check(crc.value() == (int64) 222957957,
             "Crc32 matches the reference value for \"hello world\"");
+
+        // 6b. The coding registry. Every coding is a cajeta.wire Compressor and
+        //     Decompressor under a token. gzip, x-gzip, deflate and identity are
+        //     built in, and a dependency registers more with no library change.
+        String listed #= ContentCodings.supported();
+        this.check(listed.startsWith("gzip, x-gzip, deflate, identity"),
+            "the built-in codings: gzip, its x-gzip alias, deflate, identity");
+        Compressor deflate = heap DeflateCoding();
+        int8[] fast #= deflate.compress(plain, (int64) big.byteLength(), 1);
+        int8[] small #= deflate.compress(plain, (int64) big.byteLength(), 9);
+        System.stdout.println("  deflate level 1: {} bytes, level 9: {} bytes", fast.count(), small.count());
+        int8[] fastBack #= ContentCoding.decode("deflate", fast, (int32) fast.count(), (int64) 65536);
+        int8[] smallBack #= ContentCoding.decode("deflate", small, (int32) small.count(), (int64) 65536);
+        this.check(this.sameBytes(fastBack, (int32) fastBack.count(), plain, big.byteLength())
+            && this.sameBytes(smallBack, (int32) smallBack.count(), plain, big.byteLength()),
+            "a level is a speed and size trade, and both levels decode to the original");
+        Decompressor gunzip = heap GzipCoding();
+        boolean capped = false;
+        try {
+            int8[] bomb #= gunzip.decompress(gz, (int64) gz.count(), (int64) 64);
+        } catch (DecompressionLimitException de) {
+            capped = de.limit == (int64) 64;
+        }
+        this.check(capped, "a decode over its cap raises DecompressionLimitException");
+        Compressor same = heap IdentityCoding();
+        int8[] copied #= same.compress(plain);
+        this.check(copied.count() == plain.count(), "identity passes bytes through");
+        CodedBody streamed #= CodedBody.of(#StringBody.of(big), "gzip", 1);
+        AsyncReader sr = streamed.reader();
+        int8[] acc = heap int8[8192];
+        int32 accLen = 0;
+        int32 got = sr.read(acc, 0, 8192);
+        while (got > 0) {
+            accLen = accLen + got;
+            got = sr.read(acc, accLen, 8192 - accLen);
+        }
+        int8[] unstreamed #= ContentCoding.decode("gzip", acc, accLen, (int64) 65536);
+        this.check(streamed.contentLength() == (int64) -1
+            && this.sameBytes(unstreamed, (int32) unstreamed.count(), plain, big.byteLength()),
+            "CodedBody gzips a body as it is read, and it decodes whole");
+        ContentCodings.register("x-shift", heap ShiftCoding(), heap ShiftCoding());
+        int8[] shifted #= ContentCoding.encode("x-shift", plain, big.byteLength());
+        int8[] unshifted #= ContentCoding.decode("x-shift", shifted, (int32) shifted.count(), (int64) 65536);
+        this.check(AcceptEncoding.best("x-shift").equals("x-shift")
+            && this.sameBytes(unshifted, (int32) unshifted.count(), plain, big.byteLength()),
+            "a registered coding is negotiated and round-trips");
 
         // 7. Hostile input fails loud, with a typed exception per failure class.
         String garbage = "GARBAGE\r\n\r\n";

@@ -1,0 +1,21 @@
+package dev.cajeta.http.coding;
+
+/** Byte helpers shared by the built-in codings. */
+final class CodingBytes {
+    static #int8[] copy(int8[] src, int64 len) {
+        int8[] out = heap int8[len];
+        int64 i = 0;
+        while (i < len) {
+            out[i] = src[i];
+            i = i + 1;
+        }
+        return #out;
+    }
+
+    static void le32(int8[] a, int32 at, int64 v) {
+        a[at] = (int8) (v & (int64) 255);
+        a[at + 1] = (int8) ((v >> (int64) 8) & (int64) 255);
+        a[at + 2] = (int8) ((v >> (int64) 16) & (int64) 255);
+        a[at + 3] = (int8) ((v >> (int64) 24) & (int64) 255);
+    }
+}
