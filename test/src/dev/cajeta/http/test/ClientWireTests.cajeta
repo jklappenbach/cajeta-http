@@ -10,6 +10,8 @@ import dev.cajeta.http.Http1ClientConnection;
 import dev.cajeta.http.InvalidChunkEncodingException;
 import dev.cajeta.http.UnexpectedEofException;
 import dev.cajeta.http.Version;
+import dev.cajeta.http.body.FormBody;
+import dev.cajeta.http.body.MultipartBody;
 import dev.cajeta.http.body.StreamBody;
 import dev.cajeta.http.h1.HttpParserLimits;
 import dev.cajeta.http.server.ConnectionBuffers;
@@ -84,6 +86,47 @@ public final class ClientWireTests {
         conn.exchange(chunked, resp, (int64) 0, bufs);
         Wire.same(c, ch.written(), "PUT /c HTTP/1.1\r\ntransfer-encoding: chunked\r\n\r\n6\r\nabcdef\r\n0\r\n\r\n",
             "an unsized streamed body is chunked");
+        ClientWireTests.typedBodies(c);
+    }
+
+    static void typedBodies(Check c) {
+        ConnectionBuffers bufs = heap ConnectionBuffers(heap BufferPool(8192, 8));
+        HttpParserLimits pl = heap HttpParserLimits();
+        ReplyChannel ch = heap ReplyChannel(4096);
+        ch.reply("HTTP/1.1 204 No Content\r\n\r\n").reply("HTTP/1.1 204 No Content\r\n\r\n")
+          .reply("HTTP/1.1 204 No Content\r\n\r\n");
+        Http1ClientConnection conn = heap Http1ClientConnection(ch, bufs, pl);
+        ClientResponse resp = heap ClientResponse();
+
+        FormBody f #= FormBody.of();
+        f.add("a", "1");
+        ClientRequest form #= ClientRequest.post("http://t.example/f");
+        form.body(#f);
+        conn.exchange(form, resp, (int64) 0, bufs);
+        Wire.same(c, ch.written(),
+            "POST /f HTTP/1.1\r\nContent-Type: application/x-www-form-urlencoded\r\ncontent-length: 3\r\n\r\na=1",
+            "a typed body carries its media type as Content-Type");
+
+        ch.clearWritten();
+        MultipartBody mb #= MultipartBody.withBoundary("B");
+        mb.addField("a", "1");
+        ClientRequest multi #= ClientRequest.post("http://t.example/m");
+        multi.body(#mb);
+        conn.exchange(multi, resp, (int64) 0, bufs);
+        String sent #= ch.written();
+        c.that(sent.contains("\r\nContent-Type: multipart/form-data; boundary=B\r\n"),
+            "a multipart body's boundary reaches the Content-Type");
+
+        ch.clearWritten();
+        FormBody g #= FormBody.of();
+        g.add("a", "1");
+        ClientRequest own #= ClientRequest.post("http://t.example/g");
+        own.header("Content-Type", "text/x-custom");
+        own.body(#g);
+        conn.exchange(own, resp, (int64) 0, bufs);
+        Wire.same(c, ch.written(),
+            "POST /g HTTP/1.1\r\nContent-Type: text/x-custom\r\ncontent-length: 3\r\n\r\na=1",
+            "a Content-Type the caller set is kept");
     }
 
     static void responses(Check c) {
