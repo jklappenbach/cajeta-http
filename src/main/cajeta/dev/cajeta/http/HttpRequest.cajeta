@@ -172,6 +172,15 @@ public final class HttpRequest {
         return this.table.copy(name);
     }
 
+    /** The `Content-Type` as a media type, or null when it is absent or malformed. */
+    public #MediaType contentType() {
+        if (!this.hasHeader("content-type")) {
+            return null;
+        }
+        String v #= this.table.copy("content-type");
+        return MediaType.parse(v);
+    }
+
     /** Replaces every field named `name` with `value` for the rest of this request. */
     public HttpRequest setHeader(String name, String value) {
         this.table.set(name, value);
@@ -252,7 +261,19 @@ public final class HttpRequest {
         return this.bodyLen;
     }
 
-    /** True when the body was too large to hold and is streamed instead. */
+    /** Streams the body from `b` for the rest of this request, dropping any held body. */
+    void bindStream(Body b) {
+        this.bodyOwned = false;
+        this.ownBody = null;
+        this.bodyOff = 0;
+        this.bodyLen = 0;
+        this.stream #= b;
+    }
+
+    /**
+     * True when the body is streamed rather than held, as a server with
+     * `ServerLimits.streamRequestBody` does for every request with a body.
+     */
     public boolean bodyStreamed() {
         return this.stream != null;
     }

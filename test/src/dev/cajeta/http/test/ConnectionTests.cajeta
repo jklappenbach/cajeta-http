@@ -92,6 +92,25 @@ public final class ConnectionTests {
             "HTTP/1.1 413 Content Too Large\r\ncontent-length: 0\r\nConnection: close\r\n\r\n"),
             "a body over the limit is refused before it is read");
 
+        ScriptChannel uncapped = heap ScriptChannel("POST /x HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello", 4096);
+        ConnectionTests.run1("", 4096, 4096, (int64) 0, h, uncapped);
+        c.that(ConnectionTests.wire(uncapped,
+            "HTTP/1.1 200 OK\r\nX-Path: p\r\ncontent-length: 13\r\n\r\nPOST /x hello"),
+            "a cap of 0 disables the body limit");
+
+        ScriptChannel atCap = heap ScriptChannel("POST /x HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello", 4096);
+        ConnectionTests.run1("", 4096, 4096, (int64) 5, h, atCap);
+        c.that(ConnectionTests.wire(atCap,
+            "HTTP/1.1 200 OK\r\nX-Path: p\r\ncontent-length: 13\r\n\r\nPOST /x hello"),
+            "a body exactly at the cap is served");
+
+        ScriptChannel overChunked = heap ScriptChannel(
+            "POST /x HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n14\r\nyyyyyyyyyyyyyyyyyyyy\r\n14\r\nyyyyyyyyyyyyyyyyyyyy\r\n0\r\n\r\n", 4096);
+        ConnectionTests.run1("", 4096, 4096, (int64) 32, h, overChunked);
+        c.that(ConnectionTests.wire(overChunked,
+            "HTTP/1.1 413 Content Too Large\r\ncontent-length: 0\r\nConnection: close\r\n\r\n"),
+            "a chunked body is cut with 413 once its decoded total crosses the cap");
+
         ScriptChannel bad = heap ScriptChannel("GET/x HTTP/1.1\r\n\r\n", 4096);
         ConnectionTests.run1("", 4096, 4096, (int64) 100, h, bad);
         c.that(ConnectionTests.wire(bad,

@@ -1,0 +1,191 @@
+package dev.cajeta.http.test;
+
+import cajeta.lang.String;
+import cajeta.io.net.AsyncReader;
+import cajeta.io.net.ByteBuffer;
+import dev.cajeta.http.Bytes;
+import dev.cajeta.http.Http1Connection;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.MediaType;
+import dev.cajeta.http.body.Body;
+import dev.cajeta.http.h1.HttpParserLimits;
+
+/** Request bodies streamed to the handler, larger than the connection's input buffer. */
+public final class RequestStreamTests {
+    public static void run(Check c) {
+        System.stdout.println("-- request streaming --");
+        RequestStreamTests.lengthBodies(c);
+        RequestStreamTests.chunkedBodies(c);
+        RequestStreamTests.drainAndReuse(c);
+        RequestStreamTests.failures(c);
+    }
+
+    // Serves `script` on a streaming connection with a `inCap`-byte input buffer.
+    static #String serve(String script, int32 chunk, int32 inCap, int64 maxBody,
+                         (HttpRequest, HttpResponse) -> void h) {
+        ScriptChannel ch = heap ScriptChannel(script, chunk);
+        ByteBuffer in = heap ByteBuffer(inCap);
+        ByteBuffer out = heap ByteBuffer(8192);
+        HttpParserLimits pl = heap HttpParserLimits();
+        Http1Connection conn = heap Http1Connection(ch, in, out, pl, 0, 0, maxBody, true, h);
+        conn.streamRequestBodies(true);
+        conn.serve();
+        int8[] a = ch.captured();
+        return Bytes.toString(a[0:ch.capturedLen()]);
+    }
+
+    // Reads the whole streamed body and reports its size, byte sum and shape.
+    static void summarize(HttpRequest q, HttpResponse r) {
+        if (!q.bodyStreamed()) {
+            r.body("no body");
+            return;
+        }
+        Body b = q.bodyStream();
+        AsyncReader rd = b.reader();
+        int8[] buf = heap int8[700];
+        int64 n = 0;
+        int64 sum = 0;
+        int32 got = rd.read(buf, 0, 700);
+        while (got > 0) {
+            int32 i = 0;
+            while (i < got) {
+                sum = sum + (int64) (((int32) buf[i]) & 255);
+                i = i + 1;
+            }
+            n = n + (int64) got;
+            got = rd.read(buf, 0, 700);
+        }
+        String type = "-";
+        MediaType t = b.contentType();
+        if (t != null) {
+            type #= t.essence();
+        }
+        r.body("n=" + n + " sum=" + sum + " streamed=" + q.bodyStreamed() + " held="
+               + q.bodyLength() + " len=" + b.contentLength() + " type=" + type);
+    }
+
+    static void ignore(HttpRequest q, HttpResponse r) {
+        r.body("ignored " + q.pathString());
+    }
+
+    static #String filler(int32 n) {
+        int8[] a = heap int8[n];
+        int32 i = 0;
+        while (i < n) {
+            a[i] = (int8) (97 + i % 26);
+            i = i + 1;
+        }
+        return heap String(#a, n);
+    }
+
+    static int64 sumOf(String s) {
+        int64 sum = 0;
+        int32 i = 0;
+        while (i < s.byteLength()) {
+            sum = sum + (int64) (((int32) s.byteAt(i)) & 255);
+            i = i + 1;
+        }
+        return sum;
+    }
+
+    static void lengthBodies(Check c) {
+        (HttpRequest, HttpResponse) -> void h = (HttpRequest q, HttpResponse r) -> RequestStreamTests.summarize(q, r);
+        String body #= RequestStreamTests.filler(5000);
+        String script #= "POST /up HTTP/1.1\r\nContent-Type: text/csv; charset=utf-8\r\nContent-Length: 5000\r\n\r\n" + body;
+        String got #= RequestStreamTests.serve(script, 1500, 1024, (int64) 0, h);
+        Wire.same(c, Wire.bodyOf(got),
+            "n=5000 sum=" + RequestStreamTests.sumOf(body) + " streamed=true held=0 len=5000 type=text/csv",
+            "a 5000-byte body streams through a 1024-byte input buffer");
+
+        String tiny #= RequestStreamTests.serve(script, 1, 1024, (int64) 0, h);
+        Wire.same(c, Wire.bodyOf(tiny), Wire.bodyOf(got), "one byte per read streams the same body");
+
+        String empty #= RequestStreamTests.serve("POST /up HTTP/1.1\r\nContent-Length: 0\r\n\r\n", 4096, 1024, (int64) 0, h);
+        Wire.same(c, Wire.bodyOf(empty), "n=0 sum=0 streamed=true held=0 len=0 type=-",
+            "a zero-length body streams as empty");
+    }
+
+    static #String hex(int32 n) {
+        String digits = "0123456789abcdef";
+        String out = "";
+        int32 v = n;
+        while (v > 0) {
+            out = digits.substring(v % 16, v % 16 + 1) + out;
+            v = v / 16;
+        }
+        return #out;
+    }
+
+    // One chunk per `size` bytes of `body`, with an extension on the first.
+    static #String chunked(String body, int32 size) {
+        String out = "";
+        int32 at = 0;
+        boolean first = true;
+        while (at < body.byteLength()) {
+            int32 n = body.byteLength() - at < size ? body.byteLength() - at : size;
+            String hex #= RequestStreamTests.hex(n);
+            out = out + hex + (first ? ";name=value" : "") + "\r\n" + body.substring(at, at + n) + "\r\n";
+            first = false;
+            at = at + n;
+        }
+        return out + "0\r\nX-Sum: done\r\n\r\n";
+    }
+
+    static void chunkedBodies(Check c) {
+        (HttpRequest, HttpResponse) -> void h = (HttpRequest q, HttpResponse r) -> RequestStreamTests.summarize(q, r);
+        String body #= RequestStreamTests.filler(4000);
+        String framed #= RequestStreamTests.chunked(body, 300);
+        String script #= "POST /up HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n" + framed
+            + "GET /next HTTP/1.1\r\n\r\n";
+        String got #= RequestStreamTests.serve(script, 997, 512, (int64) 0, h);
+        String want #= "n=4000 sum=" + RequestStreamTests.sumOf(body) + " streamed=true held=0 len=-1 type=-";
+        c.that(got.contains("\r\n\r\n" + want + "HTTP/1.1 200 OK"),
+            "a chunked body with an extension and a trailer streams through a 512-byte buffer");
+        c.that(got.contains("no body"), "the pipelined request after the chunked body is served");
+
+        String tiny #= RequestStreamTests.serve(script, 1, 512, (int64) 0, h);
+        c.that(tiny.equals(got), "one byte per read decodes the same chunked body");
+    }
+
+    static void drainAndReuse(Check c) {
+        (HttpRequest, HttpResponse) -> void h = (HttpRequest q, HttpResponse r) -> RequestStreamTests.ignore(q, r);
+        String body #= RequestStreamTests.filler(3000);
+        String script #= "POST /a HTTP/1.1\r\nContent-Length: 3000\r\n\r\n" + body + "GET /b HTTP/1.1\r\n\r\n";
+        String got #= RequestStreamTests.serve(script, 700, 1024, (int64) 0, h);
+        c.that(got.contains("ignored /a") && got.contains("ignored /b"),
+            "an unread body is drained, so the next request on the connection is served");
+
+        String big #= RequestStreamTests.filler(300000);
+        String over #= "POST /a HTTP/1.1\r\nContent-Length: 300000\r\n\r\n" + big + "GET /b HTTP/1.1\r\n\r\n";
+        String cut #= RequestStreamTests.serve(over, 65536, 4096, (int64) 0, h);
+        c.that(cut.contains("ignored /a") && cut.contains("Connection: close") && !cut.contains("ignored /b"),
+            "an unread body past the drain limit closes the connection instead");
+    }
+
+    static void failures(Check c) {
+        (HttpRequest, HttpResponse) -> void h = (HttpRequest q, HttpResponse r) -> RequestStreamTests.summarize(q, r);
+        String body #= RequestStreamTests.filler(100);
+        String framed #= RequestStreamTests.chunked(body, 40);
+        String got #= RequestStreamTests.serve("POST /up HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n" + framed,
+            4096, 1024, (int64) 64, h);
+        c.eqInt((int64) Wire.status(got), 413, "a streamed chunked body crossing the cap answers 413");
+
+        String declared #= RequestStreamTests.serve("POST /up HTTP/1.1\r\nContent-Length: 100\r\n\r\n" + body,
+            4096, 1024, (int64) 64, h);
+        c.eqInt((int64) Wire.status(declared), 413, "a declared length over the cap is refused before the handler");
+
+        String cutShort #= RequestStreamTests.serve("POST /up HTTP/1.1\r\nContent-Length: 100\r\n\r\nabc",
+            4096, 1024, (int64) 0, h);
+        c.eqInt((int64) Wire.status(cutShort), 400, "a body cut short answers 400");
+
+        String badChunk #= RequestStreamTests.serve("POST /up HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n",
+            4096, 1024, (int64) 0, h);
+        c.eqInt((int64) Wire.status(badChunk), 400, "a malformed chunk size answers 400");
+
+        String ex #= RequestStreamTests.serve("PUT /up HTTP/1.1\r\nExpect: 100-continue\r\nContent-Length: 3\r\n\r\nabc",
+            61, 1024, (int64) 0, h);
+        c.that(ex.startsWith("HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK"),
+            "100-continue precedes a streamed body");
+    }
+}

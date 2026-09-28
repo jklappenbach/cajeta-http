@@ -315,7 +315,7 @@ public final class Http2Connection {
         this.flow.afterReceive(len);
         Http2Payload reg #= Http2ContentFrames.parseData(payload, len, flags, sid);
         int32 have = this.cur != null && this.cur.sid == sid ? this.cur.bodyLen : 0;
-        if ((int64) have + (int64) reg.length > this.maxBody) {
+        if (this.maxBody > 0 && (int64) have + (int64) reg.length > this.maxBody) {
             throw heap Http2Exception("request body exceeds maxBodyBytes (" + this.maxBody + ")",
                                       Http2.ENHANCE_YOUR_CALM);
         }

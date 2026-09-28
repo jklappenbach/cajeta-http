@@ -169,6 +169,7 @@ public class HttpServer {
         Http1Connection conn = heap Http1Connection(ch, in, out, this.limits,
             sl.headReadTimeoutMs, sl.bodyReadTimeoutMs, sl.maxBodyBytes,
             sl.expectContinueEnabled, this.handler);
+        conn.streamRequestBodies(sl.streamRequestBody);
         try {
             conn.serve();
         } catch (Exception e) {

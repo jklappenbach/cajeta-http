@@ -1,0 +1,265 @@
+package dev.cajeta.http;
+
+import cajeta.lang.String;
+import cajeta.io.net.ByteBuffer;
+import cajeta.io.net.ByteChannel;
+import cajeta.error.Exception;
+
+/**
+ * A streamed request body decoded straight off the connection. It reads into
+ * the input buffer's space after the head, so the request's views stay valid,
+ * and hands out only body bytes, with any chunk framing removed.
+ */
+final class RequestBodyChannel implements ByteChannel {
+    static final int32 DATA = 0;
+    static final int32 SIZE = 1;
+    static final int32 CRLF = 2;
+    static final int32 TRAILERS = 3;
+    static final int32 DONE = 4;
+
+    ByteChannel ch;
+    int8[] a;
+    int32 base;
+    int32 cap;
+    int32 pos;
+    int32 end;
+    int32 bodyMs;
+    int64 maxBody;
+    boolean chunked;
+    int64 left;
+    int64 total;
+    int32 state;
+    boolean broken;
+
+    RequestBodyChannel() {
+        this.ch = null;
+        this.a = null;
+        this.state = RequestBodyChannel.DONE;
+        this.broken = false;
+    }
+
+    /**
+     * Starts a body whose first bytes are `a[pos .. end)`, reading more into
+     * `a[pos .. cap)` from `ch`. `length` is ignored for a chunked body.
+     */
+    void begin(ByteChannel ch, int8[] a, int32 pos, int32 end, int32 cap,
+               boolean chunked, int64 length, int32 bodyMs, int64 maxBody) {
+        this.ch #= ch;
+        this.a #= a;
+        this.base = pos;
+        this.cap = cap;
+        this.pos = pos;
+        this.end = end;
+        this.bodyMs = bodyMs;
+        this.maxBody = maxBody;
+        this.chunked = chunked;
+        this.left = chunked ? (int64) 0 : length;
+        this.total = 0;
+        this.broken = false;
+        if (chunked) {
+            this.state = RequestBodyChannel.SIZE;
+        } else {
+            this.state = length > 0 ? RequestBodyChannel.DATA : RequestBodyChannel.DONE;
+        }
+    }
+
+    /** True once the whole body, trailers included, has been read. */
+    boolean complete() {
+        return this.state == RequestBodyChannel.DONE && !this.broken;
+    }
+
+    void fillMore() {
+        this.broken = true;
+        int64 n = this.ch.readWithin(this.a, (int64) this.end, (int64) (this.cap - this.end), this.bodyMs);
+        if (n <= 0) {
+            throw heap UnexpectedEofException("stream ended inside the request body", this.total);
+        }
+        this.broken = false;
+        this.end = this.end + (int32) n;
+    }
+
+    void shiftDown() {
+        int32 d = this.pos - this.base;
+        if (d == 0) {
+            return;
+        }
+        int32 i = this.pos;
+        while (i < this.end) {
+            this.a[i - d] = this.a[i];
+            i = i + 1;
+        }
+        this.pos = this.base;
+        this.end = this.end - d;
+    }
+
+    void ensure(int32 k) {
+        while (this.end - this.pos < k) {
+            this.shiftDown();
+            if (this.end == this.cap) {
+                this.broken = true;
+                throw heap InvalidChunkEncodingException("chunk framing exceeds the buffer", this.total);
+            }
+            this.fillMore();
+        }
+    }
+
+    int32 lineEnd() {
+        int32 p = this.pos;
+        while (true) {
+            while (p + 1 < this.end) {
+                if (this.a[p] == (int8) 13 && this.a[p + 1] == (int8) 10) {
+                    return p;
+                }
+                p = p + 1;
+            }
+            int32 d = this.pos - this.base;
+            this.shiftDown();
+            p = p - d;
+            if (this.end == this.cap) {
+                this.broken = true;
+                throw heap InvalidChunkEncodingException("chunk line exceeds the buffer", this.total);
+            }
+            this.fillMore();
+        }
+        return -1;
+    }
+
+    void sizeLine() {
+        int32 le = this.lineEnd();
+        int64 size = 0;
+        int32 p = this.pos;
+        int32 digits = 0;
+        while (p < le && this.a[p] != (int8) 59) {
+            int32 d = Bytes.hexValue(((int32) this.a[p]) & 255);
+            if (d < 0 || digits >= 8) {
+                this.broken = true;
+                throw heap InvalidChunkEncodingException("bad chunk size", this.total);
+            }
+            size = size * 16 + (int64) d;
+            digits = digits + 1;
+            p = p + 1;
+        }
+        if (digits == 0) {
+            this.broken = true;
+            throw heap InvalidChunkEncodingException("empty chunk size", this.total);
+        }
+        this.pos = le + 2;
+        if (size == 0) {
+            this.state = RequestBodyChannel.TRAILERS;
+            return;
+        }
+        if (this.maxBody > 0 && this.total + size > this.maxBody) {
+            this.broken = true;
+            throw heap PayloadTooLargeException("chunked body over the limit", this.maxBody, this.total + size);
+        }
+        this.left = size;
+        this.state = RequestBodyChannel.DATA;
+    }
+
+    // Moves up to `length` body bytes into `buf` when `copy`, or skips them.
+    int64 take(int8[] buf, int64 offset, int64 length, boolean copy) {
+        while (true) {
+            if (this.state == RequestBodyChannel.DONE) {
+                return 0;
+            }
+            if (this.state == RequestBodyChannel.DATA) {
+                if (this.left == 0) {
+                    this.state = this.chunked ? RequestBodyChannel.CRLF : RequestBodyChannel.DONE;
+                } else {
+                    if (this.pos == this.end) {
+                        this.pos = this.base;
+                        this.end = this.base;
+                        this.fillMore();
+                    }
+                    int64 n = (int64) (this.end - this.pos);
+                    if (n > this.left) {
+                        n = this.left;
+                    }
+                    if (n > length) {
+                        n = length;
+                    }
+                    if (copy) {
+                        int32 i = 0;
+                        while ((int64) i < n) {
+                            buf[offset + (int64) i] = this.a[this.pos + i];
+                            i = i + 1;
+                        }
+                    }
+                    this.pos = this.pos + (int32) n;
+                    this.left = this.left - n;
+                    this.total = this.total + n;
+                    return n;
+                }
+            } else if (this.state == RequestBodyChannel.SIZE) {
+                this.sizeLine();
+            } else if (this.state == RequestBodyChannel.CRLF) {
+                this.ensure(2);
+                if (this.a[this.pos] != (int8) 13 || this.a[this.pos + 1] != (int8) 10) {
+                    this.broken = true;
+                    throw heap InvalidChunkEncodingException("chunk data not followed by CRLF", this.total);
+                }
+                this.pos = this.pos + 2;
+                this.state = RequestBodyChannel.SIZE;
+            } else {
+                int32 le = this.lineEnd();
+                if (le == this.pos) {
+                    this.state = RequestBodyChannel.DONE;
+                }
+                this.pos = le + 2;
+            }
+        }
+        return 0;
+    }
+
+    public int64 readAsync(int8[] buf, int64 offset, int64 length) {
+        if (length <= 0) {
+            return 0;
+        }
+        return this.take(buf, offset, length, true);
+    }
+
+    public int64 readWithin(int8[] buf, int64 offset, int64 length, int32 timeoutMs) {
+        return this.readAsync(buf, offset, length);
+    }
+
+    public void writeAllAsync(int8[] data, int64 offset, int64 length) {
+        throw heap HttpException("a request body is read-only");
+    }
+
+    public void close() {
+    }
+
+    /**
+     * Skips what the handler left unread, up to `limit` bytes. True when the
+     * body ended within the limit, so the connection may carry another request.
+     */
+    boolean drain(int64 limit) {
+        if (this.broken) {
+            return false;
+        }
+        int64 skipped = 0;
+        try {
+            while (this.state != RequestBodyChannel.DONE) {
+                if (skipped > limit) {
+                    return false;
+                }
+                skipped = skipped + this.take(this.a, 0, (int64) 2147483647, false);
+            }
+        } catch (Exception e) {
+            return false;
+        }
+        return !this.broken;
+    }
+
+    /** Moves bytes read past the body to the front of `in`, as the start of the next request. */
+    void restore(ByteBuffer in) {
+        int32 n = this.end - this.pos;
+        int32 i = 0;
+        while (i < n) {
+            this.a[i] = this.a[this.pos + i];
+            i = i + 1;
+        }
+        in.clear();
+        in.advanceWrite(n);
+    }
+}

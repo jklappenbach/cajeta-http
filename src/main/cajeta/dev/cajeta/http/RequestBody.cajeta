@@ -1,0 +1,59 @@
+package dev.cajeta.http;
+
+import cajeta.lang.String;
+import cajeta.io.net.AsyncReader;
+import dev.cajeta.http.body.Body;
+
+/** The streamed body of the request being served, read incrementally off the connection. */
+final class RequestBody implements Body {
+    RequestBodyChannel chan;
+    HttpRequest req;
+    AsyncReader rd;
+    MediaType type;
+    boolean typed;
+    int64 length;
+
+    RequestBody(RequestBodyChannel chan) {
+        this.chan #= chan;
+        this.req = null;
+        this.rd = null;
+        this.type = null;
+        this.typed = false;
+        this.length = -1;
+    }
+
+    /** Rebinds to the next streamed request, whose body is `length` bytes or -1 when chunked. */
+    void reset(HttpRequest req, int64 length) {
+        this.req #= req;
+        this.rd = null;
+        this.type = null;
+        this.typed = false;
+        this.length = length;
+    }
+
+    public int64 contentLength() {
+        return this.length;
+    }
+
+    public MediaType contentType() {
+        if (!this.typed) {
+            this.typed = true;
+            this.type #= this.req.contentType();
+        }
+        return this.type;
+    }
+
+    public AsyncReader reader() {
+        if (this.rd == null) {
+            this.rd = heap AsyncReader(this.chan);
+        }
+        return this.rd;
+    }
+
+    public void abort() {
+    }
+
+    public boolean live() {
+        return false;
+    }
+}

@@ -6,6 +6,7 @@ import dev.cajeta.http.Bytes;
 import dev.cajeta.http.ClientRequest;
 import dev.cajeta.http.ClientResponse;
 import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.MediaType;
 import dev.cajeta.http.HttpResponse;
 import dev.cajeta.http.body.MultipartBody;
 import dev.cajeta.http.body.MultipartParser;
@@ -54,6 +55,10 @@ public final class ClientTests {
         }
         if (!Bytes.equals(resp.header("content-type"), "text/plain")) {
             return -3;
+        }
+        MediaType t #= resp.contentType();
+        if (t == null || !t.is("text", "plain")) {
+            return -4;
         }
         return 1;
     }

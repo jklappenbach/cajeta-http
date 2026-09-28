@@ -142,6 +142,15 @@ public final class ClientResponse {
         return this.table.copy(name);
     }
 
+    /** The `Content-Type` as a media type, or null when it is absent or malformed. */
+    public #MediaType contentType() {
+        if (!this.hasHeader("content-type")) {
+            return null;
+        }
+        String v #= this.table.copy("content-type");
+        return MediaType.parse(v);
+    }
+
     /** True when the response carries body bytes. */
     public boolean hasBody() {
         return this.bodyLen > 0;
