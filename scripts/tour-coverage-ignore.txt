@@ -25,17 +25,3 @@ dev.cajeta.http.h2.Http2Stream
 dev.cajeta.http.h2.Http2StreamTable
 dev.cajeta.http.h2.Http2WriteSide
 dev.cajeta.http.h2.Http2SendGate
-
-# Cross-fiber handoff cells — workarounds for Channel's borrow semantics
-# (their own doc comments say so). Created and consumed inside the server
-# and the Timeout middleware; never held by user code.
-dev.cajeta.http.server.HandlerRun
-dev.cajeta.http.middleware.TimeoutRun
-
-# Server dispatch internals: the per-request record and the streaming
-# request-body plumbing behind ServerLimits.streamRequestBody. The toured
-# surface is the handler contract + ServerLimits; these run underneath.
-dev.cajeta.http.server.Exchange
-dev.cajeta.http.server.RequestBodyStream
-dev.cajeta.http.server.RequestBodyChannel
-dev.cajeta.http.server.ResponseBodyWriter
