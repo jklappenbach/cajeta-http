@@ -7,6 +7,8 @@ import dev.cajeta.http.ClientRequest;
 import dev.cajeta.http.ClientResponse;
 import dev.cajeta.http.HttpRequest;
 import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.body.MultipartBody;
+import dev.cajeta.http.body.MultipartParser;
 import dev.cajeta.http.client.HttpClient;
 import dev.cajeta.http.server.HttpServer;
 import dev.cajeta.http.server.HttpServerBuilder;
@@ -108,6 +110,57 @@ public final class ClientTests {
         return delta == 0 ? 1 : 0;
     }
 
+    static async int32 multipartEcho(int32 port) {
+        HttpClient client = heap HttpClient();
+        MultipartBody mb #= MultipartBody.withBoundary("Zed");
+        mb.addField("name", "ada");
+        ClientRequest req #= ClientRequest.post("http://127.0.0.1:" + port + "/echo");
+        req.body(#mb);
+        ClientResponse resp #= client.send(req);
+        if (resp.status() != 200) {
+            return -1;
+        }
+        int8[] b #= Bytes.copyOf(resp.body());
+        MultipartParser p #= MultipartParser.forBoundary("Zed");
+        p.feed(b, (int32) b.count());
+        if (!p.isComplete() || p.partCount() != 1) {
+            return -2;
+        }
+        return p.part(0).name().equals("name") && p.part(0).body().contentLength() == (int64) 3 ? 1 : -3;
+    }
+
+    static async int32 notFound(int32 port) {
+        HttpClient client = heap HttpClient();
+        ClientResponse resp #= client.get("http://127.0.0.1:" + port + "/nope");
+        return resp.status();
+    }
+
+    static #String filler(int32 n) {
+        int8[] a = heap int8[n];
+        int32 i = 0;
+        while (i < n) {
+            a[i] = (int8) (97 + i % 26);
+            i = i + 1;
+        }
+        return heap String(#a, n);
+    }
+
+    static async int32 twoPosts(int32 port) {
+        HttpClient client = heap HttpClient();
+        String big #= ClientTests.filler(8000);
+        String small #= ClientTests.filler(300);
+        ClientRequest a #= ClientRequest.post("http://127.0.0.1:" + port + "/echo");
+        a.body(big);
+        ClientResponse ra #= client.send(a);
+        ClientRequest b #= ClientRequest.post("http://127.0.0.1:" + port + "/echo");
+        b.body(small);
+        ClientResponse rb #= client.send(b);
+        if (!ra.bodyString().equals(big) || !rb.bodyString().equals(small)) {
+            return -1;
+        }
+        return client.pool().idleCount("127.0.0.1", port);
+    }
+
     static void handleAs(int32 code, HttpRequest q, HttpResponse r) {
         ClientTests.handle(q, r);
         if (r.status() == 200) {
@@ -157,6 +210,12 @@ public final class ClientTests {
             c.eqInt((int64) await tg, 1, "HttpClient GET /hello");
             Task<int32> tp = spawn clientPost(port);
             c.eqInt((int64) await tp, 2, "HttpClient POST /echo round-trip");
+            Task<int32> tm = spawn multipartEcho(port);
+            c.eqInt((int64) await tm, 1, "a multipart upload echoes back and re-parses");
+            Task<int32> tn = spawn notFound(port);
+            c.eqInt((int64) await tn, 404, "an unknown path answers 404 over loopback");
+            Task<int32> t2 = spawn twoPosts(port);
+            c.eqInt((int64) await t2, 1, "8000- and 300-byte POSTs share one connection, each seen whole");
             Task<int32> th = spawn hostHeader(port);
             c.eqInt((int64) await th, 1, "Host carries a port that is not the scheme's default");
             Task<int32> tk = spawn keepAlive(port);

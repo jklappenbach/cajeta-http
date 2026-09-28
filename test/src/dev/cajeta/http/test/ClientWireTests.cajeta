@@ -13,6 +13,7 @@ import dev.cajeta.http.Version;
 import dev.cajeta.http.body.FormBody;
 import dev.cajeta.http.body.MultipartBody;
 import dev.cajeta.http.body.StreamBody;
+import dev.cajeta.http.body.StringBody;
 import dev.cajeta.http.h1.HttpParserLimits;
 import dev.cajeta.http.server.ConnectionBuffers;
 
@@ -94,10 +95,18 @@ public final class ClientWireTests {
         HttpParserLimits pl = heap HttpParserLimits();
         ReplyChannel ch = heap ReplyChannel(4096);
         ch.reply("HTTP/1.1 204 No Content\r\n\r\n").reply("HTTP/1.1 204 No Content\r\n\r\n")
-          .reply("HTTP/1.1 204 No Content\r\n\r\n");
+          .reply("HTTP/1.1 204 No Content\r\n\r\n").reply("HTTP/1.1 204 No Content\r\n\r\n");
         Http1ClientConnection conn = heap Http1ClientConnection(ch, bufs, pl);
         ClientResponse resp = heap ClientResponse();
 
+        ClientRequest text #= ClientRequest.post("http://t.example/t");
+        text.body(#StringBody.of("hello body"));
+        conn.exchange(text, resp, (int64) 0, bufs);
+        Wire.same(c, ch.written(),
+            "POST /t HTTP/1.1\r\nContent-Type: text/plain; charset=utf-8\r\ncontent-length: 10\r\n\r\nhello body",
+            "a StringBody carries its type with parameters and is framed by length");
+
+        ch.clearWritten();
         FormBody f #= FormBody.of();
         f.add("a", "1");
         ClientRequest form #= ClientRequest.post("http://t.example/f");
