@@ -78,6 +78,10 @@ public final class TestMain {
         int32 drive = TestMain.flagValue(args, "--soakdrive=");
         int32 dport = TestMain.flagValue(args, "--soakport=");
         if (drive > 0 && dport > 0) { Http2SoakTests.driveOnly(c, dport, drive); }
+        int32 handoff = TestMain.flagValue(args, "--handoffprobe=");
+        if (handoff > 0) { HandoffProbeTests.run(c, handoff); }
+        int32 scopes = TestMain.flagValue(args, "--scopeprobe=");
+        if (scopes > 0) { ScopeProbeTests.run(c, scopes); }
 
         System.stdout.println("");
         System.stdout.println("=== {} passed, {} failed, {} skipped ===",
