@@ -6,7 +6,6 @@ import dev.cajeta.http.body.Body;
 import dev.cajeta.http.body.BytesChannel;
 import dev.cajeta.http.body.StreamBody;
 import dev.cajeta.http.h1.BodyReader;
-import dev.cajeta.http.h1.ChunkedEncoder;
 
 /**
  * http:1.3c — StreamBody: wrap a caller-supplied reader; known length
@@ -96,8 +95,8 @@ public final class StreamTests {
     }
 
     /**
-     * Unknown length: contentLength is -1, and each piece frames through
-     * ChunkedEncoder as it is read — fed to the chunked decoder as
+     * Unknown length: contentLength is -1, and each piece is framed as a
+     * chunk as it is read — fed to the chunked decoder as
      * produced, never accumulated on the encode side — then the
      * terminator closes the stream and the decode matches.
      */
@@ -114,11 +113,12 @@ public final class StreamTests {
         int8[] buf = heap int8[StreamTests.PIECE];
         int32 n = src.read(buf, 0, StreamTests.PIECE);
         while (n > 0) {
-            int8[] wire #= ChunkedEncoder.encodeChunk(buf, n);
+            int8[] wire #= StreamTests.chunk(buf, n);
             br.feed(wire, wire.count());
             n = src.read(buf, 0, StreamTests.PIECE);
         }
-        int8[] last #= ChunkedEncoder.encodeLast();
+        String term = "0\r\n\r\n";
+        int8[] last #= term.toBytes();
         boolean done = br.feed(last, last.count());
         c.that(done, "chunked stream completes at the terminator");
         c.that(br.isComplete(), "chunked decoder complete");
@@ -128,6 +128,34 @@ public final class StreamTests {
             "chunked round-trip preserves length");
         c.that(StreamTests.matchesPattern(dec, decLen),
             "chunked round-trip preserves bytes");
+    }
+
+    // One chunk: hex size, CRLF, the bytes, CRLF.
+    static #int8[] chunk(int8[] b, int32 n) {
+        String hex = "";
+        int32 v = n;
+        String digits = "0123456789abcdef";
+        while (v > 0) {
+            hex = digits.substring(v % 16, v % 16 + 1) + hex;
+            v = v / 16;
+        }
+        String head = hex + "\r\n";
+        int32 h = head.byteLength();
+        int8[] out = heap int8[h + n + 2];
+        int8[] hb #= head.toBytes();
+        int32 i = 0;
+        while (i < h) {
+            out[i] = hb[i];
+            i = i + 1;
+        }
+        i = 0;
+        while (i < n) {
+            out[h + i] = b[i];
+            i = i + 1;
+        }
+        out[h + n] = (int8) 13;
+        out[h + n + 1] = (int8) 10;
+        return #out;
     }
 
     /** The reader is single-shot: once drained it stays at EOF. */
