@@ -19,16 +19,17 @@ a consumer of the published archive gets.
 
 | Demo | What it teaches |
 |------|-----------------|
-| `WireDemo` | The message model + typed vocabulary (Method/Status/Version/MediaType), serialize→parse, chunked framing, keep-alive decisions, gzip content-coding, and the typed exception per hostile-input class |
+| `WireDemo` | Request views over parsed heads, the response writer, `HeaderTable`, the typed vocabulary (Method/Status/Version/MediaType), chunked framing, gzip content-coding, the typed exception per hostile-input class, and the connection layer under it all (`Http1ClientConnection`, `BodySink`, `ResponseTransport`) |
 | `RoutingDemo` | Router patterns: typed path params, precedence, 404/405+Allow, per-route body caps, mounts |
 | `MiddlewareDemo` | `MiddlewareChain` mechanics + the catalogue: Recover, RequestId, Logging, Basic/Bearer auth, RateLimit, Timeout, CORS, ETag, Compression, StaticFile, ProxyHeaders |
-| `ServerDemo` | A live server the public way: Router behind a chain behind `builder() → serve() → shutdown(deadline)`, ServerLimits enforcing 413 pre-handler, inbound gzip, Expect: 100-continue |
+| `ServerDemo` | A live server the public way: Router behind a chain behind `builder() → serve() → shutdown(deadline)`, a `routeMw` admin route, ServerLimits enforcing 413 pre-handler, inbound gzip, Expect: 100-continue, and a 1 MiB upload streamed to the handler with `streamRequestBody` |
+| `StatusDemo` | The status catalogue: throw `NotFoundException`, `TooManyRequestsException` and the rest from a handler and the connection answers that status with no body |
 | `ClientDemo` | The operational client: exchangeTimeout, retryPolicy, redirect caps, cookies, pool reuse, getJson, downloadTo — with the typed failure for each misbehavior |
 | `BodiesDemo` | The body model: String/Bytes/Form/Multipart/Stream/GzipCompress, chunked uploads, upload limits |
 | `TlsDemo` | The same exchange TLS-terminated: server PEM pair, client trust anchor |
 | `Http2Demo` | h2 prior-knowledge server + `Http2Client`, HPACK (with RFC 7541 pins), the frame layer, SETTINGS, flow control, server push entries |
 | `SseDemo` | Server-Sent Events: stream + live channel responses, `SseClient.subscribe` with Last-Event-ID resume, the wire format |
-| `WebSocketDemo` | RFC 6455: handshake math, live text/binary echo, the handler API, the CLOSE handshake, control frames, fragmentation, permessage-deflate, and every ws exception provoked |
+| `WebSocketDemo` | RFC 6455: handshake math, `Takeover` (the generic 101 switch), an `HttpServer` route upgrading with `WsUpgrade.accept`, live text/binary echo, the handler API, the CLOSE handshake, control frames, fragmentation, permessage-deflate, and every ws exception provoked |
 
 HTTP/3 is intentionally absent: it needs QUIC, which the stdlib does not ship
 — the library no longer advertises it.

@@ -3,165 +3,49 @@ package dev.cajeta.http.server;
 import dev.cajeta.http.h1.HttpParserLimits;
 
 /**
- * **Server-side request limits + hardening knobs** — plan item
- * **NET-9.6**. Where [`HttpParserLimits`](HttpParserLimits.cajeta) (NET-7.3)
- * bounds the *head* the [`HttpParser`](HttpParser.cajeta) buffers, this type
- * bounds the rest of a request's resource envelope the
- * [`HttpServer`](HttpServer.cajeta) (NET-9.1 / NET-9.4) reads: how long a
- * peer may take to deliver the head, how long the body may take, how large
- * the body may grow, and whether the server honours `Expect: 100-continue`.
- *
- * These four ceilings close the abuse vectors the plan's threat table names
- * for the server (`plan/cajeta-net-plan.md` §Threats — "HTTP parser abuse
- * (header floods, slowloris, smuggling)"): the head/body **deadlines** evict
- * a slowloris client that dribbles bytes to pin a worker forever, the body
- * **size cap** rejects an over-large upload with `413` before it is
- * buffered, and the `100-continue` toggle lets the server gate a large body
- * on an interim `100 Continue` it can decline with `417` first.
- *
- * ## The four ceilings
- *
- *   - **`headReadTimeoutMs`** — the wall-clock budget (milliseconds) for a
- *     peer to deliver a **complete request head** (request-line + all
- *     header lines + the terminating blank line) once the first byte of a
- *     new request arrives. The **slowloris** guard: a client that sends one
- *     byte every few seconds, never completing the head, is timed out
- *     ([`TimedOutException`](../TimedOutException.cajeta) →
- *     [`HttpServer`](HttpServer.cajeta) closes the connection) instead of
- *     holding the worker indefinitely. A non-positive value disables the
- *     head deadline (unbounded — the v1 NET-9.1 behaviour).
- *   - **`bodyReadTimeoutMs`** — the wall-clock budget (milliseconds) for the
- *     **whole body** to arrive after the head completes. The body-side twin
- *     of the head deadline — a slow-body trickle is bounded too. A
- *     non-positive value disables the body deadline.
- *   - **`maxBodyBytes`** — the largest message body the server will accept,
- *     in bytes. A declared `Content-Length` over this ceiling is rejected up
- *     front with [`PayloadTooLargeException`](PayloadTooLargeException.cajeta)
- *     (`413 Payload Too Large`) **before** any body byte is buffered; a
- *     `chunked` body that *streams* past the ceiling is rejected the moment
- *     the decoded total crosses it. A non-positive value disables the body
- *     size cap.
- *   - **`expectContinueEnabled`** — when `true` (the default), a request
- *     carrying `Expect: 100-continue` is answered by the
- *     [`ExpectContinue`](ExpectContinue.cajeta) policy: an interim
- *     `100 Continue` (HTTP/1.1) telling the client to send the body, or a
- *     `417 Expectation Failed` when the request would be rejected anyway
- *     (e.g. its `Content-Length` already exceeds `maxBodyBytes`) so the
- *     client never sends the body. When `false`, the server ignores the
- *     `Expect` header (the client must decide on its own timeout).
- *
- * ## Defaults
- *
- * The defaults mirror a conservative public-facing server posture: a 30 s
- * head deadline (generous for a human-paced client, fatal to a slowloris),
- * a 60 s body deadline, a 16 MiB body cap (the common reverse-proxy default,
- * e.g. nginx `client_max_body_size`), and `100-continue` honoured. A caller
- * tunes them via the [`of`](#of) factory; a `0` for any numeric field
- * selects "unbounded / disabled" rather than that field's default, so a
- * caller opts *out* of a ceiling explicitly.
- *
- * This is a **pure value type** — no I/O — so it tests directly over the
- * JIT alongside the parser limits, and the
- * [`HttpServer`](HttpServer.cajeta) pure byte path
- * ([`handleRequestWithLimits`](HttpServer.cajeta#handleRequestWithLimits))
- * enforces the body-size + expect ceilings without a live socket.
+ * The limits a server enforces before and while a handler runs: read
+ * deadlines, the body cap, head caps, `Expect: 100-continue`, and whether
+ * request bodies stream. A `0` for a deadline or the body cap disables it.
  */
 public class ServerLimits {
-    /** Default head-read deadline: 30 s. The slowloris guard. */
+    /** Default head-read deadline: 30 s. */
     public static final int32 DEFAULT_HEAD_TIMEOUT_MS = 30000;
-    /** Default body-read deadline: 60 s. */
+    /** Default body-read idle timeout: 60 s. */
     public static final int32 DEFAULT_BODY_TIMEOUT_MS = 60000;
     /** Default max body size: 16 MiB. */
     public static final int64 DEFAULT_MAX_BODY_BYTES = (int64) 16777216;
 
-    /**
-     * Milliseconds a peer may take to deliver a complete request head; a
-     * non-positive value disables the head deadline. The slowloris guard.
-     */
+    /** Milliseconds from a request's first byte to the end of its head; past it the answer is 408. */
     public int32 headReadTimeoutMs;
-    /**
-     * Milliseconds the whole body may take after the head completes; a
-     * non-positive value disables the body deadline.
-     */
+    /** Milliseconds each body read may wait for the peer; past it the answer is 408. */
     public int32 bodyReadTimeoutMs;
-    /**
-     * Largest accepted body in bytes; a non-positive value disables the
-     * size cap. A `Content-Length` over this → `413` up front; a `chunked`
-     * stream over this → `413` mid-stream.
-     */
+    /** Largest body in bytes. A larger `Content-Length` is 413 up front, a chunked body 413 once it crosses. */
     public int64 maxBodyBytes;
-    /**
-     * Honour `Expect: 100-continue` (default `true`) — see
-     * [`ExpectContinue`](ExpectContinue.cajeta).
-     */
+    /** Answers `Expect: 100-continue` with 100, or 413 when the declared length is over the cap. */
     public boolean expectContinueEnabled;
-    /**
-     * The **whole-request budget** in milliseconds (http:1.5a): from the
-     * request's first byte to the response write, spanning head + body
-     * reads AND the handler. Reads are capped by the remaining budget;
-     * a handler still running when it expires is cut — the server
-     * answers `503` + close at the deadline and drains the stray
-     * handler fiber afterward. `0` (the default) disables the budget.
-     */
-    public int32 requestBudgetMs;
-    /**
-     * Head-size ceilings **surfaced from
-     * [`HttpParserLimits`](../h1/HttpParserLimits.cajeta)** (http:1.5b) so
-     * a server's whole hardening posture is configured in ONE place: the
-     * total head byte cap, the per-line cap, and the header-field-count
-     * cap. The [`HttpServer`](HttpServer.cajeta) installs these onto the
-     * parser at bind time (via [`toParserLimits`](#toParserLimits)); the
-     * parser rejects an over-cap head with `431 Request Header Fields
-     * Too Large` before any handler runs. A non-positive value is
-     * normalized to the [`HttpParserLimits`](../h1/HttpParserLimits.cajeta)
-     * default (unlike the body/deadline ceilings, whose `0` means
-     * "disabled" — the head caps have no "unbounded" mode; the parser
-     * must always bound the head it buffers).
-     */
+    /** Head caps installed on the parser; over any of them is 431. Non-positive means the parser default. */
     public int32 maxHeadBytes;
     public int32 maxLineBytes;
     public int32 maxHeaderCount;
     /**
-     * **Stream request bodies to the handler** (http:1.3e's deferred
-     * leg, default `false` = the buffered behavior every existing
-     * handler sees). When `true`, the serve loop does NOT read the body
-     * before dispatch: the handler receives it as `request.getBody()`
-     * (a [`RequestStreamBody`](RequestStreamBody.cajeta) whose
-     * `reader()` decodes incrementally off the connection), and
-     * whatever the handler leaves unread is DRAINED on return so the
-     * keep-alive framing survives. Streaming dispatch runs inline —
-     * [`requestBudgetMs`](#requestBudgetMs)'s handler cut does not
-     * apply (the handler shares the connection's reader; cutting it
-     * mid-read would race the socket) — the per-read body deadline
-     * still bounds each pull.
+     * Streams HTTP/1.1 request bodies to the handler through `bodyStream()`
+     * instead of holding them, so bodies larger than the input buffer are served.
      */
     public boolean streamRequestBody;
 
-    /**
-     * Field-pinning constructor at the conservative public-server defaults:
-     * a 30 s head deadline, a 60 s body deadline, a 16 MiB body cap, and
-     * `100-continue` honoured.
-     */
+    /** A 30 s head deadline, a 60 s body idle timeout, a 16 MiB body cap, 100-continue honoured. */
     public ServerLimits() {
         this.headReadTimeoutMs = ServerLimits.DEFAULT_HEAD_TIMEOUT_MS;
         this.bodyReadTimeoutMs = ServerLimits.DEFAULT_BODY_TIMEOUT_MS;
         this.maxBodyBytes = ServerLimits.DEFAULT_MAX_BODY_BYTES;
         this.expectContinueEnabled = true;
-        this.requestBudgetMs = 0;
-        this.maxHeadBytes = 65536;      // HttpParserLimits defaults
+        this.maxHeadBytes = 65536;
         this.maxLineBytes = 8192;
         this.maxHeaderCount = 100;
         this.streamRequestBody = false;
     }
 
-    /**
-     * Explicit-ceiling factory. A non-positive value for any numeric field
-     * is taken **verbatim** as "disabled / unbounded" (unlike
-     * [`HttpParserLimits.of`](HttpParserLimits.cajeta#of), which normalizes
-     * a non-positive to its default) — a server hardening policy must be
-     * able to *remove* a ceiling deliberately, so a caller passes `0` to
-     * opt out rather than restate a default.
-     */
+    /** Limits with these deadlines and cap, taken verbatim, so `0` disables one. */
     public static #ServerLimits of(int32 headReadTimeoutMs,
                                    int32 bodyReadTimeoutMs,
                                    int64 maxBodyBytes,
@@ -171,50 +55,31 @@ public class ServerLimits {
         l.bodyReadTimeoutMs = bodyReadTimeoutMs;
         l.maxBodyBytes = maxBodyBytes;
         l.expectContinueEnabled = expectContinueEnabled;
-        l.requestBudgetMs = 0;
         return #l;
     }
 
-    /** True iff a whole-request budget is in force (positive). */
-    public boolean hasRequestBudget() {
-        return this.requestBudgetMs > 0;
-    }
-
-    /**
-     * The [`HttpParserLimits`](../h1/HttpParserLimits.cajeta) carrying
-     * these head ceilings (http:1.5b) — the
-     * [`HttpServer`](HttpServer.cajeta) installs it on the parser at bind
-     * time so the surfaced caps actually bound the head.
-     * [`HttpParserLimits.of`](../h1/HttpParserLimits.cajeta#of)
-     * normalizes any non-positive field to its own default.
-     */
+    /** The parser limits carrying the head caps. */
     public #HttpParserLimits toParserLimits() {
         return HttpParserLimits.of(this.maxHeadBytes, this.maxLineBytes,
                                    this.maxHeaderCount);
     }
 
-    /** True iff a head-read deadline is in force (positive budget). */
+    /** True when a head deadline is in force. */
     public boolean hasHeadDeadline() {
         return this.headReadTimeoutMs > 0;
     }
 
-    /** True iff a body-read deadline is in force (positive budget). */
+    /** True when a body idle timeout is in force. */
     public boolean hasBodyDeadline() {
         return this.bodyReadTimeoutMs > 0;
     }
 
-    /** True iff a body-size ceiling is in force (positive cap). */
+    /** True when a body cap is in force. */
     public boolean hasBodyCap() {
         return this.maxBodyBytes > 0;
     }
 
-    /**
-     * Whether a body of `lengthBytes` is within the configured cap. Always
-     * `true` when [`hasBodyCap`](#hasBodyCap) is `false` (no ceiling). The
-     * comparison the [`HttpServer`](HttpServer.cajeta) body path applies
-     * both to a declared `Content-Length` (up front) and to a running
-     * `chunked` total (mid-stream).
-     */
+    /** Whether a body of `lengthBytes` is within the cap. Always true with no cap. */
     public boolean bodyWithinCap(int64 lengthBytes) {
         if (!this.hasBodyCap()) {
             return true;

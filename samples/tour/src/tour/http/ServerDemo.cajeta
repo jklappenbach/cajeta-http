@@ -51,6 +51,36 @@ public class ServerDemo extends DemoClass {
         r.body("stored " + q.bodyLength() + " bytes");
     }
 
+    // Reads a streamed upload to the end and reports its size.
+    public static void ingest(HttpRequest q, HttpResponse r) {
+        if (!q.bodyStreamed()) {
+            r.status(400);
+            return;
+        }
+        AsyncReader rd = q.bodyStream().reader();
+        int8[] buf = heap int8[16384];
+        int64 total = 0;
+        int32 got = rd.read(buf, 0, 16384);
+        while (got > 0) {
+            total = total + (int64) got;
+            got = rd.read(buf, 0, 16384);
+        }
+        r.body("ingested " + total);
+    }
+
+    public static async int32 bigUpload(int32 port) {
+        HttpClient client #= heap HttpClient();
+        client.exchangeTimeout(15000);
+        client.defaultHeader("Connection", "close");
+        int32 n = 1048576;
+        int8[] data = heap int8[n];
+        ClientRequest req #= ClientRequest.post("http://127.0.0.1:" + port + "/ingest");
+        req.body(data, n);
+        ClientResponse resp #= client.send(req);
+        String got #= resp.bodyString();
+        return resp.status() == 200 && got.equals("ingested " + n) ? 1 : 0 - 1;
+    }
+
     public static void purge(HttpRequest q, HttpResponse r) {
         r.body("purged");
     }
@@ -247,5 +277,26 @@ public class ServerDemo extends DemoClass {
         String fine #= Served.runLimited("POST /orders HTTP/1.1\r\nExpect: 100-continue\r\n"
             + "Content-Length: 2\r\n\r\nhi", (int64) 512, accept);
         this.check(Served.status(fine) == 201, "a body within the cap reaches the handler");
+
+        // Streaming uploads. With streamRequestBody the handler reads the
+        // body off the connection through bodyStream().reader(), so an
+        // upload far larger than the 64 KiB input buffer is served.
+        scope {
+            ServerLimits streaming #= ServerLimits.of(5000, 5000, (int64) 0, true);
+            streaming.streamRequestBody = true;
+            HttpServerBuilder b #= HttpServer.builder();
+            b.bind("127.0.0.1:0");
+            b.handler((HttpRequest q, HttpResponse r) -> ServerDemo.ingest(q, r));
+            b.serverLimits(#streaming);
+            HttpServer srv #= b.build();
+            int32 port = srv.server.listener.boundPort();
+            Task<int32> sv = spawn serveLoop(srv);
+            Task<int32> up = spawn bigUpload(port);
+            this.check(await up == 1,
+                "a 1 MiB upload streams through the handler and is counted byte for byte");
+            boolean drained #= srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+            this.check(drained, "the streaming server drained clean");
+        }
     }
 }
