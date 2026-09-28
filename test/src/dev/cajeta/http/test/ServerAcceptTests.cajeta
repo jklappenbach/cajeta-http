@@ -9,31 +9,16 @@ import cajeta.io.net.TcpStream;
 import cajeta.time.Clock;
 import cajeta.time.Duration;
 import cajeta.time.Instant;
+import dev.cajeta.http.Bytes;
+import dev.cajeta.http.ClientResponse;
 import dev.cajeta.http.HttpRequest;
 import dev.cajeta.http.HttpResponse;
 import dev.cajeta.http.client.HttpClient;
 import dev.cajeta.http.server.HttpServer;
 import dev.cajeta.http.server.HttpServerBuilder;
 
-/**
- * http:1.5c — accept control + graceful shutdown, on the REAL accept
- * loop (`serve()` on its own fiber, not the manual accept the other
- * suites drive):
- *
- *   - **REFUSE sheds**: with `maxConnections = 2` and both slots held
- *     by slow exchanges, a third connection is closed without a byte
- *     of HTTP — and the two admitted exchanges still complete;
- *   - **BLOCK queues**: with `maxConnections = 1`, a second concurrent
- *     exchange is not dropped — it waits for the permit (its latency
- *     shows the wait) and completes;
- *   - **graceful shutdown**: `shutdown(Duration)` mid-exchange lets
- *     that exchange finish (returns `true`), and a connect AFTER
- *     shutdown is refused;
- *   - **the deadline forces the stop**: a hung exchange makes
- *     `shutdown` return `false` AT the deadline (asserted against the
- *     configured value), not when the handler eventually ends.
- */
-public final class ServerAcceptControlTests {
+/** Connection limits (REFUSE and BLOCK) and graceful shutdown on the real accept loop. */
+public final class ServerAcceptTests {
 
     public static void run(Check c) {
         System.stdout.println("-- accept control: REFUSE sheds the surplus --");
@@ -46,28 +31,19 @@ public final class ServerAcceptControlTests {
         deadlineForcesStop(c);
     }
 
-    // ---- server ----------------------------------------------------------
 
-    public static #HttpResponse handle(HttpRequest req) {
-        String t #= req.getTarget();
-        if (t.equals("/slow")) {
+    static void handle(HttpRequest q, HttpResponse r) {
+        if (Bytes.equals(q.path(), "/slow")) {
             Tasks.sleepMillis((int64) 400);
-            String s = "slow-done";
-            HttpResponse resp0 #= HttpResponse.ok();
-            resp0.body(s.toBytes(), s.byteLength());
-            return #resp0;
+            r.body("slow-done");
+            return;
         }
-        if (t.equals("/hung")) {
+        if (Bytes.equals(q.path(), "/hung")) {
             Tasks.sleepMillis((int64) 1500);
-            String hd = "hung-done";
-            HttpResponse resp1 #= HttpResponse.ok();
-            resp1.body(hd.toBytes(), hd.byteLength());
-            return #resp1;
+            r.body("hung-done");
+            return;
         }
-        String ok = "ok";
-        HttpResponse resp2 #= HttpResponse.ok();
-        resp2.body(ok.toBytes(), ok.byteLength());
-        return #resp2;
+        r.body("ok");
     }
 
     static #HttpServer serverWith(int32 maxConns, int32 policy) {
@@ -75,9 +51,7 @@ public final class ServerAcceptControlTests {
                                                     65536, policy);
         HttpServerBuilder b #= HttpServer.builder();
         b.bind("127.0.0.1:0");
-        (HttpRequest) -> #HttpResponse h =
-            (req) -> ServerAcceptControlTests.handle(req);
-        b.handler(h);
+        b.handler((HttpRequest q, HttpResponse r) -> ServerAcceptTests.handle(q, r));
         b.connectionLimits(#cl);
         return b.build();
     }
@@ -93,38 +67,20 @@ public final class ServerAcceptControlTests {
         return t.toEpochMilli();
     }
 
-    // ---- client fibers ---------------------------------------------------
 
-    /**
-     * GET `path`; 1 on the expected body, negative codes otherwise. A
-     * generous per-exchange deadline (15 s) makes a run **fail fast** under
-     * external CPU starvation — where the box is oversubscribed and the
-     * fiber carriers get starved of scheduling — instead of hanging
-     * indefinitely on an un-deadlined `await`. The legitimate serialized
-     * BLOCK exchange completes in ~1 s, so 15 s never trips under normal
-     * load; a starved run reports `-3` and fails a clean assertion rather
-     * than a 120 s timeout (the deadline is wall-clock, so it can only bound
-     * the hang, not make a genuinely-starved exchange succeed).
-     */
+    /** GETs `path` under a 15 s deadline: 1 on the expected body, negative otherwise, never a hang. */
     public static async int32 getPath(int32 port, String path, String want) {
         HttpClient client #= heap HttpClient();
         client.exchangeTimeout(15000);
         String url = "http://127.0.0.1:" + port + path;
         try {
-            HttpResponse resp #= client.get(url);
-            if (resp.statusCode() != 200) { return -1; }
-            int32 n = resp.bodyLength();
-            int8[] copy = heap int8[n];
-            int32 i = 0;
-            while (i < n) {
-                copy[i] = resp.body[i];
-                i = i + 1;
-            }
-            String got = heap String(#copy, n);
+            ClientResponse resp #= client.get(url);
+            if (resp.status() != 200) { return -1; }
+            String got #= resp.bodyString();
             if (!got.equals(want)) { return -2; }
             return 1;
         } catch (Exception e) {
-            return -3;                         // failed fast (timeout/fault)
+            return -3;
         }
     }
 
@@ -169,25 +125,24 @@ public final class ServerAcceptControlTests {
             int8[] buf = heap int8[64];
             int64 n = s.readAsync(buf, (int64) 0, (int64) 64);
             s.close();
-            if (n <= (int64) 0) { return 1; }    // accepted-then-EOF: closed
+            if (n <= (int64) 0) { return 1; }
             return -1;
         } catch (Exception e) {
-            return 1;                            // refused outright
+            return 1;
         }
     }
 
-    // ---- scenarios -------------------------------------------------------
 
     static void refuseSheds(Check c) {
         scope {
-            HttpServer srv #= ServerAcceptControlTests.serverWith(
+            HttpServer srv #= ServerAcceptTests.serverWith(
                 2, LoadShedPolicy.REFUSE);
             int32 port = srv.server.listener.boundPort();
             Task<int32> sv = spawn serveIt(srv);
 
             Task<int32> a = spawn getPath(port, "/slow", "slow-done");
             Task<int32> b = spawn getPath(port, "/slow", "slow-done");
-            Tasks.sleepMillis((int64) 120);      // both slots now held
+            Tasks.sleepMillis((int64) 120);
             Task<int32> probe = spawn shedProbe(port);
             c.eqInt((int64) await probe, 1,
                     "third connection shed without a byte of HTTP");
@@ -203,18 +158,18 @@ public final class ServerAcceptControlTests {
 
     static void blockQueues(Check c) {
         scope {
-            HttpServer srv #= ServerAcceptControlTests.serverWith(
+            HttpServer srv #= ServerAcceptTests.serverWith(
                 1, LoadShedPolicy.BLOCK);
             int32 port = srv.server.listener.boundPort();
             Task<int32> sv = spawn serveIt(srv);
 
-            int64 t0 = ServerAcceptControlTests.nowMs();
+            int64 t0 = ServerAcceptTests.nowMs();
             Task<int32> a = spawn getPath(port, "/slow", "slow-done");
             Tasks.sleepMillis((int64) 100);
             Task<int32> b = spawn getPath(port, "/slow", "slow-done");
             c.eqInt((int64) await a, 1, "first BLOCK exchange completed");
             c.eqInt((int64) await b, 1, "queued exchange completed (not shed)");
-            int64 elapsed = ServerAcceptControlTests.nowMs() - t0;
+            int64 elapsed = ServerAcceptTests.nowMs() - t0;
             c.that(elapsed >= (int64) 800,
                    "queued exchange waited for the permit (serialized)");
 
@@ -227,13 +182,13 @@ public final class ServerAcceptControlTests {
 
     static void gracefulShutdown(Check c) {
         scope {
-            HttpServer srv #= ServerAcceptControlTests.serverWith(
+            HttpServer srv #= ServerAcceptTests.serverWith(
                 8, LoadShedPolicy.REFUSE);
             int32 port = srv.server.listener.boundPort();
             Task<int32> sv = spawn serveIt(srv);
 
             Task<int32> a = spawn getPath(port, "/slow", "slow-done");
-            Tasks.sleepMillis((int64) 100);      // exchange in flight
+            Tasks.sleepMillis((int64) 100);
             boolean drained #= srv.shutdown(Duration.ofSeconds(2));
             c.that(drained, "shutdown mid-exchange drained clean");
             c.eqInt((int64) await a, 1, "in-flight exchange completed");
@@ -247,22 +202,20 @@ public final class ServerAcceptControlTests {
 
     static void deadlineForcesStop(Check c) {
         scope {
-            HttpServer srv #= ServerAcceptControlTests.serverWith(
+            HttpServer srv #= ServerAcceptTests.serverWith(
                 8, LoadShedPolicy.REFUSE);
             int32 port = srv.server.listener.boundPort();
             Task<int32> sv = spawn serveIt(srv);
 
             Task<int32> a = spawn getPath(port, "/hung", "hung-done");
-            Tasks.sleepMillis((int64) 100);      // the hung exchange is in
-            int64 t0 = ServerAcceptControlTests.nowMs();
+            Tasks.sleepMillis((int64) 100);
+            int64 t0 = ServerAcceptTests.nowMs();
             boolean drained #= srv.shutdown(Duration.ofMillis((int64) 300));
-            int64 elapsed = ServerAcceptControlTests.nowMs() - t0;
+            int64 elapsed = ServerAcceptTests.nowMs() - t0;
             c.that(!drained, "hung exchange forces shutdown to report false");
             c.that(elapsed >= (int64) 300 && elapsed < (int64) 1200,
                    "shutdown returned AT its deadline, not the handler's");
 
-            // v1 semantics: the hung handler is abandoned to the scope
-            // join, not hard-closed — it still completes for its client.
             c.eqInt((int64) await a, 1, "abandoned exchange still completed");
             int32 s = await sv;
             c.eqInt((int64) s, 1, "accept loop exited after forced stop");

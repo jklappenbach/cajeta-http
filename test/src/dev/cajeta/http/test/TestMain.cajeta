@@ -17,6 +17,7 @@ public final class TestMain {
         if (sel.want("ResponseTests")) { ResponseTests.run(c); }
         if (sel.want("ConnectionTests")) { ConnectionTests.run(c); }
         if (sel.want("ServerLimitTests")) { ServerLimitTests.run(c); }
+        if (sel.want("ServerAcceptTests")) { ServerAcceptTests.run(c); }
         if (sel.want("RequestStreamTests")) { RequestStreamTests.run(c); }
         if (sel.want("ViewEditTests")) { ViewEditTests.run(c); }
         if (sel.want("StatusCatalogueTests")) { StatusCatalogueTests.run(c); }
