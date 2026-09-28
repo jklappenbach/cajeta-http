@@ -118,6 +118,17 @@ public final class ViewEditTests {
             "an unsized streamed body larger than the buffer is chunked");
         Wire.same(c, Wire.bodyOf(got), big, "the chunked stream arrives intact");
 
+        (HttpRequest, HttpResponse) -> void mixed = (HttpRequest q, HttpResponse r) -> {
+            if (Bytes.equals(q.path(), "/s")) {
+                r.body(#StreamBody.of(#ViewEditTests.reader(big)));
+            } else {
+                r.body("plain");
+            }
+        };
+        got #= Wire.serveWith("GET /s HTTP/1.1\r\n\r\nGET /p HTTP/1.1\r\n\r\n", 4096, 6000, mixed);
+        c.that(got.endsWith("0\r\n\r\nHTTP/1.1 200 OK\r\ncontent-length: 5\r\n\r\nplain"),
+            "a plain response follows a chunked stream on the same connection");
+
         (HttpRequest, HttpResponse) -> void typed = (HttpRequest q, HttpResponse r) -> {
             r.body(#StringBody.of("hi"));
         };

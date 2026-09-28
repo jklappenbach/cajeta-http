@@ -1,0 +1,334 @@
+package dev.cajeta.http.test;
+
+import cajeta.lang.String;
+import cajeta.concurrent.Tasks;
+import cajeta.io.net.AsyncReader;
+import cajeta.io.net.IpAddress;
+import cajeta.io.net.SocketAddress;
+import cajeta.io.net.TcpStream;
+import cajeta.time.Clock;
+import cajeta.time.Duration;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.server.HttpServer;
+import dev.cajeta.http.server.HttpServerBuilder;
+import dev.cajeta.http.server.ServerLimits;
+
+/** ServerLimits on a live server: read deadlines timed against their budgets, caps, and streamed uploads. */
+public final class ServerLimitTests {
+    public static void run(Check c) {
+        System.stdout.println("-- server limits: head deadline --");
+        ServerLimitTests.headDeadline(c);
+        System.stdout.println("-- server limits: body idle timeout --");
+        ServerLimitTests.bodyIdle(c);
+        System.stdout.println("-- server limits: caps --");
+        ServerLimitTests.caps(c);
+        System.stdout.println("-- server limits: streamed uploads --");
+        ServerLimitTests.streamed(c);
+    }
+
+    static void handle(HttpRequest q, HttpResponse r) {
+        if (q.bodyStreamed()) {
+            AsyncReader rd = q.bodyStream().reader();
+            int8[] buf = heap int8[8192];
+            int64 total = 0;
+            int32 got = rd.read(buf, 0, 8192);
+            while (got > 0) {
+                total = total + (int64) got;
+                got = rd.read(buf, 0, 8192);
+            }
+            r.body("streamed " + total);
+            return;
+        }
+        r.body("ok " + q.bodyLength());
+    }
+
+    static #HttpServer serverWith(#ServerLimits l) {
+        HttpServerBuilder b #= HttpServer.builder();
+        b.bind("127.0.0.1:0");
+        b.handler((HttpRequest q, HttpResponse r) -> ServerLimitTests.handle(q, r));
+        b.serverLimits(#l);
+        return b.build();
+    }
+
+    static async int32 serve(HttpServer srv) {
+        srv.serve();
+        return 1;
+    }
+
+    static #TcpStream connect(int32 port) {
+        IpAddress ip #= IpAddress.loopbackV4();
+        SocketAddress a #= SocketAddress.of(#ip, port);
+        return TcpStream.connectAsync(#a);
+    }
+
+    static void send(TcpStream s, String text) {
+        int8[] b #= text.toBytes();
+        s.writeAllAsync(b, (int64) 0, (int64) text.byteLength());
+    }
+
+    static int64 now() {
+        return Clock.now().toEpochMilli();
+    }
+
+    // Reads to EOF, 8 KiB at most; a reset after the server's close still ends the read.
+    static #String readAll(TcpStream s) {
+        int8[] buf = heap int8[8192];
+        int32 have = 0;
+        try {
+            while (have < 8192) {
+                int64 n = s.readAsync(buf, (int64) have, (int64) (8192 - have));
+                if (n <= (int64) 0) {
+                    break;
+                }
+                have = have + (int32) n;
+            }
+        } catch (Exception e) {
+        }
+        int8[] copy = heap int8[have];
+        int32 i = 0;
+        while (i < have) {
+            copy[i] = buf[i];
+            i = i + 1;
+        }
+        return heap String(#copy, have);
+    }
+
+    /**
+     * Drips one byte every 60 ms, reading before each write, until the server
+     * answers. Reading first matters: on Windows a write to a closed peer draws
+     * an RST that discards the answer already received.
+     */
+    static #String dripUntilAnswered(TcpStream s) {
+        int8[] buf = heap int8[8192];
+        int32 have = 0;
+        int32 i = 0;
+        boolean done = false;
+        while (i < 40 && !done) {
+            try {
+                int64 n = s.readWithin(buf, (int64) have, (int64) (8192 - have), 60);
+                if (n > (int64) 0) {
+                    have = have + (int32) n;
+                }
+                done = true;
+            } catch (Exception e) {
+            }
+            if (!done) {
+                try {
+                    ServerLimitTests.send(s, "y");
+                } catch (Exception we) {
+                    done = true;
+                }
+            }
+            i = i + 1;
+        }
+        boolean going = have > 0 && have < 8192;
+        while (going) {
+            try {
+                int64 n = s.readWithin(buf, (int64) have, (int64) (8192 - have), 50);
+                if (n > (int64) 0) {
+                    have = have + (int32) n;
+                    going = have < 8192;
+                } else {
+                    going = false;
+                }
+            } catch (Exception e) {
+                going = false;
+            }
+        }
+        int8[] copy = heap int8[have];
+        int32 j = 0;
+        while (j < have) {
+            copy[j] = buf[j];
+            j = j + 1;
+        }
+        return heap String(#copy, have);
+    }
+
+    static async int32 dripHead(int32 port, int32 headMs) {
+        TcpStream s #= ServerLimitTests.connect(port);
+        int64 t0 = ServerLimitTests.now();
+        ServerLimitTests.send(s, "GET / HTTP/1.1\r\nx-a: ");
+        String got #= ServerLimitTests.dripUntilAnswered(s);
+        int64 elapsed = ServerLimitTests.now() - t0;
+        s.close();
+        if (!got.contains("408")) {
+            System.stdout.println("    drip-head got <<{}>>", got);
+            return -1;
+        }
+        if (elapsed < (int64) headMs) {
+            System.stdout.println("    drip-head cut early: {} ms", elapsed);
+            return -2;
+        }
+        if (elapsed >= (int64) (headMs * 4)) {
+            System.stdout.println("    drip-head cut late: {} ms", elapsed);
+            return -3;
+        }
+        return 1;
+    }
+
+    static async int32 slowHead(int32 port) {
+        TcpStream s #= ServerLimitTests.connect(port);
+        ServerLimitTests.send(s, "GET / HTTP/1.1\r\n");
+        Tasks.sleepMillis((int64) 80);
+        ServerLimitTests.send(s, "host: t\r\nconnection: close\r\n");
+        Tasks.sleepMillis((int64) 80);
+        ServerLimitTests.send(s, "\r\n");
+        String got #= ServerLimitTests.readAll(s);
+        s.close();
+        return got.startsWith("HTTP/1.1 200") ? 1 : -1;
+    }
+
+    static void headDeadline(Check c) {
+        scope {
+            HttpServer srv #= ServerLimitTests.serverWith(ServerLimits.of(300, 0, (int64) 0, true));
+            int32 port = srv.server.listener.boundPort();
+            Task<int32> sv = spawn serve(srv);
+            Task<int32> t1 = spawn dripHead(port, 300);
+            c.eqInt((int64) await t1, 1, "a drip-fed head is cut with 408 at the head budget, counted from its first byte");
+            Task<int32> t2 = spawn slowHead(port);
+            c.eqInt((int64) await t2, 1, "a head in spaced writes inside the budget is served");
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+    }
+
+    // Ten body bytes in three writes 150 ms apart: 300 ms in all against a 250 ms idle timeout.
+    static async int32 spacedBody(int32 port) {
+        TcpStream s #= ServerLimitTests.connect(port);
+        ServerLimitTests.send(s, "POST / HTTP/1.1\r\nhost: t\r\nconnection: close\r\ncontent-length: 10\r\n\r\n12345");
+        Tasks.sleepMillis((int64) 150);
+        ServerLimitTests.send(s, "67");
+        Tasks.sleepMillis((int64) 150);
+        ServerLimitTests.send(s, "890");
+        String got #= ServerLimitTests.readAll(s);
+        s.close();
+        if (!got.startsWith("HTTP/1.1 200") || !got.endsWith("ok 10")) {
+            System.stdout.println("    spaced-body got <<{}>>", got);
+            return -1;
+        }
+        return 1;
+    }
+
+    static async int32 stalledBody(int32 port, int32 bodyMs) {
+        TcpStream s #= ServerLimitTests.connect(port);
+        ServerLimitTests.send(s, "POST / HTTP/1.1\r\nhost: t\r\nconnection: close\r\ncontent-length: 10\r\n\r\nabc");
+        int64 t0 = ServerLimitTests.now();
+        String got #= ServerLimitTests.readAll(s);
+        int64 elapsed = ServerLimitTests.now() - t0;
+        s.close();
+        if (!got.contains("408")) {
+            System.stdout.println("    stalled-body got <<{}>>", got);
+            return -1;
+        }
+        if (elapsed < (int64) bodyMs) {
+            System.stdout.println("    stalled-body cut early: {} ms", elapsed);
+            return -2;
+        }
+        if (elapsed >= (int64) (bodyMs * 4)) {
+            System.stdout.println("    stalled-body cut late: {} ms", elapsed);
+            return -3;
+        }
+        return 1;
+    }
+
+    static void bodyIdle(Check c) {
+        scope {
+            HttpServer srv #= ServerLimitTests.serverWith(ServerLimits.of(0, 250, (int64) 0, true));
+            int32 port = srv.server.listener.boundPort();
+            Task<int32> sv = spawn serve(srv);
+            Task<int32> t1 = spawn spacedBody(port);
+            c.eqInt((int64) await t1, 1, "a body whose reads each arrive inside the idle timeout is served, whatever its total");
+            Task<int32> t2 = spawn stalledBody(port, 250);
+            c.eqInt((int64) await t2, 1, "a body stalled mid-delivery is cut with 408 at the idle timeout");
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+    }
+
+    static async int32 exchange(int32 port, String request) {
+        TcpStream s #= ServerLimitTests.connect(port);
+        ServerLimitTests.send(s, request);
+        String got #= ServerLimitTests.readAll(s);
+        s.close();
+        if (got.byteLength() < 12) {
+            return -1;
+        }
+        return ((int32) got.byteAt(9) - 48) * 100 + ((int32) got.byteAt(10) - 48) * 10 + ((int32) got.byteAt(11) - 48);
+    }
+
+    static void caps(Check c) {
+        scope {
+            ServerLimits l #= ServerLimits.of(5000, 5000, (int64) 32, true);
+            l.maxHeaderCount = 5;
+            HttpServer srv #= ServerLimitTests.serverWith(#l);
+            int32 port = srv.server.listener.boundPort();
+            Task<int32> sv = spawn serve(srv);
+            Task<int32> t1 = spawn exchange(port, "POST / HTTP/1.1\r\nhost: t\r\ncontent-length: 100\r\n\r\n");
+            c.eqInt((int64) await t1, 413, "a Content-Length over ServerLimits' cap is 413 before the body is read");
+            Task<int32> t2 = spawn exchange(port, "POST / HTTP/1.1\r\nhost: t\r\nconnection: close\r\ncontent-length: 32\r\n\r\n"
+                + "0123456789012345678901234567890!");
+            c.eqInt((int64) await t2, 200, "a body exactly at the cap is served");
+            Task<int32> t3 = spawn exchange(port, "GET / HTTP/1.1\r\na: 1\r\nb: 2\r\nc: 3\r\nd: 4\r\ne: 5\r\nf: 6\r\ng: 7\r\n\r\n");
+            c.eqInt((int64) await t3, 431, "ServerLimits.maxHeaderCount reaches the parser: seven fields against five is 431");
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+        scope {
+            HttpServer srv #= ServerLimitTests.serverWith(ServerLimits.of(5000, 5000, (int64) 0, true));
+            int32 port = srv.server.listener.boundPort();
+            Task<int32> sv = spawn serve(srv);
+            Task<int32> t = spawn exchange(port, "POST / HTTP/1.1\r\nhost: t\r\nconnection: close\r\ncontent-length: 5\r\n\r\nhello");
+            c.eqInt((int64) await t, 200, "a zero cap on a live server admits a body");
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+    }
+
+    // A 200 KiB upload written in 8 KiB pieces, against a server holding 64 KiB input buffers.
+    static async int32 bigUpload(int32 port, boolean chunked) {
+        TcpStream s #= ServerLimitTests.connect(port);
+        int32 total = 204800;
+        String head = "POST /up HTTP/1.1\r\nhost: t\r\nconnection: close\r\n";
+        head = head + (chunked ? "transfer-encoding: chunked\r\n\r\n" : "content-length: " + total + "\r\n\r\n");
+        ServerLimitTests.send(s, head);
+        int8[] piece = heap int8[8192];
+        int32 sent = 0;
+        while (sent < total) {
+            if (chunked) {
+                ServerLimitTests.send(s, "2000\r\n");
+            }
+            s.writeAllAsync(piece, (int64) 0, (int64) 8192);
+            if (chunked) {
+                ServerLimitTests.send(s, "\r\n");
+            }
+            sent = sent + 8192;
+        }
+        if (chunked) {
+            ServerLimitTests.send(s, "0\r\n\r\n");
+        }
+        String got #= ServerLimitTests.readAll(s);
+        s.close();
+        if (!got.startsWith("HTTP/1.1 200") || !got.endsWith("streamed " + total)) {
+            System.stdout.println("    upload got <<{}>>", got);
+            return -1;
+        }
+        return 1;
+    }
+
+    static void streamed(Check c) {
+        scope {
+            ServerLimits l #= ServerLimits.of(5000, 5000, (int64) 0, true);
+            l.streamRequestBody = true;
+            HttpServer srv #= ServerLimitTests.serverWith(#l);
+            int32 port = srv.server.listener.boundPort();
+            Task<int32> sv = spawn serve(srv);
+            Task<int32> t1 = spawn bigUpload(port, false);
+            c.eqInt((int64) await t1, 1, "a 200 KiB Content-Length upload streams past the 64 KiB input buffer");
+            Task<int32> t2 = spawn bigUpload(port, true);
+            c.eqInt((int64) await t2, 1, "a 200 KiB chunked upload streams past it too");
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+    }
+}

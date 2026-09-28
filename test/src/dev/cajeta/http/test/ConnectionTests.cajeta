@@ -66,6 +66,15 @@ public final class ConnectionTests {
         c.that(ConnectionTests.wire(chunked,
             "HTTP/1.1 200 OK\r\nX-Path: p\r\ncontent-length: 19\r\n\r\nPOST /c hello world"
             + "HTTP/1.1 200 OK\r\nX-Path: p\r\ncontent-length: 7\r\n\r\nGET /d "), "chunked body decoded in place, next request intact");
+
+        (HttpRequest, HttpResponse) -> void deaf = (HttpRequest q, HttpResponse r) -> {
+            r.writeBytes(q.path());
+        };
+        ScriptChannel ignored = heap ScriptChannel("POST /a HTTP/1.1\r\nContent-Length: 5\r\n\r\nhelloGET /b HTTP/1.1\r\n\r\n", 3);
+        ConnectionTests.run1("", 4096, 4096, (int64) 1000, deaf, ignored);
+        c.that(ConnectionTests.wire(ignored,
+            "HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n/aHTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n/b"),
+            "a body the handler never reads still keeps the framing for the next request");
     }
 
     static void failures(Check c) {
