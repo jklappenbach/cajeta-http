@@ -27,6 +27,13 @@ public final class HpackReader {
     }
 
     /** Whether any bytes remain. */
+    /** Points the reader at `buf[start .. end)`. */
+    public void resetAt(int8[] buf, int32 start, int32 end) {
+        this.buf #= buf;
+        this.pos = start;
+        this.limit = end;
+    }
+
     /** Points the reader at `buf[0 .. limit)` from the start. */
     public void reset(int8[] buf, int32 limit) {
         this.buf #= buf;

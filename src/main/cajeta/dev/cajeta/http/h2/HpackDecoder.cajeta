@@ -143,7 +143,12 @@ public final class HpackDecoder {
      * until the next decode. Only a dynamic-table insertion allocates.
      */
     public int32 decodeInto(int8[] block, int32 len) {
-        this.reader.reset(block, len);
+        return this.decodeInto(block, 0, len);
+    }
+
+    /** As `decodeInto(block, len)`, for the block at `block[off .. off + len)`. */
+    public int32 decodeInto(int8[] block, int32 off, int32 len) {
+        this.reader.resetAt(block, off, off + len);
         this.scratch.reset();
         this.fcount = 0;
         int32 total = 0;

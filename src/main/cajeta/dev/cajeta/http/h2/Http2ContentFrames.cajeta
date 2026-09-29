@@ -45,6 +45,12 @@ public final class Http2ContentFrames {
     /** Parse a DATA payload, stripping padding to the application-data region. */
     public static #Http2Payload parseData(int8[] p, int32 length, int32 flags,
                                           int32 streamId) {
+        int64 reg = Http2ContentFrames.dataRegion(p, length, flags, streamId);
+        return heap Http2Payload((int32) (reg >> 32), (int32) (reg & (int64) 0xFFFFFFFF), 0);
+    }
+
+    /** A DATA payload's application-data region, packed as `(offset << 32) | length`, allocating nothing. */
+    public static int64 dataRegion(int8[] p, int32 length, int32 flags, int32 streamId) {
         if (streamId == 0) {
             throw heap Http2Exception("DATA on stream 0", Http2.PROTOCOL_ERROR);
         }
@@ -63,7 +69,7 @@ public final class Http2ContentFrames {
                                           Http2.PROTOCOL_ERROR);
             }
         }
-        return heap Http2Payload(start, end - start, 0);
+        return ((int64) start << 32) | (int64) (end - start);
     }
 
     // -- HEADERS (§6.2) ------------------------------------------------------
@@ -107,6 +113,12 @@ public final class Http2ContentFrames {
      */
     public static #Http2Payload parseHeaders(int8[] p, int32 length,
                                              int32 flags, int32 streamId) {
+        int64 reg = Http2ContentFrames.headersRegion(p, length, flags, streamId);
+        return heap Http2Payload((int32) (reg >> 32), (int32) (reg & (int64) 0xFFFFFFFF), 0);
+    }
+
+    /** A HEADERS payload's header-block region, packed as `(offset << 32) | length`, allocating nothing. */
+    public static int64 headersRegion(int8[] p, int32 length, int32 flags, int32 streamId) {
         if (streamId == 0) {
             throw heap Http2Exception("HEADERS on stream 0",
                                       Http2.PROTOCOL_ERROR);
@@ -133,7 +145,7 @@ public final class Http2ContentFrames {
             throw heap Http2Exception("HEADERS pad length exceeds payload",
                                       Http2.PROTOCOL_ERROR);
         }
-        return heap Http2Payload(start, end - start, 0);
+        return ((int64) start << 32) | (int64) (end - start);
     }
 
     // -- PUSH_PROMISE (§6.6) -------------------------------------------------

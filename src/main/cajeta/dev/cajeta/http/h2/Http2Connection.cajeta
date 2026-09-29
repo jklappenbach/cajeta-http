@@ -42,8 +42,9 @@ public final class Http2Connection {
     boolean hdrEndStream;
     Http2StreamSlot cur;
     Http2StreamSlot ready;
-    Http2StreamSlot free;
-    Lock slotLock;
+    Http2SlotPool slots;
+    int8[] frameHdr;
+    int8[] frameBuf;
 
     static final int32 RECV_WINDOW = 1048576;
     static final int32 WINDOW_REPLENISH = 524288;
@@ -59,6 +60,8 @@ public final class Http2Connection {
         this.ws = heap Http2WriteSide(writer);
         this.gate = heap Http2SendGate(Http2.DEFAULT_INITIAL_WINDOW_SIZE);
         this.hdec = heap HpackDecoder(Http2.DEFAULT_HEADER_TABLE_SIZE);
+        this.frameHdr = heap int8[9];
+        this.frameBuf = heap int8[Http2.DEFAULT_MAX_FRAME_SIZE];
         this.local = heap Http2Settings();
         this.local.maxConcurrentStreams = (int64) 100;
         this.local.initialWindowSize = (int64) Http2Connection.RECV_WINDOW;
@@ -73,8 +76,7 @@ public final class Http2Connection {
         this.hdrEndStream = false;
         this.cur = null;
         this.ready = null;
-        this.free = null;
-        this.slotLock = heap Lock();
+        this.slots = heap Http2SlotPool();
     }
 
     /** Serves one connection until the peer leaves or a connection error ends it. */
@@ -93,41 +95,15 @@ public final class Http2Connection {
     }
 
     #Http2StreamSlot takeSlot() {
-        LockGuard g #= this.slotLock.acquire();
-        if (this.free == null) {
-            return heap Http2StreamSlot(this.bufs, this.limits, this.ws, this.gate);
-        }
-        Http2StreamSlot s #= this.free;
-        this.free = null;
-        if (s.next != null) {
-            Http2StreamSlot rest #= s.next;
-            this.free = #rest;
-        }
-        s.next = null;
-        return #s;
+        return this.slots.take(this.bufs, this.limits, this.ws, this.gate);
     }
 
     void giveSlot(#Http2StreamSlot s) {
-        LockGuard g #= this.slotLock.acquire();
-        if (this.free != null) {
-            Http2StreamSlot prev #= this.free;
-            s.next = #prev;
-        }
-        this.free = #s;
+        this.slots.give(#s);
     }
 
     void releaseSlots() {
-        LockGuard g #= this.slotLock.acquire();
-        while (this.free != null) {
-            Http2StreamSlot s #= this.free;
-            this.free = null;
-            if (s.next != null) {
-                Http2StreamSlot rest #= s.next;
-                this.free = #rest;
-            }
-            s.next = null;
-            s.recycle(this.bufs);
-        }
+        this.slots.releaseAll(this.bufs);
     }
 
     void run() {
@@ -143,7 +119,7 @@ public final class Http2Connection {
         scope {
             boolean running = true;
             while (running) {
-                int8[] hdr = heap int8[9];
+                int8[] hdr = this.frameHdr;
                 if (!this.readFully(hdr, 9)) {
                     running = false;
                 } else {
@@ -171,7 +147,10 @@ public final class Http2Connection {
             this.sendGoaway(Http2.FRAME_SIZE_ERROR);
             return false;
         }
-        int8[] payload = heap int8[len];
+        if (len > this.frameBuf.count()) {
+            this.frameBuf = heap int8[len];
+        }
+        int8[] payload = this.frameBuf;
         if (len > 0) {
             this.reader.readExact(payload, 0, len);
         }
@@ -232,12 +211,13 @@ public final class Http2Connection {
         this.streams.openIfAbsent(sid);
         this.gate.openStream(sid, (int32) this.remote.initialWindowSize);
         this.streams.recvHeaders(sid, endStream);
-        Http2Payload reg #= Http2ContentFrames.parseHeaders(payload, len, flags, sid);
+        int64 reg = Http2ContentFrames.headersRegion(payload, len, flags, sid);
+        int32 off = (int32) (reg >> 32);
+        int32 blen = (int32) (reg & (int64) 0xFFFFFFFF);
         if (endHeaders) {
-            int8[] block #= Http2Connection.slice(payload, reg.offset, reg.length);
-            this.completeRequest(sid, block, reg.length, endStream);
+            this.completeRequest(sid, payload, off, blen, endStream);
         } else {
-            this.assembler.begin(sid, payload, reg.offset, reg.length);
+            this.assembler.begin(sid, payload, off, blen);
             this.hdrEndStream = endStream;
         }
     }
@@ -246,13 +226,13 @@ public final class Http2Connection {
         boolean endHeaders = (flags & Http2.FLAG_END_HEADERS) != 0;
         this.assembler.continueOn(sid, payload, 0, len);
         if (endHeaders) {
-            int8[] block #= this.assembler.complete();
-            this.completeRequest(sid, block, (int32) block.count(), this.hdrEndStream);
+            int32 n = this.assembler.finish();
+            this.completeRequest(sid, this.assembler.buffer(), 0, n, this.hdrEndStream);
         }
     }
 
-    void completeRequest(int32 sid, int8[] block, int32 blockLen, boolean endStream) {
-        int32 n = this.hdec.decodeInto(block, blockLen);
+    void completeRequest(int32 sid, int8[] block, int32 off, int32 blockLen, boolean endStream) {
+        int32 n = this.hdec.decodeInto(block, off, blockLen);
         Http2StreamSlot s #= this.takeSlot();
         try {
             s.gate #= this.gate;
@@ -313,9 +293,11 @@ public final class Http2Connection {
         }
         this.streams.recvData(sid, endStream);
         this.flow.afterReceive(len);
-        Http2Payload reg #= Http2ContentFrames.parseData(payload, len, flags, sid);
+        int64 reg = Http2ContentFrames.dataRegion(payload, len, flags, sid);
+        int32 dOff = (int32) (reg >> 32);
+        int32 dLen = (int32) (reg & (int64) 0xFFFFFFFF);
         int32 have = this.cur != null && this.cur.sid == sid ? this.cur.bodyLen : 0;
-        if (this.maxBody > 0 && (int64) have + (int64) reg.length > this.maxBody) {
+        if (this.maxBody > 0 && (int64) have + (int64) dLen > this.maxBody) {
             throw heap Http2Exception("request body exceeds maxBodyBytes (" + this.maxBody + ")",
                                       Http2.ENHANCE_YOUR_CALM);
         }
@@ -323,7 +305,7 @@ public final class Http2Connection {
         if (this.cur == null || this.cur.sid != sid) {
             return;
         }
-        this.cur.append(payload, reg.offset, reg.length);
+        this.cur.append(payload, dOff, dLen);
         if (endStream) {
             Http2StreamSlot s #= this.cur;
             this.cur = null;

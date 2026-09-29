@@ -30,6 +30,12 @@ public final class Http2Stream {
         this.state = Http2Stream.IDLE;
     }
 
+    /** Makes this a fresh IDLE stream with `id`, for reuse. */
+    public void reset(int32 id) {
+        this.id = id;
+        this.state = Http2Stream.IDLE;
+    }
+
     /**
      * Whether the PEER is finished with this stream, so no further HEADERS or
      * DATA may arrive on it. That is CLOSED, and also HALF_CLOSED_REMOTE once

@@ -75,6 +75,27 @@ public final class HeaderBlockAssembler {
         this.appendFragment(frag, offset, len);
     }
 
+    /**
+     * Finishes the block (END_HEADERS seen) and returns its length. The bytes stay
+     * at the start of `buffer()` until the next `begin`.
+     */
+    public int32 finish() {
+        if (!this.open) {
+            throw heap Http2Exception("completing with no open header block",
+                                      Http2.PROTOCOL_ERROR);
+        }
+        int32 n = this.count;
+        this.open = false;
+        this.stream = 0;
+        this.count = 0;
+        return n;
+    }
+
+    /** The assembled bytes, valid until the next `begin`. */
+    public int8[] buffer() {
+        return this.buf;
+    }
+
     /** Finish the block (END_HEADERS seen); returns the assembled bytes. */
     public #int8[] complete() {
         if (!this.open) {

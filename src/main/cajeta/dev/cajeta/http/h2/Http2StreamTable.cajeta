@@ -18,12 +18,16 @@ public final class Http2StreamTable {
     int32 cap;
     int32 count;
     int32 lastRemoteId;
+    Http2Stream[] spare;
+    int32 spareCount;
 
     public Http2StreamTable() {
         this.streams = heap Http2Stream[16];
         this.cap = 16;
         this.count = 0;
         this.lastRemoteId = 0;
+        this.spare = heap Http2Stream[Http2StreamTable.SPARE];
+        this.spareCount = 0;
     }
 
     /** Highest client-initiated stream id accepted so far. */
@@ -58,11 +62,14 @@ public final class Http2StreamTable {
         if (this.count == this.cap) {
             this.grow();
         }
-        Http2Stream s = heap Http2Stream(id);
-        // `#=` is the slot spelling: it records the title, so the array owns
-        // the stream and drops it. A plain `=` stored the pointer and left the
-        // title behind, so nothing ever freed it (cajeta ownership 1, 2.3).
-        this.streams[this.count] #= s;
+        if (this.spareCount > 0) {
+            this.spareCount = this.spareCount - 1;
+            this.streams[this.count] #= this.spare[this.spareCount];
+            this.streams[this.count].reset(id);
+        } else {
+            Http2Stream s = heap Http2Stream(id);
+            this.streams[this.count] #= s;
+        }
         this.count = this.count + 1;
         return this.streams[this.count - 1];
     }
@@ -179,25 +186,34 @@ public final class Http2StreamTable {
         if (drop <= 0) {
             return;
         }
-        Http2Stream[] ne = heap Http2Stream[this.cap];
         int32 w = 0;
         int32 r = 0;
         while (r < this.count) {
             if (drop > 0 && this.streams[r].isPeerDone()) {
                 drop = drop - 1;
+                if (this.spareCount < Http2StreamTable.SPARE) {
+                    this.spare[this.spareCount] #= this.streams[r];
+                    this.spareCount = this.spareCount + 1;
+                } else {
+                    Http2Stream gone #= this.streams[r];
+                }
             } else {
-                ne[w] #= this.streams[r];
+                if (w != r) {
+                    this.streams[w] #= this.streams[r];
+                }
                 w = w + 1;
             }
             r = r + 1;
         }
-        this.streams #= ne;
         this.count = w;
     }
 
     // Closed streams kept for late frames. Oldest-first, so what survives is
     // what a straggler is most likely to name.
     static final int32 RETAIN_CLOSED = 32;
+
+    // Reaped streams kept for reuse, so a steady connection opens streams without allocating.
+    static final int32 SPARE = 64;
 
     void grow() {
         int32 nc = this.cap * 2;

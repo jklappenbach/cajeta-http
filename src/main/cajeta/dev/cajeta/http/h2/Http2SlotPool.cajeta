@@ -1,0 +1,62 @@
+package dev.cajeta.http.h2;
+
+import cajeta.concurrent.Lock;
+import cajeta.concurrent.LockGuard;
+import dev.cajeta.http.h1.HttpParserLimits;
+import dev.cajeta.http.server.ConnectionBuffers;
+
+/**
+ * A connection's idle stream slots. Its own object, so the ownership word that
+ * records `free` is written only under `lock`, never beside fields the reader
+ * fiber writes without it.
+ */
+final class Http2SlotPool {
+    Http2StreamSlot free;
+    Lock lock;
+
+    Http2SlotPool() {
+        this.free = null;
+        this.lock = heap Lock();
+    }
+
+    /** An idle slot, or a new one when none is idle. */
+    #Http2StreamSlot take(ConnectionBuffers bufs, HttpParserLimits limits, Http2WriteSide ws, Http2SendGate gate) {
+        LockGuard g #= this.lock.acquire();
+        if (this.free == null) {
+            return heap Http2StreamSlot(bufs, limits, ws, gate);
+        }
+        Http2StreamSlot s #= this.free;
+        this.free = null;
+        if (s.next != null) {
+            Http2StreamSlot rest #= s.next;
+            this.free = #rest;
+        }
+        s.next = null;
+        return #s;
+    }
+
+    /** Returns `s` to the idle list. */
+    void give(#Http2StreamSlot s) {
+        LockGuard g #= this.lock.acquire();
+        if (this.free != null) {
+            Http2StreamSlot prev #= this.free;
+            s.next = #prev;
+        }
+        this.free = #s;
+    }
+
+    /** Returns every idle slot's buffers to `bufs`. */
+    void releaseAll(ConnectionBuffers bufs) {
+        LockGuard g #= this.lock.acquire();
+        while (this.free != null) {
+            Http2StreamSlot s #= this.free;
+            this.free = null;
+            if (s.next != null) {
+                Http2StreamSlot rest #= s.next;
+                this.free = #rest;
+            }
+            s.next = null;
+            s.recycle(bufs);
+        }
+    }
+}
