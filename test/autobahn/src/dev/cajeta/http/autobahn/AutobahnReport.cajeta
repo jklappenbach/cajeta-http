@@ -1,0 +1,62 @@
+package dev.cajeta.http.autobahn;
+
+import cajeta.lang.String;
+import cajeta.io.file.File;
+import cajeta.codec.json.Json;
+import cajeta.codec.json.JsonObject;
+import cajeta.codec.json.JsonValue;
+import dev.cajeta.http.Bytes;
+
+/**
+ * Reads the fuzzingclient's `index.json`. A case passes when its behavior and
+ * close behavior are each OK, NON-STRICT, INFORMATIONAL or UNIMPLEMENTED.
+ * Exits 0 only when every case passes.
+ */
+public final class AutobahnReport {
+    static boolean fine(String s) {
+        return s.equals("OK") || s.equals("NON-STRICT") || s.equals("INFORMATIONAL") || s.equals("UNIMPLEMENTED");
+    }
+
+    static #String word(JsonObject info, String key) {
+        JsonValue v = info.get(key);
+        if (v == null) {
+            return "MISSING";
+        }
+        return v.asString();
+    }
+
+    public static int32 main(String[] args) {
+        String path = "test/autobahn/reports/index.json";
+        if (args.count() > 0) {
+            path = args[0];
+        }
+        int8[] bytes #= File.readAllBytes(path);
+        JsonValue root #= Json.parse(bytes, bytes.count());
+        JsonObject agents = root.object();
+        int32 total = 0;
+        int32 failed = 0;
+        int32 i = 0;
+        while (i < agents.count()) {
+            JsonObject cases = agents.valueAt(i).object();
+            int32 j = 0;
+            while (j < cases.count()) {
+                JsonObject info = cases.valueAt(j).object();
+                String b #= AutobahnReport.word(info, "behavior");
+                String bc #= AutobahnReport.word(info, "behaviorClose");
+                total = total + 1;
+                if (!AutobahnReport.fine(b) || !AutobahnReport.fine(bc)) {
+                    failed = failed + 1;
+                    String id #= Bytes.toString(cases.keyAt(j)[0:cases.keyLenAt(j)]);
+                    System.stdout.println("  FAIL case {}: behavior={} close={}", id, b, bc);
+                }
+                j = j + 1;
+            }
+            i = i + 1;
+        }
+        System.stdout.println("autobahn: {} cases, {} passed, {} failed", total, total - failed, failed);
+        if (failed == 0 && total > 0) {
+            return 0;
+        }
+        return 1;
+    }
+}

@@ -170,6 +170,16 @@ if [ -z "$ART" ]; then
 fi
 echo "==> library: $ART"
 
+if [ -n "${AUTOBAHN:-}" ]; then
+    echo "==> compiling the Autobahn testee and report reader"
+    mkdir -p test/autobahn/build
+    "$CAJETA_BIN" "dev.cajeta.http.autobahn.AutobahnEchoServer::main" test/autobahn/src test/autobahn/build \
+        --emit=exe --classpath="$ART,$CODEC_CJA" -o test/autobahn/build/autobahn-echo
+    "$CAJETA_BIN" "dev.cajeta.http.autobahn.AutobahnReport::main" test/autobahn/src test/autobahn/build \
+        --emit=exe --classpath="$ART,$CODEC_CJA" -o test/autobahn/build/autobahn-report
+    exit 0
+fi
+
 echo "==> compiling test suite"
 mkdir -p build/test
 "$CAJETA_BIN" "dev.cajeta.http.test.TestMain::main" test/src build/test \
