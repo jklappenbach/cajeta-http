@@ -48,14 +48,27 @@ public final class HttpResponse {
     public HttpResponse(ByteBuffer out, ByteChannel ch, int32 fieldBytes, int32 maxFields) {
         this.out #= out;
         this.ch #= ch;
-        this.fields = heap int8[fieldBytes];
+        int32 bytes = HttpResponse.fieldSpace(out.capacity(), fieldBytes, maxFields);
+        this.fields = heap int8[bytes];
         this.spans = heap int32[maxFields * 5];
         this.maxFields = maxFields;
-        this.room = fieldBytes + 128;
+        this.room = bytes + 4 * maxFields + 128;
         this.transport = null;
         this.pushes = null;
         this.takeover = null;
         this.reset();
+    }
+
+    /**
+     * Field bytes that fit when the head (fields, 4 separator bytes each, status
+     * line and framing) may take at most half of an output buffer of `capacity`.
+     */
+    static int32 fieldSpace(int32 capacity, int32 fieldBytes, int32 maxFields) {
+        int32 most = capacity / 2 - 4 * maxFields - 128;
+        if (most < 256) {
+            throw heap HttpException("an output buffer of " + capacity + " bytes cannot hold a response head");
+        }
+        return fieldBytes < most ? fieldBytes : most;
     }
 
     /** Clears status, headers and body for the next response on the connection. */

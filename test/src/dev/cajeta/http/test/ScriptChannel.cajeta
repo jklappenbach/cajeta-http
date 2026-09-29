@@ -11,6 +11,7 @@ public final class ScriptChannel implements ByteChannel {
     int8[] buf;
     int32 len;
     public int32 writes;
+    public int32 maxWrite;
 
     public ScriptChannel(String script, int32 chunk) {
         this.input #= script.toBytes();
@@ -20,6 +21,7 @@ public final class ScriptChannel implements ByteChannel {
         this.buf = heap int8[1 << 20];
         this.len = 0;
         this.writes = 0;
+        this.maxWrite = 0;
     }
 
     public int64 readAsync(int8[] b, int64 offset, int64 length) {
@@ -53,6 +55,9 @@ public final class ScriptChannel implements ByteChannel {
         }
         this.len = this.len + n;
         this.writes = this.writes + 1;
+        if (n > this.maxWrite) {
+            this.maxWrite = n;
+        }
     }
 
     public void close() {

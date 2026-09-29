@@ -1,0 +1,306 @@
+package dev.cajeta.http.test;
+
+import cajeta.lang.String;
+import cajeta.lang.Slice;
+import cajeta.io.net.ByteBuffer;
+import dev.cajeta.http.Bytes;
+import dev.cajeta.http.HeadScanner;
+import dev.cajeta.http.HeaderTable;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.Version;
+import dev.cajeta.http.Http1Connection;
+import dev.cajeta.http.h1.HttpParserLimits;
+import dev.cajeta.http.routing.Router;
+import dev.cajeta.http.server.HttpServer;
+
+/** The 0.4.0 view contract (plan 1.1.1 to 1.1.7), for the claims no other suite asserts. */
+public final class ViewContractTests {
+    static int32 served;
+    static int64 at100;
+    static int64 at1100;
+    static boolean sameStore;
+
+    public static void run(Check c) {
+        System.stdout.println("-- view contract: golden heads --");
+        ViewContractTests.goldenHeads(c);
+        System.stdout.println("-- view contract: typed readers --");
+        ViewContractTests.typedReaders(c);
+        System.stdout.println("-- view contract: windows and copies --");
+        ViewContractTests.windowsAndCopies(c);
+        System.stdout.println("-- view contract: body store --");
+        ViewContractTests.bodyStore(c);
+        System.stdout.println("-- view contract: pipelined straddle --");
+        ViewContractTests.straddle(c);
+        System.stdout.println("-- view contract: response writes --");
+        ViewContractTests.responseWrites(c);
+        System.stdout.println("-- view contract: head room --");
+        ViewContractTests.headRoom(c);
+        System.stdout.println("-- view contract: routed allocation --");
+        ViewContractTests.routedAllocation(c);
+    }
+
+    // method, target and version, then `|name:value` per header, in wire order.
+    static #String canon(HttpRequest r) {
+        String s = Bytes.toString(r.methodBytes()) + " " + Bytes.toString(r.target()) + " " + r.version().wireString();
+        HeaderTable t = r.headers();
+        int32 i = 0;
+        while (i < t.count()) {
+            s = s + "|" + Bytes.toString(t.nameAt(i)) + ":" + Bytes.toString(t.valueAt(i));
+            i = i + 1;
+        }
+        return #s;
+    }
+
+    static void golden(Check c, String raw, String want) {
+        ByteBuffer b = heap ByteBuffer(4096);
+        HeadScanner s = heap HeadScanner(heap HttpParserLimits());
+        HttpRequest whole = heap HttpRequest(100);
+        ScanTests.load(b, raw);
+        int32 h = ScanTests.scanWhole(s, b);
+        HeadScanner.parseRequest(b.array(), b.readPosition(), h, whole);
+        String got #= ViewContractTests.canon(whole);
+        c.eqStr(got, want, "one read: " + want);
+        HttpRequest bytewise = heap HttpRequest(100);
+        int32 hb = ScanTests.scanByteAtATime(s, b, raw);
+        HeadScanner.parseRequest(b.array(), b.readPosition(), hb, bytewise);
+        String got2 #= ViewContractTests.canon(bytewise);
+        c.eqStr(got2, want, "one byte per read: " + want);
+    }
+
+    static void goldenHeads(Check c) {
+        ViewContractTests.golden(c, "GET / HTTP/1.1\r\nHost: a\r\n\r\n", "GET / HTTP/1.1|Host:a");
+        ViewContractTests.golden(c, "POST /submit?x=1&y= HTTP/1.1\r\nHost: a\r\nContent-Length: 0\r\n\r\n",
+            "POST /submit?x=1&y= HTTP/1.1|Host:a|Content-Length:0");
+        ViewContractTests.golden(c, "HEAD /h HTTP/1.0\r\n\r\n", "HEAD /h HTTP/1.0");
+        ViewContractTests.golden(c, "DELETE /a/b/c HTTP/1.1\r\nX-A: 1\r\nx-a: 2\r\n\r\n", "DELETE /a/b/c HTTP/1.1|X-A:1|x-a:2");
+        ViewContractTests.golden(c, "PUT /p HTTP/1.1\r\nX-Empty:\r\nX-Next: n\r\n\r\n", "PUT /p HTTP/1.1|X-Empty:|X-Next:n");
+        ViewContractTests.golden(c, "OPTIONS * HTTP/1.1\r\nHost: a\r\n\r\n", "OPTIONS * HTTP/1.1|Host:a");
+        ViewContractTests.golden(c, "PATCH /x HTTP/1.1\r\nX-Pad:    padded value   \r\n\r\n", "PATCH /x HTTP/1.1|X-Pad:padded value");
+        ViewContractTests.golden(c, "BREW /pot HTTP/1.1\r\nAccept-Additions: milk\r\n\r\n", "BREW /pot HTTP/1.1|Accept-Additions:milk");
+        ViewContractTests.golden(c, "GET /%7Euser/a%20b HTTP/1.1\r\n\r\n", "GET /%7Euser/a%20b HTTP/1.1");
+        ViewContractTests.golden(c,
+            "GET /many HTTP/1.1\r\nA: 1\r\nB: 2\r\nC: 3\r\nD: 4\r\nE: 5\r\nF: 6\r\nG: 7\r\nH: 8\r\n\r\n",
+            "GET /many HTTP/1.1|A:1|B:2|C:3|D:4|E:5|F:6|G:7|H:8");
+        ViewContractTests.golden(c, "GET /v HTTP/1.1\r\nUser-Agent: curl/8.5.0 (x86_64-pc-linux-gnu)\r\nAccept: text/html, */*;q=0.8\r\n\r\n",
+            "GET /v HTTP/1.1|User-Agent:curl/8.5.0 (x86_64-pc-linux-gnu)|Accept:text/html, */*;q=0.8");
+    }
+
+    static void typedReaders(Check c) {
+        String raw = "GET /users/42?x=1 HTTP/1.1\r\nContent-Length: 12\r\nX-N: 99\r\nConnection: keep-alive, Upgrade\r\n\r\n";
+        ByteBuffer b = heap ByteBuffer(4096);
+        HeadScanner s = heap HeadScanner(heap HttpParserLimits());
+        HttpRequest r = heap HttpRequest(100);
+        ScanTests.load(b, raw);
+        HeadScanner.parseRequest(b.array(), 0, ScanTests.scanWhole(s, b), r);
+        int64 sum = 0;
+        boolean ok = true;
+        int64 before = Cajeta.allocatedBytes();
+        int32 i = 0;
+        while (i < 1000) {
+            sum = sum + r.headerInt64("x-n", (int64) 0) + r.contentLength();
+            ok = ok && r.headerIs("x-n", "99") && r.headerHasToken("connection", "upgrade") && r.keepAlive() && r.hasQuery();
+            i = i + 1;
+        }
+        int64 delta = Cajeta.allocatedBytes() - before;
+        c.that(ok && sum == (int64) 111000, "typed readers parse the values in place");
+        c.that(delta == (int64) 0, "1000 rounds of typed reads allocate nothing (" + delta + " bytes)");
+        int64 cb = Cajeta.allocatedBytes();
+        i = 0;
+        while (i < 1000) {
+            String n #= r.headerString("x-n");
+            i = i + 1;
+        }
+        c.that(Cajeta.allocatedBytes() - cb > (int64) 0, "the copying control allocates, so the counter is alive");
+    }
+
+    static void windowsAndCopies(Check c) {
+        String raw = "GET /users/42?q=v HTTP/1.1\r\nHost: example.test\r\n\r\n";
+        ByteBuffer b = heap ByteBuffer(4096);
+        HeadScanner s = heap HeadScanner(heap HttpParserLimits());
+        HttpRequest q = heap HttpRequest(100);
+        HttpResponse resp = heap HttpResponse(heap ByteBuffer(4096), null, 1024, 16);
+        ScanTests.load(b, raw);
+        HeadScanner.parseRequest(b.array(), 0, ScanTests.scanWhole(s, b), q);
+        (HttpRequest, HttpResponse) -> void none = (HttpRequest a, HttpResponse z) -> {
+        };
+        Router router = heap Router();
+        router.route("GET", "/users/{id}", none);
+        c.that(router.select(q, resp) == 0, "the route matches and binds id");
+        String host #= q.headerString("host");
+        String path #= q.pathString();
+        String target #= q.targetString();
+        String id #= q.paramString("id");
+        Slice<int8> hostWin = q.header("host");
+        int8[] a = b.array();
+        int32 i = 0;
+        while (i < a.count()) {
+            a[i] = (int8) 90;
+            i = i + 1;
+        }
+        c.eqStr(host, "example.test", "headerString survives the buffer being overwritten");
+        c.eqStr(path, "/users/42", "pathString survives it");
+        c.eqStr(target, "/users/42?q=v", "targetString survives it");
+        c.eqStr(id, "42", "paramString survives it");
+        c.that(Bytes.equals(hostWin, "ZZZZZZZZZZZZ"), "a kept header window reads the new bytes");
+        c.that(Bytes.equals(q.path(), "ZZZZZZZZZ"), "a kept path window reads the new bytes");
+        c.that(Bytes.equals(q.param("id"), "ZZ"), "a path parameter is a window into the target");
+    }
+
+    static void bodyStore(Check c) {
+        ScriptChannel ch = heap ScriptChannel("POST /u HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello", 4096);
+        ByteBuffer in = heap ByteBuffer(4096);
+        ByteBuffer out = heap ByteBuffer(4096);
+        ViewContractTests.sameStore = false;
+        (HttpRequest, HttpResponse) -> void h = (HttpRequest q, HttpResponse r) -> {
+            int8[] a = in.array();
+            int32 off = q.bodyOffset();
+            int8 was = a[off];
+            a[off] = (int8) 90;
+            ViewContractTests.sameStore = q.body()[0] == (int8) 90;
+            a[off] = was;
+            r.writeBytes(q.body());
+        };
+        Http1Connection conn = heap Http1Connection(ch, in, out, heap HttpParserLimits(), 0, 0, (int64) 1000, true, h);
+        conn.serve();
+        c.that(ViewContractTests.sameStore, "a body that fits is a window into the connection's input buffer");
+    }
+
+    static #String body(int32 n, int32 seed) {
+        int8[] a = heap int8[n];
+        int32 i = 0;
+        while (i < n) {
+            a[i] = (int8) (97 + (i + seed) % 26);
+            i = i + 1;
+        }
+        return heap String(#a, n);
+    }
+
+    static void straddle(Check c) {
+        String b1 #= ViewContractTests.body(160, 0);
+        String b2 #= ViewContractTests.body(110, 7);
+        String r1 = "POST /a HTTP/1.1\r\nContent-Length: 160\r\n\r\n" + b1;
+        String r2 = "POST /b HTTP/1.1\r\nContent-Length: 110\r\n\r\n" + b2;
+        ScriptChannel ch = heap ScriptChannel(r1 + r2, 4096);
+        ByteBuffer in = heap ByteBuffer(256);
+        ByteBuffer out = heap ByteBuffer(4096);
+        (HttpRequest, HttpResponse) -> void h = (HttpRequest q, HttpResponse r) -> ConnectionTests.echo(q, r);
+        Http1Connection conn = heap Http1Connection(ch, in, out, heap HttpParserLimits(), 0, 0, (int64) 1000, true, h);
+        conn.serve();
+        int8[] cap = ch.captured();
+        String got #= Bytes.toString(cap[0:ch.capturedLen()]);
+        int64 first = got.indexOf("POST /a " + b1);
+        int64 second = got.indexOf("POST /b " + b2);
+        c.that(r1.byteLength() < 256 && r1.byteLength() + r2.byteLength() > 256, "the second request straddles the input buffer's end");
+        c.that(first >= (int64) 0 && second > first, "both are served intact and in order after compaction");
+    }
+
+    static void responseWrites(Check c) {
+        String runtime = "v" + 42;
+        (HttpRequest, HttpResponse) -> void small = (HttpRequest q, HttpResponse r) -> {
+            r.header("X-Lit", "lit").headerBytes("X-Win", q.path()).header("X-Str", runtime);
+            r.body("ok");
+        };
+        ScriptChannel one = heap ScriptChannel("GET /w HTTP/1.1\r\n\r\n", 4096);
+        ConnectionTests.run1("", 4096, 4096, (int64) 1000, small, one);
+        int8[] a = one.captured();
+        String got #= Bytes.toString(a[0:one.capturedLen()]);
+        c.that(got.contains("X-Lit: lit\r\n") && got.contains("X-Win: /w\r\n") && got.contains("X-Str: v42\r\n"),
+            "literal, window and String headers each serialize");
+        c.that(got.indexOfFrom("X-Str", got.indexOf("X-Str") + (int64) 1) < (int64) 0, "a String header serializes once");
+        c.eqInt((int64) one.writes, 1, "a response that fits is one write");
+
+        String big #= ViewContractTests.body(50000, 3);
+        (HttpRequest, HttpResponse) -> void large = (HttpRequest q, HttpResponse r) -> {
+            r.headerInt("Content-Length", (int64) 50000);
+            r.body(big);
+        };
+        ScriptChannel lc = heap ScriptChannel("GET /big HTTP/1.1\r\n\r\n", 4096);
+        ByteBuffer in = heap ByteBuffer(4096);
+        ByteBuffer out = heap ByteBuffer(8192);
+        Http1Connection conn = heap Http1Connection(lc, in, out, heap HttpParserLimits(), 0, 0, (int64) 1000, true, large);
+        conn.serve();
+        int8[] la = lc.captured();
+        String lg #= Bytes.toString(la[0:lc.capturedLen()]);
+        c.that(lg.contains(big), "a response larger than the output buffer arrives intact");
+        c.that(lc.writes > 1 && lc.maxWrite <= 8192, "in writes no larger than the output buffer (" + lc.writes + " writes, largest " + lc.maxWrite + ")");
+        c.eqInt((int64) out.capacity(), 8192, "the output buffer keeps its capacity");
+
+        (HttpRequest, HttpResponse) -> void empty = (HttpRequest q, HttpResponse r) -> {
+        };
+        String e #= Wire.serve("GET /e HTTP/1.1\r\n\r\n", empty);
+        c.eqInt((int64) Wire.status(e), 200, "a handler that sets nothing answers 200");
+        String eb #= Wire.bodyOf(e);
+        c.eqStr(eb, "", "with an empty body");
+    }
+
+    static void headRoom(Check c) {
+        (HttpRequest, HttpResponse) -> void echo = (HttpRequest q, HttpResponse r) -> {
+            r.writeBytes(q.body());
+        };
+        ScriptChannel ch = heap ScriptChannel("POST /u HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello", 4096);
+        ByteBuffer in = heap ByteBuffer(4096);
+        ByteBuffer out = heap ByteBuffer(4096);
+        Http1Connection conn = heap Http1Connection(ch, in, out, heap HttpParserLimits(), 0, 0, (int64) 1000, true, echo);
+        conn.serve();
+        int8[] a = ch.captured();
+        String got #= Bytes.toString(a[0:ch.capturedLen()]);
+        c.that(got.endsWith("\r\n\r\nhello"), "a 4096-byte output buffer answers with a body");
+
+        ByteBuffer ob = heap ByteBuffer(16384);
+        HttpResponse full = heap HttpResponse(ob, null, 1024, 64);
+        int32 i = 0;
+        boolean fit = true;
+        while (i < 64 && fit) {
+            String n = "x-f" + (i + 10);
+            try {
+                full.header(n, "abcdefghijk");
+            } catch (Exception e) {
+                fit = false;
+            }
+            i = i + 1;
+        }
+        full.body("ok");
+        full.finish(true, Version.HTTP_1_1, false);
+        int8[] oa = ob.array();
+        String head #= Bytes.toString(oa[ob.readPosition():ob.writePosition()]);
+        c.that(head.startsWith("HTTP/1.1 200 OK\r\n") && head.contains("x-f73: abcdefghijk\r\n") && head.endsWith("\r\n\r\nok"),
+            "a head whose fields fill their space composes whole");
+    }
+
+    static void sample(HttpRequest q, HttpResponse r) {
+        ViewContractTests.served = ViewContractTests.served + 1;
+        if (ViewContractTests.served == 100) {
+            ViewContractTests.at100 = Cajeta.allocatedBytes();
+        }
+        if (ViewContractTests.served == 1100) {
+            ViewContractTests.at1100 = Cajeta.allocatedBytes();
+        }
+        r.writeBytes(q.param("id"));
+    }
+
+    static void routedAllocation(Check c) {
+        Router router = heap Router();
+        (HttpRequest, HttpResponse) -> void byId = (HttpRequest q, HttpResponse r) -> ViewContractTests.sample(q, r);
+        router.route("GET", "/users/{id}", byId);
+        (HttpRequest, HttpResponse) -> void h = (HttpRequest q, HttpResponse r) -> router.dispatch(q, r);
+        ViewContractTests.served = 0;
+        String script = "";
+        int32 i = 0;
+        while (i < 1100) {
+            script = script + "GET /users/" + (i % 97) + " HTTP/1.1\r\nHost: t\r\n\r\n";
+            i = i + 1;
+        }
+        HttpServer srv = heap HttpServer(h);
+        ScriptChannel warm = heap ScriptChannel("GET /users/1 HTTP/1.1\r\n\r\n", 4096);
+        srv.serveChannel(warm);
+        int32 pooled = srv.bufferAllocations();
+        ViewContractTests.served = 0;
+        ScriptChannel ch = heap ScriptChannel(script, 1500);
+        srv.serveChannel(ch);
+        c.eqInt((int64) ViewContractTests.served, 1100, "every routed request is served");
+        c.eqInt((int64) (srv.bufferAllocations() - pooled), 0, "a warm server takes no fresh buffer from its pool");
+        int64 d = ViewContractTests.at1100 - ViewContractTests.at100;
+        c.that(d == (int64) 0, "requests 100 to 1100 through the router with a path parameter allocate nothing (" + d + " bytes)");
+    }
+}
