@@ -24,16 +24,19 @@ public final class Http2Stream {
 
     public int32 id;
     public int32 state;
+    public boolean resetHere;
 
     public Http2Stream(int32 id) {
         this.id = id;
         this.state = Http2Stream.IDLE;
+        this.resetHere = false;
     }
 
     /** Makes this a fresh IDLE stream with `id`, for reuse. */
     public void reset(int32 id) {
         this.id = id;
         this.state = Http2Stream.IDLE;
+        this.resetHere = false;
     }
 
     /**
@@ -63,6 +66,9 @@ public final class Http2Stream {
     // -- receive side (client -> server) ------------------------------------
 
     public void onRecvHeaders(boolean endStream) {
+        if (this.resetHere) {
+            return;
+        }
         if (this.state == Http2Stream.IDLE) {
             this.state = endStream ? Http2Stream.HALF_CLOSED_REMOTE
                                    : Http2Stream.OPEN;
@@ -86,6 +92,9 @@ public final class Http2Stream {
     }
 
     public void onRecvData(boolean endStream) {
+        if (this.resetHere) {
+            return;
+        }
         if (this.state == Http2Stream.OPEN) {
             if (endStream) {
                 this.state = Http2Stream.HALF_CLOSED_REMOTE;
@@ -147,5 +156,6 @@ public final class Http2Stream {
 
     public void onSendRst() {
         this.state = Http2Stream.CLOSED;
+        this.resetHere = true;
     }
 }

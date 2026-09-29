@@ -128,6 +128,17 @@ public final class Http2StreamTable {
         this.streams[this.indexOf(id)].onSendData(endStream);
     }
 
+    /** Records that this side reset `id`, so frames still in flight on it are ignored (RFC 9113 5.1). */
+    public void sendRst(int32 id) {
+        this.streams[this.indexOf(id)].onSendRst();
+    }
+
+    /** Whether `id` is a stream this side reset. */
+    public boolean ignoring(int32 id) {
+        int32 i = this.indexOf(id);
+        return i >= 0 && this.streams[i].resetHere;
+    }
+
     public void recvRst(int32 id) {
         this.streams[this.indexOf(id)].onRecvRst();
     }

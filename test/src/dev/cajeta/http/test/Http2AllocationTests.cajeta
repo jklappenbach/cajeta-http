@@ -114,10 +114,10 @@ public final class Http2AllocationTests {
     static void perRequest(Check c) {
         Http2AllocationTests.serve(20);
         int64 small = Http2AllocationTests.serve(20);
-        int64 large = Http2AllocationTests.serve(220);
+        int64 large = Http2AllocationTests.serve(100);
         c.that(small >= (int64) 0 && large >= (int64) 0, "every request on the connection is answered");
-        int64 per = (large - small) / (int64) 200;
-        System.stdout.println("    h2 server: {} bytes per request after warm-up ({} for 20, {} for 220)", per, small, large);
+        int64 per = (large - small) / (int64) 80;
+        System.stdout.println("    h2 server: {} bytes per request after warm-up ({} for 20, {} for 100)", per, small, large);
     }
 
     // Reassembles the header block starting at `at` into `block`; returns [end, blockLen, firstType, firstFlags, frames].

@@ -13,15 +13,18 @@ import dev.cajeta.http.server.ConnectionBuffers;
 final class Http2SlotPool {
     Http2StreamSlot free;
     Lock lock;
+    int32 out;
 
     Http2SlotPool() {
         this.free = null;
+        this.out = 0;
         this.lock = heap Lock();
     }
 
     /** An idle slot, or a new one when none is idle. */
     #Http2StreamSlot take(ConnectionBuffers bufs, HttpParserLimits limits, Http2WriteSide ws, Http2SendGate gate) {
         LockGuard g #= this.lock.acquire();
+        this.out = this.out + 1;
         if (this.free == null) {
             return heap Http2StreamSlot(bufs, limits, ws, gate);
         }
@@ -38,11 +41,18 @@ final class Http2SlotPool {
     /** Returns `s` to the idle list. */
     void give(#Http2StreamSlot s) {
         LockGuard g #= this.lock.acquire();
+        this.out = this.out - 1;
         if (this.free != null) {
             Http2StreamSlot prev #= this.free;
             s.next = #prev;
         }
         this.free = #s;
+    }
+
+    /** Slots taken and not yet given back: the streams this connection is serving. */
+    int32 outstanding() {
+        LockGuard g #= this.lock.acquire();
+        return this.out;
     }
 
     /** Returns every idle slot's buffers to `bufs`. */

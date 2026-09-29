@@ -209,7 +209,9 @@ public final class Http2Connection {
         boolean endStream = (flags & Http2.FLAG_END_STREAM) != 0;
         boolean endHeaders = (flags & Http2.FLAG_END_HEADERS) != 0;
         this.streams.openIfAbsent(sid);
-        this.gate.openStream(sid, (int32) this.remote.initialWindowSize);
+        if (!this.streams.ignoring(sid)) {
+            this.gate.openStream(sid, (int32) this.remote.initialWindowSize);
+        }
         this.streams.recvHeaders(sid, endStream);
         int64 reg = Http2ContentFrames.headersRegion(payload, len, flags, sid);
         int32 off = (int32) (reg >> 32);
@@ -233,6 +235,14 @@ public final class Http2Connection {
 
     void completeRequest(int32 sid, int8[] block, int32 off, int32 blockLen, boolean endStream) {
         int32 n = this.hdec.decodeInto(block, off, blockLen);
+        if (this.streams.ignoring(sid)) {
+            return;
+        }
+        if (this.slots.outstanding() >= (int32) this.local.maxConcurrentStreams) {
+            this.gate.closeStream(sid);
+            this.sendRst(sid, Http2.REFUSED_STREAM);
+            return;
+        }
         Http2StreamSlot s #= this.takeSlot();
         try {
             s.gate #= this.gate;
@@ -253,7 +263,8 @@ public final class Http2Connection {
         }
     }
 
-    void replenish(int32 sid, int32 len, boolean endStream) {
+    // Charges `len` received bytes to the connection window and returns credit in half-window steps.
+    void replenishConn(int32 len) {
         this.flow.connRecv.consume(len);
         if (this.flow.connRecv.available() < 0) {
             throw heap Http2Exception("peer exceeded the connection receive window", Http2.FLOW_CONTROL_ERROR);
@@ -266,6 +277,10 @@ public final class Http2Connection {
             this.flow.connRecv.increase(this.pendConnRecv, 0);
             this.pendConnRecv = 0;
         }
+    }
+
+    void replenish(int32 sid, int32 len, boolean endStream) {
+        this.replenishConn(len);
         if (this.pendStreamId != sid) {
             this.pendStreamId = sid;
             this.pendStreamRecv = 0;
@@ -292,7 +307,10 @@ public final class Http2Connection {
             throw heap Http2Exception("DATA on unknown stream", Http2.PROTOCOL_ERROR);
         }
         this.streams.recvData(sid, endStream);
-        this.flow.afterReceive(len);
+        if (this.streams.ignoring(sid)) {
+            this.replenishConn(len);
+            return;
+        }
         int64 reg = Http2ContentFrames.dataRegion(payload, len, flags, sid);
         int32 dOff = (int32) (reg >> 32);
         int32 dLen = (int32) (reg & (int64) 0xFFFFFFFF);
@@ -447,6 +465,14 @@ public final class Http2Connection {
     }
 
     void sendRst(int32 sid, int32 errorCode) {
+        if (sid != 0 && this.streams.has(sid)) {
+            this.streams.sendRst(sid);
+        }
+        if (this.cur != null && this.cur.sid == sid) {
+            Http2StreamSlot s #= this.cur;
+            this.cur = null;
+            this.giveSlot(#s);
+        }
         Http2FrameWriter fw = heap Http2FrameWriter();
         Http2Frames.writeRstStream(fw, sid, (int64) errorCode);
         this.ws.writeControl(fw);

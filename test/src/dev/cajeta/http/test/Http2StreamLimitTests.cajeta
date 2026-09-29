@@ -1,0 +1,168 @@
+package dev.cajeta.http.test;
+
+import cajeta.lang.String;
+import cajeta.concurrent.Tasks;
+import cajeta.io.net.AsyncReader;
+import cajeta.io.net.AsyncWriter;
+import cajeta.io.net.BufferPool;
+import dev.cajeta.http.Bytes;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.h1.HttpParserLimits;
+import dev.cajeta.http.h2.Http2;
+import dev.cajeta.http.h2.Http2Connection;
+import dev.cajeta.http.server.ConnectionBuffers;
+
+/** The advertised concurrent-stream limit is enforced, and the receive window survives a long upload. */
+public final class Http2StreamLimitTests {
+    public static void run(Check c) {
+        System.stdout.println("-- h2 limits: concurrent streams refused past 100 --");
+        Http2StreamLimitTests.refusal(c, true);
+        System.stdout.println("-- h2 limits: DATA on a refused stream is ignored --");
+        Http2StreamLimitTests.refusal(c, false);
+        System.stdout.println("-- h2 limits: a 4 MB upload on one connection --");
+        Http2StreamLimitTests.upload(c);
+    }
+
+    // A small growable script builder over a byte array.
+    static int32 put(int8[] a, int32 at, int32 len, int32 type, int32 flags, int32 sid) {
+        a[at] = (int8) ((len >> 16) & 255);
+        a[at + 1] = (int8) ((len >> 8) & 255);
+        a[at + 2] = (int8) (len & 255);
+        a[at + 3] = (int8) type;
+        a[at + 4] = (int8) flags;
+        a[at + 5] = (int8) ((sid >> 24) & 127);
+        a[at + 6] = (int8) ((sid >> 16) & 255);
+        a[at + 7] = (int8) ((sid >> 8) & 255);
+        a[at + 8] = (int8) (sid & 255);
+        return at + 9;
+    }
+
+    static int32 start(int8[] a) {
+        int8[] pf #= Http2.preface();
+        int32 i = 0;
+        while (i < 24) {
+            a[i] = pf[i];
+            i = i + 1;
+        }
+        return Http2StreamLimitTests.put(a, 24, 0, 4, 0, 0);
+    }
+
+    // HEADERS for `method` (index 2 GET, 3 POST) on `/` with authority "t".
+    static int32 headers(int8[] a, int32 at, int32 sid, int32 method, boolean end) {
+        at = Http2StreamLimitTests.put(a, at, 6, 1, end ? 5 : 4, sid);
+        a[at] = (int8) (128 | method);
+        a[at + 1] = (int8) -122;
+        a[at + 2] = (int8) -124;
+        a[at + 3] = (int8) 1;
+        a[at + 4] = (int8) 1;
+        a[at + 5] = (int8) 116;
+        return at + 6;
+    }
+
+    static int32 data(int8[] a, int32 at, int32 sid, int32 len, boolean end) {
+        at = Http2StreamLimitTests.put(a, at, len, 0, end ? 1 : 0, sid);
+        int32 i = 0;
+        while (i < len) {
+            a[at + i] = (int8) 120;
+            i = i + 1;
+        }
+        return at + len;
+    }
+
+    static async int32 serveOn(AsyncReader reader, AsyncWriter writer, (HttpRequest, HttpResponse) -> void h,
+                               ConnectionBuffers bufs, HttpParserLimits limits) {
+        Http2Connection.serve(reader, writer, h, bufs, limits, (int64) 8388608);
+        return 1;
+    }
+
+    static void serve(ScriptChannel ch, (HttpRequest, HttpResponse) -> void h) {
+        AsyncReader reader = heap AsyncReader(ch);
+        AsyncWriter writer = heap AsyncWriter(ch);
+        ConnectionBuffers bufs = heap ConnectionBuffers(heap BufferPool(16384, 256));
+        HttpParserLimits limits = heap HttpParserLimits();
+        scope {
+            Task<int32> t = spawn serveOn(reader, writer, h, bufs, limits);
+            await t;
+        }
+    }
+
+    // Counts the server's frames: [responses ended (DATA with END_STREAM), RST_STREAM REFUSED on `sid`, GOAWAY].
+    static #int32[] tally(ScriptChannel ch, int32 sid) {
+        int32[] out = heap int32[3];
+        int8[] a = ch.captured();
+        int32 n = ch.capturedLen();
+        int32 at = 0;
+        while (at + 9 <= n) {
+            int32 len = ((((int32) a[at]) & 255) << 16) | ((((int32) a[at + 1]) & 255) << 8) | (((int32) a[at + 2]) & 255);
+            int32 type = ((int32) a[at + 3]) & 255;
+            int32 flags = ((int32) a[at + 4]) & 255;
+            int32 fs = ((((int32) a[at + 5]) & 127) << 24) | ((((int32) a[at + 6]) & 255) << 16)
+                | ((((int32) a[at + 7]) & 255) << 8) | (((int32) a[at + 8]) & 255);
+            if (type == 0 && (flags & 1) != 0) {
+                out[0] = out[0] + 1;
+            }
+            if (type == 3 && fs == sid && len == 4 && a[at + 12] == (int8) 7) {
+                out[1] = out[1] + 1;
+            }
+            if (type == 7) {
+                out[2] = out[2] + 1;
+            }
+            at = at + 9 + len;
+        }
+        return #out;
+    }
+
+    static void slow(HttpRequest q, HttpResponse r) {
+        Tasks.sleepMillis((int64) 300);
+        r.body("ok");
+    }
+
+    static void refusal(Check c, boolean headersEnd) {
+        int8[] a = heap int8[65536];
+        int32 at = Http2StreamLimitTests.start(a);
+        int32 k = 0;
+        while (k < 100) {
+            at = Http2StreamLimitTests.headers(a, at, 1 + 2 * k, 2, true);
+            k = k + 1;
+        }
+        at = Http2StreamLimitTests.headers(a, at, 201, 3, headersEnd);
+        if (!headersEnd) {
+            at = Http2StreamLimitTests.data(a, at, 201, 1000, false);
+            at = Http2StreamLimitTests.data(a, at, 201, 1000, true);
+        }
+        String script #= Bytes.toString(a[0:at]);
+        ScriptChannel ch = heap ScriptChannel(script, 65536);
+        (HttpRequest, HttpResponse) -> void h = (HttpRequest q, HttpResponse r) -> Http2StreamLimitTests.slow(q, r);
+        Http2StreamLimitTests.serve(ch, h);
+        int32[] t #= Http2StreamLimitTests.tally(ch, 201);
+        c.eqInt((int64) t[0], 100, "the 100 streams within the limit are answered");
+        c.eqInt((int64) t[1], 1, "the 101st is refused with RST_STREAM(REFUSED_STREAM)");
+        c.eqInt((int64) t[2], 0, "and the connection stays up");
+    }
+
+    static void length(HttpRequest q, HttpResponse r) {
+        r.body("" + q.bodyLength());
+    }
+
+    static void upload(Check c) {
+        int32 frames = 256;
+        int8[] a = heap int8[64 + frames * (9 + 16384) + 64];
+        int32 at = Http2StreamLimitTests.start(a);
+        at = Http2StreamLimitTests.headers(a, at, 1, 3, false);
+        int32 k = 0;
+        while (k < frames) {
+            at = Http2StreamLimitTests.data(a, at, 1, 16384, k == frames - 1);
+            k = k + 1;
+        }
+        String script #= Bytes.toString(a[0:at]);
+        ScriptChannel ch = heap ScriptChannel(script, 65536);
+        (HttpRequest, HttpResponse) -> void h = (HttpRequest q, HttpResponse r) -> Http2StreamLimitTests.length(q, r);
+        Http2StreamLimitTests.serve(ch, h);
+        int32[] t #= Http2StreamLimitTests.tally(ch, 0);
+        int8[] cap = ch.captured();
+        String got #= Bytes.toString(cap[0:ch.capturedLen()]);
+        c.eqInt((int64) t[2], 0, "no GOAWAY: the receive window is charged once per DATA byte");
+        c.that(got.contains("4194304"), "the handler reads all 4194304 bytes");
+    }
+}
