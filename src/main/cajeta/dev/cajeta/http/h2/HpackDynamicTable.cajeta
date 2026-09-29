@@ -141,4 +141,29 @@ public final class HpackDynamicTable {
         }
         return 0;
     }
+
+    /** `findField` over byte windows, allocating nothing. */
+    public int32 findFieldBytes(int8[] name, int32 nl, int8[] value, int32 vl) {
+        int32 i = 0;
+        while (i < this.count) {
+            if (HpackStaticTable.same(this.entries[i].name, name, nl)
+                    && HpackStaticTable.same(this.entries[i].value, value, vl)) {
+                return i + 1;
+            }
+            i = i + 1;
+        }
+        return 0;
+    }
+
+    /** `findName` over a byte window, allocating nothing. */
+    public int32 findNameBytes(int8[] name, int32 nl) {
+        int32 i = 0;
+        while (i < this.count) {
+            if (HpackStaticTable.same(this.entries[i].name, name, nl)) {
+                return i + 1;
+            }
+            i = i + 1;
+        }
+        return 0;
+    }
 }

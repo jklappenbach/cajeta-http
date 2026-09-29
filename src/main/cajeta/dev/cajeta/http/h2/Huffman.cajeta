@@ -346,10 +346,27 @@ public final class Huffman {
     /** Huffman-encode `data[0..len)`, padding the final octet with EOS bits. */
     public #int8[] encode(int8[] data, int32 len) {
         HpackWriter w = heap HpackWriter();
+        this.encodeTo(w, data, 0, len);
+        return w.toBytes();
+    }
+
+    /** The Huffman-coded length of `data[off .. off + len)` in bytes. */
+    public int32 encodedLengthAt(int8[] data, int32 off, int32 len) {
+        int64 bits = 0;
+        int32 i = off;
+        while (i < off + len) {
+            bits = bits + (int64) this.lens[((int32) data[i]) & 0xFF];
+            i = i + 1;
+        }
+        return (int32) ((bits + (int64) 7) / (int64) 8);
+    }
+
+    /** Huffman-encodes `data[off .. off + len)` straight into `w`, allocating nothing. */
+    public void encodeTo(HpackWriter w, int8[] data, int32 off, int32 len) {
         int64 acc = 0;
         int32 nbits = 0;
-        int32 i = 0;
-        while (i < len) {
+        int32 i = off;
+        while (i < off + len) {
             int32 sym = ((int32) data[i]) & 0xFF;
             int64 code = this.codes[sym];
             int32 clen = this.lens[sym];
@@ -368,7 +385,6 @@ public final class Huffman {
                 | (((int64) 1 << (int64) pad) - (int64) 1);
             w.writeByte((int32) (padded & (int64) 0xFF));
         }
-        return w.toBytes();
     }
 
     /** Decode Huffman-coded `data[0..len)` back to its octet string. */

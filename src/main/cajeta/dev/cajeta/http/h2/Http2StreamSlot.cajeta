@@ -31,7 +31,7 @@ final class Http2StreamSlot implements ResponseTransport {
     Http2WriteSide ws;
     Http2SendGate gate;
     int32 maxFrame;
-    HpackFieldList pendingHead;
+    boolean headPending;
     Http2StreamSlot next;
 
     Http2StreamSlot(ConnectionBuffers bufs, HttpParserLimits limits,
@@ -44,7 +44,7 @@ final class Http2StreamSlot implements ResponseTransport {
         this.ws #= ws;
         this.gate #= gate;
         this.big = null;
-        this.pendingHead = null;
+        this.headPending = false;
         this.next = null;
     }
 
@@ -88,7 +88,7 @@ final class Http2StreamSlot implements ResponseTransport {
     /** Writes the `n` fields `dec` decoded as a request head and parses it. */
     void begin(int32 sid, HpackDecoder dec, int32 n) {
         this.sid = sid;
-        this.pendingHead = null;
+        this.headPending = false;
         this.bodyLen = 0;
         this.bodyOwned = false;
         this.big = null;
@@ -193,37 +193,24 @@ final class Http2StreamSlot implements ResponseTransport {
     }
 
     public void head(HttpResponse r, boolean endStream) {
-        HpackFieldList fl = heap HpackFieldList();
-        fl.put(Http2Requests.own(":status"), Http2Requests.statusString(r.status()));
-        int32 i = 0;
-        while (i < r.fieldCount()) {
-            if (r.fieldLive(i)) {
-                String n #= Bytes.toString(r.fieldName(i)).toLowerCase();
-                if (!Http2Requests.forbidden(n)) {
-                    fl.put(#n, Bytes.toString(r.fieldValue(i)));
-                }
-            }
-            i = i + 1;
-        }
         if (endStream) {
-            this.pendingHead = null;
-            this.ws.writeHeaders(this.sid, fl, true);
+            this.headPending = false;
+            this.ws.writeResponse(this.sid, this.res, true, false, null, 0, 0, true);
             return;
         }
-        this.pendingHead #= fl;
+        this.headPending = true;
     }
 
     void flushHead(boolean endStream) {
-        if (this.pendingHead != null) {
-            HpackFieldList fl #= this.pendingHead;
-            this.pendingHead = null;
-            this.ws.writeHeaders(this.sid, fl, endStream);
+        if (this.headPending) {
+            this.headPending = false;
+            this.ws.writeResponse(this.sid, this.res, endStream, false, null, 0, 0, endStream);
         }
     }
 
     public void data(int8[] a, int32 off, int32 len, boolean endStream) {
         if (len == 0) {
-            if (this.pendingHead != null) {
+            if (this.headPending) {
                 this.flushHead(endStream);
                 return;
             }
@@ -240,15 +227,14 @@ final class Http2StreamSlot implements ResponseTransport {
             }
             int64 g = this.gate.takeUpTo(this.sid, want);
             if (g <= (int64) 0) {
-                this.pendingHead = null;
+                this.headPending = false;
                 return;
             }
             int32 gi = (int32) g;
             boolean last = endStream && done + gi >= len;
-            if (this.pendingHead != null) {
-                HpackFieldList fl #= this.pendingHead;
-                this.pendingHead = null;
-                this.ws.writeHeadersAndData(this.sid, fl, a, off + done, gi, last);
+            if (this.headPending) {
+                this.headPending = false;
+                this.ws.writeResponse(this.sid, this.res, false, true, a, off + done, gi, last);
             } else {
                 this.ws.writeData(this.sid, a, off + done, gi, last);
             }

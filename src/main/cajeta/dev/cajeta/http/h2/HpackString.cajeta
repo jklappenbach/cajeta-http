@@ -23,9 +23,8 @@ public final class HpackString {
         if (huffman != null) {
             int32 hlen = huffman.encodedLength(data, len);
             if (hlen <= len) {
-                int8[] hb #= huffman.encode(data, len);
                 w.writeInteger((int64) hlen, 7, 0x80);
-                w.writeBytes(hb, hlen);
+                huffman.encodeTo(w, data, 0, len);
                 return;
             }
         }

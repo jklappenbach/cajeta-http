@@ -1,6 +1,9 @@
 package dev.cajeta.http.h2;
 
 import cajeta.lang.String;
+import cajeta.lang.Slice;
+import dev.cajeta.http.Bytes;
+import dev.cajeta.http.HttpResponse;
 
 /**
  * The **HPACK encoder** (RFC 7541 §6, encode side) — plan item **3.1**. Turns
@@ -26,6 +29,9 @@ public final class HpackEncoder {
     Huffman huffman;
     boolean useHuffman;
     int32 pendingSizeUpdate;   // -1 = none
+    HpackWriter out;
+    int8[] nameBuf;
+    int8[] valueBuf;
 
     public HpackEncoder(int32 maxDynamicTableSize, boolean useHuffman) {
         this.staticTable = heap HpackStaticTable();
@@ -33,6 +39,9 @@ public final class HpackEncoder {
         this.huffman = heap Huffman();
         this.useHuffman = useHuffman;
         this.pendingSizeUpdate = -1;
+        this.out = heap HpackWriter();
+        this.nameBuf = heap int8[64];
+        this.valueBuf = heap int8[256];
     }
 
     /** The dynamic table, borrowed — for inspection/testing of shared state. */
@@ -64,6 +73,158 @@ public final class HpackEncoder {
             i = i + 1;
         }
         return w.toBytes();
+    }
+
+    /**
+     * Encodes `r`'s head, `:status` then its live fields with names lowercased
+     * and connection-specific fields left out, into a writer reused by the next
+     * call. Only a dynamic-table insertion allocates.
+     */
+    public HpackWriter encodeResponse(HttpResponse r) {
+        HpackWriter w = this.out;
+        w.reset();
+        if (this.pendingSizeUpdate >= 0) {
+            w.writeInteger((int64) this.pendingSizeUpdate, 5, 0x20);
+            this.pendingSizeUpdate = -1;
+        }
+        int32 status = r.status();
+        int32 si = HpackEncoder.statusIndex(status);
+        if (si != 0) {
+            w.writeInteger((int64) si, 7, 0x80);
+        } else {
+            w.writeInteger((int64) 8, 4, 0x00);
+            this.valueBuf[0] = (int8) (48 + (status / 100) % 10);
+            this.valueBuf[1] = (int8) (48 + (status / 10) % 10);
+            this.valueBuf[2] = (int8) (48 + status % 10);
+            this.encodeBytes(w, this.valueBuf, 3);
+        }
+        int32 i = 0;
+        while (i < r.fieldCount()) {
+            if (r.fieldLive(i)) {
+                int32 nl = this.lower(r.fieldName(i));
+                if (!HpackEncoder.connectionSpecific(this.nameBuf, nl)) {
+                    int32 vl = this.copyValue(r.fieldValue(i));
+                    this.encodeFieldBytes(w, nl, vl);
+                }
+            }
+            i = i + 1;
+        }
+        return w;
+    }
+
+    // The static index of `:status` with this code, or 0 (RFC 7541 Appendix A).
+    static int32 statusIndex(int32 status) {
+        if (status == 200) { return 8; }
+        if (status == 204) { return 9; }
+        if (status == 206) { return 10; }
+        if (status == 304) { return 11; }
+        if (status == 400) { return 12; }
+        if (status == 404) { return 13; }
+        if (status == 500) { return 14; }
+        return 0;
+    }
+
+    // Copies `s` lowercased into nameBuf and returns its length.
+    int32 lower(Slice<int8> s) {
+        int32 n = (int32) s.count();
+        if (n > this.nameBuf.count()) {
+            this.nameBuf = heap int8[n * 2];
+        }
+        int32 i = 0;
+        while (i < n) {
+            int32 c = ((int32) s[i]) & 0xFF;
+            if (c >= 65 && c <= 90) {
+                c = c + 32;
+            }
+            this.nameBuf[i] = (int8) c;
+            i = i + 1;
+        }
+        return n;
+    }
+
+    // Copies `s` into valueBuf and returns its length.
+    int32 copyValue(Slice<int8> s) {
+        int32 n = (int32) s.count();
+        if (n > this.valueBuf.count()) {
+            this.valueBuf = heap int8[n * 2];
+        }
+        int32 i = 0;
+        while (i < n) {
+            this.valueBuf[i] = s[i];
+            i = i + 1;
+        }
+        return n;
+    }
+
+    static boolean connectionSpecific(int8[] n, int32 nl) {
+        return HpackStaticTable.sameBytes(n, nl, "connection") || HpackStaticTable.sameBytes(n, nl, "keep-alive")
+            || HpackStaticTable.sameBytes(n, nl, "proxy-connection") || HpackStaticTable.sameBytes(n, nl, "transfer-encoding")
+            || HpackStaticTable.sameBytes(n, nl, "upgrade");
+    }
+
+    // 2 never indexed (credentials), 1 not indexed (changes per response), 0 indexed.
+    static int32 indexing(int8[] n, int32 nl) {
+        if (HpackStaticTable.sameBytes(n, nl, "authorization") || HpackStaticTable.sameBytes(n, nl, "proxy-authorization")
+                || HpackStaticTable.sameBytes(n, nl, "cookie") || HpackStaticTable.sameBytes(n, nl, "set-cookie")) {
+            return 2;
+        }
+        if (HpackStaticTable.sameBytes(n, nl, "date") || HpackStaticTable.sameBytes(n, nl, "content-length")
+                || HpackStaticTable.sameBytes(n, nl, "etag") || HpackStaticTable.sameBytes(n, nl, "last-modified")
+                || HpackStaticTable.sameBytes(n, nl, "x-request-id") || HpackStaticTable.sameBytes(n, nl, "age")
+                || HpackStaticTable.sameBytes(n, nl, "expires")) {
+            return 1;
+        }
+        return 0;
+    }
+
+    // Encodes nameBuf[0 .. nl) and valueBuf[0 .. vl) as one field.
+    void encodeFieldBytes(HpackWriter w, int32 nl, int32 vl) {
+        int32 kind = HpackEncoder.indexing(this.nameBuf, nl);
+        if (kind != 2) {
+            int32 idx = this.staticTable.findFieldBytes(this.nameBuf, nl, this.valueBuf, vl);
+            if (idx == 0) {
+                int32 d = this.dyn.findFieldBytes(this.nameBuf, nl, this.valueBuf, vl);
+                if (d != 0) {
+                    idx = HpackStaticTable.COUNT + d;
+                }
+            }
+            if (idx != 0) {
+                w.writeInteger((int64) idx, 7, 0x80);
+                return;
+            }
+        }
+        int32 nameIdx = this.staticTable.findNameBytes(this.nameBuf, nl);
+        if (nameIdx == 0) {
+            int32 dn = this.dyn.findNameBytes(this.nameBuf, nl);
+            if (dn != 0) {
+                nameIdx = HpackStaticTable.COUNT + dn;
+            }
+        }
+        if (kind == 2) {
+            w.writeInteger((int64) nameIdx, 4, 0x10);
+        } else if (kind == 1) {
+            w.writeInteger((int64) nameIdx, 4, 0x00);
+        } else {
+            w.writeInteger((int64) nameIdx, 6, 0x40);
+        }
+        if (nameIdx == 0) {
+            this.encodeBytes(w, this.nameBuf, nl);
+        }
+        this.encodeBytes(w, this.valueBuf, vl);
+        if (kind == 0) {
+            String tn #= Bytes.toString(this.nameBuf[0:nl]);
+            String tv #= Bytes.toString(this.valueBuf[0:vl]);
+            HpackField entry = heap HpackField(#tn, #tv, false);
+            this.dyn.add(#entry);
+        }
+    }
+
+    void encodeBytes(HpackWriter w, int8[] b, int32 n) {
+        if (this.useHuffman) {
+            HpackString.encode(w, b, n, this.huffman);
+        } else {
+            HpackString.encode(w, b, n, null);
+        }
     }
 
     void encodeField(HpackWriter w, String name, String value,

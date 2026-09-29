@@ -3,6 +3,7 @@ package dev.cajeta.http.h2;
 import cajeta.io.net.AsyncWriter;
 import cajeta.concurrent.Lock;
 import cajeta.concurrent.LockGuard;
+import dev.cajeta.http.HttpResponse;
 
 /**
  * The **shared write half** of a concurrent HTTP/2 connection (plan **3.3e**).
@@ -33,6 +34,7 @@ public final class Http2WriteSide {
     HpackEncoder henc;
     Lock lock;
     int32 promisedId;   // last server-initiated (even) stream id handed out
+    int8[] stage;
 
     public Http2WriteSide(AsyncWriter writer) {
         // `#=` (ownership 3.3.3): record the caller's mode — a lent writer
@@ -41,6 +43,7 @@ public final class Http2WriteSide {
         this.henc = heap HpackEncoder(Http2.DEFAULT_HEADER_TABLE_SIZE, true);
         this.lock = heap Lock();
         this.promisedId = 0;
+        this.stage = heap int8[16384 + 64];
     }
 
     /**
@@ -101,41 +104,102 @@ public final class Http2WriteSide {
     }
 
     /**
-     * Writes HEADERS and one DATA frame carrying `body[off .. off+len)` in one
-     * flush, so the peer never waits on a lone HEADERS segment.
+     * Encodes `r`'s head and writes it as HEADERS (plus CONTINUATION past 16384
+     * bytes), then, when `withData`, one DATA frame of `body[off .. off+len)`,
+     * in one flush. Frames are staged in a buffer reused across calls.
      */
-    public void writeHeadersAndData(int32 sid, HpackFieldList fields, int8[] body,
-                                    int32 off, int32 len, boolean last) {
-        int8[] slice #= Http2WriteSide.slice(body, off, len);
+    public void writeResponse(int32 sid, HttpResponse r, boolean headEnds, boolean withData,
+                              int8[] body, int32 off, int32 len, boolean last) {
         LockGuard g #= this.lock.acquire();
-        int8[] block #= this.henc.encode(fields);
-        Http2FrameWriter fw = heap Http2FrameWriter();
-        Http2ContentFrames.writeHeaders(fw, sid, block, (int32) block.count(), false, true, 0);
-        Http2ContentFrames.writeData(fw, sid, slice, len, last, 0);
-        int8[] bytes #= fw.toBytes();
-        this.writer.writeAll(bytes, 0, (int32) bytes.count());
+        HpackWriter hw = this.henc.encodeResponse(r);
+        int8[] blk = hw.buffer();
+        int32 bl = hw.size();
+        int32 frames = 1 + (bl - 1) / 16384;
+        if (bl == 0) {
+            frames = 1;
+        }
+        int32 need = bl + 9 * frames;
+        if (withData) {
+            need = need + 9 + len;
+        }
+        this.ensure(need);
+        int8[] s = this.stage;
+        int32 at = 0;
+        int32 done = 0;
+        int32 k = 0;
+        while (k < frames) {
+            int32 n = bl - done;
+            if (n > 16384) {
+                n = 16384;
+            }
+            int32 type = 9;
+            int32 flags = 0;
+            if (k == 0) {
+                type = 1;
+                if (headEnds) {
+                    flags = 1;
+                }
+            }
+            if (k == frames - 1) {
+                flags = flags | 4;
+            }
+            Http2WriteSide.frameHeader(s, at, n, type, flags, sid);
+            at = Http2WriteSide.copy(s, at + 9, blk, done, n);
+            done = done + n;
+            k = k + 1;
+        }
+        if (withData) {
+            int32 df = 0;
+            if (last) {
+                df = 1;
+            }
+            Http2WriteSide.frameHeader(s, at, len, 0, df, sid);
+            at = Http2WriteSide.copy(s, at + 9, body, off, len);
+        }
+        this.writer.writeAll(s, 0, at);
         this.writer.flush();
     }
 
     /** Write one DATA frame carrying `body[off .. off+len)`. */
     public void writeData(int32 sid, int8[] body, int32 off, int32 len,
                           boolean last) {
-        int8[] slice #= Http2WriteSide.slice(body, off, len);
         LockGuard g #= this.lock.acquire();
-        Http2FrameWriter fw = heap Http2FrameWriter();
-        Http2ContentFrames.writeData(fw, sid, slice, len, last, 0);
-        int8[] bytes #= fw.toBytes();
-        this.writer.writeAll(bytes, 0, (int32) bytes.count());
+        this.ensure(9 + len);
+        int32 df = 0;
+        if (last) {
+            df = 1;
+        }
+        Http2WriteSide.frameHeader(this.stage, 0, len, 0, df, sid);
+        int32 at = Http2WriteSide.copy(this.stage, 9, body, off, len);
+        this.writer.writeAll(this.stage, 0, at);
         this.writer.flush();
     }
 
-    static #int8[] slice(int8[] src, int32 off, int32 len) {
-        int8[] out = heap int8[len];
+    void ensure(int32 need) {
+        if (need > this.stage.count()) {
+            this.stage = heap int8[need];
+        }
+    }
+
+    static void frameHeader(int8[] a, int32 at, int32 len, int32 type, int32 flags, int32 sid) {
+        a[at] = (int8) ((len >> 16) & 255);
+        a[at + 1] = (int8) ((len >> 8) & 255);
+        a[at + 2] = (int8) (len & 255);
+        a[at + 3] = (int8) type;
+        a[at + 4] = (int8) flags;
+        a[at + 5] = (int8) ((sid >> 24) & 127);
+        a[at + 6] = (int8) ((sid >> 16) & 255);
+        a[at + 7] = (int8) ((sid >> 8) & 255);
+        a[at + 8] = (int8) (sid & 255);
+    }
+
+    // Copies src[off .. off+n) to dst at `at` and returns the end.
+    static int32 copy(int8[] dst, int32 at, int8[] src, int32 off, int32 n) {
         int32 i = 0;
-        while (i < len) {
-            out[i] = src[off + i];
+        while (i < n) {
+            dst[at + i] = src[off + i];
             i = i + 1;
         }
-        return #out;
+        return at + n;
     }
 }

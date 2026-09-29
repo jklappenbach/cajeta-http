@@ -137,4 +137,48 @@ public final class HpackStaticTable {
         }
         return 0;
     }
+
+    /** True when `b[0 .. n)` holds exactly the bytes of `s`. */
+    static boolean sameBytes(int8[] b, int32 n, String s) {
+        return HpackStaticTable.same(s, b, n);
+    }
+
+    /** True when `s` holds exactly the bytes `b[0 .. n)`. */
+    static boolean same(String s, int8[] b, int32 n) {
+        if (s.byteLength() != n) {
+            return false;
+        }
+        int32 i = 0;
+        while (i < n) {
+            if (s.byteAt(i) != b[i]) {
+                return false;
+            }
+            i = i + 1;
+        }
+        return true;
+    }
+
+    /** `findField` over byte windows, allocating nothing. */
+    public int32 findFieldBytes(int8[] name, int32 nl, int8[] value, int32 vl) {
+        int32 i = 1;
+        while (i <= HpackStaticTable.COUNT) {
+            if (HpackStaticTable.same(this.names[i], name, nl) && HpackStaticTable.same(this.values[i], value, vl)) {
+                return i;
+            }
+            i = i + 1;
+        }
+        return 0;
+    }
+
+    /** `findName` over a byte window, allocating nothing. */
+    public int32 findNameBytes(int8[] name, int32 nl) {
+        int32 i = 1;
+        while (i <= HpackStaticTable.COUNT) {
+            if (HpackStaticTable.same(this.names[i], name, nl)) {
+                return i;
+            }
+            i = i + 1;
+        }
+        return 0;
+    }
 }

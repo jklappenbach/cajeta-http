@@ -28,6 +28,16 @@ public final class HpackWriter {
         return this.count;
     }
 
+    /** Empties the writer, keeping its storage. */
+    public void reset() {
+        this.count = 0;
+    }
+
+    /** The bytes written so far, valid to `size()` until the next write. */
+    public int8[] buffer() {
+        return this.buf;
+    }
+
     /** Append the low 8 bits of `b`. */
     public void writeByte(int32 b) {
         if (this.count >= this.cap) {

@@ -55,6 +55,7 @@ public final class TestMain {
         if (sel.want("ClientBuilderTests")) { ClientBuilderTests.run(c); }
         if (sel.want("RedirectTests")) { RedirectTests.run(c); }
         if (sel.want("DownloadTests")) { DownloadTests.run(c); }
+        if (sel.want("Http2AllocationTests")) { Http2AllocationTests.run(c); }
         if (sel.want("Http2FlowTests")) { Http2FlowTests.run(c); }
         if (sel.want("HpackViewTests")) { HpackViewTests.run(c); }
         if (sel.want("Http2ConcurrencyTests")) { Http2ConcurrencyTests.run(c); }
