@@ -78,8 +78,10 @@ handler reads. An upload of any size is served through the same buffer.
 Whatever the handler leaves unread is skipped, up to 256 KiB, so the next
 request on the connection is framed correctly. Past that the connection closes.
 
-The output buffer bounds nothing. A response that outgrows it is flushed in
-pieces of the buffer's size, framed by `Content-Length` when the handler set
+The output buffer bounds the response head, not the body. The head may take
+half of it, so a buffer under 8960 bytes leaves less than 4096 bytes for header
+fields, and one under 1280 bytes is refused. A response that outgrows the
+buffer is flushed in pieces of the buffer's size, framed by `Content-Length` when the handler set
 one and chunked otherwise. Set the status and headers before writing a large
 body, since the head goes out with the first piece.
 
@@ -87,7 +89,15 @@ body, since the head goes out with the first piece.
 
 After warm-up, a keep-alive exchange allocates nothing, on the server and on the
 client. The suite holds this with `Cajeta.allocatedBytes()`: 200 loopback
-keep-alive exchanges allocate 0 bytes, client and server together.
+keep-alive exchanges allocate 0 bytes, client and server together, and 1000
+requests routed through a `Router` with a path parameter allocate 0 bytes and
+take no buffer from the pool.
+
+HTTP/2 comes close. Encoding and framing a response allocate nothing, since
+the HPACK encoder and the frame writer reuse per-connection buffers, and only
+a new dynamic-table entry allocates. Each stream still starts its handler on
+a fiber of its own, about 45 bytes, and each stream in flight at once holds
+one pooled stream slot.
 
 A handler keeps the invariant when it reads through windows and typed
 accessors and writes through the response writer. These allocate, and are
@@ -182,6 +192,21 @@ The Compression middleware encodes a held body only when it shrinks, and
 otherwise sends it as it is. A streamed body is wrapped in a `CodedBody`,
 which compresses each piece through the coding's `CompressStream` and flushes
 it, so a live stream still reaches the client as it is produced.
+
+## A framework is one handler
+
+A framework on top of cajeta-http needs no hook of its own. It installs one
+handler, and that handler runs the framework's machinery over the request view
+and the response writer. primavera's `WebServer` works this way. Its handler
+enters a request scope, lends the body's window in the input buffer to its
+pipeline as the first buffer (`q.bodyStore()`, `q.bodyOffset()`,
+`q.bodyLength()`), and the pipeline's stages route, bind and call the endpoint,
+writing through `r`.
+
+Framing, keep-alive, limits and the buffer pool stay in cajeta-http. What
+happens between a framed request and the written response is the handler's,
+so a framework keeps the allocation invariant on the same terms as any
+handler.
 
 ## Limits
 

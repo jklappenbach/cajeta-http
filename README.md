@@ -25,32 +25,38 @@ cajeta-http provides the **imperative HTTP engine** (`HttpClient`, `HttpServer`,
 `Router`, `WebSocket`). Annotation-driven endpoints and automatic
 serialization-to-object-model are **primavera's** job, layered on top.
 
-## Status — v0.3.1
+## Status: v0.4.0
 
 | Capability | State |
 |---|---|
-| HTTP/1.1 message model, wire codec, client, server, router | ✓ (`dev.cajeta.http`), loopback-tested |
+| HTTP/1.1 client, server, router and middleware | ✓ (`dev.cajeta.http`), loopback-tested |
+| Request and response as views over pooled connection buffers | ✓ a keep-alive exchange allocates nothing after warm-up |
+| Content-coding registry (gzip, deflate, identity, and any a dependency registers) | ✓ (`dev.cajeta.http.coding`) |
 | WebSocket (RFC 6455) client + server | ✓ (`dev.cajeta.http.ws`): close handshake, ping/pong, permessage-deflate |
-| HTTP/2 (HPACK, multiplexing, flow control) | ✓ (`dev.cajeta.http.h2`), prior-knowledge client + server |
-| Middleware (logging, CORS, auth, compression, rate-limit, …) | ✓ (`dev.cajeta.http.middleware`) |
+| HTTP/2 (HPACK, multiplexing, flow control) | ✓ (`dev.cajeta.http.h2`), ALPN and prior-knowledge client + server |
 | Server-Sent Events | ✓ (`dev.cajeta.http.sse`) client + server |
 | HTTP/3 over QUIC (UDP) | not planned for this line — requires QUIC in `cajeta.io.net`; intentionally not advertised |
 
-v0.3.0 was the long-connection release. HTTP/2 returns receive-window credit, so
-a transfer is no longer capped at one window per round trip. Request bodies are
-capped on h2 as h1 already capped them. Per-request state is reclaimed, so a
-connection can serve without growing. HTTPS reads honour their deadline.
+v0.4.0 replaces the owned message model with views. On the server,
+`HttpRequest` is a view over the request head in the connection's input
+buffer, and `HttpResponse` writes straight into its output buffer. Both
+buffers come from a pool and are reused, so a keep-alive exchange allocates
+nothing, measured by the suite on the server, on the client and through a
+routed handler with path parameters. The client has its own pair,
+`ClientRequest` and `ClientResponse`. Content codings are a registry of
+`cajeta.wire` compressors, request bodies can stream, and a middleware owns
+its configuration.
 
-v0.3.1 changes no library behaviour. It moves the toolchain pin to v0.29.0 and
-republishes from it, which closes the one gap v0.3.0 had to name. Reclaiming the
-Task behind each request's handler fiber is a runtime fix, and it landed in
-cajeta after v0.28.0. Measured over 3000 streams on one connection, the server's
-live-object count climbs by one per request on v0.28.0 and stays flat on
-v0.29.0. Because the fix is in the runtime, a consumer building against v0.3.0
-on a v0.29.0 toolchain already has it.
+The upgrade is a breaking change. [`docs/migrating-to-0.4.md`](docs/migrating-to-0.4.md)
+maps every removed member to its replacement, and [`docs/guide.md`](docs/guide.md)
+explains the model. v0.4.0 needs the cajeta release that extends the
+`cajeta.wire` compression interfaces, the first after v0.31.0.
 
-See [`docs/http-spec.md`](docs/http-spec.md) for the design,
-[`plan/http-plan.md`](plan/http-plan.md) for the build order, and
+Earlier releases: v0.3.0 made long HTTP/2 connections flat (receive-window
+credit returns, per-request state is reclaimed) and v0.3.1 republished it on
+the v0.29.0 toolchain.
+
+See [`docs/http-spec.md`](docs/http-spec.md) for the design and
 [`samples/tour`](samples/tour) for a runnable, self-checking walkthrough.
 
 ## Build & test
@@ -61,6 +67,9 @@ Requires the Cajeta toolchain on `PATH`:
 cajeta build    # compile to a .cja library archive
 cajeta test     # build + run unit tests
 ```
+
+`scripts/ci-checks.sh` runs the full CI chain: the suite, the self-checking
+tour, and the gate that every public type appears in the tour.
 
 ## License
 

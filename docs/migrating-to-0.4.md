@@ -582,6 +582,17 @@ response is now a `ClientResponse`.
 | `PooledConnection.of(#stream, #originKey)` | `ConnectionPool.adopt(#stream, host, port)` | The pool builds the connection with its buffers. |
 | Field `PooledConnection.originKey` | Fields `host`, `port`. The new `conn` field holds the `Http1ClientConnection` | Same. |
 
+### dev.cajeta.http.coding
+
+| 0.3.x | 0.4.0 | Reason |
+|---|---|---|
+| gzip, x-gzip, deflate and identity, fixed in the library | The same four, registered in `ContentCodings` at start-up | A dependency can add a coding. |
+| (new) | `ContentCodings.register(token, #compressor, #decompressor)`, `isSupported`, `compressor`, `decompressor`, `supported()` | A coding is a `cajeta.wire.Compressor` and `Decompressor` under a token. |
+| `ContentCoding.isSupported`, `encode`, `decode(token, data, len, maxOut)` | Same signatures, looking the token up in `ContentCodings` | Unchanged for callers. |
+| `AcceptEncoding.best(header)` | Same, choosing among the registered codings. A tie in quality goes to the coding registered first | Registered codings take part in negotiation. |
+| (new) | `Decompressor.decompress(src, len, maxOut)` raises `cajeta.wire.DecompressionLimitException`. `ContentCoding.decode` still raises `ContentCodingException` naming the cap | The cap is typed at the stdlib layer. |
+| (new) | `dev.cajeta.http.body.CodedBody.of(#body, token, level)` | Compression encodes a streamed body piece by piece. |
+
 ### dev.cajeta.http.h2
 
 | 0.3.x | 0.4.0 | Reason |
@@ -637,6 +648,7 @@ response is now a `ClientResponse`.
 | `RequestBodyChannel`, its constructor, `readAsync`, `readWithin`, `writeAllAsync`, `close` | `q.bodyStream().reader()`. The channel moved to `dev.cajeta.http` and is no longer public | Handlers read through the `Body`. |
 | `RequestBodyStream`, `forRequest`, `over`, `read`, `isComplete`, `drainToReader`, `PULL` | `q.bodyStream().reader()`. The connection drains an unread body | Same. |
 | `ResponseBodyWriter`, `begin`, `write`, `finish`, `isFinished` | `r.write(...)` flushes in bounded pieces, chunked unless `Content-Length` is set. `r.body(#Body)` streams after the handler returns | The response is itself a streaming writer. |
+| `HttpServerBuilder.bufferPool(#pool)` with any buffer size | Same. The response head may take half the output buffer, so below 8960 bytes the header field space shrinks from 4096 to half the buffer less 384, and a buffer under 1280 bytes is refused | A head never overruns the room in front of the body. |
 | `ServerLimits.hasRequestBudget()`, field `requestBudgetMs` | Removed. Use `headReadTimeoutMs`, `bodyReadTimeoutMs` and `Timeout.middleware(budgetMs)` | Each phase has its own deadline. |
 
 ### dev.cajeta.http.sse
