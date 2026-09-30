@@ -1,7 +1,7 @@
 package dev.cajeta.http.test;
 
+import cajeta.concurrent.Fiber;
 import cajeta.lang.String;
-import cajeta.concurrent.Tasks;
 import cajeta.io.net.AsyncReader;
 import cajeta.io.net.IpAddress;
 import cajeta.io.net.SocketAddress;
@@ -170,9 +170,9 @@ public final class ServerLimitTests {
     static async int32 slowHead(int32 port) {
         TcpStream s #= ServerLimitTests.connect(port);
         ServerLimitTests.send(s, "GET / HTTP/1.1\r\n");
-        Tasks.sleepMillis((int64) 80);
+        Fiber.sleep(Duration.ofMillis((int64) 80));
         ServerLimitTests.send(s, "host: t\r\nconnection: close\r\n");
-        Tasks.sleepMillis((int64) 80);
+        Fiber.sleep(Duration.ofMillis((int64) 80));
         ServerLimitTests.send(s, "\r\n");
         String got #= ServerLimitTests.readAll(s);
         s.close();
@@ -197,9 +197,9 @@ public final class ServerLimitTests {
     static async int32 spacedBody(int32 port) {
         TcpStream s #= ServerLimitTests.connect(port);
         ServerLimitTests.send(s, "POST / HTTP/1.1\r\nhost: t\r\nconnection: close\r\ncontent-length: 10\r\n\r\n12345");
-        Tasks.sleepMillis((int64) 150);
+        Fiber.sleep(Duration.ofMillis((int64) 150));
         ServerLimitTests.send(s, "67");
-        Tasks.sleepMillis((int64) 150);
+        Fiber.sleep(Duration.ofMillis((int64) 150));
         ServerLimitTests.send(s, "890");
         String got #= ServerLimitTests.readAll(s);
         s.close();

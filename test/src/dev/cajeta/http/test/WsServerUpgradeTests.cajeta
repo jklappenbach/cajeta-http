@@ -1,10 +1,11 @@
 package dev.cajeta.http.test;
 
+import cajeta.concurrent.Fiber;
+import cajeta.time.Duration;
 import cajeta.lang.String;
 import cajeta.io.net.ByteBuffer;
 import cajeta.io.net.Server;
 import cajeta.io.net.TcpStream;
-import cajeta.concurrent.Tasks;
 import cajeta.io.net.AsyncReader;
 import cajeta.io.net.AsyncWriter;
 import cajeta.io.net.uri.Uri;
@@ -162,7 +163,7 @@ public final class WsServerUpgradeTests {
             await s1;
             int32 waited = 0;
             while (WsServerUpgradeTests.ECHO.closes == closesBefore && waited < 200) {
-                Tasks.sleepMillis(10);
+                Fiber.sleep(Duration.ofMillis(10));
                 waited = waited + 1;
             }
             c.that(WsServerUpgradeTests.ECHO.closes > closesBefore,

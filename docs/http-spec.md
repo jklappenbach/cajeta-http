@@ -218,20 +218,46 @@ pool sizes, proxy, TLS, default headers.
 ## Server + routing
 
 ```cajeta
-Router router = heap Router();
-router.route(Method.GET, "/users/{id:int64}", (HttpRequest req) -> {
-    int64 id = req.pathParam("id");
-    return HttpResponse.of(200).setHeader("Content-Type", "application/json").body(lookup(id));
-});
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.routing.Router;
+import dev.cajeta.http.server.HttpServer;
 
-HttpServer server = HttpServer.builder()
-    .bind("0.0.0.0:8443")
-    .model(ServerModel.fiberPerConnection())   // or .sharedPool(n) — from cajeta.io.net
-    .tls(serverTls)                            // a cajeta.io.net.tls config
-    .router(router)
-    .serve();
+public class Users {
+    static void get(HttpRequest q, HttpResponse r) {
+        int64 id = q.paramInt64("id", -1);
+        r.header("Content-Type", "application/json");
+        r.body(Users.lookup(id));
+    }
+
+    public static void serve(int8[] cert, int32 certLen, int8[] key, int32 keyLen) {
+        Router router = heap Router();
+        router.route("GET", "/users/{id:int64}", (HttpRequest q, HttpResponse r) -> Users.get(q, r));
+
+        HttpServer server #= HttpServer.builder()
+            .bind("0.0.0.0:8443")
+            .fiberPerConnection()                // or .sharedPool(n), the cajeta.io.net models
+            .tls(cert, certLen, key, keyLen)     // PEM material for cajeta.io.net.tls
+            .handler((HttpRequest q, HttpResponse r) -> router.dispatch(q, r))
+            .build();
+        server.serve();
+    }
+
+    static String lookup(int64 id) {
+        return "{}";
+    }
+}
 ```
 
+- **Builder** chains end with `build()`, which returns an owned `#HttpServer`.
+  The builder from `HttpServer.builder()` is a temporary that is freed at the end
+  of its statement. A chain that stops at a plain builder method, such as
+  `HttpServerBuilder b #= HttpServer.builder().bind(addr);`, is rejected with
+  `CAJETA_ERROR_BORROW_OF_TEMPORARY`. To configure over several statements, bind
+  the builder first: `HttpServerBuilder b #= HttpServer.builder(); b.bind(addr);`.
+- **Handlers** take the request and the response and return nothing. The
+  response is the handler's `r` parameter, and each call on it writes into the
+  connection's output buffer.
 - **Accept model** is `cajeta.io.net`'s (`fiberPerConnection()` / `sharedPool(n)`),
   not an HTTP-specific mode. Handlers are un-colored.
 - **Router** — method + typed path patterns: `/users/{id}` (string),

@@ -1,7 +1,8 @@
 package dev.cajeta.http.test;
 
+import cajeta.concurrent.Fiber;
+import cajeta.time.Duration;
 import cajeta.lang.String;
-import cajeta.concurrent.Tasks;
 import cajeta.io.net.Server;
 import cajeta.io.net.TcpStream;
 import dev.cajeta.http.Bytes;
@@ -71,7 +72,7 @@ public final class SseServerLoopbackTests {
         ch.send(#e0);
         int32 waited = 0;
         while (!SseServerLoopbackTests.gotFirst && waited < 300) {
-            Tasks.sleepMillis(10);
+            Fiber.sleep(Duration.ofMillis(10));
             waited = waited + 1;
         }
         SseServerLoopbackTests.sawBeforeClose = SseServerLoopbackTests.gotFirst;

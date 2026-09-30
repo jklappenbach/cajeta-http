@@ -1,6 +1,6 @@
 package dev.cajeta.http.test;
 
-import cajeta.concurrent.Tasks;
+import cajeta.concurrent.Fiber;
 import cajeta.io.net.ConnectionLimits;
 import cajeta.io.net.IpAddress;
 import cajeta.io.net.LoadShedPolicy;
@@ -34,12 +34,12 @@ public final class ServerAcceptTests {
 
     static void handle(HttpRequest q, HttpResponse r) {
         if (Bytes.equals(q.path(), "/slow")) {
-            Tasks.sleepMillis((int64) 400);
+            Fiber.sleep(Duration.ofMillis((int64) 400));
             r.body("slow-done");
             return;
         }
         if (Bytes.equals(q.path(), "/hung")) {
-            Tasks.sleepMillis((int64) 1500);
+            Fiber.sleep(Duration.ofMillis((int64) 1500));
             r.body("hung-done");
             return;
         }
@@ -142,7 +142,7 @@ public final class ServerAcceptTests {
 
             Task<int32> a = spawn getPath(port, "/slow", "slow-done");
             Task<int32> b = spawn getPath(port, "/slow", "slow-done");
-            Tasks.sleepMillis((int64) 120);
+            Fiber.sleep(Duration.ofMillis((int64) 120));
             Task<int32> probe = spawn shedProbe(port);
             c.eqInt((int64) await probe, 1,
                     "third connection shed without a byte of HTTP");
@@ -165,7 +165,7 @@ public final class ServerAcceptTests {
 
             int64 t0 = ServerAcceptTests.nowMs();
             Task<int32> a = spawn getPath(port, "/slow", "slow-done");
-            Tasks.sleepMillis((int64) 100);
+            Fiber.sleep(Duration.ofMillis((int64) 100));
             Task<int32> b = spawn getPath(port, "/slow", "slow-done");
             c.eqInt((int64) await a, 1, "first BLOCK exchange completed");
             c.eqInt((int64) await b, 1, "queued exchange completed (not shed)");
@@ -188,7 +188,7 @@ public final class ServerAcceptTests {
             Task<int32> sv = spawn serveIt(srv);
 
             Task<int32> a = spawn getPath(port, "/slow", "slow-done");
-            Tasks.sleepMillis((int64) 100);
+            Fiber.sleep(Duration.ofMillis((int64) 100));
             boolean drained #= srv.shutdown(Duration.ofSeconds(2));
             c.that(drained, "shutdown mid-exchange drained clean");
             c.eqInt((int64) await a, 1, "in-flight exchange completed");
@@ -208,7 +208,7 @@ public final class ServerAcceptTests {
             Task<int32> sv = spawn serveIt(srv);
 
             Task<int32> a = spawn getPath(port, "/hung", "hung-done");
-            Tasks.sleepMillis((int64) 100);
+            Fiber.sleep(Duration.ofMillis((int64) 100));
             int64 t0 = ServerAcceptTests.nowMs();
             boolean drained #= srv.shutdown(Duration.ofMillis((int64) 300));
             int64 elapsed = ServerAcceptTests.nowMs() - t0;

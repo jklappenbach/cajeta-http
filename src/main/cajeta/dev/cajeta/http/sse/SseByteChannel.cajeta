@@ -1,6 +1,7 @@
 package dev.cajeta.http.sse;
 
-import cajeta.concurrent.Tasks;
+import cajeta.concurrent.Fiber;
+import cajeta.time.Duration;
 import cajeta.io.net.ByteChannel;
 import cajeta.time.Clock;
 import dev.cajeta.http.HttpException;
@@ -234,7 +235,7 @@ public final class SseByteChannel implements ByteChannel {
                 this.stash(#ka);
                 return true;
             }
-            Tasks.sleepMillis((int64) 5);
+            Fiber.sleep(Duration.ofMillis((int64) 5));
         }
         return false;
     }

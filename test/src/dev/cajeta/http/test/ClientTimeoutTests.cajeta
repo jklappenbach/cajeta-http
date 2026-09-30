@@ -1,7 +1,7 @@
 package dev.cajeta.http.test;
 
+import cajeta.concurrent.Fiber;
 import cajeta.concurrent.Channel;
-import cajeta.concurrent.Tasks;
 import cajeta.io.net.NetException;
 import cajeta.io.net.Server;
 import cajeta.io.net.SocketAddress;
@@ -235,7 +235,7 @@ public final class ClientTimeoutTests {
         int32 port = ClientTimeoutTests.deadPort();
         scope {
             Task<int32> t = spawn getWithRetry(port);
-            Tasks.sleepMillis((int64) 60);
+            Fiber.sleep(Duration.ofMillis((int64) 60));
 
             HttpServerBuilder b #= HttpServer.builder();
             b.bind("127.0.0.1:" + port);

@@ -1,7 +1,7 @@
 package dev.cajeta.http.test;
 
+import cajeta.concurrent.Fiber;
 import cajeta.lang.String;
-import cajeta.concurrent.Tasks;
 import cajeta.io.net.AsyncReader;
 import cajeta.io.net.AsyncWriter;
 import cajeta.io.net.ConnectionLimits;
@@ -42,7 +42,7 @@ public final class ServerTlsTests {
 
     static void handle(HttpRequest q, HttpResponse r) {
         if (Bytes.equals(q.path(), "/slow")) {
-            Tasks.sleepMillis((int64) 400);
+            Fiber.sleep(Duration.ofMillis((int64) 400));
             r.body("slow-done");
             return;
         }
@@ -50,14 +50,14 @@ public final class ServerTlsTests {
             ServerTlsTests.held = ServerTlsTests.held + 1;
             int32 waited = 0;
             while (!ServerTlsTests.letGo && waited < 1000) {
-                Tasks.sleepMillis((int64) 10);
+                Fiber.sleep(Duration.ofMillis((int64) 10));
                 waited = waited + 1;
             }
             r.body("held");
             return;
         }
         if (Bytes.equals(q.path(), "/hung")) {
-            Tasks.sleepMillis((int64) 1500);
+            Fiber.sleep(Duration.ofMillis((int64) 1500));
             r.body("hung-done");
             return;
         }
@@ -241,7 +241,7 @@ public final class ServerTlsTests {
             Task<int32> a = spawn httpsGet(port, "/hold", "held");
             int32 waited = 0;
             while (ServerTlsTests.held == before && waited < 1000) {
-                Tasks.sleepMillis((int64) 10);
+                Fiber.sleep(Duration.ofMillis((int64) 10));
                 waited = waited + 1;
             }
             Task<int32> probe = spawn shedProbe(port);
@@ -259,7 +259,7 @@ public final class ServerTlsTests {
             int32 port = srv.tlsListener.boundPort();
             Task<int32> sv = spawn serve(srv);
             Task<int32> a = spawn httpsGet(port, "/slow", "slow-done");
-            Tasks.sleepMillis((int64) 150);
+            Fiber.sleep(Duration.ofMillis((int64) 150));
             boolean drained #= srv.shutdown(Duration.ofSeconds(2));
             c.that(drained, "TLS shutdown mid-exchange waits for it and reports drained");
             c.eqInt((int64) await a, 1, "the in-flight TLS exchange completes");
@@ -270,7 +270,7 @@ public final class ServerTlsTests {
             int32 port = srv.tlsListener.boundPort();
             Task<int32> sv = spawn serve(srv);
             Task<int32> a = spawn httpsGet(port, "/hung", "hung-done");
-            Tasks.sleepMillis((int64) 150);
+            Fiber.sleep(Duration.ofMillis((int64) 150));
             int64 t0 = Clock.now().toEpochMilli();
             boolean drained #= srv.shutdown(Duration.ofMillis((int64) 300));
             int64 elapsed = Clock.now().toEpochMilli() - t0;

@@ -1,5 +1,6 @@
 package tour.http;
 
+import cajeta.concurrent.Fiber;
 import dev.cajeta.http.Bytes;
 import dev.cajeta.http.ClientRequest;
 import dev.cajeta.http.ClientResponse;
@@ -16,7 +17,6 @@ import dev.cajeta.http.server.HttpServer;
 import dev.cajeta.http.server.HttpServerBuilder;
 import cajeta.codec.json.JsonValue;
 import cajeta.codec.json.JsonObject;
-import cajeta.concurrent.Tasks;
 import cajeta.hash.Sha256;
 import cajeta.io.file.File;
 import cajeta.io.file.Path;
@@ -89,7 +89,7 @@ public class ClientDemo extends DemoClass {
             return;
         }
         if (Bytes.equals(q.path(), "/slow")) {
-            Tasks.sleepMillis((int64) 800);
+            Fiber.sleep(Duration.ofMillis((int64) 800));
             return;
         }
         r.status(404);

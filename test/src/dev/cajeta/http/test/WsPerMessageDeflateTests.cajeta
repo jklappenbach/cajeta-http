@@ -71,7 +71,8 @@ public final class WsPerMessageDeflateTests {
         c.eqInt((int64) (((int32) wire[0]) & 0xFF), (int64) 0xC2,
                 "rsv1 encodes into byte0 (0xC2)");
 
-        WsFrameDecoder d #= WsFrameDecoder.forClient().allowCompression();
+        WsFrameDecoder d #= WsFrameDecoder.forClient();
+        d.allowCompression();
         d.feed(wire, wn);
         c.that(d.hasFrame(), "rsv1 frame decodes with compression allowed");
         WsFrame g #= d.nextFrame();
@@ -95,7 +96,8 @@ public final class WsPerMessageDeflateTests {
         WsFrame ping #= WsFrame.of(true, WsOpcode.PING, false, #empty);
         ping.rsv1 = true;
         int8[] wire #= WsFrameEncoder.encodeUnmasked(ping);
-        WsFrameDecoder d #= WsFrameDecoder.forClient().allowCompression();
+        WsFrameDecoder d #= WsFrameDecoder.forClient();
+        d.allowCompression();
         boolean threw = false;
         try {
             d.feed(wire, (int32) wire.count());
@@ -109,7 +111,8 @@ public final class WsPerMessageDeflateTests {
         // Hand-craft a server->client frame with RSV2 (0x20) set on byte 0.
         // 0x80 FIN | 0x20 RSV2 | 0x02 BINARY = 0xA2, then a 0-length byte1.
         int8[] wire = [ (int8) 0xA2, (int8) 0x00 ];
-        WsFrameDecoder d #= WsFrameDecoder.forClient().allowCompression();
+        WsFrameDecoder d #= WsFrameDecoder.forClient();
+        d.allowCompression();
         boolean threw = false;
         try {
             d.feed(wire, 2);

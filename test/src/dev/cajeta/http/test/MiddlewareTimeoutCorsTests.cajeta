@@ -1,7 +1,8 @@
 package dev.cajeta.http.test;
 
+import cajeta.concurrent.Fiber;
+import cajeta.time.Duration;
 import cajeta.lang.String;
-import cajeta.concurrent.Tasks;
 import dev.cajeta.http.HttpRequest;
 import dev.cajeta.http.HttpResponse;
 import dev.cajeta.http.HttpException;
@@ -21,7 +22,7 @@ public final class MiddlewareTimeoutCorsTests {
     }
 
     static void slow(HttpRequest q, HttpResponse r) {
-        Tasks.sleepMillis((int64) 300);
+        Fiber.sleep(Duration.ofMillis((int64) 300));
         r.body("late");
     }
 

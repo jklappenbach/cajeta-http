@@ -1,5 +1,6 @@
 package dev.cajeta.http.server;
 
+import cajeta.concurrent.Fiber;
 import cajeta.lang.String;
 import cajeta.io.net.Server;
 import cajeta.io.net.ServerModel;
@@ -383,7 +384,7 @@ public class HttpServer {
                 if (Cajeta.currentTimeNanos() >= stop) {
                     return false;
                 }
-                Cajeta.fiberSleepNanos(backoff);
+                Fiber.sleep(Duration.ofNanos(backoff));
                 if (backoff < 10000000) {
                     backoff = backoff * 2;
                 }

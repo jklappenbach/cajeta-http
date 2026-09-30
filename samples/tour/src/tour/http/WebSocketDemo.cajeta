@@ -1,5 +1,6 @@
 package tour.http;
 
+import cajeta.concurrent.Fiber;
 import dev.cajeta.http.Bytes;
 import dev.cajeta.http.ClientResponse;
 import dev.cajeta.http.HeadScanner;
@@ -45,7 +46,6 @@ import cajeta.io.net.TcpListener;
 import cajeta.io.net.TcpStream;
 import cajeta.io.net.uri.Uri;
 import cajeta.time.Duration;
-import cajeta.concurrent.Tasks;
 
 // WebSocket — dev.cajeta.http.ws, RFC 6455 end to end:
 //
@@ -300,7 +300,7 @@ public class WebSocketDemo extends DemoClass {
             client.close(WsCloseCode.NORMAL, "done");
             int32 waited = 0;
             while (h.closes == 0 && waited < 200) {
-                Tasks.sleepMillis((int64) 10);
+                Fiber.sleep(Duration.ofMillis((int64) 10));
                 waited = waited + 1;
             }
             boolean drained #= srv.shutdown(Duration.ofSeconds(2));

@@ -1,7 +1,8 @@
 package dev.cajeta.http.test;
 
+import cajeta.concurrent.Fiber;
+import cajeta.time.Duration;
 import cajeta.lang.String;
-import cajeta.concurrent.Tasks;
 
 /**
  * Opt-in probe (`--handoffprobe=N`): whether the ownership shapes the h2 server
@@ -126,7 +127,7 @@ public final class HandoffProbeTests {
             while (i < rounds) {
                 Cell c = heap Cell();
                 spawn consume(#c);
-                Tasks.sleepMillis((int64) 1);
+                Fiber.sleep(Duration.ofMillis((int64) 1));
                 i = i + 1;
                 if (i == 50) { before = Cajeta.liveCount(); }
             }

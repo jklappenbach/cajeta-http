@@ -1,7 +1,8 @@
 package dev.cajeta.http.test;
 
+import cajeta.concurrent.Fiber;
+import cajeta.time.Duration;
 import cajeta.lang.String;
-import cajeta.concurrent.Tasks;
 import cajeta.io.net.AsyncReader;
 import cajeta.io.net.AsyncWriter;
 import cajeta.io.net.BufferPool;
@@ -114,7 +115,7 @@ public final class Http2StreamLimitTests {
     }
 
     static void slow(HttpRequest q, HttpResponse r) {
-        Tasks.sleepMillis((int64) 300);
+        Fiber.sleep(Duration.ofMillis((int64) 300));
         r.body("ok");
     }
 
