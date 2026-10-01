@@ -49,8 +49,8 @@ its configuration.
 
 The upgrade is a breaking change. [`docs/migrating-to-0.4.md`](docs/migrating-to-0.4.md)
 maps every removed member to its replacement, and [`docs/guide.md`](docs/guide.md)
-explains the model. v0.4.0 needs the cajeta release that extends the
-`cajeta.wire` compression interfaces, the first after v0.31.0.
+explains the model. v0.4.0 needs cajeta v0.32.0 or later, the release that
+extends the `cajeta.wire` compression interfaces.
 
 Earlier releases: v0.3.0 made long HTTP/2 connections flat (receive-window
 credit returns, per-request state is reclaimed) and v0.3.1 republished it on
