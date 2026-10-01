@@ -414,8 +414,8 @@ public class WebSocketDemo extends DemoClass {
         this.check(none == null && joined != null && joined.length() == 4
             && joined.text().equals("half"),
             "TEXT + CONTINUATION assemble into one 4-byte message");
-        WsMessageAssembler tiny #= WsMessageAssembler.create()
-            .withMaxMessageLength((int64) 3);
+        WsMessageAssembler tiny #= WsMessageAssembler.create();
+        tiny.withMaxMessageLength((int64) 3);
         int8[] big = heap int8[8];
         WsFrame overF #= WsFrame.of(true, WsOpcode.BINARY, false, #big);
         boolean overCap = false;

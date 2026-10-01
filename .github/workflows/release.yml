@@ -81,7 +81,9 @@ jobs:
       #
       # Raised to v0.31.0 for the view model: slice windows, exception titles,
       # interface-slot moves and the builder handing its handler to the server.
-      cajeta-version: v0.31.0
+      # Raised to v0.32.0, which frees an owned temporary at its statement end
+      # and refuses a kept borrow of one. The tour bound its assembler for it.
+      cajeta-version: v0.32.0
       # Suite + tour + tour-coverage gate, chained in scripts/ci-checks.sh.
       # (`./run-tests.sh` rather than `cajeta test` because the suite needs the
       # codec's native zlib backend extracted out of its .cja with

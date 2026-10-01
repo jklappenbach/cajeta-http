@@ -78,7 +78,7 @@
         // actually installs. A stale value here is a false claim about what
         // builds, which is exactly how the workflow pin came to be wrong.
         "toolchain": {
-            "version": "0.31.0"
+            "version": "0.32.0"
         },
 
         // Uses the network transport stack (sockets + TLS via cajeta.io.net).
