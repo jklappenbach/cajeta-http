@@ -20,7 +20,7 @@ public class Http2Exception extends HttpException {
     public int32 streamId;
 
     public Http2Exception(String message, int32 errorCode) {
-        this.message = message;
+        this.message #= message;
         this.cause = 0;
         this.kind = 12;
         this.errorCode = errorCode;
@@ -28,7 +28,7 @@ public class Http2Exception extends HttpException {
     }
 
     public Http2Exception(String message, int32 errorCode, int32 streamId) {
-        this.message = message;
+        this.message #= message;
         this.cause = 0;
         this.kind = 12;
         this.errorCode = errorCode;

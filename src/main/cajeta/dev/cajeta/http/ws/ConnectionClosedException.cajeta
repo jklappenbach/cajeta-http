@@ -100,7 +100,7 @@ public class ConnectionClosedException extends WebSocketException {
      * [`isClean`](#isClean) = `false`, and a null reason.
      */
     public ConnectionClosedException(String message) {
-        this.message = message;
+        this.message #= message;
         this.cause = 0;
         this.kind = 99;            // NetException.KIND_OTHER — a stream end, not an invalid-input fault
         this.closeCode = 1006;     // WsCloseCode.ABNORMAL
@@ -113,7 +113,7 @@ public class ConnectionClosedException extends WebSocketException {
      * [`isClean`](#isClean) is `true` — a `CLOSE` frame was exchanged.
      */
     public ConnectionClosedException(String message, int32 closeCode) {
-        this.message = message;
+        this.message #= message;
         this.cause = 0;
         this.kind = 99;            // NetException.KIND_OTHER
         this.closeCode = closeCode;
@@ -126,11 +126,11 @@ public class ConnectionClosedException extends WebSocketException {
      * reason phrase. [`isClean`](#isClean) is `true`.
      */
     public ConnectionClosedException(String message, int32 closeCode, String reason) {
-        this.message = message;
+        this.message #= message;
         this.cause = 0;
         this.kind = 99;            // NetException.KIND_OTHER
         this.closeCode = closeCode;
-        this.reason = reason;
+        this.reason #= reason;
         this.isClean = true;
     }
 }

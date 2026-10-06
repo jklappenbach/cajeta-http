@@ -38,14 +38,14 @@ public class MessageTooLargeException extends WebSocketException {
     public int64 limit;
 
     public MessageTooLargeException(String message) {
-        this.message = message;
+        this.message #= message;
         this.cause = 0;
         this.kind = 12;            // NetException.KIND_INVALID
         this.limit = (int64) -1;
     }
 
     public MessageTooLargeException(String message, int64 limit) {
-        this.message = message;
+        this.message #= message;
         this.cause = 0;
         this.kind = 12;            // NetException.KIND_INVALID
         this.limit = limit;

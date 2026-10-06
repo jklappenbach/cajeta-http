@@ -93,7 +93,7 @@ public final class SseByteChannel implements ByteChannel {
      * A byte source over a **live** channel (borrowed). Each read blocks for
      * the next [`SseEvent`](SseEvent.cajeta); the channel closing is EOF.
      */
-    public static #SseByteChannel overChannel(SseChannel ch) {
+    public static #SseByteChannel overChannel(^SseChannel ch) {
         SseByteChannel c = heap SseByteChannel();
         c.ch = ch;
         return #c;
@@ -103,7 +103,7 @@ public final class SseByteChannel implements ByteChannel {
      * A live-channel byte source that emits a `:` comment keep-alive ping
      * whenever `keepAliveMillis` elapse with no event to send.
      */
-    public static #SseByteChannel overChannel(SseChannel ch,
+    public static #SseByteChannel overChannel(^SseChannel ch,
                                               int32 keepAliveMillis) {
         SseByteChannel c = heap SseByteChannel();
         c.ch = ch;

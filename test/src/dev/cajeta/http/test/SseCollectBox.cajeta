@@ -6,7 +6,7 @@ import dev.cajeta.http.sse.SseClient;
 /**
  * Shared collector for the SSE-client loopback test — borrowed into the
  * subscriber fiber (fiber-sharing by borrow + `scope` join). `seq` accrues
- * each event's data in arrival order; `client` is the borrowed subscriber the
+ * each event's data in arrival order; `client` is the subscriber, kept by `#=`, that the
  * callback stops once the full sequence has arrived.
  */
 public final class SseCollectBox {

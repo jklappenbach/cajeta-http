@@ -12,7 +12,7 @@ public class NotAcceptableException extends HttpException {
     }
 
     public NotAcceptableException(String message) {
-        this.message = message;
+        this.message #= message;
         this.cause = 0;
         this.kind = 12;
     }

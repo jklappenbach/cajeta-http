@@ -61,7 +61,7 @@ public class HandshakeRejectedException extends WebSocketException {
      * malformed handshake.
      */
     public HandshakeRejectedException(String message) {
-        this.message = message;
+        this.message #= message;
         this.cause = 0;
         this.kind = 12;            // NetException.KIND_INVALID
         this.httpStatus = 400;
@@ -72,7 +72,7 @@ public class HandshakeRejectedException extends WebSocketException {
      * `400` otherwise).
      */
     public HandshakeRejectedException(String message, int32 httpStatus) {
-        this.message = message;
+        this.message #= message;
         this.cause = 0;
         this.kind = 12;            // NetException.KIND_INVALID
         this.httpStatus = httpStatus;

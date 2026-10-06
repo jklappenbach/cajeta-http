@@ -160,7 +160,7 @@ public class SseDemo extends DemoClass {
     public static async int32 subscribeFills(int32 port, FillBox box) {
         SseClient sc = heap SseClient("http://127.0.0.1:" + port + "/fills");
         sc.defaultRetryMillis(20);
-        box.client = sc;
+        box.client #= sc;
         (SseEvent) -> void h = (e) -> SseDemo.collect(box, e);
         sc.subscribe(h);
         return 1;

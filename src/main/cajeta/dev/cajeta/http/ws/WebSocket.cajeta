@@ -96,11 +96,11 @@ import dev.cajeta.http.ClientResponse;
  * dropped with the connection.
  */
 public class WebSocket {
-    // -- transport (borrowed) ----------------------------------------------
+    // -- transport -----------------------------------------------------------
 
-    /** The buffered async read half — **borrowed**, not owned/closed here. */
+    /** The buffered async read half: borrowed from forServer/forClient, owned when built by `connect`. */
     AsyncReader reader;
-    /** The buffered async write half — **borrowed**, not owned/closed here. */
+    /** The buffered async write half: borrowed from forServer/forClient, owned when built by `connect`. */
     AsyncWriter writer;
 
     // -- read-side state (owned; single reader fiber) ----------------------
@@ -127,8 +127,6 @@ public class WebSocket {
     // alive. These are null for the borrowed-transport factories.
     TcpStream heldSock;
     TlsStream heldTls;
-    AsyncReader heldReader;
-    AsyncWriter heldWriter;
     /** The server-selected subprotocol (`Sec-WebSocket-Protocol`), or null. */
     String subprotocol;
 
@@ -180,8 +178,6 @@ public class WebSocket {
         this.compress = false;
         this.heldSock = null;
         this.heldTls = null;
-        this.heldReader = null;
-        this.heldWriter = null;
         this.subprotocol = null;
         this.writeLock = null;
         this.isClient = false;
@@ -199,7 +195,7 @@ public class WebSocket {
      *
      * @EntryPoint
      */
-    public static #WebSocket forServer(AsyncReader reader, AsyncWriter writer) {
+    public static #WebSocket forServer(^AsyncReader reader, ^AsyncWriter writer) {
         WebSocket ws = heap WebSocket();
         ws.reader = reader;
         ws.writer = writer;
@@ -218,7 +214,7 @@ public class WebSocket {
      *
      * @EntryPoint
      */
-    public static #WebSocket forClient(AsyncReader reader, AsyncWriter writer) {
+    public static #WebSocket forClient(^AsyncReader reader, ^AsyncWriter writer) {
         WebSocket ws = heap WebSocket();
         ws.reader = reader;
         ws.writer = writer;
@@ -295,15 +291,13 @@ public class WebSocket {
                 tls.handshake();
                 ws.heldTls = #tls;
             }
-            ws.heldReader = heap AsyncReader(ws.heldTls);
-            ws.heldWriter = heap AsyncWriter(ws.heldTls);
+            ws.reader = heap AsyncReader(ws.heldTls);
+            ws.writer = heap AsyncWriter(ws.heldTls);
         } else {
             ws.heldSock = #sock;
-            ws.heldReader = heap AsyncReader(ws.heldSock);
-            ws.heldWriter = heap AsyncWriter(ws.heldSock);
+            ws.reader = heap AsyncReader(ws.heldSock);
+            ws.writer = heap AsyncWriter(ws.heldSock);
         }
-        ws.reader = ws.heldReader;
-        ws.writer = ws.heldWriter;
 
         // Client opening handshake over the owned transport.
         ClientResponse response = heap ClientResponse();

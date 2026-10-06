@@ -70,7 +70,7 @@ public final class SseClientLoopbackTests {
         String url = "http://127.0.0.1:" + port + "/events";
         SseClient sc = heap SseClient(url);
         sc.defaultRetryMillis(20);
-        box.client = sc;
+        box.client #= sc;
         (SseEvent) -> void h = (e) -> SseClientLoopbackTests.collect(box, e);
         sc.subscribe(h);
         return 1;

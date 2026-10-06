@@ -12,7 +12,7 @@ public class BadRequestException extends HttpException {
     }
 
     public BadRequestException(String message) {
-        this.message = message;
+        this.message #= message;
         this.cause = 0;
         this.kind = 12;
     }

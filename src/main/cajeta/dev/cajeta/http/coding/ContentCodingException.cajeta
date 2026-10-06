@@ -20,7 +20,7 @@ import dev.cajeta.http.HttpException;
  */
 public class ContentCodingException extends HttpException {
     public ContentCodingException(String message) {
-        this.message = message;
+        this.message #= message;
         this.cause = 0;
         this.kind = 12;   // NetException.KIND_INVALID (via HttpException)
     }

@@ -31,6 +31,7 @@ public final class CoreTypeTests {
         System.stdout.println("-- core types: MediaType --");
         mediaTypeParse(c);
         mediaTypeParams(c);
+        mediaTypeManyParams(c);
         mediaTypeConstants(c);
         System.stdout.println("-- core types: typed reads --");
         requestTypedAccessors(c);
@@ -166,6 +167,29 @@ public final class CoreTypeTests {
         c.that(t.parameter("nope") == null, "absent param: null");
         c.eqStr(MediaType.parse("a/b;c=d").parameter("c"), "d",
                 "params parse without spaces");
+    }
+
+    static void mediaTypeManyParams(Check c) {
+        String text = "a/b";
+        int32 i = 0;
+        while (i < 10) {
+            text = text + "; p" + i + "=value-number-" + i;
+            i = i + 1;
+        }
+        MediaType t #= MediaType.parse(text);
+        String[] churn = heap String[64];
+        int32 k = 0;
+        while (k < 64) {
+            churn[k] #= "churn-churn-churn-" + k;
+            k = k + 1;
+        }
+        c.eqInt((int64) t.parameterCount(), 10, "ten params survive growth");
+        int32 j = 0;
+        while (j < 10) {
+            c.eqStr(t.parameterNameAt(j), "p" + j, "param name kept across growth");
+            c.eqStr(t.parameterValueAt(j), "value-number-" + j, "param value kept across growth");
+            j = j + 1;
+        }
     }
 
     static void mediaTypeConstants(Check c) {

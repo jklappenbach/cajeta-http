@@ -12,7 +12,7 @@ public class NotImplementedException extends HttpException {
     }
 
     public NotImplementedException(String message) {
-        this.message = message;
+        this.message #= message;
         this.cause = 0;
         this.kind = 12;
     }

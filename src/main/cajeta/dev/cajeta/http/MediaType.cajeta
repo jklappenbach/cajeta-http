@@ -178,12 +178,12 @@ public final class MediaType {
             String[] nv = heap String[newCap];
             int32 i = 0;
             while (i < this.paramCount) {
-                nn[i] = this.paramNames[i];
-                nv[i] = this.paramValues[i];
+                nn[i] #= this.paramNames[i];
+                nv[i] #= this.paramValues[i];
                 i = i + 1;
             }
-            this.paramNames = nn;
-            this.paramValues = nv;
+            this.paramNames #= nn;
+            this.paramValues #= nv;
         }
         this.paramNames[this.paramCount] = #name;
         this.paramValues[this.paramCount] = #value;

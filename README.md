@@ -52,6 +52,12 @@ maps every removed member to its replacement, and [`docs/guide.md`](docs/guide.m
 explains the model. v0.4.0 needs cajeta v0.32.0 or later, the release that
 extends the `cajeta.wire` compression interfaces.
 
+v0.5.0 republishes on cajeta v0.35.0, which enforces the field-store rule.
+The WebSocket `forServer` and `forClient` factories and
+`SseByteChannel.overChannel` now take `^T` parameters, so they borrow their
+transport or channel and refuse an owned temporary. Media type parameters
+and captured log lines keep their strings when their arrays grow.
+
 Earlier releases: v0.3.0 made long HTTP/2 connections flat (receive-window
 credit returns, per-request state is reclaimed) and v0.3.1 republished it on
 the v0.29.0 toolchain.

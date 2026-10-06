@@ -12,7 +12,7 @@ public class GatewayTimeoutException extends HttpException {
     }
 
     public GatewayTimeoutException(String message) {
-        this.message = message;
+        this.message #= message;
         this.cause = 0;
         this.kind = 12;
     }
