@@ -83,8 +83,8 @@ jobs:
       # interface-slot moves and the builder handing its handler to the server.
       # Raised to v0.32.0, which frees an owned temporary at its statement end
       # and refuses a kept borrow of one. The tour bound its assembler for it.
-      # Raised to v0.35.0, which enforces the field-store rule.
-      cajeta-version: v0.35.0
+      # Raised to v0.35.0, which enforces the field-store rule, then to v0.36.0.
+      cajeta-version: v0.36.0
       # Suite + tour + tour-coverage gate, chained in scripts/ci-checks.sh.
       # (`./run-tests.sh` rather than `cajeta test` because the suite needs the
       # codec's native zlib backend extracted out of its .cja with
