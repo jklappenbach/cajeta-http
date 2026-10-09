@@ -59,6 +59,7 @@ transport or channel and refuse an owned temporary. Media type parameters
 and captured log lines keep their strings when their arrays grow.
 
 v0.5.1 republishes 0.5.0 unchanged on cajeta v0.36.0 and codec 0.8.5.
+v0.5.2 republishes it unchanged on cajeta v0.38.0 and codec 0.8.6.
 
 Earlier releases: v0.3.0 made long HTTP/2 connections flat (receive-window
 credit returns, per-request state is reclaimed) and v0.3.1 republished it on
