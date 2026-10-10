@@ -13,7 +13,7 @@
 
     "details": {
         "name":               "dev.cajeta.http",
-        "version":            "0.5.2",
+        "version":            "0.5.3",
         "description":        "cajeta-http — HTTP/1.1·2 + WebSocket + SSE client/server over cajeta.io.net",
         "license":            "Apache-2.0",
         "authors":            ["Julian Klappenbach"],
@@ -77,9 +77,9 @@
         // dispatch are not wired up yet), while the workflow's pin is what CI
         // actually installs. A stale value here is a false claim about what
         // builds, which is exactly how the workflow pin came to be wrong.
-        // 0.38.0 is the release 0.5.2 is cut on.
+        // 0.39.0 is the release 0.5.3 is cut on.
         "toolchain": {
-            "version": "0.38.0"
+            "version": "0.39.0"
         },
 
         // Uses the network transport stack (sockets + TLS via cajeta.io.net).
@@ -111,9 +111,9 @@
         // v0.29.0 binary resolving 0.8.3 out of $OLLA_HOME, with
         // .cajeta/cache/artifact cleared first and the sibling checkout taken
         // out of the lookup, which is the path CI takes.
-        // 0.8.6 is the v0.38.0 rebuild.
+        // 0.8.7 is the v0.39.0 rebuild.
         "dependencies": {
-            "dev.cajeta.codec": "0.8.6"
+            "dev.cajeta.codec": "0.8.7"
         },
 
         // Empty: the suite is a self-checking binary under test/src, not a
