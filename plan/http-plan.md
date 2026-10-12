@@ -1843,6 +1843,33 @@ the wire.
       connections is delivered as one `abcd` sequence, the client reconnecting
       and resuming from `Last-Event-ID: 2` (40× clean). Retry timing is
       asserted via the pure `reconnectDelayMillis`, not wall-clock.
+- [ ] **4.5** `permessage-deflate` with a smaller server window. 4.1c fixed the
+  window at 15 bits and declines an offer whose `server_max_window_bits` is
+  below 15. Autobahn on e9e9f26 (2026-10-12, 517/517) reports those 54 cases
+  (13.3.x, 13.5.x, 13.7.x) as UNIMPLEMENTED: compression is declined and the
+  connection runs plain. Browsers never ask for it, so this is for clients
+  that limit server memory. After 0.6.0; added by Julian 2026-10-12.
+  - **4.5.1 TDD**
+    - [ ] 4.5.1.1 cajeta-codec: a `DeflateStream` built with window bits `b`
+      (9 to 15) never emits a match distance above `2^b`, and its output
+      inflates byte-exact with zlib raw inflate at `windowBits = -b`, with and
+      without context takeover.
+    - [ ] 4.5.1.2 `WsCompression.negotiateServer` accepts
+      `server_max_window_bits` 9 to 15 and echoes the agreed value in the
+      response; 8 is answered as 9 (zlib cannot make a raw 8-bit window), and
+      a value outside 8 to 15 or unparsable still declines.
+    - [ ] 4.5.1.3 A compressed round trip over `MemChannel` at 9 bits decodes
+      byte-exact, and a repeat beyond `2^9` bytes back is not matched.
+  - **4.5.2 Coding**
+    - [ ] 4.5.2.1 cajeta-codec: a window-bits parameter on `DeflateStream`
+      bounding match distance and kept history (the `NativeZlib` shims already
+      take zlib's `windowBits`). Release it, then pin it here.
+    - [ ] 4.5.2.2 `PmdParams` carries the server window bits; `WsCompression`
+      negotiates and echoes it; `PerMessageDeflate` builds its compressor with
+      it. Inflate is unchanged, since a 15-bit window decodes any smaller one.
+  - **4.5.3 Acceptance**
+    - [ ] 4.5.3.1 Autobahn (`test/autobahn/run.sh`) reports 13.3.x, 13.5.x and
+      13.7.x as OK, with no other case regressing.
 
 ## 5 — HTTP/3 (deferred)
 
