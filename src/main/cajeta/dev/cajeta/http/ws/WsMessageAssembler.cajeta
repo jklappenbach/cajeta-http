@@ -166,7 +166,7 @@ public class WsMessageAssembler {
 
         boolean fin = frame.isFin();
         int8[] pay = frame.getPayload();
-        int32 payLen = pay.count();
+        int32 payLen = frame.payloadLength();
 
         if (op == WsOpcode.CONTINUATION) {
             // A continuation must follow an opened data frame.
@@ -232,6 +232,60 @@ public class WsMessageAssembler {
      * Append `n` bytes of `pay` to the reassembly buffer, enforcing the
      * per-message cap first, growing the backing store as needed.
      */
+    /**
+     * [`accept`](#accept) without allocating: a completed message is copied
+     * into `into`, reusing its payload array, and the result says whether one
+     * completed. The fragment buffer is kept between messages.
+     */
+    public boolean acceptInto(WsFrame frame, WsMessage into) {
+        int32 op = frame.getOpcode();
+        if (WsOpcode.isControl(op)) {
+            return false;
+        }
+        boolean fin = frame.isFin();
+        int8[] pay = frame.getPayload();
+        int32 payLen = frame.payloadLength();
+        if (op == WsOpcode.CONTINUATION) {
+            if (!this.inProgress) {
+                throw heap ProtocolViolationException(
+                    "continuation frame with no message in progress");
+            }
+            if (frame.isRsv1()) {
+                throw heap ProtocolViolationException(
+                    "RSV1 set on a continuation frame");
+            }
+            this.appendPayload(pay, payLen);
+            if (fin) {
+                into.fill(this.msgOpcode, this.buf, this.bufLen, this.msgCompressed);
+                this.inProgress = false;
+                this.msgOpcode = 0;
+                this.msgCompressed = false;
+                this.bufLen = 0;
+                return true;
+            }
+            return false;
+        }
+        if (!WsOpcode.isData(op)) {
+            throw heap ProtocolViolationException(
+                "unexpected non-data opcode at message start");
+        }
+        if (this.inProgress) {
+            throw heap ProtocolViolationException(
+                "new data frame while a fragmented message is in progress");
+        }
+        if (fin) {
+            this.checkLimit((int64) payLen);
+            into.fill(op, pay, payLen, frame.isRsv1());
+            return true;
+        }
+        this.inProgress = true;
+        this.msgOpcode = op;
+        this.msgCompressed = frame.isRsv1();
+        this.bufLen = 0;
+        this.appendPayload(pay, payLen);
+        return false;
+    }
+
     void appendPayload(int8[] pay, int32 n) {
         if (n <= 0) {
             return;

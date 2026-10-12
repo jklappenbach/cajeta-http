@@ -97,7 +97,7 @@ public final class WsUpgrade {
             handler.onConnect(conn);
             boolean running = true;
             while (running) {
-                WsMessage m #= ws.receive();
+                WsMessage m = ws.next();
                 handler.onMessage(conn, m);
             }
         } catch (ConnectionClosedException e) {

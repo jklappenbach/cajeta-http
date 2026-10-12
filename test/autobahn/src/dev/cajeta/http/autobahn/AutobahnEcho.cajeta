@@ -16,7 +16,7 @@ public final class AutobahnEcho implements WebSocketHandler {
 
     public void onMessage(WebSocketConnection conn, WsMessage message) {
         if (message.isBinary()) {
-            conn.sendBinary(message.getPayload());
+            conn.sendBinary(message.bytes(), 0, message.length());
         } else {
             String t #= message.text();
             conn.send(t);

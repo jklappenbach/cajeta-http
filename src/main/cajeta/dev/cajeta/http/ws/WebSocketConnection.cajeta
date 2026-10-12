@@ -33,6 +33,11 @@ public final class WebSocketConnection {
         this.ws.sendBinary(data);
     }
 
+    /** Send bytes `offset` to `offset + length` of `data` as a binary message. */
+    public void sendBinary(int8[] data, int32 offset, int32 length) {
+        this.ws.sendBinary(data, offset, length);
+    }
+
     /** Initiate the closing handshake with `code` + `reason` (RFC 6455 §5.5.1). */
     public void close(int32 code, String reason) {
         this.ws.close(code, reason);

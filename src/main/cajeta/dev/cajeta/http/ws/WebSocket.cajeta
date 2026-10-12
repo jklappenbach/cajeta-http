@@ -111,6 +111,11 @@ public class WebSocket {
     WsProtocol protocol;
     /** Scratch buffer the reader fills from the socket before feeding the decoder. */
     int8[] readScratch;
+    // The message `next` fills and lends, reused for every message.
+    WsMessage current;
+    // The unread part of `readScratch`: `next` feeds it a frame at a time.
+    int32 scratchAt;
+    int32 scratchLen;
 
     /**
      * The negotiated `permessage-deflate` codec (RFC 7692), or `null` when the
@@ -154,6 +159,9 @@ public class WebSocket {
     /** `true` once the local side has emitted a `CLOSE` (via [`close`](#close) or the read loop's reciprocal). */
     boolean closeSent;
 
+    // A frame header written straight to the writer by a direct send.
+    int8[] header;
+
     /** Default scratch-read size when feeding the decoder. */
     static final int32 READ_CHUNK = 8192;
 
@@ -183,6 +191,10 @@ public class WebSocket {
         this.isClient = false;
         this.maskCounter = 0;
         this.closeSent = false;
+        this.current = heap WsMessage();
+        this.scratchAt = 0;
+        this.scratchLen = 0;
+        this.header = heap int8[10];
     }
 
     /**
@@ -395,6 +407,17 @@ public class WebSocket {
         if (text != null) {
             n = text.byteLength();
         }
+        if (this.direct()) {
+            LockGuard g #= this.writeLock.acquire();
+            this.writeHeader(WsOpcode.TEXT, n);
+            int32 j = 0;
+            while (j < n) {
+                this.writer.writeByte(text.byteAt(j));
+                j = j + 1;
+            }
+            this.writer.flush();
+            return;
+        }
         int8[] pay = heap int8[n];
         int32 i = 0;
         while (i < n) {
@@ -411,18 +434,71 @@ public class WebSocket {
      * `data`. Same lock + close-state discipline as [`send`](#send).
      */
     public void sendBinary(int8[] data) {
-        this.requireOpen();
         int32 n = 0;
         if (data != null) {
             n = data.count();
         }
+        this.sendBinary(data, 0, n);
+    }
+
+    /**
+     * Send bytes `offset` to `offset + length` of `data` as one **binary**
+     * message. A server connection without compression frames them straight
+     * into the writer, with no copy; otherwise they are copied into the frame.
+     */
+    public void sendBinary(int8[] data, int32 offset, int32 length) {
+        this.requireOpen();
+        int32 n = length;
+        if (this.direct()) {
+            LockGuard g #= this.writeLock.acquire();
+            this.writeHeader(WsOpcode.BINARY, n);
+            if (n > 0) {
+                this.writer.writeAll(data, offset, n);
+            }
+            this.writer.flush();
+            return;
+        }
         int8[] pay = heap int8[n];
         int32 i = 0;
         while (i < n) {
-            pay[i] = data[i];
+            pay[i] = data[offset + i];
             i = i + 1;
         }
         this.writeData(WsOpcode.BINARY, #pay, n);
+    }
+
+    // A server frame is unmasked, so with no compression its payload can go
+    // to the writer as it is.
+    boolean direct() {
+        return !this.isClient && !this.compress;
+    }
+
+    // An unmasked FIN header for an `n`-byte `opcode` message, to the writer.
+    // The caller holds the write lock.
+    void writeHeader(int32 opcode, int32 n) {
+        int8[] h = this.header;
+        h[0] = (int8) (128 | (opcode & 15));
+        int32 w = 2;
+        if (n <= 125) {
+            h[1] = (int8) n;
+        } else if (n <= 65535) {
+            h[1] = (int8) 126;
+            h[2] = (int8) ((n >> 8) & 255);
+            h[3] = (int8) (n & 255);
+            w = 4;
+        } else {
+            h[1] = (int8) 127;
+            h[2] = (int8) 0;
+            h[3] = (int8) 0;
+            h[4] = (int8) 0;
+            h[5] = (int8) 0;
+            h[6] = (int8) ((n >> 24) & 255);
+            h[7] = (int8) ((n >> 16) & 255);
+            h[8] = (int8) ((n >> 8) & 255);
+            h[9] = (int8) (n & 255);
+            w = 10;
+        }
+        this.writer.writeAll(h, 0, w);
     }
 
     // Emit one unfragmented data message, compressing it (RSV1) when
@@ -468,80 +544,75 @@ public class WebSocket {
      * `Fail the Connection` close.
      */
     public #WsMessage receive() {
+        WsMessage m = this.next();
+        int32 n = m.length();
+        int8[] copy = heap int8[n];
+        int8[] src = m.bytes();
+        int32 i = 0;
+        while (i < n) {
+            copy[i] = src[i];
+            i = i + 1;
+        }
+        return WsMessage.ofCompressed(m.getOpcode(), #copy, false);
+    }
+
+    /**
+     * [`receive`](#receive) without allocating: the next message, lent until
+     * the next call. The connection reuses one message and recycles each
+     * frame, so a warm connection reads a message with no allocation. A
+     * compressed message is decompressed into a fresh array first.
+     */
+    public WsMessage next() {
         while (true) {
-            // Drain any frames the decoder already has buffered before
-            // touching the socket again.
+            // Drain the frames the decoder already holds before reading again.
             while (this.decoder.hasFrame()) {
                 WsFrame f #= this.decoder.nextFrame();
-                WsMessage m #= this.dispatch(f);
-                if (m != null) {
-                    return this.decodeMessage(#m);
+                int32 kind = this.protocol.step(f, this.current);
+                this.decoder.recycle(#f);
+                if (kind == WsReadAction.MESSAGE) {
+                    if (this.compress && this.current.isCompressed()) {
+                        int8[] plain #= this.codec.decompress(this.current.bytes(), this.current.length());
+                        this.current.fill(this.current.getOpcode(), plain, plain.count(), false);
+                    }
+                    return this.current;
+                }
+                if (kind != WsReadAction.NONE) {
+                    this.act(this.protocol.pending());
                 }
             }
-            // Decoder is empty: pull more bytes from the socket. A 0 read is
-            // an orderly transport EOF — an abnormal close if no CLOSE was
-            // exchanged. Bind READ_CHUNK to a local int32 before passing it as
-            // the read length — a direct `WebSocket.READ_CHUNK` arg mis-lowers
-            // the static-final read as the global's address (see the ctor
-            // note); the bad length made `read` return a wrong count and the
-            // decoder see an empty/garbled frame.
+            // Feed the rest of the last read a frame at a time, so the decoder
+            // holds one frame and recycles it.
+            if (this.scratchAt < this.scratchLen) {
+                int32 took = this.decoder.feedSome(this.readScratch, this.scratchAt,
+                                                   this.scratchLen - this.scratchAt);
+                this.scratchAt = this.scratchAt + took;
+                continue;
+            }
+            // A 0 read is an orderly transport EOF, an abnormal close when no
+            // CLOSE was exchanged. READ_CHUNK goes through a local: a direct
+            // static-final argument mis-lowers as the global's address.
             int32 rc = WebSocket.READ_CHUNK;
             int32 got = this.reader.read(this.readScratch, 0, rc);
             if (got == 0) {
                 throw heap ConnectionClosedException(
                     "WebSocket transport closed without a close frame");
             }
-            this.decoder.feed(this.readScratch, got);
+            this.scratchAt = 0;
+            this.scratchLen = got;
         }
-        // Unreachable — the loop returns a message or throws on close.
-        return null;
+        return this.current;
     }
 
-    /**
-     * Drive one decoded frame through the engine and act on its
-     * [`WsReadAction`](WsReadAction.cajeta): return the message for a
-     * `MESSAGE`, write the reply for a `SEND_FRAME`, complete + raise on a
-     * `CLOSED`, and return `null` (read on) otherwise.
-     */
-    // Decompress a received message in place when it arrived compressed
-    // (RSV1 / permessage-deflate); a plain message passes straight through.
-    #WsMessage decodeMessage(#WsMessage msg) {
-        WsMessage m #= msg;
-        if (this.compress && m.isCompressed()) {
-            int8[] p = m.getPayload();
-            int32 n = (int32) p.count();
-            int8[] plain #= this.codec.decompress(p, n);
-            m.payload = #plain;
-            m.compressed = false;
-        }
-        return #m;
-    }
-
-    #WsMessage dispatch(WsFrame frame) {
-        WsReadAction act #= this.protocol.onFrame(frame);
+    // Write the reply an engine action asks for, or complete the close and
+    // raise for a CLOSED one.
+    void act(WsReadAction act) {
         int32 kind = act.getKind();
-
-        if (kind == WsReadAction.MESSAGE) {
-            // Detach the engine-owned message and hand it out to the caller.
-            // `#m` TRANSFERS ownership out — without the marker this `#WsMessage`
-            // return treats `m` as a borrow, so the local's scope-exit drop
-            // array-drops `m.payload` and the caller reads a freed (count()==0)
-            // payload. That is the WS live-echo 0-length-message bug.
-            WsMessage m #= act.takeMessage();
-            return #m;
-        }
-
         if (kind == WsReadAction.SEND_FRAME) {
-            // An auto-pong (or other engine-built reply): write it under the
-            // write lock so it cannot split a concurrent data frame.
             WsFrame reply = act.getFrame();
             this.writeFrame(reply);
-            return null;
+            return;
         }
-
         if (kind == WsReadAction.CLOSED) {
-            // The peer closed. Send the reciprocal close if the engine built
-            // one (the local side had not already closed), then raise.
             WsFrame reply = act.getFrame();
             if (reply != null) {
                 this.writeFrame(reply);
@@ -549,11 +620,7 @@ public class WebSocket {
             }
             WsCloseReason r = act.getCloseReason();
             this.raiseClosed(r);
-            return null;            // unreachable — raiseClosed throws
         }
-
-        // NONE or PING (a surfaced ping the loop ignores in v1): read on.
-        return null;
     }
 
     /**

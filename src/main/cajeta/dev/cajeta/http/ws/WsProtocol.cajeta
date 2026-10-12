@@ -85,6 +85,7 @@ public class WsProtocol {
     boolean peerClosed;
     /** The peer's parsed close reason once `peerClosed`; else `null`. */
     WsCloseReason closeReason;
+    WsReadAction held;
 
     // -----------------------------------------------------------------------
 
@@ -94,6 +95,7 @@ public class WsProtocol {
         this.localCloseSent = false;
         this.peerClosed = false;
         this.closeReason = null;
+        this.held = null;
     }
 
     /** A read engine with auto-pong on and the default per-message cap. */
@@ -231,6 +233,34 @@ public class WsProtocol {
      * idempotent, and carries the `1007` reason out for
      * [`getCloseReason`](#getCloseReason) / the handler's `onClose`.
      */
+    /**
+     * [`onFrame`](#onFrame) for a connection that reuses `into` for every
+     * message. A data frame allocates nothing: a completed message is copied
+     * into `into` and the result is `WsReadAction.MESSAGE`. A control frame,
+     * a protocol failure or a closed engine builds its action as `onFrame`
+     * does and leaves it in [`pending`](#pending); the result is its kind.
+     */
+    public int32 step(WsFrame frame, WsMessage into) {
+        if (this.peerClosed || WsOpcode.isControl(frame.getOpcode())) {
+            this.held #= this.onFrame(frame);
+            return this.held.getKind();
+        }
+        if (this.assembler.acceptInto(frame, into)) {
+            if (into.isText() && !into.isCompressed()
+                    && !Utf8Validator.isValid(into.bytes(), into.length())) {
+                this.held #= this.failInvalidUtf8();
+                return this.held.getKind();
+            }
+            return WsReadAction.MESSAGE;
+        }
+        return WsReadAction.NONE;
+    }
+
+    /** The action the last [`step`](#step) built for a control frame or failure. */
+    public WsReadAction pending() {
+        return this.held;
+    }
+
     #WsReadAction failInvalidUtf8() {
         this.localCloseSent = true;
         this.peerClosed = true;
@@ -316,7 +346,7 @@ public class WsProtocol {
      */
     static #WsFrame copyFrame(WsFrame src) {
         int8[] sp = src.getPayload();
-        int32 n = sp.count();
+        int32 n = src.payloadLength();
         int8[] pay = heap int8[n];
         int32 i = 0;
         while (i < n) {

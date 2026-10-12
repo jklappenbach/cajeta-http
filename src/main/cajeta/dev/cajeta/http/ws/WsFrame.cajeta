@@ -43,6 +43,8 @@ public class WsFrame {
     public boolean masked;
     /** The unmasked application payload (never null; may be empty). Field 3. */
     public int8[] payload;
+    // The payload's length: `payload` may be longer when the frame is reused.
+    public int32 len;
     /**
      * The **RSV1** reserved bit (Field 4). Under `permessage-deflate`
      * (RFC 7692) it flags the first frame of a **compressed** message; with no
@@ -63,6 +65,7 @@ public class WsFrame {
         this.opcode = 0;            // WsOpcode.CONTINUATION
         this.masked = false;
         this.payload = heap int8[0];
+        this.len = 0;
         this.rsv1 = false;
         this.rsv2 = false;
         this.rsv3 = false;
@@ -77,6 +80,7 @@ public class WsFrame {
         f.fin = fin;
         f.opcode = opcode;
         f.masked = masked;
+        f.len = payload.count();
         f.payload = #payload;
         return #f;
     }
@@ -108,7 +112,15 @@ public class WsFrame {
 
     /** Payload length in bytes. */
     public int32 payloadLength() {
-        return this.payload.count();
+        return this.len;
+    }
+
+    /** Makes room for an `n`-byte payload, keeping the array when it is long enough. */
+    public void reserve(int32 n) {
+        if (this.payload.count() < n) {
+            this.payload = heap int8[n];
+        }
+        this.len = n;
     }
 
     /** `true` if this is a control frame (close/ping/pong). */

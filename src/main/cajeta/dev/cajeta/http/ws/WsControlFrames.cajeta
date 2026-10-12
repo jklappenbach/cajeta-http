@@ -100,7 +100,7 @@ public class WsControlFrames {
                 "pongFor requires a ping frame", (int64) -1);
         }
         int8[] src = ping.getPayload();
-        int32 n = src.count();
+        int32 n = ping.payloadLength();
         int8[] echo = heap int8[n];
         int32 i = 0;
         while (i < n) {
@@ -206,7 +206,7 @@ public class WsControlFrames {
                 "parseClose requires a close frame", (int64) -1);
         }
         int8[] pay = frame.getPayload();
-        int32 n = pay.count();
+        int32 n = frame.payloadLength();
         if (n == 0) {
             return WsCloseReason.noStatus();
         }

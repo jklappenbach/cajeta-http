@@ -39,6 +39,8 @@ public class WsMessage {
     public int32 opcode;
     /** The full reassembled application payload (never null; may be empty). Field 1. */
     public int8[] payload;
+    // The payload's length: `payload` may be longer when the message is reused.
+    public int32 len;
     /**
      * Whether the message arrived **compressed** (its first frame had RSV1
      * under `permessage-deflate`). Field 2. The reassembled `payload` is still
@@ -55,6 +57,7 @@ public class WsMessage {
     public WsMessage() {
         this.opcode = 2;            // WsOpcode.BINARY
         this.payload = heap int8[0];
+        this.len = 0;
         this.compressed = false;
     }
 
@@ -65,6 +68,7 @@ public class WsMessage {
     public static #WsMessage of(int32 opcode, #int8[] payload) {
         WsMessage m = heap WsMessage();
         m.opcode = opcode;
+        m.len = payload.count();
         m.payload = #payload;
         return #m;
     }
@@ -74,6 +78,7 @@ public class WsMessage {
                                           boolean compressed) {
         WsMessage m = heap WsMessage();
         m.opcode = opcode;
+        m.len = payload.count();
         m.payload = #payload;
         m.compressed = compressed;
         return #m;
@@ -89,14 +94,54 @@ public class WsMessage {
         return this.opcode;
     }
 
-    /** The full reassembled application payload (never null; may be empty). */
+    /**
+     * The full reassembled application payload (never null; may be empty),
+     * exactly [`length`](#length) bytes long. On a message the connection
+     * reuses this makes an exact copy the first time; [`bytes`](#bytes) reads
+     * without one.
+     */
     public int8[] getPayload() {
+        if (this.payload.count() != this.len) {
+            int8[] exact = heap int8[this.len];
+            int32 i = 0;
+            while (i < this.len) {
+                exact[i] = this.payload[i];
+                i = i + 1;
+            }
+            this.payload = #exact;
+        }
+        return this.payload;
+    }
+
+    /**
+     * The payload's backing array, valid for its first [`length`](#length)
+     * bytes and only until the connection reads its next message. No copy.
+     */
+    public int8[] bytes() {
         return this.payload;
     }
 
     /** Reassembled payload length in bytes. */
     public int32 length() {
-        return this.payload.count();
+        return this.len;
+    }
+
+    /**
+     * Makes this message `opcode` with the first `n` bytes of `src`, reusing
+     * the payload array when it is long enough.
+     */
+    public void fill(int32 opcode, int8[] src, int32 n, boolean compressed) {
+        if (this.payload.count() < n) {
+            this.payload = heap int8[n];
+        }
+        int32 i = 0;
+        while (i < n) {
+            this.payload[i] = src[i];
+            i = i + 1;
+        }
+        this.len = n;
+        this.opcode = opcode;
+        this.compressed = compressed;
     }
 
     /** `true` when this is a text message (`WsOpcode.TEXT`). */
@@ -122,7 +167,7 @@ public class WsMessage {
      * from a TEXT message anyway.
      */
     public #String text() {
-        int32 n = this.payload.count();
+        int32 n = this.len;
         int8[] copy = heap int8[n];
         int32 i = 0;
         while (i < n) {

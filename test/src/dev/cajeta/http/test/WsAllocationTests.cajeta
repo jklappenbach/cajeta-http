@@ -1,0 +1,122 @@
+package dev.cajeta.http.test;
+
+import cajeta.lang.String;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.server.HttpServer;
+import dev.cajeta.http.ws.WebSocketConnection;
+import dev.cajeta.http.ws.WebSocketHandler;
+import dev.cajeta.http.ws.WsMessage;
+import dev.cajeta.http.ws.WsUpgrade;
+
+/** Counts messages and reads the allocation counter at the 100th and the last. */
+final class CountingWsHandler implements WebSocketHandler {
+    int32 messages;
+    int32 bytes;
+    int64 at100;
+    int64 atLast;
+    int32 last;
+    boolean echo;
+
+    CountingWsHandler(int32 last, boolean echo) {
+        this.messages = 0;
+        this.bytes = 0;
+        this.at100 = 0;
+        this.atLast = 0;
+        this.last = last;
+        this.echo = echo;
+    }
+
+    public void onConnect(WebSocketConnection conn) { }
+
+    public void onMessage(WebSocketConnection conn, WsMessage message) {
+        this.messages = this.messages + 1;
+        this.bytes = this.bytes + message.length();
+        if (this.echo) {
+            conn.sendBinary(message.bytes(), 0, message.length());
+        }
+        if (this.messages == 100) {
+            this.at100 = Cajeta.allocatedBytes();
+        }
+        if (this.messages == this.last) {
+            this.atLast = Cajeta.allocatedBytes();
+        }
+    }
+
+    public void onClose(WebSocketConnection conn, int32 code) { }
+}
+
+/**
+ * primavera-web spec §6.1 to §6.3: after the upgrade a WebSocket reads frames
+ * from the connection's pooled input buffer and writes them into its pooled
+ * output buffer, so a warm connection allocates nothing per message.
+ */
+public final class WsAllocationTests {
+
+    static int32 put(int8[] b, int32 at, String s) {
+        int32 i = 0;
+        while (i < s.byteLength()) {
+            b[at + i] = s.byteAt(i);
+            i = i + 1;
+        }
+        return at + s.byteLength();
+    }
+
+    // One masked client frame: FIN, `opcode`, a payload under 126 bytes.
+    static int32 frame(int8[] b, int32 at, int32 opcode, String payload) {
+        int32 n = payload.byteLength();
+        b[at] = (int8) (128 | opcode);
+        b[at + 1] = (int8) (128 | n);
+        b[at + 2] = (int8) 17;
+        b[at + 3] = (int8) 34;
+        b[at + 4] = (int8) 51;
+        b[at + 5] = (int8) 68;
+        int32 i = 0;
+        while (i < n) {
+            b[at + 6 + i] = (int8) (payload.byteAt(i) ^ b[at + 2 + (i % 4)]);
+            i = i + 1;
+        }
+        return at + 6 + n;
+    }
+
+    // The upgrade, `count` five-byte text messages, and a close with no code.
+    static #ScriptChannel script(int32 count) {
+        int8[] b = heap int8[512 + count * 16];
+        int32 at = WsAllocationTests.put(b, 0,
+            "GET /ws HTTP/1.1\r\nHost: t\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+            + "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n");
+        int32 i = 0;
+        while (i < count) {
+            at = WsAllocationTests.frame(b, at, 1, "hello");
+            i = i + 1;
+        }
+        String closeBody = "\u0003è";
+        at = WsAllocationTests.frame(b, at, 8, closeBody);
+        return heap ScriptChannel(b, at, 4096);
+    }
+
+    static void served(Check c, boolean echo, String what) {
+        CountingWsHandler h = heap CountingWsHandler(1100, echo);
+        (HttpRequest, HttpResponse) -> void route = (HttpRequest q, HttpResponse r) -> {
+            WsUpgrade.accept(q, r, h, false);
+        };
+        HttpServer srv = heap HttpServer(route);
+        ScriptChannel warm #= WsAllocationTests.script(4);
+        srv.serveChannel(warm);
+        int32 pooled = srv.bufferAllocations();
+        ScriptChannel ch #= WsAllocationTests.script(1100);
+        srv.serveChannel(ch);
+        c.eqInt((int64) h.messages, 1104, what + ": every message reaches the handler");
+        c.eqInt((int64) h.bytes, 1104 * 5, what + ": each carries its five bytes");
+        c.eqInt((int64) (srv.bufferAllocations() - pooled), 0, what + ": a warm server takes no fresh buffer");
+        int64 d = h.atLast - h.at100;
+        c.that(d == (int64) 0, what + ": messages 100 to 1100 allocate nothing (" + d + " bytes)");
+    }
+
+    public static void run(Check c) {
+        System.stdout.println("-- ws allocation: receive --");
+        WsAllocationTests.served(c, false, "receive");
+        System.stdout.println("-- ws allocation: echo --");
+        WsAllocationTests.served(c, true, "echo");
+    }
+}

@@ -61,7 +61,7 @@ public class WsFrameEncoder {
     public static #int8[] encode(WsFrame frame, int8[] maskKey) {
         boolean masked = maskKey != null;
         int8[] payload = frame.payload;
-        int32 payLen = payload.count();
+        int32 payLen = frame.payloadLength();
 
         // --- compute the header size ---
         // byte0 + (1 | 3 | 9 length bytes) + (4 mask bytes if masked).

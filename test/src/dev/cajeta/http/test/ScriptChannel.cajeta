@@ -24,6 +24,23 @@ public final class ScriptChannel implements ByteChannel {
         this.maxWrite = 0;
     }
 
+    /** A channel that reads `len` bytes of `script`, `chunk` at a time. */
+    public ScriptChannel(int8[] script, int32 len, int32 chunk) {
+        this.input = heap int8[len];
+        int32 i = 0;
+        while (i < len) {
+            this.input[i] = script[i];
+            i = i + 1;
+        }
+        this.inLen = len;
+        this.inPos = 0;
+        this.chunk = chunk;
+        this.buf = heap int8[1 << 20];
+        this.len = 0;
+        this.writes = 0;
+        this.maxWrite = 0;
+    }
+
     public int64 readAsync(int8[] b, int64 offset, int64 length) {
         int32 n = this.inLen - this.inPos;
         if (n > this.chunk) {

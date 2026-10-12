@@ -11,7 +11,10 @@ package dev.cajeta.http.ws;
  *   - [`onConnect`](#onConnect) — once, right after the upgrade completes.
  *   - [`onMessage`](#onMessage) — per reassembled text/binary message, on the
  *     library's reader fiber. Control frames (ping/pong/close) are handled by
- *     the library and never surface here.
+ *     the library and never surface here. The message is lent for the call
+ *     and reused for the next one: [`WsMessage.bytes`](WsMessage.cajeta)
+ *     reads it with no copy, and a handler that keeps a message copies it
+ *     out (`text()`, `getPayload()`).
  *   - [`onClose`](#onClose) — once, when the connection ends, carrying the
  *     [`WsCloseCode`](WsCloseCode.cajeta): the peer's code on a clean close,
  *     `1006` on an abnormal drop, `1002` on a protocol fault, or `1011` when a
