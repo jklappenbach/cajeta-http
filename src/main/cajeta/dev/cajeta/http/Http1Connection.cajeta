@@ -356,6 +356,7 @@ public final class Http1Connection {
             this.in.advanceRead(this.in.readable());
         }
         AsyncWriter writer = heap AsyncWriter(this.ch);
+        t.attach(this.ch);
         t.run(reader, writer);
     }
 

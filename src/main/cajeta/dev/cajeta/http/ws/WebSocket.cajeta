@@ -3,6 +3,7 @@ package dev.cajeta.http.ws;
 import cajeta.lang.String;
 import cajeta.io.net.AsyncReader;
 import cajeta.io.net.AsyncWriter;
+import cajeta.io.net.ByteChannel;
 import cajeta.io.net.TcpStream;
 import cajeta.io.net.SocketAddress;
 import cajeta.io.net.IpAddress;
@@ -162,6 +163,11 @@ public class WebSocket {
     // A frame header written straight to the writer by a direct send.
     int8[] header;
 
+    // The connection's channel, lent by the takeover, and the code `abort`
+    // ended the connection with (0 when it did not).
+    ByteChannel transport;
+    int32 abortCode;
+
     /** Default scratch-read size when feeding the decoder. */
     static final int32 READ_CHUNK = 8192;
 
@@ -195,6 +201,8 @@ public class WebSocket {
         this.scratchAt = 0;
         this.scratchLen = 0;
         this.header = heap int8[10];
+        this.transport = null;
+        this.abortCode = 0;
     }
 
     /**
@@ -442,6 +450,31 @@ public class WebSocket {
     }
 
     /**
+     * Send bytes `offset` to `offset + length` of `data`, which must be UTF-8,
+     * as one **text** message. A server connection without compression frames
+     * them straight into the writer, with no copy.
+     */
+    public void sendText(int8[] data, int32 offset, int32 length) {
+        this.requireOpen();
+        if (this.direct()) {
+            LockGuard g #= this.writeLock.acquire();
+            this.writeHeader(WsOpcode.TEXT, length);
+            if (length > 0) {
+                this.writer.writeAll(data, offset, length);
+            }
+            this.writer.flush();
+            return;
+        }
+        int8[] pay = heap int8[length];
+        int32 i = 0;
+        while (i < length) {
+            pay[i] = data[offset + i];
+            i = i + 1;
+        }
+        this.writeData(WsOpcode.TEXT, #pay, length);
+    }
+
+    /**
      * Send bytes `offset` to `offset + length` of `data` as one **binary**
      * message. A server connection without compression frames them straight
      * into the writer, with no copy; otherwise they are copied into the frame.
@@ -629,6 +662,38 @@ public class WebSocket {
      * 6455 §7.4). A no-status close (empty close frame) surfaces
      * [`WsCloseCode.NO_STATUS`](WsCloseCode.cajeta) (`1005`).
      */
+    /** Lends the connection's channel, for [`abort`](#abort). */
+    public void useTransport(ByteChannel ch) {
+        this.transport #= ch;
+    }
+
+    /**
+     * Ends the connection without a close handshake, for a peer that has
+     * stopped reading: a sender parked on its full socket holds the write
+     * lock, so no CLOSE frame can be written. Closes the channel, which fails
+     * any parked send and ends the reader loop; `onClose` then reports
+     * `code`. Takes no lock, so it can run beside a parked sender. A no-op
+     * without a channel or once aborted.
+     */
+    public void abort(int32 code) {
+        if (this.abortCode != 0 || this.transport == null) {
+            return;
+        }
+        this.abortCode = code;
+        this.closeSent = true;
+        // Closing alone does not wake a fiber parked on the socket; a shutdown
+        // fails its wait.
+        if (this.transport instanceof TcpStream t) {
+            t.shutdown(2);
+        }
+        this.transport.close();
+    }
+
+    /** The code [`abort`](#abort) ended the connection with, or 0. */
+    public int32 abortedWith() {
+        return this.abortCode;
+    }
+
     void raiseClosed(WsCloseReason r) {
         // Raise with the close *code* — the load-bearing discriminant the
         // acceptance row `closeHandshakeReportsCode` checks (RFC 6455 §7.4).

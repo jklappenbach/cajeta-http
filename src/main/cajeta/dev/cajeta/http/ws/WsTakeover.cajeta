@@ -2,6 +2,7 @@ package dev.cajeta.http.ws;
 
 import cajeta.io.net.AsyncReader;
 import cajeta.io.net.AsyncWriter;
+import cajeta.io.net.ByteChannel;
 import dev.cajeta.http.Takeover;
 
 /**
@@ -12,15 +13,22 @@ import dev.cajeta.http.Takeover;
 public final class WsTakeover extends Takeover {
     WebSocketHandler handler;
     PmdParams params;
+    ByteChannel ch;
 
     public WsTakeover(WebSocketHandler handler, #PmdParams params) {
         this.handler #= handler;
         this.params #= params;
+        this.ch = null;
+    }
+
+    public void attach(ByteChannel ch) {
+        this.ch #= ch;
     }
 
     public void run(AsyncReader reader, AsyncWriter writer) {
         WebSocket ws #= WebSocket.forServer(reader, writer);
         ws.enableCompression(this.params);
+        ws.useTransport(this.ch);
         WsUpgrade.run(#ws, this.handler);
     }
 }

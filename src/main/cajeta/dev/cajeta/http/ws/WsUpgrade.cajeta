@@ -109,6 +109,9 @@ public final class WsUpgrade {
             code = WsCloseCode.INTERNAL_ERROR;
             WsUpgrade.closeQuietly(ws, code);
         }
+        if (ws.abortedWith() != 0) {
+            code = ws.abortedWith();
+        }
         try {
             handler.onClose(conn, code);
         } catch (Exception e) {

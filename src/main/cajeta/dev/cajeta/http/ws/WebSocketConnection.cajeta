@@ -33,9 +33,22 @@ public final class WebSocketConnection {
         this.ws.sendBinary(data);
     }
 
+    /** Send bytes `offset` to `offset + length` of `data`, UTF-8, as a text message. */
+    public void sendText(int8[] data, int32 offset, int32 length) {
+        this.ws.sendText(data, offset, length);
+    }
+
     /** Send bytes `offset` to `offset + length` of `data` as a binary message. */
     public void sendBinary(int8[] data, int32 offset, int32 length) {
         this.ws.sendBinary(data, offset, length);
+    }
+
+    /**
+     * Ends the connection at once, without a close handshake, for a peer that
+     * has stopped reading; `onClose` reports `code`. See `WebSocket.abort`.
+     */
+    public void abort(int32 code) {
+        this.ws.abort(code);
     }
 
     /** Initiate the closing handshake with `code` + `reason` (RFC 6455 §5.5.1). */

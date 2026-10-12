@@ -33,7 +33,7 @@ final class CountingWsHandler implements WebSocketHandler {
         this.messages = this.messages + 1;
         this.bytes = this.bytes + message.length();
         if (this.echo) {
-            conn.sendBinary(message.bytes(), 0, message.length());
+            conn.sendText(message.bytes(), 0, message.length());
         }
         if (this.messages == 100) {
             this.at100 = Cajeta.allocatedBytes();
