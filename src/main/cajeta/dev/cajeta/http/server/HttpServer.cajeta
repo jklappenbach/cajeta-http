@@ -412,6 +412,15 @@ public class HttpServer {
         return this.buffers.allocations();
     }
 
+    /**
+     * Connection buffers returned and waiting to be reused. A closed
+     * connection gives back both of its buffers, so a caller that must not
+     * race the server's teardown can wait for this count instead of sleeping.
+     */
+    public int32 idleBuffers() {
+        return this.buffers.idle();
+    }
+
     /** A builder. */
     public static #HttpServerBuilder builder() {
         return heap HttpServerBuilder();

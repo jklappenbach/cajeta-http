@@ -32,6 +32,12 @@ public final class ConnectionBuffers {
         this.pool.release(#b);
     }
 
+    /** Buffers returned and waiting to be taken again. */
+    public int32 idle() {
+        LockGuard g #= this.gate.acquire();
+        return this.pool.idle();
+    }
+
     /** The pool's lifetime count of fresh buffers. */
     public int32 allocations() {
         LockGuard g #= this.gate.acquire();

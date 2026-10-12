@@ -38,6 +38,23 @@ public final class ViewContractTests {
         ViewContractTests.headRoom(c);
         System.stdout.println("-- view contract: routed allocation --");
         ViewContractTests.routedAllocation(c);
+        System.stdout.println("-- view contract: idle buffers --");
+        ViewContractTests.idleBuffers(c);
+    }
+
+    // A connection returns both of its buffers when it closes, so a caller can
+    // wait for that instead of racing the server's teardown.
+    static void idleBuffers(Check c) {
+        (HttpRequest, HttpResponse) -> void h = (HttpRequest q, HttpResponse r) -> ViewContractTests.sample(q, r);
+        HttpServer srv = heap HttpServer(h);
+        c.eqInt((int64) srv.idleBuffers(), 0, "a fresh server holds no idle buffer");
+        ScriptChannel one = heap ScriptChannel("GET /users/1 HTTP/1.1\r\n\r\n", 4096);
+        srv.serveChannel(one);
+        c.eqInt((int64) srv.idleBuffers(), 2, "a closed connection returns its input and output buffers");
+        ScriptChannel two = heap ScriptChannel("GET /users/2 HTTP/1.1\r\n\r\n", 4096);
+        srv.serveChannel(two);
+        c.eqInt((int64) srv.idleBuffers(), 2, "the next connection takes them and returns them");
+        c.eqInt((int64) srv.bufferAllocations(), 2, "and makes no fresh one");
     }
 
     // method, target and version, then `|name:value` per header, in wire order.
