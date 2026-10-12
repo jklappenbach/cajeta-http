@@ -62,6 +62,16 @@ v0.5.1 republishes 0.5.0 unchanged on cajeta v0.36.0 and codec 0.8.5.
 v0.5.2 republishes it unchanged on cajeta v0.38.0 and codec 0.8.6.
 v0.5.3 republishes it unchanged on cajeta v0.39.0 and codec 0.8.7.
 
+v0.6.0 makes a warm WebSocket connection allocate nothing per message. A
+handler's `WsMessage` is lent for the call and reused: `bytes()` and
+`length()` read it in place, and a handler that keeps a message copies it out
+with `text()` or `getPayload()`. That is the breaking change. Also new:
+`WebSocket.next()`, `sendText` and `sendBinary` over a byte range, `abort(code)`
+for a peer that has stopped reading, and `HttpServer.idleBuffers()`.
+`WsUpgrade.accept(q, r, #h, ...)` hands a per-connection handler to its
+connection, which frees it at close; before, it was freed when `accept`
+returned.
+
 Earlier releases: v0.3.0 made long HTTP/2 connections flat (receive-window
 credit returns, per-request state is reclaimed) and v0.3.1 republished it on
 the v0.29.0 toolchain.
