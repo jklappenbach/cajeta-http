@@ -24,6 +24,7 @@ public final class TestMain {
         if (sel.want("ViewContractTests")) { ViewContractTests.run(c); }
         if (sel.want("WsAllocationTests")) { WsAllocationTests.run(c); }
         if (sel.want("WsAbortTests")) { WsAbortTests.run(c); }
+        if (sel.want("WsHandlerOwnershipTests")) { WsHandlerOwnershipTests.run(c); }
         if (sel.want("StatusCatalogueTests")) { StatusCatalogueTests.run(c); }
         if (sel.want("RouterSelectTests")) { RouterSelectTests.run(c); }
         if (sel.want("RouterTests")) { RouterTests.run(c); }

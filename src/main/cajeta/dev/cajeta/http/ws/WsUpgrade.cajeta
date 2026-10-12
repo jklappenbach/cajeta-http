@@ -23,7 +23,9 @@ import dev.cajeta.http.h1.HttpParserLimits;
 public final class WsUpgrade {
     /**
      * Answers an upgrade request on `r`. On success the connection switches to
-     * `handler` after the 101, and `handler` must outlive it. Returns false after
+     * `handler` after the 101. A lent `handler` must outlive the connection;
+     * `accept(q, r, #h, ...)` hands it to the connection, which frees it when
+     * the connection ends. Returns false after
      * writing the 400 or 426 rejection when `q` is not a valid upgrade.
      */
     public static boolean accept(HttpRequest q, HttpResponse r, WebSocketHandler handler,
@@ -38,7 +40,9 @@ public final class WsUpgrade {
         if (params.enabled) {
             r.header("Sec-WebSocket-Extensions", params.responseHeader);
         }
-        r.upgrade(heap WsTakeover(handler, #params));
+        // `#handler` forwards the mode it was handed: a lent handler stays the
+        // caller's, a transferred one becomes the connection's.
+        r.upgrade(heap WsTakeover(#handler, #params));
         return true;
     }
 

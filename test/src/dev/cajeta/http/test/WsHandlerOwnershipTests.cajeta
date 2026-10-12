@@ -1,0 +1,81 @@
+package dev.cajeta.http.test;
+
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.server.HttpServer;
+import dev.cajeta.http.ws.WebSocketConnection;
+import dev.cajeta.http.ws.WebSocketHandler;
+import dev.cajeta.http.ws.WsMessage;
+import dev.cajeta.http.ws.WsUpgrade;
+
+/** Counts its callbacks and its drops. */
+final class DroppingHandler implements WebSocketHandler {
+    static int32 drops;
+    static int32 messages;
+    static int32 closes;
+    static int32 dropsAtMessage;
+
+    DroppingHandler() { }
+
+    public void onConnect(WebSocketConnection conn) { }
+    public void onMessage(WebSocketConnection conn, WsMessage message) {
+        DroppingHandler.messages = DroppingHandler.messages + 1;
+        DroppingHandler.dropsAtMessage = DroppingHandler.drops;
+    }
+    public void onClose(WebSocketConnection conn, int32 code) {
+        DroppingHandler.closes = DroppingHandler.closes + 1;
+    }
+    public ~DroppingHandler() {
+        DroppingHandler.drops = DroppingHandler.drops + 1;
+    }
+}
+
+/**
+ * `WsUpgrade.accept` forwards the handler's mode to the connection: a lent
+ * handler stays the caller's, and `accept(q, r, #h, ...)` makes the connection
+ * its owner, so a per-connection handler is freed when its connection ends.
+ */
+public final class WsHandlerOwnershipTests {
+    static DroppingHandler SHARED = heap DroppingHandler();
+
+    static void reset() {
+        DroppingHandler.drops = 0;
+        DroppingHandler.messages = 0;
+        DroppingHandler.closes = 0;
+        DroppingHandler.dropsAtMessage = -1;
+    }
+
+    static void lent(HttpRequest q, HttpResponse r) {
+        WsUpgrade.accept(q, r, WsHandlerOwnershipTests.SHARED, false);
+    }
+
+    static void owned(HttpRequest q, HttpResponse r) {
+        DroppingHandler h = heap DroppingHandler();
+        WsUpgrade.accept(q, r, #h, false);
+    }
+
+    static void served(Check c, boolean transfer) {
+        WsHandlerOwnershipTests.reset();
+        (HttpRequest, HttpResponse) -> void route = (HttpRequest q, HttpResponse r) -> {
+            if (transfer) {
+                WsHandlerOwnershipTests.owned(q, r);
+            } else {
+                WsHandlerOwnershipTests.lent(q, r);
+            }
+        };
+        HttpServer srv = heap HttpServer(route);
+        ScriptChannel ch #= WsAllocationTests.script(1);
+        srv.serveChannel(ch);
+        c.eqInt((int64) DroppingHandler.messages, 1, "the handler gets the message");
+        c.eqInt((int64) DroppingHandler.closes, 1, "and the close");
+        c.eqInt((int64) DroppingHandler.dropsAtMessage, 0, "the handler is alive while its connection runs");
+    }
+
+    public static void run(Check c) {
+        System.stdout.println("-- ws handler ownership --");
+        WsHandlerOwnershipTests.served(c, false);
+        c.eqInt((int64) DroppingHandler.drops, 0, "a lent handler outlives its connection");
+        WsHandlerOwnershipTests.served(c, true);
+        c.eqInt((int64) DroppingHandler.drops, 1, "a transferred handler is freed when its connection ends");
+    }
+}
