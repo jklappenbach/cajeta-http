@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write
 
 # Builds the library .cja on every PR; on a v* tag also publishes a GitHub
 # Release and a signed publish to Olla. Logic lives in the reusable workflow.
