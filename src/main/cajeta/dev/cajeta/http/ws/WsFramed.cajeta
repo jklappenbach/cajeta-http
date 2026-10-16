@@ -1,0 +1,288 @@
+package dev.cajeta.http.ws;
+
+import cajeta.collection.ArrayList;
+import cajeta.error.Exception;
+import cajeta.io.net.AsyncReader;
+import cajeta.io.net.AsyncWriter;
+import cajeta.io.net.ByteBuffer;
+import cajeta.io.net.ByteChannel;
+import dev.cajeta.http.h2.NowWriter;
+
+/**
+ * A WebSocket connection on the framer (request-dispatch spec §2.5). The
+ * framer feeds the connection's bytes to [`feed`](#feed), which decodes
+ * frames, answers pings, completes the close handshake and queues each
+ * complete message as a unit; a worker's [`turn`](#turn) runs `onConnect`
+ * once, every queued `onMessage` in order, and `onClose` last. The framer
+ * never parks: its control frames go out through the connection's
+ * non-parking write under the socket's write lock when it is free, and wait
+ * in [`WebSocket`](WebSocket.cajeta)'s framer queue for the next sender when
+ * a worker holds it, so frames from the two sides never interleave.
+ */
+public final class WsFramed {
+    WebSocketHandler handler;
+    AsyncReader reader;         // the socket borrows both; the framer reads from its own buffer
+    AsyncWriter writer;
+    WebSocket ws;
+    WebSocketConnection conn;
+    NowWriter now;
+    ArrayList<WsMessage> ready;
+    ArrayList<WsMessage> spare;
+    boolean connected;          // onConnect ran
+    boolean closing;            // the close is decided; onClose is the last unit
+    boolean closed;             // onClose ran
+    int32 closeCode;
+    int32 maxUnits;
+
+    WsFramed(WebSocketHandler handler, PmdParams params, ByteChannel ch, ^NowWriter now,
+             int64 maxMessage, int32 maxUnits) {
+        this.handler #= handler;
+        this.reader = heap AsyncReader(ch);
+        this.writer = heap AsyncWriter(ch);
+        this.ws #= WebSocket.forServer(this.reader, this.writer);
+        this.ws.enableCompression(params);
+        this.ws.useTransport(ch);
+        this.ws.withMaxMessageLength(maxMessage);
+        this.conn = heap WebSocketConnection(this.ws);
+        this.now = now;
+        this.ready = heap ArrayList<WsMessage>();
+        this.spare = heap ArrayList<WsMessage>();
+        this.connected = false;
+        this.closing = false;
+        this.closed = false;
+        this.closeCode = WsCloseCode.NORMAL;
+        this.maxUnits = maxUnits < 1 ? 1 : maxUnits;
+    }
+
+    /** Complete messages waiting, plus the final turn once the close is decided. */
+    public int32 unitCount() {
+        int32 n = this.ready.count();
+        if (this.closing && !this.closed) {
+            n = n + 1;
+        }
+        return n;
+    }
+
+    /** True when the framer should stop reading: the mailbox holds `maxUnits` messages. */
+    public boolean full() {
+        return this.ready.count() >= this.maxUnits;
+    }
+
+    /** True once `onClose` ran: nothing more will be dispatched. */
+    public boolean finished() {
+        return this.closed;
+    }
+
+    /**
+     * Decodes what `in` holds, up to the mailbox size. Pings are answered
+     * here; a close from the peer is answered here and leaves one final unit;
+     * a protocol failure or an oversized message closes with its code here,
+     * so no fiber is spent on it. Returns the units waiting.
+     */
+    public int32 feed(ByteBuffer in) {
+        this.flushPending();
+        try {
+            boolean more = true;
+            while (more) {
+                while (this.ws.decoder.hasFrame() && !this.full() && !this.closing) {
+                    this.oneFrame();
+                }
+                if (this.closing || this.full() || in.readable() == 0) {
+                    more = false;
+                } else {
+                    int32 took = this.ws.decoder.feedSome(in.array(), in.readPosition(), in.readable());
+                    in.advanceRead(took);
+                    if (took <= 0) {
+                        more = false;
+                    }
+                }
+            }
+        } catch (MessageTooLargeException e) {
+            this.failClose(WsCloseCode.MESSAGE_TOO_BIG);
+        } catch (WebSocketException e) {
+            this.failClose(WsCloseCode.PROTOCOL_ERROR);
+        } catch (Exception e) {
+            this.failClose(WsCloseCode.INTERNAL_ERROR);
+        }
+        return this.unitCount();
+    }
+
+    /** The socket reached EOF: without a close frame that is an abnormal close. */
+    public void transportEof() {
+        if (!this.closing) {
+            this.closeCode = WsCloseCode.ABNORMAL;
+            this.closing = true;
+        }
+    }
+
+    void oneFrame() {
+        WsFrame f #= this.ws.decoder.nextFrame();
+        WsMessage m #= this.takeSpare();
+        int32 kind = this.ws.protocol.step(f, m);
+        this.ws.decoder.recycle(#f);
+        if (kind == WsReadAction.MESSAGE) {
+            if (this.ws.compress && m.isCompressed()) {
+                int8[] plain #= this.ws.codec.decompress(m.bytes(), m.length());
+                m.fill(m.getOpcode(), plain, (int32) plain.count(), false);
+                if (m.isText() && !Utf8Validator.isValid(m.bytes(), m.length())) {
+                    this.spare.add(#m);
+                    this.failClose(WsCloseCode.INVALID_PAYLOAD);
+                    return;
+                }
+            }
+            this.ready.add(#m);
+            return;
+        }
+        this.spare.add(#m);
+        if (kind != WsReadAction.NONE) {
+            this.act(this.ws.protocol.pending());
+        }
+    }
+
+    #WsMessage takeSpare() {
+        if (this.spare.count() > 0) {
+            return this.spare.removeAt(this.spare.count() - 1);
+        }
+        return heap WsMessage();
+    }
+
+    void act(WsReadAction a) {
+        int32 kind = a.getKind();
+        if (kind == WsReadAction.SEND_FRAME) {
+            this.writeNow(a.getFrame());
+            return;
+        }
+        if (kind == WsReadAction.CLOSED) {
+            WsFrame reply = a.getFrame();
+            if (reply != null) {
+                this.writeNow(reply);
+                this.ws.closeSent = true;
+            }
+            WsCloseReason r = a.getCloseReason();
+            this.closeCode = WsCloseCode.NO_STATUS;
+            if (r != null && r.hasCode()) {
+                this.closeCode = r.getCode();
+            }
+            this.closing = true;
+        }
+    }
+
+    /** Fails the connection from the framer: the close frame goes out now, onClose is the final unit. */
+    void failClose(int32 code) {
+        if (this.closing) {
+            return;
+        }
+        if (!this.ws.closeSent) {
+            WsFrame f #= WsControlFrames.closeCode(code);
+            this.writeNow(f);
+            this.ws.closeSent = true;
+            this.ws.protocol.markLocalCloseSent();
+        }
+        this.closeCode = code;
+        this.closing = true;
+    }
+
+    // ----- the framer's writes -----------------------------------------------
+
+    void writeNow(WsFrame f) {
+        int8[] wire #= WsFrameEncoder.encodeUnmasked(f);
+        int32 n = (int32) wire.count();
+        if (this.ws.writeLock.tryAcquire() != 1) {
+            // A worker is mid-send: it drains this before its next frame.
+            this.ws.queueFramerBytes(wire, 0, n);
+            return;
+        }
+        try {
+            if (this.ws.framerPendLen > 0) {
+                this.flushLocked();
+            }
+            if (this.ws.framerPendLen > 0) {
+                this.ws.queueFramerBytes(wire, 0, n);
+            } else {
+                int32 sent = this.now.writeNow(wire, 0, n);
+                if (sent < 0) {
+                    sent = 0;
+                }
+                if (sent < n) {
+                    this.ws.queueFramerBytes(wire, sent, n - sent);
+                }
+            }
+        } finally {
+            this.ws.writeLock.releaseLock();
+        }
+    }
+
+    /** Writes what the socket takes of the queued framer bytes; the lock is held. */
+    void flushLocked() {
+        int32 sent = this.now.writeNow(this.ws.framerPend, this.ws.framerPendOff, this.ws.framerPendLen);
+        if (sent > 0) {
+            this.ws.framerPendOff = this.ws.framerPendOff + sent;
+            this.ws.framerPendLen = this.ws.framerPendLen - sent;
+        }
+        if (this.ws.framerPendLen == 0) {
+            this.ws.framerPendOff = 0;
+        }
+    }
+
+    void flushPending() {
+        if (this.ws.framerPendLen == 0) {
+            return;
+        }
+        if (this.ws.writeLock.tryAcquire() != 1) {
+            return;
+        }
+        try {
+            this.flushLocked();
+        } finally {
+            this.ws.writeLock.releaseLock();
+        }
+    }
+
+    // ----- the worker's turn -------------------------------------------------
+
+    /**
+     * One worker turn: `onConnect` the first time, every queued message in
+     * order, and `onClose` once the close is decided. False when the
+     * connection is over and the caller should close the socket.
+     */
+    public boolean turn() {
+        try {
+            if (!this.connected) {
+                this.connected = true;
+                this.handler.onConnect(this.conn);
+            }
+            while (this.ready.count() > 0 && !this.closing && !this.ws.closeSent) {
+                WsMessage m #= this.ready.removeAt(0);
+                this.handler.onMessage(this.conn, m);
+                this.spare.add(#m);
+            }
+        } catch (WebSocketException e) {
+            this.failOnWorker(WsCloseCode.PROTOCOL_ERROR);
+        } catch (Exception e) {
+            this.failOnWorker(WsCloseCode.INTERNAL_ERROR);
+        }
+        if (this.ws.abortedWith() != 0 && !this.closing) {
+            this.closeCode = this.ws.abortedWith();
+            this.closing = true;
+        }
+        if (this.closing && !this.closed) {
+            this.closed = true;
+            try {
+                this.handler.onClose(this.conn, this.closeCode);
+            } catch (Exception e) {
+            }
+            return false;
+        }
+        return true;
+    }
+
+    /** A handler threw on a worker: the parking close is fine here. */
+    void failOnWorker(int32 code) {
+        if (this.closing) {
+            return;
+        }
+        WsUpgrade.closeQuietly(this.ws, code);
+        this.closeCode = code;
+        this.closing = true;
+    }
+}

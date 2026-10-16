@@ -167,6 +167,12 @@ public class WebSocket {
     // ended the connection with (0 when it did not).
     ByteChannel transport;
     int32 abortCode;
+    // Control frames the framer could not write because a worker held the
+    // lock, or the socket took only part of one: the next sender drains them
+    // first, so the two sides' frames never interleave (WsFramed).
+    int8[] framerPend;
+    int32 framerPendOff;
+    int32 framerPendLen;
 
     /** Default scratch-read size when feeding the decoder. */
     static final int32 READ_CHUNK = 8192;
@@ -203,6 +209,9 @@ public class WebSocket {
         this.header = heap int8[10];
         this.transport = null;
         this.abortCode = 0;
+        this.framerPend = heap int8[256];
+        this.framerPendOff = 0;
+        this.framerPendLen = 0;
     }
 
     /**
@@ -417,6 +426,7 @@ public class WebSocket {
         }
         if (this.direct()) {
             LockGuard g #= this.writeLock.acquire();
+            this.drainFramerPending();
             this.writeHeader(WsOpcode.TEXT, n);
             int32 j = 0;
             while (j < n) {
@@ -458,6 +468,7 @@ public class WebSocket {
         this.requireOpen();
         if (this.direct()) {
             LockGuard g #= this.writeLock.acquire();
+            this.drainFramerPending();
             this.writeHeader(WsOpcode.TEXT, length);
             if (length > 0) {
                 this.writer.writeAll(data, offset, length);
@@ -484,6 +495,7 @@ public class WebSocket {
         int32 n = length;
         if (this.direct()) {
             LockGuard g #= this.writeLock.acquire();
+            this.drainFramerPending();
             this.writeHeader(WsOpcode.BINARY, n);
             if (n > 0) {
                 this.writer.writeAll(data, offset, n);
@@ -502,6 +514,43 @@ public class WebSocket {
 
     // A server frame is unmasked, so with no compression its payload can go
     // to the writer as it is.
+    /** Appends bytes the framer could not write; the lock is held or the caller is the framer. */
+    void queueFramerBytes(int8[] b, int32 off, int32 len) {
+        int32 need = this.framerPendOff + this.framerPendLen + len;
+        if (need > this.framerPend.count()) {
+            int32 cap = (int32) this.framerPend.count() * 2;
+            while (cap < need) {
+                cap = cap * 2;
+            }
+            int8[] grown = heap int8[cap];
+            int32 i = 0;
+            while (i < this.framerPendLen) {
+                grown[i] = this.framerPend[this.framerPendOff + i];
+                i = i + 1;
+            }
+            this.framerPend #= grown;
+            this.framerPendOff = 0;
+        }
+        int32 at = this.framerPendOff + this.framerPendLen;
+        int32 j = 0;
+        while (j < len) {
+            this.framerPend[at + j] = b[off + j];
+            j = j + 1;
+        }
+        this.framerPendLen = this.framerPendLen + len;
+    }
+
+    /** Writes the framer's queued bytes before a frame of this side's; the lock is held. */
+    void drainFramerPending() {
+        if (this.framerPendLen == 0) {
+            return;
+        }
+        this.writer.writeAll(this.framerPend, this.framerPendOff, this.framerPendLen);
+        this.writer.flush();
+        this.framerPendOff = 0;
+        this.framerPendLen = 0;
+    }
+
     boolean direct() {
         return !this.isClient && !this.compress;
     }
@@ -778,6 +827,7 @@ public class WebSocket {
      */
     void writeFrame(WsFrame frame) {
         LockGuard g #= this.writeLock.acquire();
+        this.drainFramerPending();
         if (this.isClient) {
             // Client: mask with a fresh per-frame key (see the scope note).
             int8[] key #= this.nextMaskKey();

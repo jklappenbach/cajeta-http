@@ -961,9 +961,16 @@ public final class DispatchTests {
                 Fiber.sleep(Duration.ofMillis((int64) 50));
                 sock.close();
             }
-            Fiber.sleep(Duration.ofMillis((int64) 400));
+            // The worker's 100 ms pass returns to the framer, which then drops
+            // the connection; poll rather than sleep a fixed time, so a late
+            // drop and a lost one read differently.
+            int32 waited = 0;
+            while (waited < 3000 && srv.server.inflightCount() != 0) {
+                Fiber.sleep(Duration.ofMillis((int64) 20));
+                waited = waited + 20;
+            }
             c.eqInt(srv.dispatches() - d0, (int64) 1, "the stream was dispatched before the reset");
-            c.eqInt((int64) srv.server.inflightCount(), (int64) 0, "the connection was counted gone exactly once");
+            c.eqInt((int64) srv.server.inflightCount(), (int64) 0, "the connection was counted gone exactly once (" + waited + " ms)");
             String[] paths = heap String[1];
             paths[0] = "/";
             boolean[] close = heap boolean[1];

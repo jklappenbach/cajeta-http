@@ -1,0 +1,430 @@
+package dev.cajeta.http.test;
+
+import cajeta.concurrent.Fiber;
+import cajeta.error.Exception;
+import cajeta.io.net.AsyncReader;
+import cajeta.io.net.AsyncWriter;
+import cajeta.io.net.TcpStream;
+import cajeta.io.net.uri.Uri;
+import cajeta.time.Duration;
+import dev.cajeta.http.Bytes;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.server.HttpServer;
+import dev.cajeta.http.server.HttpServerBuilder;
+import dev.cajeta.http.ws.ConnectionClosedException;
+import dev.cajeta.http.ws.WebSocket;
+import dev.cajeta.http.ws.WebSocketConnection;
+import dev.cajeta.http.ws.WebSocketHandler;
+import dev.cajeta.http.ws.WsCloseCode;
+import dev.cajeta.http.ws.WsMessage;
+import dev.cajeta.http.ws.WsOpcode;
+import dev.cajeta.http.ws.WsUpgrade;
+import dev.cajeta.unit.Check;
+
+/** Echoes each text message, records the lifecycle, and can sleep per message. */
+final class RecordingWsHandler implements WebSocketHandler {
+    public int32 connects;
+    public int32 messages;
+    public int32 closes;
+    public int32 lastCode;
+    public int32 sleepMs;
+    public String joined;
+
+    public RecordingWsHandler(int32 sleepMs) {
+        this.connects = 0;
+        this.messages = 0;
+        this.closes = 0;
+        this.lastCode = 0;
+        this.sleepMs = sleepMs;
+        this.joined = "";
+    }
+
+    public void onConnect(WebSocketConnection conn) {
+        this.connects = this.connects + 1;
+    }
+
+    public void onMessage(WebSocketConnection conn, WsMessage message) {
+        this.messages = this.messages + 1;
+        String t #= message.text();
+        this.joined = this.joined + t + ",";
+        if (this.sleepMs > 0) {
+            Fiber.sleep(Duration.ofMillis((int64) this.sleepMs));
+        }
+        conn.send(t);
+    }
+
+    public void onClose(WebSocketConnection conn, int32 code) {
+        this.closes = this.closes + 1;
+        this.lastCode = code;
+    }
+}
+
+/**
+ * request-dispatch plan Unit 6 (spec §2.5): WebSocket frames are decoded on
+ * the framer, a complete message is a unit, pings are answered without a
+ * fiber, and a connection that sends nothing holds no fiber.
+ */
+public final class WsDispatchTests {
+    static RecordingWsHandler ECHO;
+    static RecordingWsHandler SLOW;
+
+    public static void run(Check c) {
+        System.stdout.println("-- ws dispatch: three quick messages are one dispatch, in order (6.1.1) --");
+        WsDispatchTests.threeQuickMessagesOneDispatch(c);
+        System.stdout.println("-- ws dispatch: a thousand silent clients hold no worker; pings answered (6.1.2) --");
+        WsDispatchTests.silentClientsHoldNoWorkers(c);
+        System.stdout.println("-- ws dispatch: an oversized message closes with 1009 on the framer, no dispatch (6.1.3) --");
+        WsDispatchTests.oversizeMessageClosesOnFramer(c);
+        System.stdout.println("-- ws dispatch: a parked onMessage holds its own client only (6.1.4) --");
+        WsDispatchTests.slowHandlerHoldsOnlyItsClient(c);
+        System.stdout.println("-- ws dispatch: a compressed message and a close handshake through the pool (6.1.5) --");
+        WsDispatchTests.compressedMessageThroughThePool(c);
+    }
+
+    // ----- fixtures -------------------------------------------------------
+
+    static void handle(HttpRequest q, HttpResponse r) {
+        if (Bytes.equals(q.path(), "/ws")) {
+            WsUpgrade.accept(q, r, WsDispatchTests.ECHO, false);
+            return;
+        }
+        if (Bytes.equals(q.path(), "/slow")) {
+            WsUpgrade.accept(q, r, WsDispatchTests.SLOW, false);
+            return;
+        }
+        if (Bytes.equals(q.path(), "/pmd")) {
+            WsUpgrade.accept(q, r, WsDispatchTests.ECHO, true);
+            return;
+        }
+        r.body("plain");
+    }
+
+    static #HttpServer wsServer(int64 maxMessage) {
+        WsDispatchTests.ECHO = heap RecordingWsHandler(0);
+        WsDispatchTests.SLOW = heap RecordingWsHandler(150);
+        HttpServerBuilder b #= HttpServer.builder();
+        b.bind("127.0.0.1:0");
+        b.handler((HttpRequest q, HttpResponse r) -> WsDispatchTests.handle(q, r));
+        b.framers(1);
+        if (maxMessage > (int64) 0) {
+            b.wsMaxMessageLength(maxMessage);
+        }
+        return b.build();
+    }
+
+    public static async int32 serveIt(HttpServer srv) {
+        srv.serve();
+        return 1;
+    }
+
+    static int32 port(HttpServer srv) {
+        return srv.server.listener.boundPort();
+    }
+
+    /** Sends the upgrade for `path` and reads the 101; false when it did not arrive within `ms`. */
+    static boolean handshake(TcpStream s, String path, int32 ms) {
+        DispatchTests.sendRaw(s, "GET " + path + " HTTP/1.1\r\nHost: t\r\nUpgrade: websocket\r\n"
+            + "Connection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+            + "Sec-WebSocket-Version: 13\r\n\r\n");
+        int8[] buf = heap int8[2048];
+        int32 got = 0;
+        boolean done = false;
+        while (!done) {
+            int64 n = DispatchTests.readStep(s, buf, got, ms);
+            if (n <= (int64) 0) {
+                return false;
+            }
+            got = got + (int32) n;
+            done = WsDispatchTests.endsHead(buf, got);
+        }
+        return DispatchTests.contains(buf, got, " 101 ");
+    }
+
+    static boolean endsHead(int8[] b, int32 n) {
+        return n >= 4 && b[n - 4] == (int8) 13 && b[n - 3] == (int8) 10
+            && b[n - 2] == (int8) 13 && b[n - 1] == (int8) 10;
+    }
+
+    /** One masked client frame with a payload under 126 bytes; returns the end offset. */
+    static int32 frame(int8[] b, int32 at, int32 opcode, String payload) {
+        int32 n = payload.byteLength();
+        b[at] = (int8) (128 | opcode);
+        b[at + 1] = (int8) (128 | n);
+        b[at + 2] = (int8) 17;
+        b[at + 3] = (int8) 34;
+        b[at + 4] = (int8) 51;
+        b[at + 5] = (int8) 68;
+        int32 i = 0;
+        while (i < n) {
+            b[at + 6 + i] = (int8) (payload.byteAt(i) ^ b[at + 2 + (i % 4)]);
+            i = i + 1;
+        }
+        return at + 6 + n;
+    }
+
+    /** One masked client text frame of `n` bytes (126 to 65535), all the letter a. */
+    static int32 frameLong(int8[] b, int32 at, int32 n) {
+        b[at] = (int8) (128 | WsOpcode.TEXT);
+        b[at + 1] = (int8) (128 | 126);
+        b[at + 2] = (int8) ((n >> 8) & 255);
+        b[at + 3] = (int8) (n & 255);
+        b[at + 4] = (int8) 1;
+        b[at + 5] = (int8) 2;
+        b[at + 6] = (int8) 3;
+        b[at + 7] = (int8) 4;
+        int32 i = 0;
+        while (i < n) {
+            b[at + 8 + i] = (int8) (97 ^ b[at + 4 + (i % 4)]);
+            i = i + 1;
+        }
+        return at + 8 + n;
+    }
+
+    /**
+     * Reads server frames (unmasked, payloads under 126 bytes) until `want`
+     * arrived or `ms` passed without bytes. Opcodes land in `ops`, text
+     * payloads joined with commas in the returned String; the close code of a
+     * CLOSE frame is written to `closeCode[0]`.
+     */
+    static #String readFrames(TcpStream s, int32 want, int32 ms, int32[] ops, int32[] closeCode) {
+        int8[] buf = heap int8[65536];
+        int32 got = 0;
+        int32 at = 0;
+        int32 count = 0;
+        String out = "";
+        boolean going = true;
+        while (going && count < want) {
+            if (got - at >= 2 && got - at >= 2 + (buf[at + 1] & 127)) {
+                int32 op = buf[at] & 15;
+                int32 len = buf[at + 1] & 127;
+                ops[count] = op;
+                if (op == WsOpcode.TEXT || op == WsOpcode.PONG) {
+                    String t #= WsDispatchTests.text(buf, at + 2, len);
+                    out = out + t + ",";
+                }
+                if (op == WsOpcode.CLOSE && len >= 2) {
+                    closeCode[0] = ((buf[at + 2] & 255) << 8) | (buf[at + 3] & 255);
+                }
+                at = at + 2 + len;
+                count = count + 1;
+            } else {
+                int64 n = DispatchTests.readStep(s, buf, got, ms);
+                if (n <= (int64) 0) {
+                    going = false;
+                } else {
+                    got = got + (int32) n;
+                }
+            }
+        }
+        return out.substring(0, out.byteLength());
+    }
+
+    /** An owned String of `len` bytes of `b` from `off`. */
+    static #String text(int8[] b, int32 off, int32 len) {
+        int8[] copy = heap int8[len];
+        int32 i = 0;
+        while (i < len) {
+            copy[i] = b[off + i];
+            i = i + 1;
+        }
+        return heap String(#copy, len);
+    }
+
+    // ----- cases ----------------------------------------------------------
+
+    /** 6.1.1: three messages in one segment run onMessage three times, in order, on one dispatch. */
+    static void threeQuickMessagesOneDispatch(Check c) {
+        scope {
+            HttpServer srv #= WsDispatchTests.wsServer((int64) 0);
+            Task<int32> sv = spawn serveIt(srv);
+            DispatchTests.settle(srv);
+            int32 port = WsDispatchTests.port(srv);
+            TcpStream s #= DispatchTests.connectRaw(port);
+            c.that(WsDispatchTests.handshake(s, "/ws", 3000), "the upgrade is answered");
+            Fiber.sleep(Duration.ofMillis((int64) 30));
+            int64 d0 = srv.dispatches();
+            int8[] b = heap int8[64];
+            int32 at = WsDispatchTests.frame(b, 0, WsOpcode.TEXT, "a");
+            at = WsDispatchTests.frame(b, at, WsOpcode.TEXT, "b");
+            at = WsDispatchTests.frame(b, at, WsOpcode.TEXT, "c");
+            s.writeAllAsync(b, (int64) 0, (int64) at);
+            int32[] ops = heap int32[3];
+            int32[] cc = heap int32[1];
+            String echoed #= WsDispatchTests.readFrames(s, 3, 3000, ops, cc);
+            c.that(echoed.equals("a,b,c,"), "three echoes in order (" + echoed + ")");
+            Fiber.sleep(Duration.ofMillis((int64) 30));
+            c.eqInt((int64) WsDispatchTests.ECHO.connects, (int64) 1, "onConnect once");
+            c.eqInt((int64) WsDispatchTests.ECHO.messages, (int64) 3, "onMessage three times");
+            c.that(WsDispatchTests.ECHO.joined.equals("a,b,c,"), "in order");
+            c.eqInt(srv.dispatches() - d0, (int64) 1, "one dispatch carried all three");
+            s.close();
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+    }
+
+    /** 6.1.2: 1,000 upgraded, silent clients hold no worker; a ping from any of them is answered. */
+    static void silentClientsHoldNoWorkers(Check c) {
+        scope {
+            HttpServer srv #= WsDispatchTests.wsServer((int64) 0);
+            Task<int32> sv = spawn serveIt(srv);
+            DispatchTests.settle(srv);
+            int32 port = WsDispatchTests.port(srv);
+            int32 n = 1000;
+            TcpStream[] conns = heap TcpStream[n];
+            int32 ok = 0;
+            int32 i = 0;
+            boolean going = true;
+            while (i < n && going) {
+                conns[i] #= DispatchTests.connectRaw(port);
+                if (WsDispatchTests.handshake(conns[i], "/ws", 2000)) {
+                    ok = ok + 1;
+                } else {
+                    going = false;
+                }
+                i = i + 1;
+            }
+            c.eqInt((int64) ok, (int64) n, "every upgrade is answered, well past maxInFlight");
+            Fiber.sleep(Duration.ofMillis((int64) 50));
+            c.eqInt((int64) srv.inFlight(), (int64) 0, "no worker holds a silent client");
+            c.eqInt((int64) WsDispatchTests.ECHO.connects, (int64) n, "onConnect ran for each");
+            int8[] b = heap int8[32];
+            int32[] ops = heap int32[1];
+            int32[] cc = heap int32[1];
+            int32 at = WsDispatchTests.frame(b, 0, WsOpcode.PING, "hi");
+            // The first and the last client that upgraded (all of them once
+            // the framer holds the sockets; the failing count otherwise).
+            int32 last = ok > 0 ? ok - 1 : 0;
+            int32 which = 0;
+            int32 pongs = 0;
+            while (which <= last) {
+                TcpStream s = conns[which];
+                if (s != null) {
+                    s.writeAllAsync(b, (int64) 0, (int64) at);
+                    String got #= WsDispatchTests.readFrames(s, 1, 2000, ops, cc);
+                    if (ops[0] == WsOpcode.PONG && got.equals("hi,")) {
+                        pongs = pongs + 1;
+                    }
+                }
+                which = which + (last > 0 ? last : 1);
+            }
+            c.eqInt((int64) pongs, (int64) 2, "the first and the last client get their pong");
+            c.eqInt((int64) WsDispatchTests.ECHO.messages, (int64) 0, "a ping is not a message");
+            i = 0;
+            while (i < n) {
+                if (conns[i] != null) {
+                    conns[i].close();
+                }
+                i = i + 1;
+            }
+            srv.shutdown(Duration.ofSeconds(3));
+            await sv;
+        }
+    }
+
+    /** 6.1.3: a message over the limit closes with 1009 from the framer; onMessage never runs. */
+    static void oversizeMessageClosesOnFramer(Check c) {
+        scope {
+            HttpServer srv #= WsDispatchTests.wsServer((int64) 1024);
+            Task<int32> sv = spawn serveIt(srv);
+            DispatchTests.settle(srv);
+            int32 port = WsDispatchTests.port(srv);
+            TcpStream s #= DispatchTests.connectRaw(port);
+            c.that(WsDispatchTests.handshake(s, "/ws", 3000), "the upgrade is answered");
+            Fiber.sleep(Duration.ofMillis((int64) 30));
+            int64 d0 = srv.dispatches();
+            int8[] b = heap int8[2100];
+            int32 at = WsDispatchTests.frameLong(b, 0, 2048);
+            s.writeAllAsync(b, (int64) 0, (int64) at);
+            int32[] ops = heap int32[1];
+            int32[] cc = heap int32[1];
+            String got #= WsDispatchTests.readFrames(s, 1, 3000, ops, cc);
+            c.eqInt((int64) ops[0], (int64) WsOpcode.CLOSE, "the server sends a close frame");
+            c.eqInt((int64) cc[0], (int64) WsCloseCode.MESSAGE_TOO_BIG, "with MESSAGE_TOO_BIG");
+            Fiber.sleep(Duration.ofMillis((int64) 50));
+            c.eqInt((int64) WsDispatchTests.ECHO.messages, (int64) 0, "onMessage never ran");
+            c.eqInt((int64) WsDispatchTests.ECHO.closes, (int64) 1, "onClose ran once");
+            c.eqInt((int64) WsDispatchTests.ECHO.lastCode, (int64) WsCloseCode.MESSAGE_TOO_BIG, "with the code");
+            c.eqInt(srv.dispatches() - d0, (int64) 1, "the only dispatch is onClose's final turn");
+            s.close();
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+    }
+
+    /** 6.1.4: a client whose onMessage parks holds its own next message; another client proceeds. */
+    static void slowHandlerHoldsOnlyItsClient(Check c) {
+        scope {
+            HttpServer srv #= WsDispatchTests.wsServer((int64) 0);
+            Task<int32> sv = spawn serveIt(srv);
+            DispatchTests.settle(srv);
+            int32 port = WsDispatchTests.port(srv);
+            TcpStream a #= DispatchTests.connectRaw(port);
+            TcpStream b #= DispatchTests.connectRaw(port);
+            c.that(WsDispatchTests.handshake(a, "/slow", 3000), "slow client upgraded");
+            c.that(WsDispatchTests.handshake(b, "/ws", 3000), "fast client upgraded");
+            int8[] fa = heap int8[32];
+            int32 la = WsDispatchTests.frame(fa, 0, WsOpcode.TEXT, "m1");
+            a.writeAllAsync(fa, (int64) 0, (int64) la);
+            Fiber.sleep(Duration.ofMillis((int64) 20));
+            la = WsDispatchTests.frame(fa, 0, WsOpcode.TEXT, "m2");
+            a.writeAllAsync(fa, (int64) 0, (int64) la);
+            int8[] fb = heap int8[32];
+            int32 lb = WsDispatchTests.frame(fb, 0, WsOpcode.TEXT, "x");
+            int64 t0 = DispatchTests.nowMs();
+            b.writeAllAsync(fb, (int64) 0, (int64) lb);
+            int32[] ops = heap int32[2];
+            int32[] cc = heap int32[1];
+            String gotB #= WsDispatchTests.readFrames(b, 1, 3000, ops, cc);
+            int64 tookB = DispatchTests.nowMs() - t0;
+            c.that(gotB.equals("x,"), "the fast client is echoed");
+            c.that(tookB < (int64) 120, "while the slow client's handler is parked (" + tookB + " ms)");
+            String gotA #= WsDispatchTests.readFrames(a, 2, 3000, ops, cc);
+            c.that(gotA.equals("m1,m2,"), "the slow client's messages are answered in order (" + gotA + ")");
+            a.close();
+            b.close();
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+    }
+
+    /**
+     * 6.1.5: permessage-deflate through the pool. The framer inflates the
+     * client's message, the worker's echo compresses, and the client's close
+     * is answered by the framer with onClose as the final turn.
+     */
+    static void compressedMessageThroughThePool(Check c) {
+        scope {
+            HttpServer srv #= WsDispatchTests.wsServer((int64) 0);
+            Task<int32> sv = spawn serveIt(srv);
+            DispatchTests.settle(srv);
+            int32 port = WsDispatchTests.port(srv);
+            TcpStream sock #= DispatchTests.connectRaw(port);
+            AsyncReader reader = heap AsyncReader(sock);
+            AsyncWriter writer = heap AsyncWriter(sock);
+            Uri uri #= Uri.parse("ws://127.0.0.1:" + port + "/pmd");
+            WebSocket client #= WsUpgrade.connectClient(reader, writer, uri, 7, true);
+            String msg = "compress me: the quick brown fox jumps over the lazy dog "
+                + "and then does it all over again for good measure.";
+            client.send(msg);
+            WsMessage reply #= client.receive();
+            c.that(reply.text().equals(msg), "a compressed message round-trips through the framer");
+            client.close(WsCloseCode.NORMAL, "bye");
+            int32 code = 0;
+            try {
+                WsMessage m2 #= client.receive();
+            } catch (ConnectionClosedException e) {
+                code = e.closeCode;
+            }
+            c.eqInt((int64) code, (int64) WsCloseCode.NORMAL, "the framer completes the close handshake");
+            Fiber.sleep(Duration.ofMillis((int64) 50));
+            c.eqInt((int64) WsDispatchTests.ECHO.messages, (int64) 1, "one message reached the handler");
+            c.eqInt((int64) WsDispatchTests.ECHO.closes, (int64) 1, "onClose ran once");
+            c.eqInt((int64) WsDispatchTests.ECHO.lastCode, (int64) WsCloseCode.NORMAL, "with the peer's code");
+            sock.close();
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+    }
+}

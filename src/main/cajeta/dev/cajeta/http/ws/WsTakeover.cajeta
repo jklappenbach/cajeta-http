@@ -4,6 +4,7 @@ import cajeta.io.net.AsyncReader;
 import cajeta.io.net.AsyncWriter;
 import cajeta.io.net.ByteChannel;
 import dev.cajeta.http.Takeover;
+import dev.cajeta.http.h2.NowWriter;
 
 /**
  * The takeover `WsUpgrade.accept` registers: once the 101 is sent, it runs the
@@ -23,6 +24,17 @@ public final class WsTakeover extends Takeover {
 
     public void attach(ByteChannel ch) {
         this.ch #= ch;
+    }
+
+    /**
+     * The framer-side form (request-dispatch spec §2.5): the handler and the
+     * negotiated extension move to a `WsFramed` the connection's framer
+     * drives, and this takeover never runs.
+     */
+    public #WsFramed framed(ByteChannel ch, ^NowWriter now, int64 maxMessage, int32 maxUnits) {
+        WebSocketHandler h #= this.handler;
+        PmdParams p #= this.params;
+        return heap WsFramed(#h, #p, ch, now, maxMessage, maxUnits);
     }
 
     public void run(AsyncReader reader, AsyncWriter writer) {
