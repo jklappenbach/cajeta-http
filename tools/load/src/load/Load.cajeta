@@ -1,0 +1,506 @@
+package load;
+
+import cajeta.concurrent.Carriers;
+import cajeta.concurrent.Fiber;
+import cajeta.error.Exception;
+import cajeta.io.file.File;
+import cajeta.io.file.FileReader;
+import cajeta.io.net.IpAddress;
+import cajeta.io.net.SocketAddress;
+import cajeta.io.net.TcpStream;
+import cajeta.io.net.TimedOutException;
+import cajeta.lang.String;
+import cajeta.time.Clock;
+import cajeta.time.Duration;
+import dev.cajeta.http.Bytes;
+import dev.cajeta.http.ClientResponse;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.client.HttpClient;
+import dev.cajeta.http.server.HttpServer;
+import dev.cajeta.http.server.HttpServerBuilder;
+
+/**
+ * The request-dispatch load instrument (spec §8). Three modes:
+ *
+ * ```
+ * load serve <port> <delayMs> <pool|fiber> [certPem keyPem]
+ * load run <port> <idle> <inflight> <seconds> [anchorPem]
+ * load selftest
+ * ```
+ *
+ * `serve` runs a server whose `/` answers `ok`, whose `/work` sleeps
+ * `delayMs` first, and whose `/stats` reports the process: RSS in KiB, live
+ * fibers, memory mappings, and the server's own counters. `run` opens `idle`
+ * keep-alive connections that each make one request and then stay silent,
+ * keeps `inflight` fibers each looping `/work` on its own connection for
+ * `seconds`, and prints requests, throughput, latency percentiles and the
+ * server's `/stats` before and after. `selftest` runs both in one process
+ * against bounds, so the instrument is itself tested (plan 10.1.1).
+ */
+public final class Load {
+    @Native("__cajeta_dbg_fiber_count")
+    private static int32 fiberCount();
+
+    static int32 delayMs;
+    static HttpServer srv;
+
+    // Latency samples: a flat array, `CAP` slots per in-flight fiber.
+    static final int32 CAP = 200000;
+    static int64[] samples;
+    static int32[] counts;
+    static int32 errors;
+
+    public static int32 main(String[] args) {
+        if (args.count() >= (int64) 1 && args[0].equals("serve")) {
+            return Load.serveMain(args);
+        }
+        if (args.count() >= (int64) 1 && args[0].equals("run")) {
+            return Load.runMain(args);
+        }
+        if (args.count() >= (int64) 1 && args[0].equals("selftest")) {
+            return Load.selftest();
+        }
+        System.stdout.println("usage: load serve <port> <delayMs> <pool|fiber> [certPem keyPem]");
+        System.stdout.println("       load run <port> <idle> <inflight> <seconds> [anchorPem]");
+        System.stdout.println("       load selftest");
+        return 2;
+    }
+
+    // ----- serve ----------------------------------------------------------
+
+    static void handle(HttpRequest q, HttpResponse r) {
+        if (Bytes.equals(q.path(), "/work")) {
+            if (Load.delayMs > 0) {
+                Fiber.sleep(Duration.ofMillis((int64) Load.delayMs));
+            }
+            r.body("ok");
+            return;
+        }
+        if (Bytes.equals(q.path(), "/stats")) {
+            r.header("Content-Type", "application/json");
+            String s #= Load.statsJson();
+            r.body(s);
+            return;
+        }
+        r.body("ok");
+    }
+
+    /** The process and the server as one JSON object. */
+    static #String statsJson() {
+        HttpServer s = Load.srv;
+        String j = "{\"rss_kb\":" + Load.rssKb() + ",\"fibers\":" + Load.fiberCount()
+            + ",\"maps\":" + Load.mappings()
+            + ",\"model\":\"" + (s.dispatchMode == HttpServer.DISPATCH_POOL ? "pool" : "fiber") + "\""
+            + ",\"framers\":" + s.framerCount() + ",\"dispatches\":" + s.dispatches()
+            + ",\"in_flight\":" + s.inFlight() + ",\"idle\":" + s.idleConnections()
+            + ",\"paused\":" + s.pausedSockets() + ",\"connections\":" + s.server.inflightCount() + "}";
+        return j.substring(0, j.byteLength());
+    }
+
+    static #HttpServer build(int32 port, boolean fiberModel, int8[] cert, int32 certLen, int8[] key, int32 keyLen) {
+        HttpServerBuilder b #= HttpServer.builder();
+        b.bind("127.0.0.1:" + port);
+        b.handler((HttpRequest q, HttpResponse r) -> Load.handle(q, r));
+        if (fiberModel) {
+            b.fiberPerConnection();
+        }
+        if (cert != null) {
+            b.tls(cert, certLen, key, keyLen);
+        }
+        return b.build();
+    }
+
+    public static async int32 serveLoop(HttpServer s) {
+        s.serve();
+        return 0;
+    }
+
+    static int32 serveMain(String[] args) {
+        if (args.count() < (int64) 4) {
+            System.stdout.println("usage: load serve <port> <delayMs> <pool|fiber> [certPem keyPem]");
+            return 2;
+        }
+        int32 port = Load.parseInt(args[1]);
+        Load.delayMs = Load.parseInt(args[2]);
+        boolean fiberModel = args[3].equals("fiber");
+        int8[] cert = null;
+        int8[] key = null;
+        int32 certLen = 0;
+        int32 keyLen = 0;
+        if (args.count() >= (int64) 6) {
+            cert #= Load.readFile(args[4]);
+            key #= Load.readFile(args[5]);
+            certLen = (int32) cert.count();
+            keyLen = (int32) key.count();
+        }
+        Load.srv #= Load.build(port, fiberModel, cert, certLen, key, keyLen);
+        System.stdout.println("load serve: {} model, delay {} ms, port {}", fiberModel ? "fiber" : "pool", Load.delayMs, port);
+        Load.srv.serve();
+        return 0;
+    }
+
+    // ----- run -------------------------------------------------------------
+
+    static int32 runMain(String[] args) {
+        if (args.count() < (int64) 5) {
+            System.stdout.println("usage: load run <port> <idle> <inflight> <seconds> [anchorPem]");
+            return 2;
+        }
+        int32 port = Load.parseInt(args[1]);
+        int32 idle = Load.parseInt(args[2]);
+        int32 inflight = Load.parseInt(args[3]);
+        int32 seconds = Load.parseInt(args[4]);
+        int8[] anchor = null;
+        if (args.count() >= (int64) 6) {
+            anchor #= Load.readFile(args[5]);
+        }
+        String report #= Load.drive(port, idle, inflight, seconds, anchor);
+        System.stdout.println("{}", report);
+        return 0;
+    }
+
+    /** Opens the idle connections, runs the in-flight fibers, and returns the report. */
+    static #String drive(int32 port, int32 idle, int32 inflight, int32 seconds, int8[] anchor) {
+        boolean tls = anchor != null;
+        String before #= Load.fetchStats(port, anchor);
+        TcpStream[] idlers = null;
+        int32 opened = 0;
+        if (!tls) {
+            idlers = heap TcpStream[idle > 0 ? idle : 1];
+            int32 i = 0;
+            boolean going = true;
+            while (i < idle && going) {
+                TcpStream s #= Load.idleConnection(port);
+                if (s == null) {
+                    going = false;
+                } else {
+                    idlers[i] #= s;
+                    opened = opened + 1;
+                }
+                i = i + 1;
+            }
+        }
+        Fiber.sleep(Duration.ofMillis((int64) 200));
+        String settled #= Load.fetchStats(port, anchor);
+        Load.samples = heap int64[(inflight > 0 ? inflight : 1) * Load.CAP];
+        Load.counts = heap int32[inflight > 0 ? inflight : 1];
+        Load.errors = 0;
+        int64 t0 = Clock.nanoTime();
+        scope {
+            int32 w = 0;
+            while (w < inflight) {
+                spawn worker(port, w, seconds, anchor);
+                w = w + 1;
+            }
+        }
+        int64 wall = Clock.nanoTime() - t0;
+        String after #= Load.fetchStats(port, anchor);
+        int32 total = 0;
+        int32 w = 0;
+        while (w < inflight) {
+            total = total + Load.counts[w];
+            w = w + 1;
+        }
+        int64[] all = heap int64[total > 0 ? total : 1];
+        int32 at = 0;
+        w = 0;
+        while (w < inflight) {
+            int32 k = 0;
+            while (k < Load.counts[w]) {
+                all[at] = Load.samples[w * Load.CAP + k];
+                at = at + 1;
+                k = k + 1;
+            }
+            w = w + 1;
+        }
+        Load.sort(all, 0, total - 1);
+        int64 wallMs = wall / (int64) 1000000;
+        int64 rps = wallMs > (int64) 0 ? (int64) total * (int64) 1000 / wallMs : (int64) 0;
+        String rep = "load run: " + opened + " idle connections, " + inflight + " in flight, " + seconds + " s\n"
+            + "  requests " + total + " (" + rps + "/s), errors " + Load.errors + "\n"
+            + "  latency ms p50 " + Load.pct(all, total, 50) + " p90 " + Load.pct(all, total, 90)
+            + " p99 " + Load.pct(all, total, 99) + " max " + Load.pct(all, total, 100) + "\n"
+            + "  stats before  " + before + "\n"
+            + "  stats settled " + settled + "\n"
+            + "  stats after   " + after;
+        if (idlers != null) {
+            int32 i = 0;
+            while (i < opened) {
+                idlers[i].close();
+                i = i + 1;
+            }
+        }
+        return rep.substring(0, rep.byteLength());
+    }
+
+    /** One keep-alive connection that made one request and now says nothing. */
+    static #TcpStream idleConnection(int32 port) {
+        try {
+            IpAddress ip #= IpAddress.loopbackV4();
+            SocketAddress a #= SocketAddress.of(#ip, port);
+            TcpStream s #= TcpStream.connectAsync(#a);
+            String req = "GET / HTTP/1.1\r\nHost: load\r\n\r\n";
+            int8[] rb #= req.toBytes();
+            s.writeAllAsync(rb, (int64) 0, (int64) req.byteLength());
+            int8[] buf = heap int8[512];
+            int32 got = 0;
+            boolean done = false;
+            while (!done) {
+                int64 n = s.readWithin(buf, (int64) got, (int64) (512 - got), 5000);
+                if (n <= (int64) 0) {
+                    return null;
+                }
+                got = got + (int32) n;
+                done = got >= 2 && buf[got - 2] == (int8) 111 && buf[got - 1] == (int8) 107;   // "ok"
+            }
+            return #s;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    public static async int32 worker(int32 port, int32 idx, int32 seconds, int8[] anchor) {
+        HttpClient client #= Load.client(anchor);
+        String scheme = anchor != null ? "https" : "http";
+        String url = scheme + "://127.0.0.1:" + port + "/work";
+        int64 until = Clock.nanoTime() + (int64) seconds * (int64) 1000000000;
+        int32 k = 0;
+        while (Clock.nanoTime() < until && k < Load.CAP) {
+            int64 t0 = Clock.nanoTime();
+            try {
+                ClientResponse resp #= client.get(url);
+                if (resp.status() != 200) {
+                    Load.errors = Load.errors + 1;
+                }
+            } catch (Exception e) {
+                Load.errors = Load.errors + 1;
+            }
+            Load.samples[idx * Load.CAP + k] = (Clock.nanoTime() - t0) / (int64) 1000;   // microseconds
+            k = k + 1;
+        }
+        Load.counts[idx] = k;
+        return k;
+    }
+
+    static #HttpClient client(int8[] anchor) {
+        if (anchor == null) {
+            HttpClient c #= heap HttpClient();
+            c.exchangeTimeout(30000);
+            return #c;
+        }
+        HttpClient c #= HttpClient.builder().trustAnchor(anchor, (int32) anchor.count()).build();
+        c.exchangeTimeout(30000);
+        return #c;
+    }
+
+    static #String fetchStats(int32 port, int8[] anchor) {
+        try {
+            HttpClient c #= Load.client(anchor);
+            String scheme = anchor != null ? "https" : "http";
+            ClientResponse resp #= c.get(scheme + "://127.0.0.1:" + port + "/stats");
+            return resp.bodyString();
+        } catch (Exception e) {
+            String none = "{}";
+            return none.substring(0, none.byteLength());
+        }
+    }
+
+    // ----- the process ------------------------------------------------------
+
+    /** Resident set size from /proc/self/status, in KiB; 0 when unreadable. */
+    static int64 rssKb() {
+        int8[] text #= Load.readFile("/proc/self/status");
+        int32 n = (int32) text.count();
+        String key = "VmRSS:";
+        int32 i = 0;
+        while (i + 6 < n) {
+            boolean hit = true;
+            int32 j = 0;
+            while (hit && j < 6) {
+                if (text[i + j] != key.byteAt(j)) {
+                    hit = false;
+                }
+                j = j + 1;
+            }
+            if (hit) {
+                int32 at = i + 6;
+                while (at < n && (text[at] == (int8) 32 || text[at] == (int8) 9)) {
+                    at = at + 1;
+                }
+                int64 v = (int64) 0;
+                while (at < n && text[at] >= (int8) 48 && text[at] <= (int8) 57) {
+                    v = v * (int64) 10 + (int64) (text[at] - 48);
+                    at = at + 1;
+                }
+                return v;
+            }
+            i = i + 1;
+        }
+        return (int64) 0;
+    }
+
+    /** Lines in /proc/self/maps: the mapping count that vm.max_map_count bounds. */
+    static int64 mappings() {
+        int8[] text #= Load.readFile("/proc/self/maps");
+        int64 lines = (int64) 0;
+        int32 i = 0;
+        int32 n = (int32) text.count();
+        while (i < n) {
+            if (text[i] == (int8) 10) {
+                lines = lines + (int64) 1;
+            }
+            i = i + 1;
+        }
+        return lines;
+    }
+
+    /** Reads a whole file through a reader, so proc files (size 0 in stat) read too. */
+    static #int8[] readFile(String path) {
+        int8[] buf = heap int8[65536];
+        int32 len = 0;
+        try {
+            FileReader r #= File.openRead(path);
+            boolean going = true;
+            while (going) {
+                if (len == (int32) buf.count()) {
+                    int8[] grown = heap int8[len * 2];
+                    int32 i = 0;
+                    while (i < len) {
+                        grown[i] = buf[i];
+                        i = i + 1;
+                    }
+                    buf = grown;
+                }
+                int8[] chunk = heap int8[65536];
+                int32 n = r.read(chunk, 65536);
+                if (n <= 0) {
+                    going = false;
+                } else {
+                    if (len + n > (int32) buf.count()) {
+                        int8[] grown = heap int8[(len + n) * 2];
+                        int32 i = 0;
+                        while (i < len) {
+                            grown[i] = buf[i];
+                            i = i + 1;
+                        }
+                        buf = grown;
+                    }
+                    int32 j = 0;
+                    while (j < n) {
+                        buf[len + j] = chunk[j];
+                        j = j + 1;
+                    }
+                    len = len + n;
+                }
+            }
+            r.close();
+        } catch (Exception e) {
+        }
+        int8[] out = heap int8[len];
+        int32 k = 0;
+        while (k < len) {
+            out[k] = buf[k];
+            k = k + 1;
+        }
+        return #out;
+    }
+
+    // ----- numbers ----------------------------------------------------------
+
+    static int32 parseInt(String s) {
+        int32 v = 0;
+        int32 i = 0;
+        while (i < s.byteLength()) {
+            int8 ch = s.byteAt(i);
+            if (ch >= (int8) 48 && ch <= (int8) 57) {
+                v = v * 10 + (ch - 48);
+            }
+            i = i + 1;
+        }
+        return v;
+    }
+
+    static void sort(int64[] a, int32 lo, int32 hi) {
+        while (lo < hi) {
+            int64 pivot = a[(lo + hi) / 2];
+            int32 i = lo;
+            int32 j = hi;
+            while (i <= j) {
+                while (a[i] < pivot) { i = i + 1; }
+                while (a[j] > pivot) { j = j - 1; }
+                if (i <= j) {
+                    int64 t = a[i];
+                    a[i] = a[j];
+                    a[j] = t;
+                    i = i + 1;
+                    j = j - 1;
+                }
+            }
+            if (j - lo < hi - i) {
+                Load.sort(a, lo, j);
+                lo = i;
+            } else {
+                Load.sort(a, i, hi);
+                hi = j;
+            }
+        }
+    }
+
+    /** The `p`th percentile of the sorted microsecond samples, in milliseconds with two decimals. */
+    static #String pct(int64[] a, int32 n, int32 p) {
+        if (n == 0) {
+            String none = "-";
+            return none.substring(0, 1);
+        }
+        int32 idx = (int32) (((int64) (n - 1) * (int64) p) / (int64) 100);
+        int64 us = a[idx];
+        int64 whole = us / (int64) 1000;
+        int64 frac = (us % (int64) 1000) / (int64) 10;
+        String s = "" + whole + "." + (frac < (int64) 10 ? "0" : "") + frac;
+        return s.substring(0, s.byteLength());
+    }
+
+    // ----- selftest (plan 10.1.1) ------------------------------------------
+
+    static int32 selftest() {
+        int32 fails = 0;
+        Load.delayMs = 5;
+        Load.srv #= Load.build(0, false, null, 0, null, 0);
+        scope {
+            Task<int32> loop = spawn serveLoop(Load.srv);
+            int32 waited = 0;
+            while (waited < 200 && Load.srv.framerCount() == 0) {
+                Fiber.sleep(Duration.ofMillis((int64) 5));
+                waited = waited + 1;
+            }
+            int32 port = Load.srv.server.listener.boundPort();
+            int32 fibersBefore = Load.fiberCount();
+            String report #= Load.drive(port, 10, 2, 2, null);
+            System.stdout.println("{}", report);
+            int32 total = 0;
+            int32 w = 0;
+            while (w < 2) {
+                total = total + Load.counts[w];
+                w = w + 1;
+            }
+            fails = fails + Load.check(total > 100, "two in-flight fibers made more than 100 requests in 2 s (" + total + ")");
+            fails = fails + Load.check(Load.errors == 0, "no request failed");
+            fails = fails + Load.check(Load.rssKb() > (int64) 1000, "RSS is read from /proc (" + Load.rssKb() + " KiB)");
+            fails = fails + Load.check(Load.mappings() > (int64) 10, "mappings are counted from /proc (" + Load.mappings() + ")");
+            fails = fails + Load.check(Load.srv.idleConnections() >= 0, "the server reports idle connections");
+            int32 fibersNow = Load.fiberCount();
+            fails = fails + Load.check(fibersNow <= fibersBefore + 4,
+                "ten idle connections added no fiber (" + fibersBefore + " before, " + fibersNow + " after the run)");
+            Load.srv.shutdown(Duration.ofSeconds(2));
+            await loop;
+        }
+        System.stdout.println(fails == 0 ? "load selftest: ok" : "load selftest: FAILED");
+        return fails;
+    }
+
+    static int32 check(boolean cond, String what) {
+        System.stdout.println("  {} {}", cond ? "ok  " : "FAIL", what);
+        return cond ? 0 : 1;
+    }
+}

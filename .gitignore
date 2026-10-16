@@ -13,3 +13,4 @@ tmp/
 .idea/
 samples/view-tour/build-native/
 samples/wire/build-native/
+tools/load/build-native/
