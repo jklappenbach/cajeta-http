@@ -5,6 +5,8 @@ import cajeta.concurrent.AtomicInt32;
 import cajeta.concurrent.AtomicInt64;
 import cajeta.concurrent.Channel;
 import dev.cajeta.http.Http1Framed;
+import dev.cajeta.http.h2.Http2Connection;
+import dev.cajeta.http.h2.Http2StreamSlot;
 
 /**
  * The dispatch pool (request-dispatch spec §4): `maxInFlight` worker fibers
@@ -16,7 +18,7 @@ import dev.cajeta.http.Http1Framed;
  */
 public final class DispatchPool {
     HttpServer srv;
-    Channel<Http1Framed> queue;
+    Channel<Dispatch> queue;
     public int32 workers;
     public AtomicInt32 inFlight;
     public AtomicInt64 dispatches;
@@ -24,14 +26,19 @@ public final class DispatchPool {
     public DispatchPool(^HttpServer srv, int32 workers) {
         this.srv = srv;
         this.workers = workers < 1 ? 1 : workers;
-        this.queue = heap Channel<Http1Framed>(this.workers);
+        this.queue = heap Channel<Dispatch>(this.workers);
         this.inFlight = heap AtomicInt32(0);
         this.dispatches = heap AtomicInt64((int64) 0);
     }
 
-    /** A framer's non-parking handoff: false when the pool cannot take it now. */
-    public boolean offer(Http1Framed c) {
-        if (this.queue.trySend(c)) {
+    /**
+     * A framer's non-parking handoff. The record is owned by the queue from
+     * here: a temporary passed as an argument dies at its statement's end, so
+     * the queue must take the title or the worker reads a freed record. On
+     * refusal the record is dropped.
+     */
+    public boolean offerOwned(#Dispatch d) {
+        if (this.queue.trySend(#d)) {
             this.dispatches.fetchAdd((int64) 1);
             return true;
         }
@@ -45,23 +52,41 @@ public final class DispatchPool {
     public static async int32 worker(DispatchPool p) {
         boolean go = true;
         while (go) {
-            Optional<Http1Framed> o = p.queue.receive();
+            Optional<Dispatch> o = p.queue.receive();
             if (!o.isPresent()) {
                 go = false;
             } else {
-                Http1Framed c = o.get();
+                // Take the record: a stream unit's title moves here and is
+                // dropped at the end of this pass; a connection's own unit
+                // stays the connection's (the channel recorded a lend).
+                Dispatch d #= o.take();
+                Http1Framed c = d.conn;
                 p.inFlight.fetchAdd(1);
-                boolean keep = false;
-                try {
-                    keep = c.turn();
-                } catch (Exception e) {
-                    keep = false;
+                if (d.kind == Dispatch.STREAM) {
+                    // One completed h2 stream, carried in the record so the
+                    // worker never touches the framer's ready list; the
+                    // connection stays with its framer, which keeps reading.
+                    Http2StreamSlot s #= d.slot;
+                    d.slot = null;
+                    try {
+                        Http2Connection.runStream(c.h2, #s);
+                    } catch (Exception e) {
+                    }
+                    p.inFlight.fetchAdd(-1);
+                    p.srv.framerAt(c.framerIndex).giveBack(c);
+                } else {
+                    boolean keep = false;
+                    try {
+                        keep = c.turn();
+                    } catch (Exception e) {
+                        keep = false;
+                    }
+                    p.inFlight.fetchAdd(-1);
+                    if (!keep) {
+                        c.close();
+                    }
+                    p.srv.framerAt(c.framerIndex).giveBack(c);
                 }
-                p.inFlight.fetchAdd(-1);
-                if (!keep) {
-                    c.close();
-                }
-                p.srv.framerAt(c.framerIndex).giveBack(c);
             }
         }
         return 0;

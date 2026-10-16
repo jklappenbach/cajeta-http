@@ -16,6 +16,17 @@ import dev.cajeta.http.ClientResponse;
 import dev.cajeta.http.HttpRequest;
 import dev.cajeta.http.HttpResponse;
 import dev.cajeta.http.client.HttpClient;
+import cajeta.io.net.AsyncReader;
+import cajeta.io.net.AsyncWriter;
+import dev.cajeta.http.h2.HpackDecoder;
+import dev.cajeta.http.h2.HpackEncoder;
+import dev.cajeta.http.h2.HpackFieldList;
+import dev.cajeta.http.h2.Http2;
+import dev.cajeta.http.h2.Http2ContentFrames;
+import dev.cajeta.http.h2.Http2FrameHeader;
+import dev.cajeta.http.h2.Http2FrameWriter;
+import dev.cajeta.http.h2.Http2Frames;
+import dev.cajeta.http.h2.Http2SettingsList;
 import dev.cajeta.http.server.HttpServer;
 import dev.cajeta.http.server.HttpServerBuilder;
 import dev.cajeta.http.server.ServerLimits;
@@ -66,6 +77,16 @@ public final class DispatchTests {
         DispatchTests.tlsGetOnPoolFiber(c);
         System.stdout.println("-- dispatch tls: a stalled handshake delays nobody (4.1.3) --");
         DispatchTests.tlsStallDelaysNobody(c);
+        System.stdout.println("-- dispatch h2: streams on one connection run in parallel by default (5.1.2) --");
+        DispatchTests.h2StreamsParallel(c);
+        System.stdout.println("-- dispatch h2: serializedStreams runs one at a time (5.1.2) --");
+        DispatchTests.h2StreamsSerialized(c);
+        System.stdout.println("-- dispatch h2: fifty open, ten complete, ten dispatched (5.1.1) --");
+        DispatchTests.h2HeldStreams(c);
+        System.stdout.println("-- dispatch h2: a reset with a stream on a worker drops the connection once (5.1.2) --");
+        DispatchTests.h2ResetWhileStreamInFlight(c);
+        System.stdout.println("-- dispatch h2: a TLS read error with a stream on a worker drops the connection once (5.1.2) --");
+        DispatchTests.h2TlsReadErrorWhileStreamInFlight(c);
     }
 
     // ----- fixtures -------------------------------------------------------
@@ -696,8 +717,10 @@ public final class DispatchTests {
             Fiber.sleep(Duration.ofMillis((int64) 30));
             c.eqInt((int64) DispatchTests.fiberCount(), (int64) before, "no fiber was spawned for the TLS connection");
             c.that(srv.dispatches() >= (int64) 1, "the request went through the pool");
+            int64 d1 = srv.dispatches();
             int32 r2 = await spawn httpsGet(port, "/", "ok");
-            c.eqInt((int64) r2, (int64) 1, "an ALPN-h2 client is still answered, by the h2 loop");
+            c.eqInt((int64) r2, (int64) 1, "an ALPN-h2 client is answered");
+            c.that(srv.dispatches() > d1, "and its stream went through the pool (5.1.7 over TLS)");
             srv.shutdown(Duration.ofSeconds(2));
             await sv;
         }
@@ -722,6 +745,290 @@ public final class DispatchTests {
             c.eqInt((int64) r, (int64) 1, "the other client is answered");
             c.that(took < (int64) 1000, "and not held behind the stalled handshake");
             stall.close();
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+    }
+
+    // ----- h2 through the pool (Unit 5) ------------------------------------
+
+    static #HttpServer h2Server(boolean serialized, int32 maxInFlight) {
+        HttpServerBuilder b #= HttpServer.builder();
+        b.bind("127.0.0.1:0");
+        b.handler((HttpRequest q, HttpResponse r) -> DispatchTests.handle(q, r));
+        b.h2PriorKnowledge();
+        b.framers(1);
+        if (maxInFlight > 0) { b.maxInFlight(maxInFlight); }
+        b.serializedStreams(serialized);
+        return b.build();
+    }
+
+    static #String own(String s) {
+        return s.substring(0, s.byteLength());
+    }
+
+    static void encodeRequest(HpackEncoder enc, Http2FrameWriter fw, int32 sid, String path, boolean endStream) {
+        HpackFieldList fl = heap HpackFieldList();
+        fl.put(DispatchTests.own(":method"), DispatchTests.own(endStream ? "GET" : "POST"));
+        fl.put(DispatchTests.own(":path"), DispatchTests.own(path));
+        fl.put(DispatchTests.own(":scheme"), DispatchTests.own("http"));
+        fl.put(DispatchTests.own(":authority"), DispatchTests.own("127.0.0.1"));
+        int8[] block #= enc.encode(fl);
+        Http2ContentFrames.writeHeaders(fw, sid, block, (int32) block.count(), endStream, true, 0);
+    }
+
+    static boolean readExactWithin(AsyncReader r, int8[] buf, int32 n, int32 timeoutMs) {
+        int32 off = 0;
+        while (off < n) {
+            int32 g = 0;
+            try {
+                g = r.readWithin(buf, off, n - off, timeoutMs);
+            } catch (Exception e) {
+                return false;
+            }
+            if (g <= 0) { return false; }
+            off = off + g;
+        }
+        return true;
+    }
+
+    /**
+     * Opens an h2 connection, sends the preface and settings, then one
+     * HEADERS per path (closed when `close[i]`), and reads frames until
+     * `wantDone` streams have ended or `ms` elapsed. Returns the stream id
+     * that ended first, 0 when none did; `order` receives the end order.
+     */
+    static int32 h2Exchange(int32 port, String[] paths, boolean[] close, int32 n, int32 wantDone, int32 ms,
+                            int32[] order) {
+        IpAddress ca #= IpAddress.loopbackV4();
+        SocketAddress connAddr #= SocketAddress.of(#ca, port);
+        TcpStream sock #= TcpStream.connectAsync(#connAddr);
+        AsyncReader reader = heap AsyncReader(sock);
+        AsyncWriter writer = heap AsyncWriter(sock);
+        int8[] pf #= Http2.preface();
+        writer.writeAll(pf, 0, 24);
+        Http2FrameWriter fw = heap Http2FrameWriter();
+        Http2SettingsList empty = heap Http2SettingsList();
+        Http2Frames.writeSettings(fw, empty);
+        HpackEncoder enc = heap HpackEncoder(Http2.DEFAULT_HEADER_TABLE_SIZE, true);
+        int32 i = 0;
+        while (i < n) {
+            DispatchTests.encodeRequest(enc, fw, 1 + 2 * i, paths[i], close[i]);
+            i = i + 1;
+        }
+        int8[] out #= fw.toBytes();
+        writer.writeAll(out, 0, (int32) out.count());
+        writer.flush();
+        int32 done = 0;
+        int32 first = 0;
+        int64 deadline = DispatchTests.nowMs() + (int64) ms;
+        boolean open = true;
+        while (open && done < wantDone && DispatchTests.nowMs() < deadline) {
+            int8[] hdr = heap int8[9];
+            if (!DispatchTests.readExactWithin(reader, hdr, 9, 500)) {
+                if (DispatchTests.nowMs() >= deadline) { open = false; }
+            } else {
+                Http2FrameHeader h #= Http2FrameHeader(hdr);
+                int32 type = h.typeCode();
+                int32 flags = h.flags();
+                int32 sid = h.streamId();
+                int32 len = h.length();
+                int8[] pl = heap int8[len > 0 ? len : 1];
+                if (len > 0 && !DispatchTests.readExactWithin(reader, pl, len, 2000)) {
+                    open = false;
+                } else {
+                    if (type == Http2.FRAME_SETTINGS && (flags & Http2.FLAG_ACK) == 0) {
+                        Http2FrameWriter afw = heap Http2FrameWriter();
+                        Http2Frames.writeSettingsAck(afw);
+                        int8[] ab #= afw.toBytes();
+                        writer.writeAll(ab, 0, (int32) ab.count());
+                        writer.flush();
+                    } else if (type == Http2.FRAME_GOAWAY) {
+                        open = false;
+                    } else if ((type == Http2.FRAME_HEADERS || type == Http2.FRAME_DATA)
+                               && (flags & Http2.FLAG_END_STREAM) != 0) {
+                        if (first == 0) { first = sid; }
+                        if (done < order.count()) { order[done] = sid; }
+                        done = done + 1;
+                    }
+                }
+            }
+        }
+        sock.close();
+        return first;
+    }
+
+    /** 5.1.2: /slow on stream 1 and / on stream 3 complete out of order, both through the pool. */
+    static void h2StreamsParallel(Check c) {
+        scope {
+            HttpServer srv #= DispatchTests.h2Server(false, 0);
+            Task<int32> sv = spawn serveIt(srv);
+            DispatchTests.settle(srv);
+            int32 port = srv.server.listener.boundPort();
+            int64 d0 = srv.dispatches();
+            String[] paths = heap String[2];
+            paths[0] = "/slow";
+            paths[1] = "/";
+            boolean[] close = heap boolean[2];
+            close[0] = true;
+            close[1] = true;
+            int32[] order = heap int32[2];
+            int32 first = DispatchTests.h2Exchange(port, paths, close, 2, 2, 5000, order);
+            c.eqInt((int64) first, (int64) 3, "the fast stream finishes first: streams ran in parallel");
+            c.eqInt(srv.dispatches() - d0, (int64) 2, "two stream units went through the pool");
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+    }
+
+    /** 5.1.2 (4.4.2): under serializedStreams the slow stream finishes first. */
+    static void h2StreamsSerialized(Check c) {
+        scope {
+            HttpServer srv #= DispatchTests.h2Server(true, 0);
+            Task<int32> sv = spawn serveIt(srv);
+            DispatchTests.settle(srv);
+            int32 port = srv.server.listener.boundPort();
+            String[] paths = heap String[2];
+            paths[0] = "/slow";
+            paths[1] = "/";
+            boolean[] close = heap boolean[2];
+            close[0] = true;
+            close[1] = true;
+            int32[] order = heap int32[2];
+            int32 first = DispatchTests.h2Exchange(port, paths, close, 2, 2, 5000, order);
+            c.eqInt((int64) first, (int64) 1, "serialized: stream 1 finishes before stream 3 starts");
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+    }
+
+    /** 5.1.1: fifty streams opened, ten complete: ten dispatches, forty held, no fiber per stream. */
+    static void h2HeldStreams(Check c) {
+        scope {
+            HttpServer srv #= DispatchTests.h2Server(false, 0);
+            Task<int32> sv = spawn serveIt(srv);
+            DispatchTests.settle(srv);
+            int32 port = srv.server.listener.boundPort();
+            int32 before = DispatchTests.fiberCount();
+            int64 d0 = srv.dispatches();
+            String[] paths = heap String[50];
+            boolean[] close = heap boolean[50];
+            int32 i = 0;
+            while (i < 50) {
+                paths[i] = i < 10 ? "/" : "/echo";
+                close[i] = i < 10;          // the first ten carry END_STREAM; the rest await a body
+                i = i + 1;
+            }
+            int32[] order = heap int32[10];
+            int32 first = DispatchTests.h2Exchange(port, paths, close, 50, 10, 5000, order);
+            c.that(first > 0, "the completed streams were answered");
+            c.eqInt(srv.dispatches() - d0, (int64) 10, "ten units dispatched, forty held");
+            c.eqInt((int64) DispatchTests.fiberCount(), (int64) before, "no fiber per stream or per connection");
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+    }
+
+    /**
+     * 5.1.2: a peer that resets the connection while a stream is on a worker.
+     * The framer's read fails and closes the connection; the drop must wait
+     * for the stream's return, or the return finds a freed connection.
+     */
+    static void h2ResetWhileStreamInFlight(Check c) {
+        scope {
+            HttpServer srv #= DispatchTests.h2Server(false, 0);
+            Task<int32> sv = spawn serveIt(srv);
+            DispatchTests.settle(srv);
+            int32 port = srv.server.listener.boundPort();
+            int64 d0 = srv.dispatches();
+            scope {
+                IpAddress ca #= IpAddress.loopbackV4();
+                SocketAddress connAddr #= SocketAddress.of(#ca, port);
+                TcpStream sock #= TcpStream.connectAsync(#connAddr);
+                AsyncWriter writer = heap AsyncWriter(sock);
+                int8[] pf #= Http2.preface();
+                writer.writeAll(pf, 0, 24);
+                Http2FrameWriter fw = heap Http2FrameWriter();
+                Http2SettingsList empty = heap Http2SettingsList();
+                Http2Frames.writeSettings(fw, empty);
+                HpackEncoder enc = heap HpackEncoder(Http2.DEFAULT_HEADER_TABLE_SIZE, true);
+                DispatchTests.encodeRequest(enc, fw, 1, "/slow", true);
+                int8[] out #= fw.toBytes();
+                writer.writeAll(out, 0, (int32) out.count());
+                writer.flush();
+                // The stream is on a worker for 100 ms; the server's SETTINGS
+                // sits unread here, so closing now sends a reset, not a FIN.
+                Fiber.sleep(Duration.ofMillis((int64) 50));
+                sock.close();
+            }
+            Fiber.sleep(Duration.ofMillis((int64) 400));
+            c.eqInt(srv.dispatches() - d0, (int64) 1, "the stream was dispatched before the reset");
+            c.eqInt((int64) srv.server.inflightCount(), (int64) 0, "the connection was counted gone exactly once");
+            String[] paths = heap String[1];
+            paths[0] = "/";
+            boolean[] close = heap boolean[1];
+            close[0] = true;
+            int32[] order = heap int32[1];
+            int32 first = DispatchTests.h2Exchange(port, paths, close, 1, 1, 2000, order);
+            c.eqInt((int64) first, (int64) 1, "a fresh connection is answered afterwards");
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+    }
+
+    /**
+     * 5.1.2: an ALPN-h2 client over TLS whose bytes stop being TLS while a
+     * stream is on a worker. The framer's TLS read raises, the connection
+     * closes, and the drop must still wait for the stream's return. This is
+     * the shape that crashed 4.1.3 intermittently: a TLS read error and the
+     * worker's return woke the framer together, and the return found a
+     * released connection.
+     */
+    static void h2TlsReadErrorWhileStreamInFlight(Check c) {
+        scope {
+            HttpServer srv #= DispatchTests.tlsServer(1);
+            Task<int32> sv = spawn serveIt(srv);
+            DispatchTests.settle(srv);
+            int32 port = DispatchTests.tlsPort(srv);
+            int64 d0 = srv.dispatches();
+            int32 n0 = srv.tlsConnections();
+            scope {
+                String cp #= ClientBuilderTests.certPem();
+                IpAddress ip #= IpAddress.loopbackV4();
+                SocketAddress a #= SocketAddress.of(#ip, port);
+                TcpStream sock #= TcpStream.connectAsync(#a);
+                String host = "127.0.0.1";
+                int8[] hostBytes #= host.toBytes();
+                int8[] anchor #= cp.toBytes();
+                TlsStream tls #= TlsStream.client(#sock, hostBytes, host.byteLength(), anchor, cp.byteLength());
+                int8[] alpn = heap int8[3];
+                alpn[0] = (int8) 2;
+                alpn[1] = (int8) 104;   // h
+                alpn[2] = (int8) 50;    // 2
+                tls.offerAlpn(alpn, 3);
+                tls.handshake();
+                int8[] pf #= Http2.preface();
+                tls.write(pf, 24);
+                Http2FrameWriter fw = heap Http2FrameWriter();
+                Http2SettingsList empty = heap Http2SettingsList();
+                Http2Frames.writeSettings(fw, empty);
+                HpackEncoder enc = heap HpackEncoder(Http2.DEFAULT_HEADER_TABLE_SIZE, true);
+                DispatchTests.encodeRequest(enc, fw, 1, "/slow", true);
+                int8[] out #= fw.toBytes();
+                tls.write(out, (int32) out.count());
+                // The stream is on a worker for 100 ms. Eight raw bytes on the
+                // socket (the eventfd signal is a plain write) are not a TLS
+                // record: the framer's next read raises and closes the
+                // connection while the stream is still out.
+                Fiber.sleep(Duration.ofMillis((int64) 50));
+                Cajeta.eventfdSignal(tls.fd());
+                Fiber.sleep(Duration.ofMillis((int64) 20));
+            }
+            Fiber.sleep(Duration.ofMillis((int64) 400));
+            c.eqInt(srv.dispatches() - d0, (int64) 1, "the stream was dispatched before the read error");
+            c.eqInt((int64) (srv.tlsConnections() - n0), (int64) 0, "the connection was counted gone exactly once");
+            int32 r = await spawn httpsGet(port, "/", "ok");
+            c.eqInt((int64) r, (int64) 1, "a fresh https client is answered afterwards");
             srv.shutdown(Duration.ofSeconds(2));
             await sv;
         }

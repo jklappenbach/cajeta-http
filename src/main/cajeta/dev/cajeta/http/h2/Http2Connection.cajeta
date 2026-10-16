@@ -13,6 +13,9 @@ import dev.cajeta.http.HttpResponse;
 import dev.cajeta.http.PushEntry;
 import dev.cajeta.http.h1.HttpParserLimits;
 import dev.cajeta.http.server.ConnectionBuffers;
+import cajeta.collection.ArrayList;
+import cajeta.concurrent.AtomicInt32;
+import cajeta.io.net.ByteBuffer;
 import dev.cajeta.http.server.ServerLimits;
 
 /**
@@ -50,6 +53,17 @@ public final class Http2Connection {
     static final int32 WINDOW_REPLENISH = 524288;
 
     /** An engine answering with `handler`, taking stream buffers from `bufs`. */
+    // Framer-fed mode (request-dispatch Unit 5): bytes arrive through `feed`
+    // instead of the reader, control frames go out through `controlNow`, and
+    // completed streams wait in `readyList` for the dispatch pool.
+    boolean fed;
+    int32 fedPhase;            // 0 preface, 1 frame header, 2 payload
+    int32 fedLen;
+    ArrayList<Http2StreamSlot> readyList;
+    public AtomicInt32 streamsInFlight;
+    public boolean ended;      // GOAWAY sent or received, or the peer finished
+    NowWriter nowWriter;
+
     public Http2Connection(AsyncReader reader, AsyncWriter writer,
                            (HttpRequest, HttpResponse) -> void handler,
                            ConnectionBuffers bufs, HttpParserLimits limits) {
@@ -77,6 +91,158 @@ public final class Http2Connection {
         this.cur = null;
         this.ready = null;
         this.slots = heap Http2SlotPool();
+        this.fed = false;
+        this.fedPhase = 0;
+        this.fedLen = 0;
+        this.readyList = heap ArrayList<Http2StreamSlot>();
+        this.streamsInFlight = heap AtomicInt32(0);
+        this.ended = false;
+        this.nowWriter = null;
+    }
+
+    /**
+     * A connection a framer feeds (request-dispatch spec §2.4): no reader;
+     * `now` is the transport's non-parking write for control frames.
+     */
+    public static #Http2Connection framed(AsyncWriter writer,
+                                          (HttpRequest, HttpResponse) -> void handler,
+                                          ConnectionBuffers bufs, HttpParserLimits limits,
+                                          int64 maxBodyBytes, ^NowWriter now) {
+        Http2Connection c = heap Http2Connection(null, writer, handler, bufs, limits);
+        c.maxBody = maxBodyBytes;
+        c.fed = true;
+        c.nowWriter = now;
+        return #c;
+    }
+
+    /** A control frame: parking on the connection loop, never parking when framer-fed. */
+    void control(Http2FrameWriter fw) {
+        if (this.fed) {
+            this.ws.controlNow(fw, this.nowWriter);
+        } else {
+            this.ws.writeControl(fw);
+        }
+    }
+
+    /**
+     * Feeds bytes from a framer's buffer: consumes every complete frame, runs
+     * the connection's frame logic on it, and moves completed streams onto
+     * `readyList`. Returns the number of streams waiting, or -1 once the
+     * connection has ended. Bytes of an incomplete frame stay in `in`.
+     */
+    public int32 feed(ByteBuffer in) {
+        if (this.ended) {
+            return -1;
+        }
+        boolean more = true;
+        while (more && !this.ended) {
+            if (this.fedPhase == 0) {
+                if (in.readable() < 24) {
+                    more = false;
+                } else {
+                    int8[] pf = heap int8[24];
+                    in.read(pf, 0, 24);
+                    if (!Http2.matchesPreface(pf, 0, 24)) {
+                        this.sendGoaway(Http2.PROTOCOL_ERROR);
+                        this.ended = true;
+                    } else {
+                        this.sendOurSettings();
+                        this.fedPhase = 1;
+                    }
+                }
+            } else if (this.fedPhase == 1) {
+                if (in.readable() < 9) {
+                    more = false;
+                } else {
+                    // Through a local: a wire view built over a FIELD array
+                    // read the slot, not the bytes (2026-10-16, the same shape
+                    // as the socket-intrinsic defect fixed in the compiler).
+                    int8[] hdr = this.frameHdr;
+                    in.read(hdr, 0, 9);
+                    Http2FrameHeader h #= Http2FrameHeader(hdr);
+                    this.fedLen = h.length();
+                    if (this.fedLen > (int32) this.local.maxFrameSize) {
+                        this.sendGoaway(Http2.FRAME_SIZE_ERROR);
+                        this.ended = true;
+                    } else {
+                        this.fedPhase = 2;
+                    }
+                }
+            } else {
+                if (in.readable() < this.fedLen) {
+                    more = false;
+                } else {
+                    if (this.fedLen > this.frameBuf.count()) {
+                        this.frameBuf = heap int8[this.fedLen];
+                    }
+                    int8[] payload = this.frameBuf;
+                    if (this.fedLen > 0) {
+                        in.read(payload, 0, this.fedLen);
+                    }
+                    this.fedPhase = 1;
+                    int8[] hdr2 = this.frameHdr;
+                    boolean cont = this.dispatchHeader(hdr2, payload, this.fedLen);
+                    if (!cont) {
+                        this.ended = true;
+                    }
+                    if (this.ready != null) {
+                        Http2StreamSlot r #= this.ready;
+                        this.ready = null;
+                        this.readyList.add(#r);
+                    }
+                }
+            }
+        }
+        if (this.ended) {
+            return -1;
+        }
+        return this.readyList.count();
+    }
+
+    /** The peer finished writing: no more frames can complete. */
+    public void endInput() {
+        this.ended = true;
+    }
+
+    public int32 readyCount() {
+        return this.readyList.count();
+    }
+
+    /** The oldest completed stream, for the pool. */
+    public #Http2StreamSlot takeReady() {
+        return this.readyList.removeAt(0);
+    }
+
+    /** No completed stream waits; the framer tracks the ones on workers. */
+    public boolean quiescent() {
+        return this.readyList.count() == 0;
+    }
+
+    /** The framer puts a taken stream back when the pool refused it; order among streams is not promised. */
+    public void putBackReady(#Http2StreamSlot slot) {
+        this.readyList.add(#slot);
+    }
+
+    /** One stream's turn on a pool worker: the per-stream handler, then the slot goes back. */
+    public static int32 runStream(Http2Connection c, #Http2StreamSlot slot) {
+        int32 maxFrame = (int32) c.remote.maxFrameSize;
+        boolean pushOk = c.remote.pushEnabled();
+        int32 initWin = (int32) c.remote.initialWindowSize;
+        int32 sid = 0;
+        try {
+            sid = Http2Connection.handleStream(c, #slot, maxFrame, pushOk, initWin);
+        } catch (Exception e) {
+        }
+        return sid;
+    }
+
+    /** Returns every slot's buffers; the framer calls it when it drops the connection. */
+    public void release() {
+        while (this.readyList.count() > 0) {
+            Http2StreamSlot s #= this.readyList.removeAt(0);
+            this.giveSlot(#s);
+        }
+        this.releaseSlots();
     }
 
     /** Serves one connection until the peer leaves or a connection error ends it. */
@@ -154,6 +320,15 @@ public final class Http2Connection {
         if (len > 0) {
             this.reader.readExact(payload, 0, len);
         }
+        return this.dispatchHeader(hdr, payload, len);
+    }
+
+    /** Runs one frame whose header and payload are in hand; false when the connection ends. */
+    boolean dispatchHeader(int8[] hdr, int8[] payload, int32 len) {
+        Http2FrameHeader h #= Http2FrameHeader(hdr);
+        int32 type = h.typeCode();
+        int32 flags = h.flags();
+        int32 sid = h.streamId();
         if (this.assembler.isOpen() && type != Http2.FRAME_CONTINUATION) {
             this.sendGoaway(Http2.PROTOCOL_ERROR);
             return false;
@@ -273,7 +448,7 @@ public final class Http2Connection {
         if (this.pendConnRecv >= Http2Connection.WINDOW_REPLENISH) {
             Http2FrameWriter fw = heap Http2FrameWriter();
             Http2Frames.writeWindowUpdate(fw, 0, this.pendConnRecv);
-            this.ws.writeControl(fw);
+            this.control(fw);
             this.flow.connRecv.increase(this.pendConnRecv, 0);
             this.pendConnRecv = 0;
         }
@@ -293,7 +468,7 @@ public final class Http2Connection {
         if (this.pendStreamRecv >= Http2Connection.WINDOW_REPLENISH) {
             Http2FrameWriter sw = heap Http2FrameWriter();
             Http2Frames.writeWindowUpdate(sw, sid, this.pendStreamRecv);
-            this.ws.writeControl(sw);
+            this.control(sw);
             this.pendStreamRecv = 0;
         }
     }
@@ -360,7 +535,7 @@ public final class Http2Connection {
         if ((flags & Http2.FLAG_ACK) == 0) {
             Http2FrameWriter fw = heap Http2FrameWriter();
             Http2Frames.writePing(fw, payload, true);
-            this.ws.writeControl(fw);
+            this.control(fw);
         }
     }
 
@@ -448,20 +623,20 @@ public final class Http2Connection {
         Http2SettingsList l #= this.local.toList();
         Http2Frames.writeSettings(fw, l);
         Http2Frames.writeWindowUpdate(fw, 0, Http2Connection.RECV_WINDOW - Http2.DEFAULT_INITIAL_WINDOW_SIZE);
-        this.ws.writeControl(fw);
+        this.control(fw);
     }
 
     void sendSettingsAck() {
         Http2FrameWriter fw = heap Http2FrameWriter();
         Http2Frames.writeSettingsAck(fw);
-        this.ws.writeControl(fw);
+        this.control(fw);
     }
 
     void sendGoaway(int32 errorCode) {
         Http2FrameWriter fw = heap Http2FrameWriter();
         int8[] none = heap int8[0];
         Http2Frames.writeGoaway(fw, this.streams.lastRemoteId(), (int64) errorCode, none, 0);
-        this.ws.writeControl(fw);
+        this.control(fw);
     }
 
     void sendRst(int32 sid, int32 errorCode) {
@@ -475,7 +650,7 @@ public final class Http2Connection {
         }
         Http2FrameWriter fw = heap Http2FrameWriter();
         Http2Frames.writeRstStream(fw, sid, (int64) errorCode);
-        this.ws.writeControl(fw);
+        this.control(fw);
     }
 
     boolean readFully(int8[] buf, int32 n) {

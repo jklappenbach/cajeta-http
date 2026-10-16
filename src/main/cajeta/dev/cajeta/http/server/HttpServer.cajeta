@@ -72,6 +72,7 @@ public class HttpServer {
     public int32 maxInFlightN;
     public int32 maxPendingN;
     public int32 framerN;          // 0: the carrier count
+    public boolean serializedStreamsN;   // h2: one stream at a time per connection
     public DispatchPool pool;
     ArrayList<Framer> framerList;
     AtomicInt32 framersRunning;
@@ -94,6 +95,7 @@ public class HttpServer {
         this.maxInFlightN = 256;
         this.maxPendingN = 4;
         this.framerN = 0;
+        this.serializedStreamsN = false;
         this.pool = null;
         this.framerList = heap ArrayList<Framer>();
         this.framersRunning = heap AtomicInt32(0);
@@ -406,7 +408,7 @@ public class HttpServer {
      * them onto the framers.
      */
     boolean usesPool() {
-        return this.dispatchMode == HttpServer.DISPATCH_POOL && !this.h2Prior;
+        return this.dispatchMode == HttpServer.DISPATCH_POOL;
     }
 
     /**
@@ -468,6 +470,8 @@ public class HttpServer {
                     // The framer wraps the socket in TLS on intake: the engine
                     // setup per connection must not slow the accept loop.
                     f.tlsPending = this.isTls;
+                    f.h2Prior = this.h2Prior;
+                    f.bufs = this.buffers;
                     this.framerList.get(rr).adopt(#f);
                     rr = rr + 1;
                     if (rr >= k) {
@@ -526,6 +530,11 @@ public class HttpServer {
     /** Units dispatched to the pool over the server's life. */
     public int64 dispatches() {
         return this.pool == null ? (int64) 0 : this.pool.dispatches.load();
+    }
+
+    /** TLS connections accepted and not yet gone, under either model. */
+    public int32 tlsConnections() {
+        return this.tlsInflight.load();
     }
 
     /** Units on a worker right now. */

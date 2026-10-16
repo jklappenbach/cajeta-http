@@ -6,10 +6,8 @@ import cajeta.concurrent.Channel;
 import cajeta.io.net.reactor.ReadySet;
 import cajeta.time.Clock;
 import cajeta.time.Instant;
-import cajeta.io.net.AsyncReader;
-import cajeta.io.net.AsyncWriter;
-import cajeta.io.net.tls.TlsStream;
 import dev.cajeta.http.Http1Framed;
+import dev.cajeta.http.h2.Http2StreamSlot;
 
 /**
  * One framer fiber (request-dispatch spec §3): owns a ReadySet over its
@@ -231,13 +229,27 @@ public final class Framer {
                 more = false;
             } else {
                 Http1Framed c = o.get();
-                c.dispatched = false;
-                this.dispatchedCount = this.dispatchedCount - 1;
-                if (c.closed || this.stopping) {
-                    this.drop(c);
+                if (c.h2 != null) {
+                    // A stream finished; the connection never left the set.
+                    // The count moves here and only here, so a worker is
+                    // never past a drop while it still holds the connection.
+                    c.h2InFlight = c.h2InFlight - 1;
+                    if (c.closed || (c.h2.ended && c.h2Quiet())) {
+                        this.drop(c);
+                    } else if (this.stopping && c.h2Quiet()) {
+                        this.drop(c);
+                    } else {
+                        this.offerStreams(c);
+                    }
                 } else {
-                    int64 now = Framer.nowMs();
-                    this.service(c, now);
+                    c.dispatched = false;
+                    this.dispatchedCount = this.dispatchedCount - 1;
+                    if (c.closed || this.stopping) {
+                        this.drop(c);
+                    } else {
+                        int64 now = Framer.nowMs();
+                        this.service(c, now);
+                    }
                 }
             }
         }
@@ -250,17 +262,24 @@ public final class Framer {
             this.drop(c);
             return;
         }
-        if (r == Http1Framed.PUMP_H2) {
-            // ALPN chose h2: the h2 loop keeps its own fiber until Unit 5
-            // moves it onto the framers. The stream leaves this table.
-            this.set.remove(c.fd);
-            TlsStream t #= c.takeTls();
-            this.dropTable(c);
-            spawn h2Loop(this.srv, #t);
+        if (c.h2 != null) {
+            // h2: each completed stream is its own unit and the connection
+            // keeps reading; under serializedStreams one stream at a time.
+            this.offerStreams(c);
+            if (c.h2.ended) {
+                // Nothing more to read: stop watching the socket and wait for
+                // the streams in flight; their returns wake this framer.
+                this.unwatch(c);
+                if (c.h2Quiet()) {
+                    this.drop(c);
+                }
+            } else if (!c.closed) {
+                this.set.add(c.fd, ReadySet.READ);
+            }
             return;
         }
         if (c.unitCount() > 0) {
-            this.set.remove(c.fd);
+            this.unwatch(c);
             this.dispatch(c);
             return;
         }
@@ -268,12 +287,47 @@ public final class Framer {
     }
 
     void dispatch(Http1Framed c) {
-        if (this.srv.pool.offer(c)) {
+        // One record per dispatch, owned by the queue: a worker takes its
+        // title and drops it after the turn. (Optional.take panics on a lent
+        // slot, so lending a connection-owned record is not an option.)
+        Dispatch d = heap Dispatch(Dispatch.TURN, c);
+        if (this.srv.pool.offerOwned(#d)) {
             c.dispatched = true;
             this.dispatchedCount = this.dispatchedCount + 1;
         } else if (!c.waiting) {
             c.waiting = true;
             this.waitingCount = this.waitingCount + 1;
+        }
+    }
+
+    /** Offers every completed stream the pool will take; the rest wait for the next wake. */
+    void offerStreams(Http1Framed c) {
+        boolean more = true;
+        while (more && c.readyStreams() > 0) {
+            if (this.srv.serializedStreamsN && c.h2InFlight > 0) {
+                more = false;
+            } else {
+                Http2StreamSlot s #= c.h2.takeReady();
+                Dispatch d = heap Dispatch(Dispatch.STREAM, c);
+                d.slot #= s;
+                if (this.srv.pool.offerOwned(#d)) {
+                    c.h2InFlight = c.h2InFlight + 1;
+                } else {
+                    // Refused: the stream goes back to wait; the record is gone.
+                    Http2StreamSlot back #= d.slot;
+                    d.slot = null;
+                    c.h2.putBackReady(#back);
+                    more = false;
+                }
+            }
+        }
+        boolean waitingNow = c.readyStreams() > 0;
+        if (waitingNow && !c.waiting) {
+            c.waiting = true;
+            this.waitingCount = this.waitingCount + 1;
+        } else if (!waitingNow && c.waiting) {
+            c.waiting = false;
+            this.waitingCount = this.waitingCount - 1;
         }
     }
 
@@ -286,11 +340,16 @@ public final class Framer {
         while (i < count) {
             Http1Framed c = this.table.get(i);
             if (c.waiting) {
-                if (this.srv.pool.offer(c)) {
-                    c.waiting = false;
-                    this.waitingCount = this.waitingCount - 1;
-                    c.dispatched = true;
-                    this.dispatchedCount = this.dispatchedCount + 1;
+                if (c.h2 != null) {
+                    this.offerStreams(c);
+                } else {
+                    Dispatch d = heap Dispatch(Dispatch.TURN, c);
+                    if (this.srv.pool.offerOwned(#d)) {
+                        c.waiting = false;
+                        this.waitingCount = this.waitingCount - 1;
+                        c.dispatched = true;
+                        this.dispatchedCount = this.dispatchedCount + 1;
+                    }
                 }
             }
             i = i + 1;
@@ -338,7 +397,15 @@ public final class Framer {
         int32 i = 0;
         while (i < this.table.count()) {
             Http1Framed c = this.table.get(i);
-            if (!c.dispatched) {
+            if (c.h2 != null) {
+                c.h2.endInput();
+                this.unwatch(c);
+                if (c.h2Quiet()) {
+                    this.drop(c);
+                } else {
+                    i = i + 1;
+                }
+            } else if (!c.dispatched) {
                 this.drop(c);
             } else {
                 i = i + 1;
@@ -346,32 +413,47 @@ public final class Framer {
         }
     }
 
-    /** The h2 loop over a TLS stream whose ALPN chose h2; counts as one connection until it ends. */
-    static async int32 h2Loop(HttpServer srv, #TlsStream t) {
-        try {
-            AsyncReader reader = heap AsyncReader(t);
-            AsyncWriter writer = heap AsyncWriter(t);
-            srv.serveH2(reader, writer);
-        } catch (Exception e) {
-        }
-        try {
-            t.close();
-        } catch (Exception e) {
-        }
-        srv.connectionGone();
-        return 0;
-    }
-
-    /** Removes a connection from the set and the table, closes it, and returns its buffers. */
+    /**
+     * Removes a connection from the set and the table, closes it, and returns
+     * its buffers. An h2 connection with streams on workers is only closed and
+     * unwatched here: the workers still hold it, so its release waits for the
+     * last return (`absorbReturns` drops a closed connection once nothing is
+     * in flight). Releasing it early freed the connection under a worker.
+     */
     void drop(Http1Framed c) {
-        this.set.remove(c.fd);
+        this.unwatch(c);
         if (c.waiting) {
             c.waiting = false;
             this.waitingCount = this.waitingCount - 1;
         }
+        if (c.h2 != null && c.h2InFlight > 0) {
+            c.close();
+            c.h2.endInput();
+            return;
+        }
         c.release(this.srv.buffers);
         this.dropTable(c);
         this.srv.connectionGone();
+    }
+
+    /**
+     * Stops watching `c`'s socket, unless the descriptor number already
+     * belongs to a newer connection: a worker closes a finished connection's
+     * socket before the return reaches the framer, and an accept in between
+     * can reuse the number.
+     */
+    void unwatch(Http1Framed c) {
+        if (this.indexedAt(c.fd) == c.slot) {
+            this.set.remove(c.fd);
+        }
+    }
+
+    /** The table slot the fd index holds for `fd`, or -1. */
+    int32 indexedAt(int32 fd) {
+        if (fd < 0 || fd >= this.slotOfFd.count()) {
+            return -1;
+        }
+        return this.slotOfFd[fd];
     }
 
     /** Unlinks a connection from the table and the fd index; the caller has released it. */
@@ -379,8 +461,12 @@ public final class Framer {
         int32 slot = c.slot;
         int32 last = this.table.count() - 1;
         int32 fd = c.fd;
+        boolean mine = this.indexedAt(fd) == slot;   // see unwatch: the number may be a newer connection's
         if (c.in != null) {
             c.release(this.srv.buffers);
+        }
+        if (mine) {
+            this.slotOfFd[fd] = -1;
         }
         if (slot >= 0 && slot <= last) {
             if (slot != last) {
@@ -394,9 +480,6 @@ public final class Framer {
             } else {
                 Http1Framed gone #= this.table.removeAt(last);
             }
-        }
-        if (fd >= 0 && fd < this.slotOfFd.count()) {
-            this.slotOfFd[fd] = -1;
         }
     }
 }

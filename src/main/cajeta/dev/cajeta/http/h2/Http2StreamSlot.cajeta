@@ -18,7 +18,7 @@ import dev.cajeta.http.server.ConnectionBuffers;
  * the body lands after the head. The connection reuses a slot for stream after
  * stream.
  */
-final class Http2StreamSlot implements ResponseTransport {
+public final class Http2StreamSlot implements ResponseTransport {
     int32 sid;
     HttpRequest req;
     HttpResponse res;

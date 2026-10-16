@@ -36,6 +36,14 @@ public final class Http2WriteSide {
     int32 promisedId;   // last server-initiated (even) stream id handed out
     int8[] stage;
 
+    // Control frames a framer could not write without parking (the lock
+    // was held by a worker mid-response, or the socket took only part):
+    // `pending[pendOff, pendOff + pendLen)`. Whoever holds the lock next
+    // writes them first, so frames never interleave on the wire.
+    int8[] pending;
+    int32 pendOff;
+    int32 pendLen;
+
     public Http2WriteSide(AsyncWriter writer) {
         // `#=` (ownership 3.3.3): record the caller's mode — a lent writer
         // stays lent, `#writer` at the call site transfers it.
@@ -44,6 +52,95 @@ public final class Http2WriteSide {
         this.lock = heap Lock();
         this.promisedId = 0;
         this.stage = heap int8[16384 + 64];
+        this.pending = heap int8[1024];
+        this.pendOff = 0;
+        this.pendLen = 0;
+    }
+
+    /** Writes the queued control bytes through the parking writer. Caller holds the lock. */
+    void drainPending() {
+        if (this.pendLen > 0) {
+            this.writer.writeAll(this.pending, this.pendOff, this.pendLen);
+            this.writer.flush();
+            this.pendOff = 0;
+            this.pendLen = 0;
+        }
+    }
+
+    void queuePending(int8[] bytes, int32 off, int32 n) {
+        if (this.pendOff > 0 && this.pendLen == 0) {
+            this.pendOff = 0;
+        }
+        int32 end = this.pendOff + this.pendLen;
+        if (end + n > this.pending.count()) {
+            int32 cap = this.pending.count() * 2;
+            while (cap < this.pendLen + n) {
+                cap = cap * 2;
+            }
+            int8[] grown = heap int8[cap];
+            int32 i = 0;
+            while (i < this.pendLen) {
+                grown[i] = this.pending[this.pendOff + i];
+                i = i + 1;
+            }
+            this.pending #= grown;
+            this.pendOff = 0;
+            end = this.pendLen;
+        }
+        int32 j = 0;
+        while (j < n) {
+            this.pending[end + j] = bytes[off + j];
+            j = j + 1;
+        }
+        this.pendLen = this.pendLen + n;
+    }
+
+    /**
+     * A framer's control frame, never parking (request-dispatch spec §3.2):
+     * with the lock free and no bytes pending it goes straight to the
+     * transport through `now`, which answers how many bytes it took; any
+     * remainder, or the whole frame when the lock is held or bytes already
+     * wait, is queued and written by the next lock holder. Returns true when
+     * nothing is left pending.
+     */
+    public boolean controlNow(Http2FrameWriter fw, NowWriter now) {
+        int8[] bytes #= fw.toBytes();
+        int32 n = (int32) bytes.count();
+        if (this.lock.tryAcquire() != 1) {
+            this.queuePending(bytes, 0, n);
+            return false;
+        }
+        boolean clean = false;
+        try {
+            if (this.pendLen > 0) {
+                int32 wrote = now.writeNow(this.pending, this.pendOff, this.pendLen);
+                if (wrote > 0) {
+                    this.pendOff = this.pendOff + wrote;
+                    this.pendLen = this.pendLen - wrote;
+                }
+            }
+            if (this.pendLen > 0) {
+                this.queuePending(bytes, 0, n);
+            } else {
+                int32 sent = now.writeNow(bytes, 0, n);
+                if (sent < 0) {
+                    sent = 0;
+                }
+                if (sent < n) {
+                    this.queuePending(bytes, sent, n - sent);
+                } else {
+                    clean = true;
+                }
+            }
+        } finally {
+            this.lock.releaseLock();
+        }
+        return clean;
+    }
+
+    /** True when a framer left control bytes for the next writer. */
+    public boolean hasPending() {
+        return this.pendLen > 0;
     }
 
     /**
@@ -64,6 +161,7 @@ public final class Http2WriteSide {
     public void writePushPromise(int32 streamId, int32 promisedId,
                                  HpackFieldList fields) {
         LockGuard g #= this.lock.acquire();
+        this.drainPending();
         int8[] block #= this.henc.encode(fields);
         int32 blockLen = (int32) block.count();
         Http2FrameWriter fw = heap Http2FrameWriter();
@@ -82,6 +180,7 @@ public final class Http2WriteSide {
         int8[] bytes #= fw.toBytes();
         int32 n = (int32) bytes.count();
         LockGuard g #= this.lock.acquire();
+        this.drainPending();
         this.writer.writeAll(bytes, 0, n);
         this.writer.flush();
     }
@@ -93,6 +192,7 @@ public final class Http2WriteSide {
      */
     public void writeHeaders(int32 sid, HpackFieldList fields, boolean endStream) {
         LockGuard g #= this.lock.acquire();
+        this.drainPending();
         int8[] block #= this.henc.encode(fields);
         int32 blockLen = (int32) block.count();
         Http2FrameWriter fw = heap Http2FrameWriter();
@@ -111,6 +211,7 @@ public final class Http2WriteSide {
     public void writeResponse(int32 sid, HttpResponse r, boolean headEnds, boolean withData,
                               int8[] body, int32 off, int32 len, boolean last) {
         LockGuard g #= this.lock.acquire();
+        this.drainPending();
         HpackWriter hw = this.henc.encodeResponse(r);
         int8[] blk = hw.buffer();
         int32 bl = hw.size();
@@ -164,6 +265,7 @@ public final class Http2WriteSide {
     public void writeData(int32 sid, int8[] body, int32 off, int32 len,
                           boolean last) {
         LockGuard g #= this.lock.acquire();
+        this.drainPending();
         this.ensure(9 + len);
         int32 df = 0;
         if (last) {

@@ -14,6 +14,9 @@ import cajeta.time.Clock;
 import cajeta.time.Instant;
 import dev.cajeta.http.h1.HttpParserLimits;
 import dev.cajeta.http.server.ConnectionBuffers;
+import dev.cajeta.http.h2.Http2;
+import dev.cajeta.http.h2.Http2Connection;
+import dev.cajeta.http.h2.NowWriter;
 import dev.cajeta.http.server.ServerLimits;
 
 /**
@@ -31,7 +34,7 @@ import dev.cajeta.http.server.ServerLimits;
  * Units are recorded as absolute offsets into `in`; the buffer is compacted
  * only at the end of a turn, when no unit is outstanding.
  */
-public final class Http1Framed {
+public final class Http1Framed implements NowWriter {
     static final int32 PHASE_HEAD = 0;
     static final int32 PHASE_BODY_LENGTH = 1;
     static final int32 PHASE_BODY_CHUNKED = 2;
@@ -40,11 +43,16 @@ public final class Http1Framed {
     public static final int32 PUMP_IDLE = 0;      // nothing new to dispatch
     public static final int32 PUMP_READY = 1;     // at least one unit queued
     public static final int32 PUMP_CLOSED = 2;    // closed: the caller drops it
-    public static final int32 PUMP_H2 = 3;        // TLS negotiated h2: the caller hands it to the h2 loop
+    public static final int32 PUMP_STREAMS = 3;   // h2: completed streams wait for the pool
 
     public TcpStream conn;
     public TlsStream tls;        // non-null under TLS: owns the socket then
     public boolean handshaking;  // TLS: the handshake has not completed
+    public Http2Connection h2;   // non-null once the connection speaks h2
+    AsyncWriter h2Writer;        // owned here: the h2 write side keeps a borrow of it
+    public int32 h2InFlight;     // streams on workers; the framer alone moves it, so no worker touches a dropped connection
+    public boolean h2Prior;      // plaintext: a preface switches the connection to h2
+    public ConnectionBuffers bufs;   // for the h2 slots
     public int32 fd;
     public int32 framerIndex;
     ByteBuffer in;
@@ -52,6 +60,7 @@ public final class Http1Framed {
     HeadScanner scanner;
     HttpRequest req;
     HttpResponse res;
+    HttpParserLimits parse;
     (HttpRequest, HttpResponse) -> void handler;
     int32 headMs;
     int32 bodyMs;
@@ -91,12 +100,18 @@ public final class Http1Framed {
         this.tls = null;
         this.handshaking = false;
         this.tlsPending = false;
+        this.h2 = null;
+        this.h2Writer = null;
+        this.h2InFlight = 0;
+        this.h2Prior = false;
+        this.bufs = null;
         this.fd = this.conn.fd;
         this.in #= in;
         this.out #= out;
         this.scanner = heap HeadScanner(parse);
         this.req = heap HttpRequest(parse.maxHeaderCount);
         this.res = heap HttpResponse(this.out, this.conn, 4096, 64);
+        this.parse #= parse;
         this.handler #= handler;
         this.headMs = sl.headReadTimeoutMs;
         this.bodyMs = sl.bodyReadTimeoutMs;
@@ -255,6 +270,14 @@ public final class Http1Framed {
                 gotBytes = true;
             }
         }
+        if (this.h2 == null && this.h2Prior && this.in.readable() >= 24 && this.units == 0
+                && this.phase == Http1Framed.PHASE_HEAD
+                && Http2.matchesPreface(this.in.array(), this.in.readPosition(), 24)) {
+            this.switchToH2();
+        }
+        if (this.h2 != null) {
+            return this.pumpH2();
+        }
         // A body read that arrives inside the idle timeout keeps the request
         // alive, whatever its total: the body deadline is per read, as the
         // connection loop's `fillWithin(ch, bodyMs)` was.
@@ -321,7 +344,7 @@ public final class Http1Framed {
                 int8[] proto = heap int8[16];
                 int32 pn = this.tls.negotiatedAlpn(proto, 16);
                 if (pn == 2 && proto[0] == (int8) 104 && proto[1] == (int8) 50) {
-                    return Http1Framed.PUMP_H2;
+                    this.switchToH2();
                 }
                 return Http1Framed.PUMP_IDLE;
             }
@@ -351,12 +374,66 @@ public final class Http1Framed {
         return Http1Framed.PUMP_IDLE;
     }
 
-    /** Gives the TLS stream up to the h2 loop; this connection is then empty. */
-    public #TlsStream takeTls() {
-        TlsStream t #= this.tls;
-        this.tls = null;
-        this.closed = true;
-        return #t;
+    /** The connection speaks h2 from here: frames come through `feed`, streams go to the pool. */
+    void switchToH2() {
+        // The write side keeps a borrow of the writer, so the writer must
+        // outlive the h2 connection: a field here, not a local of this call.
+        this.h2Writer = heap AsyncWriter(this.channel());
+        this.h2 #= Http2Connection.framed(this.h2Writer, this.handler, this.bufs, this.parse,
+            this.maxBody, this);
+        this.deadline = (int64) 0;
+    }
+
+    /** The transport's non-parking write: bytes taken, or 0 when none could go. */
+    public int32 writeNow(int8[] b, int32 off, int32 len) {
+        if (this.tls != null) {
+            try {
+                return this.tls.writeNow(b, off, len) ? len : 0;
+            } catch (Exception e) {
+                return 0;
+            }
+        }
+        int64 sent = (int64) 0;
+        try {
+            sent = this.conn.write(b, (int64) off, (int64) len);
+        } catch (Exception e) {
+            sent = (int64) 0;
+        }
+        return sent < (int64) 0 ? 0 : (int32) sent;
+    }
+
+    /** Feeds buffered bytes to the h2 connection: PUMP_STREAMS when streams wait, PUMP_CLOSED once it is quiet after its end. */
+    int32 pumpH2() {
+        int32 n = -1;
+        try {
+            n = this.h2.feed(this.in);
+        } catch (Exception e) {
+            n = -1;
+            this.h2.endInput();
+        }
+        this.in.compact();
+        if (this.eof) {
+            this.h2.endInput();
+            n = -1;
+        }
+        if (n < 0) {
+            if (this.h2Quiet()) {
+                this.close();
+                return Http1Framed.PUMP_CLOSED;
+            }
+            return Http1Framed.PUMP_IDLE;
+        }
+        return n > 0 ? Http1Framed.PUMP_STREAMS : Http1Framed.PUMP_IDLE;
+    }
+
+    /** No stream waiting and none on a worker: an ended h2 connection may be released. */
+    public boolean h2Quiet() {
+        return this.h2 != null && this.h2.readyCount() == 0 && this.h2InFlight == 0;
+    }
+
+    /** Completed h2 streams waiting for the pool. */
+    public int32 readyStreams() {
+        return this.h2 == null ? 0 : this.h2.readyCount();
     }
 
     /** Frames as many complete units as the bytes hold, up to the mailbox size. */
@@ -760,6 +837,9 @@ public final class Http1Framed {
     /** Hands the buffers back to `pool` and closes if not yet closed. */
     public void release(ConnectionBuffers pool) {
         this.close();
+        if (this.h2 != null) {
+            this.h2.release();
+        }
         if (this.in != null) {
             ByteBuffer bin #= this.in;
             this.in = null;

@@ -1,0 +1,11 @@
+package dev.cajeta.http.h2;
+
+/**
+ * A transport's non-parking write, as a framer-fed h2 connection sends its
+ * control frames (request-dispatch spec §3.2): the bytes taken, or 0 when
+ * none could go now. An interface rather than a closure, so the connection
+ * keeps a plain borrow of its owner and nothing escapes a dying frame.
+ */
+public interface NowWriter {
+    int32 writeNow(int8[] b, int32 off, int32 len);
+}

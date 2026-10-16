@@ -1,0 +1,25 @@
+package dev.cajeta.http.server;
+
+import dev.cajeta.http.Http1Framed;
+import dev.cajeta.http.h2.Http2StreamSlot;
+
+/**
+ * One unit the pool runs (request-dispatch spec §4.1, §4.4): an HTTP/1.1
+ * connection's turn, or one completed h2 stream on a connection. A
+ * connection owns one `Dispatch` for its turns; a stream unit is a fresh
+ * one per offer, since several may be queued for one connection at once.
+ */
+public final class Dispatch {
+    public static final int32 TURN = 0;
+    public static final int32 STREAM = 1;
+
+    public int32 kind;
+    public Http1Framed conn;
+    public Http2StreamSlot slot;   // STREAM: the completed stream, owned while queued
+
+    public Dispatch(int32 kind, ^Http1Framed conn) {
+        this.kind = kind;
+        this.conn = conn;
+        this.slot = null;
+    }
+}

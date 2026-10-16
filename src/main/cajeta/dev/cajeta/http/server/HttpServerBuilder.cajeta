@@ -26,6 +26,7 @@ public class HttpServerBuilder {
     private int32 bMaxInFlight;
     private int32 bMaxPending;
     private int32 bFramers;
+    private boolean bSerializedStreams;
 
     /** A builder with the request-dispatch pool (spec §6) and default limits. */
     public HttpServerBuilder() {
@@ -45,6 +46,13 @@ public class HttpServerBuilder {
         this.bMaxInFlight = 256;
         this.bMaxPending = 4;
         this.bFramers = 0;
+        this.bSerializedStreams = false;
+    }
+
+    /** h2: one stream at a time per connection (spec §4.4); default false, streams run in parallel. */
+    public HttpServerBuilder serializedStreams(boolean on) {
+        this.bSerializedStreams = on;
+        return this;
     }
 
     /** Units dispatched and not yet returned (spec §4.2); default 256. */
@@ -205,6 +213,7 @@ public class HttpServerBuilder {
         srv.maxInFlightN = this.bMaxInFlight;
         srv.maxPendingN = this.bMaxPending;
         srv.framerN = this.bFramers;
+        srv.serializedStreamsN = this.bSerializedStreams;
         return #srv;
     }
 
