@@ -5,8 +5,11 @@ import cajeta.error.Exception;
 import cajeta.io.net.AsyncReader;
 import cajeta.io.net.AsyncWriter;
 import cajeta.io.net.ByteBuffer;
+import cajeta.io.net.ByteChannel;
 import cajeta.io.net.TcpStream;
 import cajeta.io.net.TimedOutException;
+import cajeta.io.net.tls.TlsConnection;
+import cajeta.io.net.tls.TlsStream;
 import cajeta.time.Clock;
 import cajeta.time.Instant;
 import dev.cajeta.http.h1.HttpParserLimits;
@@ -37,8 +40,11 @@ public final class Http1Framed {
     public static final int32 PUMP_IDLE = 0;      // nothing new to dispatch
     public static final int32 PUMP_READY = 1;     // at least one unit queued
     public static final int32 PUMP_CLOSED = 2;    // closed: the caller drops it
+    public static final int32 PUMP_H2 = 3;        // TLS negotiated h2: the caller hands it to the h2 loop
 
     public TcpStream conn;
+    public TlsStream tls;        // non-null under TLS: owns the socket then
+    public boolean handshaking;  // TLS: the handshake has not completed
     public int32 fd;
     public int32 framerIndex;
     ByteBuffer in;
@@ -82,6 +88,9 @@ public final class Http1Framed {
                        (HttpRequest, HttpResponse) -> void handler,
                        int32 maxUnits, int32 framerIndex) {
         this.conn #= conn;
+        this.tls = null;
+        this.handshaking = false;
+        this.tlsPending = false;
         this.fd = this.conn.fd;
         this.in #= in;
         this.out #= out;
@@ -120,6 +129,31 @@ public final class Http1Framed {
         this.framerIndex = framerIndex;
     }
 
+    /**
+     * Turns this connection into a TLS one: the socket moves into a server
+     * TLS stream, the framer then drives its handshake and decryption through
+     * the stream's non-parking entries, and responses are sealed by the worker
+     * through the same stream. Called by the framer on intake, so the accept
+     * loop never pays the per-connection engine setup.
+     */
+    public void startTls(int8[] cert, int32 certLen, int8[] key, int32 keyLen,
+                         int8[] alpn, int32 alpnLen) {
+        TcpStream sock #= this.conn;
+        this.conn = heap TcpStream(-1);
+        TlsStream t #= TlsStream.server(#sock, cert, certLen, key, keyLen);
+        if (alpnLen > 0) {
+            t.supportAlpn(alpn, alpnLen);
+        }
+        this.tls #= t;
+        this.handshaking = true;
+        this.fd = this.tls.fd();
+        this.res = heap HttpResponse(this.out, this.tls, 4096, 64);
+        this.tlsPending = false;
+    }
+
+    /** Set by the accept loop: the framer wraps the socket in TLS on intake. */
+    public boolean tlsPending;
+
     public int32 unitCount() {
         return this.units;
     }
@@ -157,6 +191,52 @@ public final class Http1Framed {
         }
         boolean readMore = true;
         boolean gotBytes = false;
+        if (this.tls != null) {
+            if (this.handshaking) {
+                int32 hs = this.pumpHandshake();
+                if (hs != Http1Framed.PUMP_IDLE) {
+                    return hs;
+                }
+                if (this.handshaking) {
+                    return Http1Framed.PUMP_IDLE;
+                }
+            }
+            // Ciphertext in, plaintext straight into the buffer.
+            boolean fillMore = true;
+            while (fillMore && !this.eof) {
+                int32 f = 0;
+                try {
+                    f = this.tls.fillNow();
+                } catch (Exception e) {
+                    this.close();
+                    return Http1Framed.PUMP_CLOSED;
+                }
+                if (f < 0) {
+                    fillMore = false;
+                } else if (f == 0) {
+                    this.eof = true;
+                }
+            }
+            boolean decryptMore = true;
+            while (decryptMore && this.in.writable() > 0) {
+                int32 d = 0;
+                try {
+                    d = this.tls.readPlaintextNow(this.in);
+                } catch (Exception e) {
+                    this.close();
+                    return Http1Framed.PUMP_CLOSED;
+                }
+                if (d > 0) {
+                    gotBytes = true;
+                } else {
+                    if (d < 0) {
+                        this.eof = true;
+                    }
+                    decryptMore = false;
+                }
+            }
+            readMore = false;
+        }
         while (readMore && !this.eof && this.in.writable() > 0) {
             int64 n = (int64) 0;
             try {
@@ -215,6 +295,68 @@ public final class Http1Framed {
             return Http1Framed.PUMP_CLOSED;
         }
         return Http1Framed.PUMP_IDLE;
+    }
+
+    /**
+     * Advances the TLS handshake without parking: PUMP_IDLE while it waits
+     * for bytes (or once done, with `handshaking` cleared), PUMP_H2 when ALPN
+     * chose h2 (the caller hands the stream to the h2 loop), PUMP_CLOSED on
+     * failure or EOF.
+     */
+    int32 pumpHandshake() {
+        boolean again = true;
+        while (again) {
+            int32 r = 0;
+            try {
+                r = this.tls.handshakeNow();
+            } catch (Exception e) {
+                this.close();
+                return Http1Framed.PUMP_CLOSED;
+            }
+            if (r == TlsConnection.OK) {
+                this.handshaking = false;
+                if (this.deadline == (int64) 0 && this.headMs > 0) {
+                    this.deadline = Http1Framed.nowMs() + (int64) this.headMs;
+                }
+                int8[] proto = heap int8[16];
+                int32 pn = this.tls.negotiatedAlpn(proto, 16);
+                if (pn == 2 && proto[0] == (int8) 104 && proto[1] == (int8) 50) {
+                    return Http1Framed.PUMP_H2;
+                }
+                return Http1Framed.PUMP_IDLE;
+            }
+            if (r == TlsConnection.FAILED || r == TlsConnection.CLOSED) {
+                this.close();
+                return Http1Framed.PUMP_CLOSED;
+            }
+            int32 f = 0;
+            try {
+                f = this.tls.fillNow();
+            } catch (Exception e) {
+                this.close();
+                return Http1Framed.PUMP_CLOSED;
+            }
+            if (f == 0) {
+                this.close();
+                return Http1Framed.PUMP_CLOSED;
+            }
+            if (f < 0) {
+                again = false;
+            }
+        }
+        if (this.deadline == (int64) 0 && this.headMs > 0) {
+            // A handshake that never completes is a head that never arrives.
+            this.deadline = Http1Framed.nowMs() + (int64) this.headMs;
+        }
+        return Http1Framed.PUMP_IDLE;
+    }
+
+    /** Gives the TLS stream up to the h2 loop; this connection is then empty. */
+    public #TlsStream takeTls() {
+        TlsStream t #= this.tls;
+        this.tls = null;
+        this.closed = true;
+        return #t;
     }
 
     /** Frames as many complete units as the bytes hold, up to the mailbox size. */
@@ -358,6 +500,13 @@ public final class Http1Framed {
     boolean writeSmall(String text) {
         int8[] b #= text.toBytes();
         int32 n = text.byteLength();
+        if (this.tls != null) {
+            try {
+                return this.tls.writeNow(b, 0, n);
+            } catch (Exception e) {
+                return false;
+            }
+        }
         int64 sent = (int64) 0;
         try {
             sent = this.conn.write(b, (int64) 0, (int64) n);
@@ -502,7 +651,7 @@ public final class Http1Framed {
             HeadScanner.parseRequest(this.in.array(), this.uStart[i], this.uHead[i], this.req);
             if (this.uStream[i]) {
                 boolean chunked = this.req.framing == HttpRequest.FRAMING_CHUNKED;
-                this.bodyChan.begin(this.conn, this.in.array(), this.uBodyOff[i],
+                this.bodyChan.begin(this.channel(), this.in.array(), this.uBodyOff[i],
                     this.in.writePosition(), this.in.capacity(), chunked,
                     this.req.declaredLength, this.bodyMs, this.maxBody);
                 this.streamed.reset(this.req, chunked ? (int64) -1 : this.req.declaredLength);
@@ -518,7 +667,7 @@ public final class Http1Framed {
             }
             boolean omit = this.req.methodKind == Method.HEAD;
             if (this.res.finish(reuse, this.req.versionKind, omit)) {
-                this.out.writeToAsync(this.conn);
+                this.out.writeToAsync(this.channel());
             }
             keep = this.res.keepsAlive() && reuse;
             if (this.uStream[i]) {
@@ -573,14 +722,23 @@ public final class Http1Framed {
     void switchProtocols() {
         Takeover t #= this.res.takeUpgrade();
         int32 cap = this.in.readable() > 8192 ? this.in.readable() : 8192;
-        AsyncReader reader = heap AsyncReader(this.conn, cap);
+        ByteChannel ch = this.channel();
+        AsyncReader reader = heap AsyncReader(ch, cap);
         if (this.in.readable() > 0) {
             reader.stage(this.in.array(), this.in.readable());
             this.in.advanceRead(this.in.readable());
         }
-        AsyncWriter writer = heap AsyncWriter(this.conn);
-        t.attach(this.conn);
+        AsyncWriter writer = heap AsyncWriter(ch);
+        t.attach(ch);
         t.run(reader, writer);
+    }
+
+    /** The channel responses go through: the TLS stream under TLS, else the socket. */
+    ByteChannel channel() {
+        if (this.tls != null) {
+            return this.tls;
+        }
+        return this.conn;
     }
 
     /** Closes the socket; the buffers go back through `release`. */
@@ -590,7 +748,11 @@ public final class Http1Framed {
         }
         this.closed = true;
         try {
-            this.conn.close();
+            if (this.tls != null) {
+                this.tls.close();
+            } else {
+                this.conn.close();
+            }
         } catch (Exception e) {
         }
     }

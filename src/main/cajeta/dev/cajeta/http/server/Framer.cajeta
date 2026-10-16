@@ -6,6 +6,9 @@ import cajeta.concurrent.Channel;
 import cajeta.io.net.reactor.ReadySet;
 import cajeta.time.Clock;
 import cajeta.time.Instant;
+import cajeta.io.net.AsyncReader;
+import cajeta.io.net.AsyncWriter;
+import cajeta.io.net.tls.TlsStream;
 import dev.cajeta.http.Http1Framed;
 
 /**
@@ -199,6 +202,11 @@ public final class Framer {
                 more = false;
             } else {
                 Http1Framed f #= o.take();
+                if (f.tlsPending) {
+                    int8[] alpn #= HttpServer.alpnH2Http11();
+                    f.startTls(this.srv.tlsCert, this.srv.tlsCertLen, this.srv.tlsKey,
+                        this.srv.tlsKeyLen, alpn, 12);
+                }
                 int32 slot = this.table.count();
                 f.slot = slot;
                 f.framerIndex = this.index;
@@ -240,6 +248,15 @@ public final class Framer {
         int32 r = c.pump(now);
         if (r == Http1Framed.PUMP_CLOSED) {
             this.drop(c);
+            return;
+        }
+        if (r == Http1Framed.PUMP_H2) {
+            // ALPN chose h2: the h2 loop keeps its own fiber until Unit 5
+            // moves it onto the framers. The stream leaves this table.
+            this.set.remove(c.fd);
+            TlsStream t #= c.takeTls();
+            this.dropTable(c);
+            spawn h2Loop(this.srv, #t);
             return;
         }
         if (c.unitCount() > 0) {
@@ -329,6 +346,22 @@ public final class Framer {
         }
     }
 
+    /** The h2 loop over a TLS stream whose ALPN chose h2; counts as one connection until it ends. */
+    static async int32 h2Loop(HttpServer srv, #TlsStream t) {
+        try {
+            AsyncReader reader = heap AsyncReader(t);
+            AsyncWriter writer = heap AsyncWriter(t);
+            srv.serveH2(reader, writer);
+        } catch (Exception e) {
+        }
+        try {
+            t.close();
+        } catch (Exception e) {
+        }
+        srv.connectionGone();
+        return 0;
+    }
+
     /** Removes a connection from the set and the table, closes it, and returns its buffers. */
     void drop(Http1Framed c) {
         this.set.remove(c.fd);
@@ -336,10 +369,19 @@ public final class Framer {
             c.waiting = false;
             this.waitingCount = this.waitingCount - 1;
         }
+        c.release(this.srv.buffers);
+        this.dropTable(c);
+        this.srv.connectionGone();
+    }
+
+    /** Unlinks a connection from the table and the fd index; the caller has released it. */
+    void dropTable(Http1Framed c) {
         int32 slot = c.slot;
         int32 last = this.table.count() - 1;
         int32 fd = c.fd;
-        c.release(this.srv.buffers);
+        if (c.in != null) {
+            c.release(this.srv.buffers);
+        }
         if (slot >= 0 && slot <= last) {
             if (slot != last) {
                 // Swap-remove: the last element takes the hole, so no other
@@ -356,6 +398,5 @@ public final class Framer {
         if (fd >= 0 && fd < this.slotOfFd.count()) {
             this.slotOfFd[fd] = -1;
         }
-        this.srv.connectionGone();
     }
 }

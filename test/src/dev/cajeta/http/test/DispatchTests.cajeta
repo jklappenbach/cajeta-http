@@ -1,11 +1,13 @@
 package dev.cajeta.http.test;
 
 import cajeta.concurrent.Carriers;
+import cajeta.error.Exception;
 import cajeta.concurrent.Fiber;
 import cajeta.io.net.IpAddress;
 import cajeta.io.net.SocketAddress;
 import cajeta.io.net.TcpStream;
 import cajeta.io.net.TimedOutException;
+import cajeta.io.net.tls.TlsStream;
 import cajeta.time.Clock;
 import cajeta.time.Duration;
 import cajeta.time.Instant;
@@ -58,6 +60,12 @@ public final class DispatchTests {
         DispatchTests.handlerCallsAnotherServer(c);
         System.stdout.println("-- dispatch: fiberPerConnection() is the old model, explicitly (3.3.2) --");
         DispatchTests.fiberPerConnectionExplicit(c);
+        System.stdout.println("-- dispatch tls: idle TLS connections hold no fibers (4.1.1) --");
+        DispatchTests.tlsIdleConnectionsHoldNoFibers(c);
+        System.stdout.println("-- dispatch tls: an https GET runs on a pool fiber (4.1.2) --");
+        DispatchTests.tlsGetOnPoolFiber(c);
+        System.stdout.println("-- dispatch tls: a stalled handshake delays nobody (4.1.3) --");
+        DispatchTests.tlsStallDelaysNobody(c);
     }
 
     // ----- fixtures -------------------------------------------------------
@@ -566,6 +574,154 @@ public final class DispatchTests {
             c.eqInt((int64) r, (int64) 1, "GET / answered ok under fiber per connection");
             c.eqInt((int64) srv.framerCount(), (int64) 0, "no framers run under fiber per connection");
             c.eqInt(srv.dispatches(), (int64) 0, "and nothing went through a pool");
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+    }
+
+    // ----- TLS under the pool (Unit 4) ------------------------------------
+
+    static #HttpServer tlsServer(int32 framers) {
+        String cp #= ClientBuilderTests.certPem();
+        String kp #= ClientBuilderTests.keyPem();
+        int8[] cert #= cp.toBytes();
+        int8[] key #= kp.toBytes();
+        HttpServerBuilder b #= HttpServer.builder();
+        b.bind("127.0.0.1:0");
+        b.handler((HttpRequest q, HttpResponse r) -> DispatchTests.handle(q, r));
+        b.tls(cert, cp.byteLength(), key, kp.byteLength());
+        if (framers > 0) { b.framers(framers); }
+        return b.build();
+    }
+
+    static int32 tlsPort(HttpServer srv) {
+        return srv.tlsListener.boundPort();
+    }
+
+    public static async int32 httpsGet(int32 port, String path, String want) {
+        String cp #= ClientBuilderTests.certPem();
+        int8[] anchor #= cp.toBytes();
+        HttpClient client #= HttpClient.builder().trustAnchor(anchor, cp.byteLength()).build();
+        client.exchangeTimeout(15000);
+        try {
+            ClientResponse resp #= client.get("https://127.0.0.1:" + port + path);
+            if (resp.status() != 200) { return -1; }
+            String got #= resp.bodyString();
+            if (!got.equals(want)) { return -2; }
+            return 1;
+        } catch (Exception e) {
+            return -3;
+        }
+    }
+
+    /** 4.1.1: 1,000 TLS connections that never handshake add no fibers. */
+    static void tlsIdleConnectionsHoldNoFibers(Check c) {
+        scope {
+            HttpServer srv #= DispatchTests.tlsServer(2);
+            Task<int32> sv = spawn serveIt(srv);
+            DispatchTests.settle(srv);
+            int32 port = DispatchTests.tlsPort(srv);
+            int32 before = DispatchTests.fiberCount();
+            TcpStream[] conns = heap TcpStream[1000];
+            int32 i = 0;
+            int32 failedAt = -1;
+            String failure = "";
+            while (i < 1000 && failedAt < 0) {
+                try {
+                    conns[i] #= DispatchTests.connectRaw(port);
+                } catch (Exception e) {
+                    failedAt = i;
+                    failure #= "" + e.message;
+                }
+                i = i + 1;
+            }
+            c.that(failedAt < 0, "all 1,000 TLS connects succeed (failed at " + failedAt + ": " + failure + ")");
+            int32 opened = failedAt < 0 ? 1000 : failedAt;
+            Fiber.sleep(Duration.ofMillis((int64) 200));
+            c.eqInt((int64) DispatchTests.fiberCount(), (int64) before, "1,000 idle TLS connections spawned no fiber");
+            // One of them still works: a real https exchange beside them.
+            int32 r = await spawn httpsGet(port, "/", "ok");
+            c.eqInt((int64) r, (int64) 1, "an https GET beside the idle thousand is answered");
+            i = 0;
+            while (i < opened) {
+                conns[i].close();
+                i = i + 1;
+            }
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+    }
+
+    /** HTTP/1.1 over TLS with no ALPN offer, so the server speaks h1 and the pool serves it. */
+    public static async int32 h1sGet(int32 port, String path, String want) {
+        String cp #= ClientBuilderTests.certPem();
+        IpAddress ip #= IpAddress.loopbackV4();
+        SocketAddress a #= SocketAddress.of(#ip, port);
+        TcpStream sock #= TcpStream.connectAsync(#a);
+        String host = "127.0.0.1";
+        int8[] hostBytes #= host.toBytes();
+        int8[] anchor #= cp.toBytes();
+        TlsStream tls #= TlsStream.client(#sock, hostBytes, host.byteLength(), anchor, cp.byteLength());
+        try {
+            tls.handshake();
+            String req = "GET " + path + " HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n";
+            int8[] rb #= req.toBytes();
+            tls.writeAllAsync(rb, (int64) 0, (int64) req.byteLength());
+            int8[] buf = heap int8[4096];
+            int32 have = 0;
+            boolean open = true;
+            while (open && have < 4096) {
+                int64 n = tls.readAsync(buf, (int64) have, (int64) (4096 - have));
+                if (n <= (int64) 0) { open = false; } else { have = have + (int32) n; }
+            }
+            tls.close();
+            if (!DispatchTests.contains(buf, have, "HTTP/1.1 200")) { return -1; }
+            if (!DispatchTests.contains(buf, have, want)) { return -2; }
+            return 1;
+        } catch (Exception e) {
+            return -3;
+        }
+    }
+
+    /** 4.1.2: an HTTP/1.1 GET over TLS is answered on a pool fiber; the handshake ran on the framer. An ALPN-h2 client goes to the h2 loop until Unit 5. */
+    static void tlsGetOnPoolFiber(Check c) {
+        scope {
+            HttpServer srv #= DispatchTests.tlsServer(1);
+            Task<int32> sv = spawn serveIt(srv);
+            DispatchTests.settle(srv);
+            int32 port = DispatchTests.tlsPort(srv);
+            int32 before = DispatchTests.fiberCount();
+            int32 r = await spawn h1sGet(port, "/", "ok");
+            c.eqInt((int64) r, (int64) 1, "GET / over TLS answered ok");
+            Fiber.sleep(Duration.ofMillis((int64) 30));
+            c.eqInt((int64) DispatchTests.fiberCount(), (int64) before, "no fiber was spawned for the TLS connection");
+            c.that(srv.dispatches() >= (int64) 1, "the request went through the pool");
+            int32 r2 = await spawn httpsGet(port, "/", "ok");
+            c.eqInt((int64) r2, (int64) 1, "an ALPN-h2 client is still answered, by the h2 loop");
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+    }
+
+    /** 4.1.3: a client that connects and never handshakes delays nobody on its framer. */
+    static void tlsStallDelaysNobody(Check c) {
+        scope {
+            HttpServer srv #= DispatchTests.tlsServer(1);
+            Task<int32> sv = spawn serveIt(srv);
+            DispatchTests.settle(srv);
+            int32 port = DispatchTests.tlsPort(srv);
+            TcpStream stall #= DispatchTests.connectRaw(port);
+            int8[] hello = heap int8[3];   // the first bytes of a ClientHello, then silence
+            hello[0] = (int8) 22;
+            hello[1] = (int8) 3;
+            hello[2] = (int8) 1;
+            stall.writeAllAsync(hello, (int64) 0, (int64) 3);
+            int64 t0 = DispatchTests.nowMs();
+            int32 r = await spawn httpsGet(port, "/", "ok");
+            int64 took = DispatchTests.nowMs() - t0;
+            c.eqInt((int64) r, (int64) 1, "the other client is answered");
+            c.that(took < (int64) 1000, "and not held behind the stalled handshake");
+            stall.close();
             srv.shutdown(Duration.ofSeconds(2));
             await sv;
         }

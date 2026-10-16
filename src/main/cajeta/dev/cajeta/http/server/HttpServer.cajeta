@@ -76,6 +76,7 @@ public class HttpServer {
     ArrayList<Framer> framerList;
     AtomicInt32 framersRunning;
     public boolean poolStopping;
+    boolean poolRunning;
 
     /** Default size of each connection buffer, which bounds a request head and a held body. */
     public static final int32 DEFAULT_BUFFER_BYTES = 65536;
@@ -97,6 +98,7 @@ public class HttpServer {
         this.framerList = heap ArrayList<Framer>();
         this.framersRunning = heap AtomicInt32(0);
         this.poolStopping = false;
+        this.poolRunning = false;
     }
 
     /** Binds `addr` with one fiber per connection. */
@@ -376,6 +378,10 @@ public class HttpServer {
      * connection is spawned in this loop's scope, which joins them at teardown.
      */
     public void serve() {
+        if (this.usesPool()) {
+            this.servePool();
+            return;
+        }
         if (this.isTls) {
             scope {
                 boolean go = true;
@@ -391,10 +397,6 @@ public class HttpServer {
             }
             return;
         }
-        if (this.usesPool()) {
-            this.servePool();
-            return;
-        }
         this.server.serve();
     }
 
@@ -404,7 +406,7 @@ public class HttpServer {
      * them onto the framers.
      */
     boolean usesPool() {
-        return this.dispatchMode == HttpServer.DISPATCH_POOL && !this.isTls && !this.h2Prior;
+        return this.dispatchMode == HttpServer.DISPATCH_POOL && !this.h2Prior;
     }
 
     /**
@@ -414,7 +416,12 @@ public class HttpServer {
      * connection.
      */
     void servePool() {
-        if (!this.server.state.compareAndSet(ServerState.NEW, ServerState.RUNNING)) {
+        if (this.isTls) {
+            if (this.poolRunning) {
+                return;
+            }
+            this.poolRunning = true;
+        } else if (!this.server.state.compareAndSet(ServerState.NEW, ServerState.RUNNING)) {
             return;
         }
         int32 k = this.framerN > 0 ? this.framerN : Carriers.count();
@@ -441,19 +448,26 @@ public class HttpServer {
             this.framersRunning.store(k);
             int32 rr = 0;
             boolean go = true;
-            while (go && this.server.state.load() == ServerState.RUNNING) {
-                TcpStream conn #= this.server.acceptNext();
+            while (go && this.poolAccepting()) {
+                TcpStream conn #= this.isTls ? this.acceptTlsNext() : this.server.acceptNext();
                 if (conn == null) {
                     go = false;
                 } else if (this.limiter != null && !this.limiter.admit()) {
                     conn.close();
                 } else {
                     conn.setNoDelay(true);
-                    this.server.inflight.fetchAdd(1);
+                    if (this.isTls) {
+                        this.tlsInflight.fetchAdd(1);
+                    } else {
+                        this.server.inflight.fetchAdd(1);
+                    }
                     ByteBuffer bin #= this.buffers.take();
                     ByteBuffer bout #= this.buffers.take();
                     Http1Framed f = heap Http1Framed(#conn, #bin, #bout, this.limits,
                         this.serverLimits, this.handler, this.maxPendingN, rr);
+                    // The framer wraps the socket in TLS on intake: the engine
+                    // setup per connection must not slow the accept loop.
+                    f.tlsPending = this.isTls;
                     this.framerList.get(rr).adopt(#f);
                     rr = rr + 1;
                     if (rr >= k) {
@@ -472,6 +486,13 @@ public class HttpServer {
         this.framersRunning.store(0);
     }
 
+    boolean poolAccepting() {
+        if (this.isTls) {
+            return !this.poolStopping;
+        }
+        return this.server.state.load() == ServerState.RUNNING;
+    }
+
     static async int32 runFramer(Framer f) {
         return Framer.run(f);
     }
@@ -487,7 +508,11 @@ public class HttpServer {
 
     /** A framer dropped a connection: the server's in-flight count and the limiter see it. */
     public void connectionGone() {
-        this.server.inflight.fetchAdd(-1);
+        if (this.isTls) {
+            this.tlsInflight.fetchAdd(-1);
+        } else {
+            this.server.inflight.fetchAdd(-1);
+        }
         if (this.limiter != null) {
             this.limiter.release();
         }
@@ -548,14 +573,16 @@ public class HttpServer {
     public boolean shutdown(Duration deadline) {
         if (this.usesPool()) {
             // Idle keep-alive connections are the framers' to close; the
-            // stdlib drain then waits only for turns in progress.
+            // drain then waits only for turns in progress.
             this.poolStopping = true;
             int32 i = 0;
             while (i < this.framerList.count()) {
                 this.framerList.get(i).stop();
                 i = i + 1;
             }
-            return this.server.shutdown(deadline);
+            if (!this.isTls) {
+                return this.server.shutdown(deadline);
+            }
         }
         if (this.isTls) {
             this.tlsListener.close();
