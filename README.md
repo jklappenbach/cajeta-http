@@ -25,11 +25,13 @@ cajeta-http provides the **imperative HTTP engine** (`HttpClient`, `HttpServer`,
 `Router`, `WebSocket`). Annotation-driven endpoints and automatic
 serialization-to-object-model are **primavera's** job, layered on top.
 
-## Status: v0.4.0
+## Status: v0.7.0
 
 | Capability | State |
 |---|---|
 | HTTP/1.1 client, server, router and middleware | ✓ (`dev.cajeta.http`), loopback-tested |
+| Request dispatch: framers hold a connection until it carries a complete unit, pooled fibers run handlers | ✓ the default server model since 0.7.0; `fiberPerConnection()` keeps a fiber per connection |
+| Developer framing over an upgraded connection | ✓ (`dev.cajeta.http.framing`): `Framer`, `Protocol`, handlers by kind, a per-call budget |
 | Request and response as views over pooled connection buffers | ✓ a keep-alive exchange allocates nothing after warm-up |
 | Content-coding registry (gzip, deflate, identity, and any a dependency registers) | ✓ (`dev.cajeta.http.coding`) |
 | WebSocket (RFC 6455) client + server | ✓ (`dev.cajeta.http.ws`): close handshake, ping/pong, permessage-deflate |
@@ -71,6 +73,18 @@ for a peer that has stopped reading, and `HttpServer.idleBuffers()`.
 `WsUpgrade.accept(q, r, #h, ...)` hands a per-connection handler to its
 connection, which frees it at close; before, it was freed when `accept`
 returned.
+
+v0.7.0 changes how a server assigns fibers. Request dispatch is the default:
+framer fibers, one per carrier, read every socket and hold a connection until
+it carries a complete unit of work (an HTTP/1.1 request, an h2 stream, a
+WebSocket message, a multipart part), and only then does a pooled fiber run
+the handler, so an idle connection costs no fiber. `sharedPool(n)` is gone;
+`maxInFlight(n)` bounds the work in flight and `fiberPerConnection()` keeps
+the old model. New: `multipart(method, pattern, mode)`, `wsMaxMessageLength`,
+`maxPartBytes`, and the `dev.cajeta.http.framing` package (`Framer`,
+`Protocol`) for developer-framed streams over an upgraded connection. The
+handler, request, response and WebSocket surfaces are unchanged; see
+`docs/migrating-to-0.7.md`.
 
 Earlier releases: v0.3.0 made long HTTP/2 connections flat (receive-window
 credit returns, per-request state is reclaimed) and v0.3.1 republished it on
