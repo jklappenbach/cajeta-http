@@ -212,5 +212,79 @@ public final class ScanTests {
         ScanTests.malformedAndLimits(c);
         System.stdout.println("-- scan: no allocation --");
         ScanTests.noAllocation(c);
+        System.stdout.println("-- scan: byte-at-a-time work is linear (request-dispatch 2.1.1) --");
+        ScanTests.byteAtATimeIsLinear(c);
+    }
+
+    /** Writes `s` at `at` and returns the position after it. */
+    static int32 put(int8[] a, int32 at, String s) {
+        int8[] sb #= s.toBytes();
+        int32 n = s.byteLength();
+        int32 i = 0;
+        while (i < n) {
+            a[at + i] = sb[i];
+            i = i + 1;
+        }
+        return at + n;
+    }
+
+    /**
+     * request-dispatch plan 2.1.1 (spec §3.3): a framer feeds the scanner as
+     * bytes arrive, so a scanner that rescanned from the head's first byte on
+     * every call would cost O(n^2) on a slow sender. `work` counts the bytes
+     * the scanner examined; across a 16 KB head delivered one byte at a time
+     * it must equal the head's length, and the blank line split across two
+     * deliveries must still be found at the right offset (2.1.2).
+     */
+    static void byteAtATimeIsLinear(Check c) {
+        // 200 header lines of 80 bytes ("X-Fill-ddd: " + 66 'a' + CRLF) after
+        // the request line, then the blank line: about 16 KB under a 32 KB cap.
+        int8[] a = heap int8[17000];
+        int32 p = ScanTests.put(a, 0, "GET /linear HTTP/1.1\r\n");
+        int32 k = 0;
+        while (k < 200) {
+            p = ScanTests.put(a, p, "X-Fill-");
+            a[p] = (int8) (48 + k / 100);
+            a[p + 1] = (int8) (48 + (k / 10) % 10);
+            a[p + 2] = (int8) (48 + k % 10);
+            p = p + 3;
+            p = ScanTests.put(a, p, ": ");
+            int32 j = 0;
+            while (j < 66) {
+                a[p] = (int8) 97;
+                p = p + 1;
+                j = j + 1;
+            }
+            p = ScanTests.put(a, p, "\r\n");
+            k = k + 1;
+        }
+        p = ScanTests.put(a, p, "\r\n");
+        int32 n = p;
+        c.that(n > 16000, "the head is at least 16 KB");
+
+        HttpParserLimits limits #= HttpParserLimits.of(32768, 8192, 256);
+        HeadScanner s = heap HeadScanner(limits);
+        ByteBuffer b = heap ByteBuffer(32768);
+        s.reset();
+        b.clear();
+        int32 i = 0;
+        int32 got = -1;
+        while (i < n && got < 0) {
+            b.write(a, i, 1);
+            got = s.scan(b);
+            i = i + 1;
+        }
+        c.that(got == n, "byte-at-a-time finds the whole head");
+        c.that(s.work == (int64) n,
+            "work equals the head length: the scanner never rescans");
+
+        // 2.1.2: the blank line split as "\r\n" then "\r\n" across two calls.
+        s.reset();
+        b.clear();
+        b.write(a, 0, n - 2);
+        c.that(s.scan(b) == -1, "two bytes short of the blank line is incomplete");
+        b.write(a, n - 2, 2);
+        c.that(s.scan(b) == n, "the second CRLF completes the head at its true length");
+        c.that(s.work == (int64) n, "the split delivery also costs exactly the head length");
     }
 }

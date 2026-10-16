@@ -22,6 +22,13 @@ public final class HeadScanner {
     int32 seen;
     int32 lineLen;
     int32 lines;
+    /**
+     * Bytes examined since `reset`. A framer feeds the scanner as bytes
+     * arrive, so this equals the head's length however it was delivered:
+     * the scanner resumes at `seen` and never rescans (request-dispatch
+     * spec §3.3).
+     */
+    public int64 work;
 
     /** A scanner enforcing a copy of `limits`. */
     public HeadScanner(HttpParserLimits limits) {
@@ -36,6 +43,7 @@ public final class HeadScanner {
         this.seen = 0;
         this.lineLen = 0;
         this.lines = 0;
+        this.work = 0L;
     }
 
     /**
@@ -52,6 +60,7 @@ public final class HeadScanner {
         while (i < end) {
             int8 c = a[i];
             this.seen = this.seen + 1;
+            this.work = this.work + 1L;
             if (c == (int8) 10) {
                 this.lines = this.lines + 1;
                 this.lineLen = 0;
