@@ -1,0 +1,15 @@
+package dev.cajeta.http.server;
+
+/**
+ * How a route takes a multipart body (request-dispatch spec §2.3). `WHOLE`
+ * holds the body under `maxBodyBytes` like any other; `PART` runs the handler
+ * once per completed part, in order, with the part on the request
+ * (`HttpRequest.multipartPart`), fed by the framer so the body never has to
+ * fit the input buffer; `STREAM` hands the handler the body at head complete
+ * (`HttpRequest.bodyStream`).
+ */
+public final class MultipartMode {
+    public static final int32 WHOLE = 0;
+    public static final int32 PART = 1;
+    public static final int32 STREAM = 2;
+}

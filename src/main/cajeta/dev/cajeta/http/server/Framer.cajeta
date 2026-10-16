@@ -209,6 +209,8 @@ public final class Framer {
                 f.slot = slot;
                 f.framerIndex = this.index;
                 f.wsMaxMessage = this.srv.wsMaxMessageN;
+                f.mpRoutes = this.srv.multipartRoutes;
+                f.maxPartBytes = this.srv.maxPartBytesN;
                 int32 fd = f.fd;
                 this.table.add(#f);
                 this.remember(fd, slot);

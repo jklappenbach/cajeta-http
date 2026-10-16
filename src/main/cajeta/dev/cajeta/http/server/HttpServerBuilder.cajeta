@@ -28,6 +28,8 @@ public class HttpServerBuilder {
     private int32 bFramers;
     private boolean bSerializedStreams;
     private int64 bWsMaxMessage;
+    private MultipartRoutes bMultipart;
+    private int32 bMaxPartBytes;
 
     /** A builder with the request-dispatch pool (spec §6) and default limits. */
     public HttpServerBuilder() {
@@ -49,11 +51,33 @@ public class HttpServerBuilder {
         this.bFramers = 0;
         this.bSerializedStreams = false;
         this.bWsMaxMessage = (int64) 0;
+        this.bMultipart = null;
+        this.bMaxPartBytes = 0;
     }
 
     /** h2: one stream at a time per connection (spec §4.4); default false, streams run in parallel. */
     public HttpServerBuilder serializedStreams(boolean on) {
         this.bSerializedStreams = on;
+        return this;
+    }
+
+    /**
+     * How the route `method pattern` takes a multipart body (spec §2.3):
+     * `MultipartMode.WHOLE` (the default for every route), `PART` (the handler
+     * runs once per completed part, with `HttpRequest.multipartPart` set) or
+     * `STREAM` (the handler gets `HttpRequest.bodyStream` at head complete).
+     */
+    public HttpServerBuilder multipart(String method, String pattern, int32 mode) {
+        if (this.bMultipart == null) {
+            this.bMultipart = heap MultipartRoutes();
+        }
+        this.bMultipart.add(method, pattern, mode);
+        return this;
+    }
+
+    /** The largest single part a `PART` route accepts, in bytes (spec §2.3.2); default 16 MiB. */
+    public HttpServerBuilder maxPartBytes(int32 bytes) {
+        this.bMaxPartBytes = bytes;
         return this;
     }
 
@@ -224,6 +248,13 @@ public class HttpServerBuilder {
         srv.serializedStreamsN = this.bSerializedStreams;
         if (this.bWsMaxMessage > (int64) 0) {
             srv.wsMaxMessageN = this.bWsMaxMessage;
+        }
+        if (this.bMultipart != null) {
+            MultipartRoutes mr #= this.bMultipart;
+            srv.multipartRoutes #= mr;
+        }
+        if (this.bMaxPartBytes > 0) {
+            srv.maxPartBytesN = this.bMaxPartBytes;
         }
         return #srv;
     }

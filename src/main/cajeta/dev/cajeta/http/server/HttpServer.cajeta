@@ -74,6 +74,8 @@ public class HttpServer {
     public int32 framerN;          // 0: the carrier count
     public boolean serializedStreamsN;   // h2: one stream at a time per connection
     public int64 wsMaxMessageN;          // WebSocket: the largest message a route accepts
+    public MultipartRoutes multipartRoutes;   // PART and STREAM routes; null when every route is WHOLE
+    public int32 maxPartBytesN;          // PART routes: the largest single part
     public DispatchPool pool;
     ArrayList<Framer> framerList;
     AtomicInt32 framersRunning;
@@ -98,6 +100,8 @@ public class HttpServer {
         this.framerN = 0;
         this.serializedStreamsN = false;
         this.wsMaxMessageN = (int64) 67108864;
+        this.multipartRoutes = null;
+        this.maxPartBytesN = 16777216;
         this.pool = null;
         this.framerList = heap ArrayList<Framer>();
         this.framersRunning = heap AtomicInt32(0);

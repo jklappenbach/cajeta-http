@@ -1,0 +1,54 @@
+package dev.cajeta.http.server;
+
+import cajeta.collection.ArrayList;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.routing.Route;
+
+/** The routes a server takes multipart bodies on in `PART` or `STREAM` mode (spec §2.3). */
+public final class MultipartRoutes {
+    ArrayList<Route> routes;
+    ArrayList<int32> modes;
+
+    public MultipartRoutes() {
+        this.routes = heap ArrayList<Route>();
+        this.modes = heap ArrayList<int32>();
+    }
+
+    public void add(String method, String pattern, int32 mode) {
+        Route r = heap Route(method, pattern, (HttpRequest q, HttpResponse p) -> MultipartRoutes.none(q, p));
+        this.routes.add(#r);
+        this.modes.add(mode);
+    }
+
+    static void none(HttpRequest q, HttpResponse r) {
+    }
+
+    public int32 count() {
+        return this.routes.count();
+    }
+
+    /** The mode of the best matching route for `q`'s method and path, or WHOLE. */
+    public int32 modeFor(HttpRequest q) {
+        if (this.routes.count() == 0) {
+            return MultipartMode.WHOLE;
+        }
+        int32 n = q.splitPath();
+        if (n < 0) {
+            return MultipartMode.WHOLE;
+        }
+        int64 bestScore = (int64) -1;
+        int32 best = MultipartMode.WHOLE;
+        int32 i = 0;
+        while (i < this.routes.count()) {
+            Route rt = this.routes.get(i);
+            int64 sc = rt.score(q, n);
+            if (sc >= (int64) 0 && rt.methodMatches(q.methodBytes()) && sc > bestScore) {
+                bestScore = sc;
+                best = this.modes.get(i);
+            }
+            i = i + 1;
+        }
+        return best;
+    }
+}

@@ -17,6 +17,10 @@ import dev.cajeta.http.server.ConnectionBuffers;
 import dev.cajeta.http.h2.Http2;
 import dev.cajeta.http.h2.Http2Connection;
 import dev.cajeta.http.h2.NowWriter;
+import dev.cajeta.http.body.MultipartParser;
+import dev.cajeta.http.body.MultipartPart;
+import dev.cajeta.http.server.MultipartMode;
+import dev.cajeta.http.server.MultipartRoutes;
 import dev.cajeta.http.ws.WsFramed;
 import dev.cajeta.http.ws.WsTakeover;
 import dev.cajeta.http.server.ServerLimits;
@@ -40,6 +44,7 @@ public final class Http1Framed implements NowWriter {
     static final int32 PHASE_HEAD = 0;
     static final int32 PHASE_BODY_LENGTH = 1;
     static final int32 PHASE_BODY_CHUNKED = 2;
+    static final int32 PHASE_BODY_PARTS = 3;      // a PART multipart route: the framer feeds the parser
 
     /** `pump` results. */
     public static final int32 PUMP_IDLE = 0;      // nothing new to dispatch
@@ -52,6 +57,20 @@ public final class Http1Framed implements NowWriter {
     // framer, each message is a unit, the handler runs on a worker's turn.
     WsFramed ws;
     public int64 wsMaxMessage;
+
+    // Multipart per route (spec §2.3). In PART mode the head is copied aside,
+    // the body is fed to the parser as it arrives and each completed part is
+    // a unit; the handler sees the part on the request.
+    public MultipartRoutes mpRoutes;
+    public int32 maxPartBytes;
+    MultipartParser mp;
+    int8[] mpHead;
+    int32 mpHeadLen;
+    int64 mpRemaining;
+    int32 mpQueued;
+    boolean[] uIsPart;
+    int32[] uPart;
+    boolean[] uPartLast;
     public TlsStream tls;        // non-null under TLS: owns the socket then
     public boolean handshaking;  // TLS: the handshake has not completed
     public Http2Connection h2;   // non-null once the connection speaks h2
@@ -112,6 +131,13 @@ public final class Http1Framed implements NowWriter {
         this.h2Prior = false;
         this.ws = null;
         this.wsMaxMessage = (int64) 67108864;
+        this.mpRoutes = null;
+        this.maxPartBytes = 16777216;
+        this.mp = null;
+        this.mpHead = null;
+        this.mpHeadLen = 0;
+        this.mpRemaining = (int64) 0;
+        this.mpQueued = 0;
         this.bufs = null;
         this.fd = this.conn.fd;
         this.in #= in;
@@ -143,6 +169,9 @@ public final class Http1Framed implements NowWriter {
         this.uBodyLen = heap int32[this.maxUnits];
         this.uEnd = heap int32[this.maxUnits];
         this.uStream = heap boolean[this.maxUnits];
+        this.uIsPart = heap boolean[this.maxUnits];
+        this.uPart = heap int32[this.maxUnits];
+        this.uPartLast = heap boolean[this.maxUnits];
         this.units = 0;
         this.dispatched = false;
         this.waiting = false;
@@ -497,12 +526,23 @@ public final class Http1Framed implements NowWriter {
                     this.continueSent = true;
                 }
                 int32 start = this.in.readPosition() + h;
-                if (this.req.framing == HttpRequest.FRAMING_LENGTH
+                int32 mode = MultipartMode.WHOLE;
+                if (this.mpRoutes != null && this.req.framing != HttpRequest.FRAMING_NONE) {
+                    mode = this.mpRoutes.modeFor(this.req);
+                }
+                boolean partMode = mode == MultipartMode.PART
+                    && this.req.framing == HttpRequest.FRAMING_LENGTH;
+                boolean streamUnit = (this.streaming || mode == MultipartMode.STREAM)
+                    && this.req.framing != HttpRequest.FRAMING_NONE;
+                if (!partMode && !streamUnit && this.req.framing == HttpRequest.FRAMING_LENGTH
                         && this.maxBody > (int64) 0 && this.req.declaredLength > this.maxBody) {
                     throw heap PayloadTooLargeException("body over the limit", this.maxBody,
                         this.req.declaredLength);
                 }
-                if (this.streaming && this.req.framing != HttpRequest.FRAMING_NONE) {
+                if (partMode) {
+                    this.beginParts(h, now);
+                    progress = !this.closed;
+                } else if (streamUnit) {
                     // Streaming: the hold point is head complete; the handler
                     // reads the body itself. One unit only: the rest of the
                     // bytes belong to its body.
@@ -511,8 +551,7 @@ public final class Http1Framed implements NowWriter {
                     this.scanner.reset();
                     this.deadline = (int64) 0;
                     return;
-                }
-                if (this.req.framing == HttpRequest.FRAMING_LENGTH) {
+                } else if (this.req.framing == HttpRequest.FRAMING_LENGTH) {
                     if ((int64) start + this.req.declaredLength > (int64) this.in.capacity()) {
                         throw heap PayloadTooLargeException("body exceeds the input buffer",
                             (int64) (this.in.capacity() - start), this.req.declaredLength);
@@ -534,7 +573,46 @@ public final class Http1Framed implements NowWriter {
                     progress = true;
                 }
             }
-            if (this.phase == Http1Framed.PHASE_BODY_LENGTH) {
+            if (this.phase == Http1Framed.PHASE_BODY_PARTS) {
+                if (!this.partsOnly()) {
+                    // Units with offsets into `in` wait ahead of this request:
+                    // no compaction until their turn has run.
+                    return;
+                }
+                int32 avail = this.in.readable();
+                if ((int64) avail > this.mpRemaining) {
+                    avail = (int32) this.mpRemaining;
+                }
+                if (avail > 0) {
+                    this.mp.feedFrom(this.in.array(), this.in.readPosition(), avail);
+                    this.in.advanceRead(avail);
+                    this.mpRemaining = this.mpRemaining - (int64) avail;
+                    this.in.compact();
+                    if (this.bodyMs > 0) {
+                        this.deadline = now + (int64) this.bodyMs;
+                    }
+                }
+                boolean complete = this.mp.isComplete();
+                while (this.mpQueued < this.mp.partCount() && this.units < this.maxUnits) {
+                    boolean last = complete && this.mpQueued == this.mp.partCount() - 1;
+                    this.queuePart(this.mpQueued, last);
+                    this.mpQueued = this.mpQueued + 1;
+                }
+                if (complete && this.mp.partCount() == 0 && this.mpQueued == 0
+                        && this.units < this.maxUnits) {
+                    // An empty form: the handler runs once with no part.
+                    this.queuePart(-1, true);
+                    this.mpQueued = 1;
+                }
+                if (this.mpRemaining > (int64) 0) {
+                    return;
+                }
+                this.mp.endInput();   // raises when the closing delimiter never came
+                this.phase = Http1Framed.PHASE_HEAD;
+                this.scanner.reset();
+                this.deadline = (int64) 0;
+                progress = true;
+            } else if (this.phase == Http1Framed.PHASE_BODY_LENGTH) {
                 int32 start = this.in.readPosition() + this.headLen;
                 int32 n = (int32) this.req.declaredLength;
                 if (this.in.writePosition() < start + n) {
@@ -571,8 +649,82 @@ public final class Http1Framed implements NowWriter {
         this.uBodyLen[i] = bodyLen;
         this.uEnd[i] = end;
         this.uStream[i] = stream;
+        this.uIsPart[i] = false;
+        this.uPart[i] = -1;
+        this.uPartLast[i] = false;
         this.units = i + 1;
         this.continueSent = false;
+    }
+
+    /** One completed part of a PART-mode request as a unit; `last` sends the response after it. */
+    void queuePart(int32 index, boolean last) {
+        int32 i = this.units;
+        this.uStart[i] = 0;
+        this.uHead[i] = 0;
+        this.uBodyOff[i] = 0;
+        this.uBodyLen[i] = 0;
+        this.uEnd[i] = 0;
+        this.uStream[i] = false;
+        this.uIsPart[i] = true;
+        this.uPart[i] = index;
+        this.uPartLast[i] = last;
+        this.units = i + 1;
+        this.continueSent = false;
+    }
+
+    /** The streamed-body objects, built on first use: a STREAM route needs them without global streaming. */
+    void ensureStreamObjects() {
+        if (this.bodyChan == null) {
+            this.bodyChan = heap RequestBodyChannel();
+            this.streamed = heap RequestBody(this.bodyChan);
+        }
+    }
+
+    /** True when every queued unit is a part: nothing holds offsets into `in`. */
+    boolean partsOnly() {
+        int32 i = 0;
+        while (i < this.units) {
+            if (!this.uIsPart[i]) {
+                return false;
+            }
+            i = i + 1;
+        }
+        return true;
+    }
+
+    /**
+     * Enters PART mode for the request whose head is the next `h` bytes:
+     * copies the head aside (the body streams through `in` and is compacted
+     * away), builds the parser, and starts feeding.
+     */
+    void beginParts(int32 h, int64 now) {
+        MediaType ct #= this.req.contentType();
+        String bound #= MultipartParser.boundaryOf(ct);
+        if (bound == null || bound.byteLength() == 0) {
+            this.refuse(400);
+            return;
+        }
+        if (this.mpHead == null || this.mpHead.count() < (int64) h) {
+            this.mpHead = heap int8[h];
+        }
+        int8[] src = this.in.array();
+        int32 from = this.in.readPosition();
+        int32 i = 0;
+        while (i < h) {
+            this.mpHead[i] = src[from + i];
+            i = i + 1;
+        }
+        this.mpHeadLen = h;
+        this.mp #= MultipartParser.forBoundaryWithLimits(bound, MultipartParser.DEFAULT_MAX_PARTS,
+            this.maxPartBytes);
+        this.mpRemaining = this.req.declaredLength;
+        this.mpQueued = 0;
+        this.in.advanceRead(h);
+        this.scanner.reset();
+        this.phase = Http1Framed.PHASE_BODY_PARTS;
+        if (this.bodyMs > 0) {
+            this.deadline = now + (int64) this.bodyMs;
+        }
     }
 
     /** The framer's deadline check: true when the unit expired and the connection was closed. */
@@ -760,8 +912,14 @@ public final class Http1Framed implements NowWriter {
         int32 i = 0;
         int32 n = this.units;
         while (i < n && keep) {
+            if (this.uIsPart[i]) {
+                keep = this.partTurn(i);
+                i = i + 1;
+                continue;
+            }
             HeadScanner.parseRequest(this.in.array(), this.uStart[i], this.uHead[i], this.req);
             if (this.uStream[i]) {
+                this.ensureStreamObjects();
                 boolean chunked = this.req.framing == HttpRequest.FRAMING_CHUNKED;
                 this.bodyChan.begin(this.channel(), this.in.array(), this.uBodyOff[i],
                     this.in.writePosition(), this.in.capacity(), chunked,
@@ -804,8 +962,51 @@ public final class Http1Framed implements NowWriter {
         return keep;
     }
 
+    /**
+     * One part of a PART-mode request: the handler runs with the part on the
+     * request; after the last part the response goes out as for any request.
+     * Returns the keep-alive decision (true while parts remain).
+     */
+    boolean partTurn(int32 i) {
+        HeadScanner.parseRequest(this.mpHead, 0, this.mpHeadLen, this.req);
+        this.req.bodyOff = 0;
+        this.req.bodyLen = 0;
+        int32 idx = this.uPart[i];
+        this.req.mpIndex = idx < 0 ? 0 : idx;
+        this.req.mpPart = idx >= 0 ? this.mp.part(idx) : null;
+        this.req.mpLast = this.uPartLast[i];
+        this.dispatchKeeping(idx <= 0);
+        if (!this.uPartLast[i]) {
+            return true;
+        }
+        boolean reuse = this.req.reuse;
+        boolean omit = this.req.methodKind == Method.HEAD;
+        if (this.res.finish(reuse, this.req.versionKind, omit)) {
+            this.out.writeToAsync(this.channel());
+        }
+        boolean keep = this.res.keepsAlive() && reuse;
+        this.req.mpPart = null;
+        this.mp = null;
+        if (this.res.upgrades()) {
+            this.units = 0;
+            return this.switchProtocols();
+        }
+        return keep;
+    }
+
     void dispatch() {
-        this.res.reset();
+        this.dispatchKeeping(true);
+    }
+
+    /** `dispatch`, resetting the response first unless a PART request's earlier parts wrote to it. */
+    void dispatchKeeping(boolean reset) {
+        if (reset) {
+            this.res.reset();
+        }
+        this.runHandler();
+    }
+
+    void runHandler() {
         try {
             (HttpRequest, HttpResponse) -> void fn = this.handler;
             fn(this.req, this.res);
