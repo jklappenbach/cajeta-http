@@ -234,6 +234,12 @@ public class HttpServerBuilder {
                 this.bClimits = null;
                 tls.limitConnections(#tmoved);
             }
+            if (p != null) {
+                BufferPool tp #= p;
+                p = null;
+                tls.buffers = heap ConnectionBuffers(#tp);
+            }
+            this.applyDispatch(tls);
             return #tls;
         }
         ConnectionLimits cl = null;
@@ -246,6 +252,12 @@ public class HttpServerBuilder {
         this.model = null;
         HttpServer srv #= HttpServer.bindAddressWithModelAndLimits(SocketAddress.parse(this.addr),
             #m, #h, #l, #cl, #p);
+        this.applyDispatch(srv);
+        return #srv;
+    }
+
+    /** The model and the dispatch settings, the same for a plaintext and a TLS server. */
+    void applyDispatch(HttpServer srv) {
         srv.h2Prior = this.bH2Prior;
         srv.dispatchMode = this.bMode;
         srv.maxInFlightN = this.bMaxInFlight;
@@ -262,7 +274,6 @@ public class HttpServerBuilder {
         if (this.bMaxPartBytes > 0) {
             srv.maxPartBytesN = this.bMaxPartBytes;
         }
-        return #srv;
     }
 
     /** Builds and serves until shutdown. */

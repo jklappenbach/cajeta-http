@@ -52,6 +52,7 @@ public final class ConnectionFramer {
         this.dispatchedCount = 0;
         this.waitingCount = 0;
         this.stopping = false;
+        this.nextExpiry = (int64) 0;
         this.running = false;
     }
 
@@ -261,6 +262,13 @@ public final class ConnectionFramer {
 
     /** Reads, frames, and dispatches or re-arms one connection. */
     void service(Http1Framed c, int64 now) {
+        this.serviceInner(c, now);
+        if (!c.closed) {
+            this.noteDeadline(c);
+        }
+    }
+
+    void serviceInner(Http1Framed c, int64 now) {
         int32 r = c.pump(now);
         if (r == Http1Framed.PUMP_CLOSED) {
             this.drop(c);
@@ -360,19 +368,39 @@ public final class ConnectionFramer {
         }
     }
 
-    int32 nextTimeoutMs(int64 now) {
-        int64 best = (int64) -1;
+    // The earliest deadline any connection holds, or 0 for none. Kept so a
+    // wake does not scan ten thousand connections: the scan runs only when
+    // this moment has come (or a connection's deadline moved, which
+    // `noteDeadline` records after each service).
+    int64 nextExpiry;
+
+    /** Records a connection's current deadline into the cached earliest. */
+    void noteDeadline(Http1Framed c) {
+        int64 d = c.deadlineMs();
+        if (d > (int64) 0 && (this.nextExpiry == (int64) 0 || d < this.nextExpiry)) {
+            this.nextExpiry = d;
+        }
+    }
+
+    /** Recomputes the cached earliest deadline over the table. */
+    void rescanDeadlines() {
+        int64 best = (int64) 0;
         int32 i = 0;
         int32 count = this.table.count();
         while (i < count) {
             Http1Framed c = this.table.get(i);
             int64 d = c.deadlineMs();
-            if (d > (int64) 0 && !c.dispatched && (best < (int64) 0 || d < best)) {
+            if (d > (int64) 0 && !c.dispatched && (best == (int64) 0 || d < best)) {
                 best = d;
             }
             i = i + 1;
         }
-        if (best < (int64) 0) {
+        this.nextExpiry = best;
+    }
+
+    int32 nextTimeoutMs(int64 now) {
+        int64 best = this.nextExpiry;
+        if (best == (int64) 0) {
             return -1;
         }
         int64 left = best - now;
@@ -386,6 +414,9 @@ public final class ConnectionFramer {
     }
 
     void expireDeadlines(int64 now) {
+        if (this.nextExpiry == (int64) 0 || now < this.nextExpiry) {
+            return;   // nothing can have expired yet
+        }
         int32 i = 0;
         while (i < this.table.count()) {
             Http1Framed c = this.table.get(i);
@@ -395,6 +426,7 @@ public final class ConnectionFramer {
                 i = i + 1;
             }
         }
+        this.rescanDeadlines();
     }
 
     void closeIdle() {

@@ -46,7 +46,7 @@ public final class Load {
     static HttpServer srv;
 
     // Latency samples: a flat array, `CAP` slots per in-flight fiber.
-    static final int32 CAP = 200000;
+    static final int32 CAP = 20000;
     static int64[] samples;
     static int32[] counts;
     static int32 errors;
@@ -90,17 +90,20 @@ public final class Load {
     static #String statsJson() {
         HttpServer s = Load.srv;
         String j = "{\"rss_kb\":" + Load.rssKb() + ",\"fibers\":" + Load.fiberCount()
-            + ",\"maps\":" + Load.mappings()
+            + ",\"maps\":" + Load.mappings() + ",\"alloc\":" + Cajeta.allocatedBytes()
             + ",\"model\":\"" + (s.dispatchMode == HttpServer.DISPATCH_POOL ? "pool" : "fiber") + "\""
             + ",\"framers\":" + s.framerCount() + ",\"dispatches\":" + s.dispatches()
             + ",\"in_flight\":" + s.inFlight() + ",\"idle\":" + s.idleConnections()
-            + ",\"paused\":" + s.pausedSockets() + ",\"connections\":" + s.server.inflightCount() + "}";
+            + ",\"paused\":" + s.pausedSockets() + ",\"connections\":"
+            + (s.server != null ? s.server.inflightCount() : s.tlsConnections()) + "}";
         return j.substring(0, j.byteLength());
     }
 
     static #HttpServer build(int32 port, boolean fiberModel, int8[] cert, int32 certLen, int8[] key, int32 keyLen) {
         HttpServerBuilder b #= HttpServer.builder();
-        b.bind("127.0.0.1:" + port);
+        // Every address, so a client can spread 100K idle connections over the
+        // loopback aliases 127.0.0.1 to 127.0.0.4 (one ephemeral port range each).
+        b.bind("0.0.0.0:" + port);
         b.handler((HttpRequest q, HttpResponse r) -> Load.handle(q, r));
         if (fiberModel) {
             b.fiberPerConnection();
@@ -171,7 +174,7 @@ public final class Load {
             int32 i = 0;
             boolean going = true;
             while (i < idle && going) {
-                TcpStream s #= Load.idleConnection(port);
+                TcpStream s #= Load.idleConnection(port, 1 + i / 25000);
                 if (s == null) {
                     going = false;
                 } else {
@@ -217,8 +220,17 @@ public final class Load {
         Load.sort(all, 0, total - 1);
         int64 wallMs = wall / (int64) 1000000;
         int64 rps = wallMs > (int64) 0 ? (int64) total * (int64) 1000 / wallMs : (int64) 0;
+        int64 rssPerIdle = opened > 0
+            ? (Load.jsonInt(settled, "rss_kb") - Load.jsonInt(before, "rss_kb")) * (int64) 1024 / (int64) opened
+            : (int64) 0;
+        int64 allocPerReq = total > 0
+            ? (Load.jsonInt(after, "alloc") - Load.jsonInt(settled, "alloc")) / (int64) total
+            : (int64) 0;
         String rep = "load run: " + opened + " idle connections, " + inflight + " in flight, " + seconds + " s\n"
             + "  requests " + total + " (" + rps + "/s), errors " + Load.errors + "\n"
+            + "  server: " + rssPerIdle + " B of RSS per idle connection, " + allocPerReq
+            + " B allocated per request, fibers " + Load.jsonInt(after, "fibers")
+            + ", maps " + Load.jsonInt(after, "maps") + "\n"
             + "  latency ms p50 " + Load.pct(all, total, 50) + " p90 " + Load.pct(all, total, 90)
             + " p99 " + Load.pct(all, total, 99) + " max " + Load.pct(all, total, 100) + "\n"
             + "  stats before  " + before + "\n"
@@ -235,9 +247,9 @@ public final class Load {
     }
 
     /** One keep-alive connection that made one request and now says nothing. */
-    static #TcpStream idleConnection(int32 port) {
+    static #TcpStream idleConnection(int32 port, int32 alias) {
         try {
-            IpAddress ip #= IpAddress.loopbackV4();
+            IpAddress ip #= IpAddress.parse("127.0.0." + alias);
             SocketAddress a #= SocketAddress.of(#ip, port);
             TcpStream s #= TcpStream.connectAsync(#a);
             String req = "GET / HTTP/1.1\r\nHost: load\r\n\r\n";
@@ -407,6 +419,24 @@ public final class Load {
     }
 
     // ----- numbers ----------------------------------------------------------
+
+    /** The integer after `"key":` in a flat JSON object, or -1. */
+    static int64 jsonInt(String json, String key) {
+        String needle = "\"" + key + "\":";
+        int64 at = json.indexOf(needle);
+        if (at < (int64) 0) {
+            return (int64) -1;
+        }
+        int32 i = (int32) at + needle.byteLength();
+        int64 v = (int64) 0;
+        boolean any = false;
+        while (i < json.byteLength() && json.byteAt(i) >= (int8) 48 && json.byteAt(i) <= (int8) 57) {
+            v = v * (int64) 10 + (int64) (json.byteAt(i) - 48);
+            any = true;
+            i = i + 1;
+        }
+        return any ? v : (int64) -1;
+    }
 
     static int32 parseInt(String s) {
         int32 v = 0;

@@ -80,6 +80,8 @@ public final class DispatchTests {
         DispatchTests.tlsIdleConnectionsHoldNoFibers(c);
         System.stdout.println("-- dispatch tls: an https GET runs on a pool fiber (4.1.2) --");
         DispatchTests.tlsGetOnPoolFiber(c);
+        System.stdout.println("-- dispatch tls: the builder's model and framer count apply to a TLS server (9.1.3) --");
+        DispatchTests.tlsBuilderSettingsApply(c);
         System.stdout.println("-- dispatch tls: a stalled handshake delays nobody (4.1.3) --");
         DispatchTests.tlsStallDelaysNobody(c);
         System.stdout.println("-- dispatch h2: streams on one connection run in parallel by default (5.1.2) --");
@@ -88,6 +90,8 @@ public final class DispatchTests {
         DispatchTests.h2StreamsSerialized(c);
         System.stdout.println("-- dispatch h2: fifty open, ten complete, ten dispatched (5.1.1) --");
         DispatchTests.h2HeldStreams(c);
+        System.stdout.println("-- dispatch h2: bytes per stream on one connection under the pool (10.3.3) --");
+        DispatchTests.h2BytesPerStream(c);
         System.stdout.println("-- dispatch h2: a reset with a stream on a worker drops the connection once (5.1.2) --");
         DispatchTests.h2ResetWhileStreamInFlight(c);
         System.stdout.println("-- dispatch h2: a TLS read error with a stream on a worker drops the connection once (5.1.2) --");
@@ -767,6 +771,30 @@ public final class DispatchTests {
         }
     }
 
+    /** 9.1.3: a TLS server honors fiberPerConnection() and framers(k) like a plaintext one. */
+    static void tlsBuilderSettingsApply(Check c) {
+        scope {
+            String cp #= ClientBuilderTests.certPem();
+            String kp #= ClientBuilderTests.keyPem();
+            int8[] cert #= cp.toBytes();
+            int8[] key #= kp.toBytes();
+            HttpServerBuilder b #= HttpServer.builder();
+            b.bind("127.0.0.1:0");
+            b.handler((HttpRequest q, HttpResponse r) -> DispatchTests.handle(q, r));
+            b.tls(cert, cp.byteLength(), key, kp.byteLength());
+            b.fiberPerConnection();
+            HttpServer old #= b.build();
+            c.eqInt((int64) old.dispatchMode, (int64) HttpServer.DISPATCH_FIBER, "a TLS server built with fiberPerConnection() is the fiber model");
+            HttpServer srv #= DispatchTests.tlsServer(1);
+            c.eqInt((int64) srv.maxInFlightN, (int64) 256, "the pool defaults reach a TLS server");
+            Task<int32> sv = spawn serveIt(srv);
+            DispatchTests.settle(srv);
+            c.eqInt((int64) srv.framerCount(), (int64) 1, "framers(1) gives a TLS server one framer");
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+    }
+
     /** 4.1.3: a client that connects and never handshakes delays nobody on its framer. */
     static void tlsStallDelaysNobody(Check c) {
         scope {
@@ -965,6 +993,46 @@ public final class DispatchTests {
             c.that(first > 0, "the completed streams were answered");
             c.eqInt(srv.dispatches() - d0, (int64) 10, "ten units dispatched, forty held");
             c.eqInt((int64) DispatchTests.fiberCount(), (int64) before, "no fiber per stream or per connection");
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+    }
+
+    /**
+     * 10.3.3 (spec 8.3): the pool's per-stream cost on one prior-knowledge
+     * connection, as the connection loop's scripted figure is measured:
+     * allocation over 20 and over 100 completed streams, the difference per
+     * stream. In-process, so the raw client's own frame building is included;
+     * the server's figure is at most this.
+     */
+    static int64 h2Streams(int32 port, int32 n) {
+        String[] paths = heap String[n];
+        boolean[] close = heap boolean[n];
+        int32 i = 0;
+        while (i < n) {
+            paths[i] = "/";
+            close[i] = true;
+            i = i + 1;
+        }
+        int32[] order = heap int32[n];
+        int64 before = Cajeta.allocatedBytes();
+        int32 first = DispatchTests.h2Exchange(port, paths, close, n, n, 10000, order);
+        int64 used = Cajeta.allocatedBytes() - before;
+        return first > 0 ? used : (int64) -1;
+    }
+
+    static void h2BytesPerStream(Check c) {
+        scope {
+            HttpServer srv #= DispatchTests.h2Server(false, 0);
+            Task<int32> sv = spawn serveIt(srv);
+            DispatchTests.settle(srv);
+            int32 port = srv.server.listener.boundPort();
+            DispatchTests.h2Streams(port, 20);
+            int64 small = DispatchTests.h2Streams(port, 20);
+            int64 large = DispatchTests.h2Streams(port, 100);
+            c.that(small >= (int64) 0 && large >= (int64) 0, "every stream on the connection is answered");
+            int64 per = (large - small) / (int64) 80;
+            System.stdout.println("    pool h2: {} bytes per stream after warm-up, client included ({} for 20, {} for 100)", per, small, large);
             srv.shutdown(Duration.ofSeconds(2));
             await sv;
         }
