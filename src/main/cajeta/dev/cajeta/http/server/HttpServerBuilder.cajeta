@@ -22,8 +22,12 @@ public class HttpServerBuilder {
     private boolean bTls;
     private ConnectionLimits bClimits;
     private boolean bH2Prior;
+    private int32 bMode;
+    private int32 bMaxInFlight;
+    private int32 bMaxPending;
+    private int32 bFramers;
 
-    /** A builder with one fiber per connection and default limits. */
+    /** A builder with the request-dispatch pool (spec §6) and default limits. */
     public HttpServerBuilder() {
         this.addr = null;
         this.model #= ServerModel.fiberPerConnection();
@@ -37,6 +41,28 @@ public class HttpServerBuilder {
         this.bTls = false;
         this.bClimits = null;
         this.bH2Prior = false;
+        this.bMode = HttpServer.DISPATCH_POOL;
+        this.bMaxInFlight = 256;
+        this.bMaxPending = 4;
+        this.bFramers = 0;
+    }
+
+    /** Units dispatched and not yet returned (spec §4.2); default 256. */
+    public HttpServerBuilder maxInFlight(int32 n) {
+        this.bMaxInFlight = n < 1 ? 1 : n;
+        return this;
+    }
+
+    /** Complete units a connection may hold before its socket is paused (spec §4.3); default 4. */
+    public HttpServerBuilder maxPendingUnits(int32 n) {
+        this.bMaxPending = n < 1 ? 1 : n;
+        return this;
+    }
+
+    /** Framer fibers (spec §3.1); default the carrier count. */
+    public HttpServerBuilder framers(int32 k) {
+        this.bFramers = k < 1 ? 0 : k;
+        return this;
     }
 
     /** Serves HTTP/2 on plaintext connections that open with its preface (RFC 9113 prior knowledge). */
@@ -51,21 +77,31 @@ public class HttpServerBuilder {
         return this;
     }
 
-    /** The server model. */
+    /** The server model: the stdlib shared pool maps onto the dispatch pool with its size as `maxInFlight`. */
     public HttpServerBuilder model(ServerModel model) {
-        this.model #= model;
+        if (model.kind == ServerModel.SHARED_POOL_KIND) {
+            this.bMode = HttpServer.DISPATCH_POOL;
+            this.bMaxInFlight = model.poolSize < 1 ? 1 : model.poolSize;
+            this.model #= ServerModel.fiberPerConnection();
+        } else {
+            this.bMode = HttpServer.DISPATCH_FIBER;
+            this.model #= model;
+        }
         return this;
     }
 
-    /** One fiber per connection. */
+    /** One fiber per connection, the connection's own loop (spec §4.6). */
     public HttpServerBuilder fiberPerConnection() {
+        this.bMode = HttpServer.DISPATCH_FIBER;
         this.model #= ServerModel.fiberPerConnection();
         return this;
     }
 
-    /** A fixed pool of `poolSize` worker fibers. */
+    /** The dispatch pool with `poolSize` as `maxInFlight`; removed in request-dispatch Unit 9. */
     public HttpServerBuilder sharedPool(int32 poolSize) {
-        this.model #= ServerModel.sharedPool(poolSize);
+        this.bMode = HttpServer.DISPATCH_POOL;
+        this.bMaxInFlight = poolSize < 1 ? 1 : poolSize;
+        this.model #= ServerModel.fiberPerConnection();
         return this;
     }
 
@@ -165,6 +201,10 @@ public class HttpServerBuilder {
         HttpServer srv #= HttpServer.bindAddressWithModelAndLimits(SocketAddress.parse(this.addr),
             #m, #h, #l, #cl, #p);
         srv.h2Prior = this.bH2Prior;
+        srv.dispatchMode = this.bMode;
+        srv.maxInFlightN = this.bMaxInFlight;
+        srv.maxPendingN = this.bMaxPending;
+        srv.framerN = this.bFramers;
         return #srv;
     }
 

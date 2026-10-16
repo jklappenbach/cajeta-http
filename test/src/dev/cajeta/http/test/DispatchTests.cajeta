@@ -1,0 +1,573 @@
+package dev.cajeta.http.test;
+
+import cajeta.concurrent.Carriers;
+import cajeta.concurrent.Fiber;
+import cajeta.io.net.IpAddress;
+import cajeta.io.net.SocketAddress;
+import cajeta.io.net.TcpStream;
+import cajeta.io.net.TimedOutException;
+import cajeta.time.Clock;
+import cajeta.time.Duration;
+import cajeta.time.Instant;
+import dev.cajeta.http.Bytes;
+import dev.cajeta.http.ClientResponse;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.client.HttpClient;
+import dev.cajeta.http.server.HttpServer;
+import dev.cajeta.http.server.HttpServerBuilder;
+import dev.cajeta.http.server.ServerLimits;
+
+/**
+ * request-dispatch plan Unit 3 (spec §2.1, §3.1, §3.2, §4.1 to §4.5): under
+ * the default pool model a connection is assigned a fiber only when it holds
+ * a complete request, framers do the reading, and admission bounds in-flight
+ * units with back-pressure by pausing a socket. Plaintext HTTP/1.1 only here.
+ */
+public final class DispatchTests {
+    @Native("__cajeta_dbg_fiber_count")
+    private static int32 fiberCount();
+
+    static int32 slowHits;
+    static int32 upstreamPort;
+
+    public static void run(Check c) {
+        System.stdout.println("-- dispatch: framers count follows the builder (3.1.11) --");
+        DispatchTests.framerCount(c);
+        System.stdout.println("-- dispatch: a GET runs on a pool fiber, none per connection (3.1.1) --");
+        DispatchTests.getOnPoolFiber(c);
+        System.stdout.println("-- dispatch: idle keep-alive connections hold no fibers (3.1.5) --");
+        DispatchTests.idleConnectionsHoldNoFibers(c);
+        System.stdout.println("-- dispatch: a POST dispatches after its last body byte (3.1.2) --");
+        DispatchTests.postDispatchesAfterBody(c);
+        System.stdout.println("-- dispatch: a chunked body dispatches after the terminator (3.1.3) --");
+        DispatchTests.chunkedDispatchesAfterTerminator(c);
+        System.stdout.println("-- dispatch: 100-continue and 413 are answered on the framer (3.1.4) --");
+        DispatchTests.expectContinueOnFramer(c);
+        System.stdout.println("-- dispatch: three pipelined requests are one turn (3.1.6) --");
+        DispatchTests.pipelinedIsOneTurn(c);
+        System.stdout.println("-- dispatch: 431 and 408 without a dispatch (3.1.7) --");
+        DispatchTests.headLimitsOnFramer(c);
+        System.stdout.println("-- dispatch: maxInFlight bounds admission, not progress (3.1.8) --");
+        DispatchTests.maxInFlightBounds(c);
+        System.stdout.println("-- dispatch: back-pressure pauses a socket, refuses nothing (3.1.9) --");
+        DispatchTests.backPressurePauses(c);
+        System.stdout.println("-- dispatch: a dribbling head delays nobody else (3.1.10) --");
+        DispatchTests.dribbleDelaysNobody(c);
+        System.stdout.println("-- dispatch: a handler that calls another server parks and returns (3.1.12) --");
+        DispatchTests.handlerCallsAnotherServer(c);
+        System.stdout.println("-- dispatch: fiberPerConnection() is the old model, explicitly (3.3.2) --");
+        DispatchTests.fiberPerConnectionExplicit(c);
+    }
+
+    // ----- fixtures -------------------------------------------------------
+
+    static void handle(HttpRequest q, HttpResponse r) {
+        if (Bytes.equals(q.path(), "/slow")) {
+            DispatchTests.slowHits = DispatchTests.slowHits + 1;
+            Fiber.sleep(Duration.ofMillis((int64) 100));
+            r.body("slow-done");
+            return;
+        }
+        if (Bytes.equals(q.path(), "/hung")) {
+            Fiber.sleep(Duration.ofMillis((int64) 500));
+            r.body("hung-done");
+            return;
+        }
+        if (Bytes.equals(q.path(), "/echo")) {
+            r.writeBytes(q.body());
+            return;
+        }
+        if (Bytes.equals(q.path(), "/proxy")) {
+            // Calls the second server: the client's socket reads park this
+            // pool fiber on the reactor, never the framer.
+            HttpClient client #= heap HttpClient();
+            client.exchangeTimeout(5000);
+            String url = "http://127.0.0.1:" + DispatchTests.upstreamPort + "/";
+            ClientResponse resp #= client.get(url);
+            String got #= resp.bodyString();
+            r.body("via:" + got);
+            return;
+        }
+        r.body("ok");
+    }
+
+    static #HttpServer server(int32 maxInFlight, int32 maxPending, int32 framers) {
+        HttpServerBuilder b #= HttpServer.builder();
+        b.bind("127.0.0.1:0");
+        b.handler((HttpRequest q, HttpResponse r) -> DispatchTests.handle(q, r));
+        if (maxInFlight > 0) { b.maxInFlight(maxInFlight); }
+        if (maxPending > 0) { b.maxPendingUnits(maxPending); }
+        if (framers > 0) { b.framers(framers); }
+        return b.build();
+    }
+
+    public static async int32 serveIt(HttpServer srv) {
+        srv.serve();
+        return 1;
+    }
+
+    static int64 nowMs() {
+        Instant t = Clock.now();
+        return t.toEpochMilli();
+    }
+
+    /** Waits until the server reports its framers running, so counts are stable. */
+    static void settle(HttpServer srv) {
+        int32 i = 0;
+        while (i < 200 && srv.framerCount() == 0) {
+            Fiber.sleep(Duration.ofMillis((int64) 5));
+            i = i + 1;
+        }
+        Fiber.sleep(Duration.ofMillis((int64) 20));
+    }
+
+    public static async int32 getPath(int32 port, String path, String want) {
+        HttpClient client #= heap HttpClient();
+        client.exchangeTimeout(15000);
+        String url = "http://127.0.0.1:" + port + path;
+        try {
+            ClientResponse resp #= client.get(url);
+            if (resp.status() != 200) { return -1; }
+            String got #= resp.bodyString();
+            if (!got.equals(want)) { return -2; }
+            return 1;
+        } catch (Exception e) {
+            return -3;
+        }
+    }
+
+    static #TcpStream connectRaw(int32 port) {
+        IpAddress ip #= IpAddress.loopbackV4();
+        SocketAddress a #= SocketAddress.of(#ip, port);
+        return TcpStream.connectAsync(#a);
+    }
+
+    static void sendRaw(TcpStream s, String text) {
+        int8[] b #= text.toBytes();
+        s.writeAllAsync(b, (int64) 0, (int64) text.byteLength());
+    }
+
+    /** One bounded read: the count, 0 at EOF, -1 when `ms` elapsed first (readWithin throws on that). */
+    static int64 readStep(TcpStream s, int8[] buf, int32 at, int32 ms) {
+        try {
+            return s.readWithin(buf, (int64) at, (int64) (buf.count() - at), ms);
+        } catch (TimedOutException t) {
+            return (int64) -1;
+        }
+    }
+
+    /** Reads until `want` bytes arrived, EOF, or `ms` elapsed; returns the count. */
+    static int32 readSome(TcpStream s, int8[] buf, int32 want, int32 ms) {
+        int32 got = 0;
+        int64 deadline = DispatchTests.nowMs() + (int64) ms;
+        boolean open = true;
+        while (open && got < want && DispatchTests.nowMs() < deadline) {
+            int64 n = DispatchTests.readStep(s, buf, got, 50);
+            if (n == (int64) 0) {
+                open = false;
+            } else if (n > (int64) 0) {
+                got = got + (int32) n;
+            }
+        }
+        return got;
+    }
+
+    static boolean contains(int8[] buf, int32 len, String needle) {
+        int8[] nb #= needle.toBytes();
+        int32 nl = needle.byteLength();
+        int32 i = 0;
+        while (i + nl <= len) {
+            int32 j = 0;
+            while (j < nl && buf[i + j] == nb[j]) { j = j + 1; }
+            if (j == nl) { return true; }
+            i = i + 1;
+        }
+        return false;
+    }
+
+    static int32 countOf(int8[] buf, int32 len, String needle) {
+        int8[] nb #= needle.toBytes();
+        int32 nl = needle.byteLength();
+        int32 hits = 0;
+        int32 i = 0;
+        while (i + nl <= len) {
+            int32 j = 0;
+            while (j < nl && buf[i + j] == nb[j]) { j = j + 1; }
+            if (j == nl) { hits = hits + 1; i = i + nl; } else { i = i + 1; }
+        }
+        return hits;
+    }
+
+    // ----- cases ----------------------------------------------------------
+
+    /** 3.1.11: `framers(k)` yields k framers; the default is the carrier count. */
+    static void framerCount(Check c) {
+        scope {
+            HttpServer srv #= DispatchTests.server(0, 0, 3);
+            Task<int32> sv = spawn serveIt(srv);
+            DispatchTests.settle(srv);
+            c.eqInt((int64) srv.framerCount(), (int64) 3, "framers(3) runs three framers");
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+        scope {
+            HttpServer srv #= DispatchTests.server(0, 0, 0);
+            Task<int32> sv = spawn serveIt(srv);
+            DispatchTests.settle(srv);
+            c.eqInt((int64) srv.framerCount(), (int64) Carriers.count(), "the default framer count is the carrier count");
+            c.eqInt((int64) srv.maxInFlight(), (int64) 256, "the default maxInFlight is 256");
+            c.eqInt((int64) srv.maxPendingUnits(), (int64) 4, "the default maxPendingUnits is 4");
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+    }
+
+    /** 3.1.1: a GET is answered, and the live fiber count after it equals the count before it. */
+    static void getOnPoolFiber(Check c) {
+        scope {
+            HttpServer srv #= DispatchTests.server(0, 0, 2);
+            Task<int32> sv = spawn serveIt(srv);
+            DispatchTests.settle(srv);
+            int32 port = srv.server.listener.boundPort();
+            int32 before = DispatchTests.fiberCount();
+            int32 r = await spawn getPath(port, "/", "ok");
+            c.eqInt((int64) r, (int64) 1, "GET / answered ok");
+            Fiber.sleep(Duration.ofMillis((int64) 30));
+            c.eqInt((int64) DispatchTests.fiberCount(), (int64) before, "no fiber was spawned for the connection");
+            c.that(srv.dispatches() >= (int64) 1, "the request was dispatched through the pool");
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+    }
+
+    /** 3.1.5: 1,000 idle keep-alive connections add no fibers. */
+    static void idleConnectionsHoldNoFibers(Check c) {
+        scope {
+            HttpServer srv #= DispatchTests.server(0, 0, 2);
+            Task<int32> sv = spawn serveIt(srv);
+            DispatchTests.settle(srv);
+            int32 port = srv.server.listener.boundPort();
+            int32 before = DispatchTests.fiberCount();
+            TcpStream[] conns = heap TcpStream[1000];
+            int32 i = 0;
+            while (i < 1000) {
+                conns[i] #= DispatchTests.connectRaw(port);
+                i = i + 1;
+            }
+            Fiber.sleep(Duration.ofMillis((int64) 200));
+            c.eqInt((int64) DispatchTests.fiberCount(), (int64) before, "1,000 idle connections spawned no fiber");
+            c.that(srv.idleConnections() >= 900, "the server counts them as idle connections");
+            // They still work: one of them sends a request.
+            DispatchTests.sendRaw(conns[617], "GET / HTTP/1.1\r\nhost: t\r\n\r\n");
+            int8[] buf = heap int8[512];
+            int32 got = DispatchTests.readSome(conns[617], buf, 20, 3000);
+            c.that(DispatchTests.contains(buf, got, "200 OK"), "an idle connection answers when it speaks");
+            i = 0;
+            while (i < 1000) {
+                conns[i].close();
+                i = i + 1;
+            }
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+    }
+
+    /** 3.1.2: the handler runs after the last body byte, not after the head. */
+    static void postDispatchesAfterBody(Check c) {
+        scope {
+            HttpServer srv #= DispatchTests.server(0, 0, 1);
+            Task<int32> sv = spawn serveIt(srv);
+            DispatchTests.settle(srv);
+            int32 port = srv.server.listener.boundPort();
+            TcpStream s #= DispatchTests.connectRaw(port);
+            int64 d0 = srv.dispatches();
+            DispatchTests.sendRaw(s, "POST /echo HTTP/1.1\r\nhost: t\r\ncontent-length: 10\r\n\r\nhello");
+            Fiber.sleep(Duration.ofMillis((int64) 150));
+            c.eqInt(srv.dispatches(), d0, "half a body is not a unit: nothing dispatched");
+            DispatchTests.sendRaw(s, "world");
+            int8[] buf = heap int8[512];
+            int32 got = DispatchTests.readSome(s, buf, 20, 3000);
+            c.that(DispatchTests.contains(buf, got, "helloworld"), "the whole body reached the handler");
+            c.eqInt(srv.dispatches(), d0 + (int64) 1, "one dispatch for the complete request");
+            s.close();
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+    }
+
+    /** 3.1.3: a chunked body dispatches after the terminator and arrives dechunked. */
+    static void chunkedDispatchesAfterTerminator(Check c) {
+        scope {
+            HttpServer srv #= DispatchTests.server(0, 0, 1);
+            Task<int32> sv = spawn serveIt(srv);
+            DispatchTests.settle(srv);
+            int32 port = srv.server.listener.boundPort();
+            TcpStream s #= DispatchTests.connectRaw(port);
+            int64 d0 = srv.dispatches();
+            DispatchTests.sendRaw(s, "POST /echo HTTP/1.1\r\nhost: t\r\ntransfer-encoding: chunked\r\n\r\n5\r\nhello\r\n");
+            Fiber.sleep(Duration.ofMillis((int64) 150));
+            c.eqInt(srv.dispatches(), d0, "an open chunked body is not a unit");
+            DispatchTests.sendRaw(s, "5\r\nworld\r\n0\r\n\r\n");
+            int8[] buf = heap int8[512];
+            int32 got = DispatchTests.readSome(s, buf, 20, 3000);
+            c.that(DispatchTests.contains(buf, got, "helloworld"), "the dechunked body reached the handler");
+            s.close();
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+    }
+
+    /** 3.1.4: 100 Continue under the cap and 413 over it, both before any dispatch. */
+    static void expectContinueOnFramer(Check c) {
+        scope {
+            ServerLimits sl = heap ServerLimits();
+            sl.maxBodyBytes = (int64) 64;
+            sl.expectContinueEnabled = true;
+            HttpServerBuilder b #= HttpServer.builder();
+            b.bind("127.0.0.1:0");
+            b.handler((HttpRequest q, HttpResponse r) -> DispatchTests.handle(q, r));
+            b.serverLimits(#sl);
+            b.framers(1);
+            HttpServer srv #= b.build();
+            Task<int32> sv = spawn serveIt(srv);
+            DispatchTests.settle(srv);
+            int32 port = srv.server.listener.boundPort();
+            int64 d0 = srv.dispatches();
+
+            TcpStream s #= DispatchTests.connectRaw(port);
+            DispatchTests.sendRaw(s, "POST /echo HTTP/1.1\r\nhost: t\r\nexpect: 100-continue\r\ncontent-length: 5\r\n\r\n");
+            int8[] buf = heap int8[512];
+            int32 got = DispatchTests.readSome(s, buf, 25, 3000);
+            c.that(DispatchTests.contains(buf, got, "100 Continue"), "100 Continue arrives before the body is sent");
+            c.eqInt(srv.dispatches(), d0, "100 Continue cost no dispatch");
+            DispatchTests.sendRaw(s, "hello");
+            int8[] buf2 = heap int8[512];
+            int32 got2 = DispatchTests.readSome(s, buf2, 20, 3000);
+            c.that(DispatchTests.contains(buf2, got2, "hello"), "the body then reaches the handler");
+            s.close();
+
+            TcpStream big #= DispatchTests.connectRaw(port);
+            DispatchTests.sendRaw(big, "POST /echo HTTP/1.1\r\nhost: t\r\nexpect: 100-continue\r\ncontent-length: 5000\r\n\r\n");
+            int8[] buf3 = heap int8[512];
+            int32 got3 = DispatchTests.readSome(big, buf3, 20, 3000);
+            c.that(DispatchTests.contains(buf3, got3, " 413 "), "a declared body over the cap is 413 on the framer");
+            c.eqInt(srv.dispatches(), d0 + (int64) 1, "the 413 cost no dispatch");
+            big.close();
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+    }
+
+    /** 3.1.6: three pipelined GETs in one write: one dispatch, three in-order responses. */
+    static void pipelinedIsOneTurn(Check c) {
+        scope {
+            HttpServer srv #= DispatchTests.server(0, 0, 1);
+            Task<int32> sv = spawn serveIt(srv);
+            DispatchTests.settle(srv);
+            int32 port = srv.server.listener.boundPort();
+            TcpStream s #= DispatchTests.connectRaw(port);
+            int64 d0 = srv.dispatches();
+            String one = "GET / HTTP/1.1\r\nhost: t\r\n\r\n";
+            DispatchTests.sendRaw(s, one + one + one);
+            int8[] buf = heap int8[2048];
+            int32 got = 0;
+            int64 deadline = DispatchTests.nowMs() + (int64) 3000;
+            boolean open = true;
+            while (open && DispatchTests.countOf(buf, got, "200 OK") < 3 && DispatchTests.nowMs() < deadline) {
+                int64 n = DispatchTests.readStep(s, buf, got, 50);
+                if (n > (int64) 0) { got = got + (int32) n; }
+                if (n == (int64) 0) { open = false; }
+            }
+            c.eqInt((int64) DispatchTests.countOf(buf, got, "200 OK"), (int64) 3, "three responses");
+            c.eqInt(srv.dispatches(), d0 + (int64) 1, "one dispatch drained all three");
+            s.close();
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+    }
+
+    /** 3.1.7: a head over the buffer is 431 and a stalled head is 408, neither dispatched. */
+    static void headLimitsOnFramer(Check c) {
+        scope {
+            ServerLimits sl = heap ServerLimits();
+            sl.headReadTimeoutMs = 300;
+            HttpServerBuilder b #= HttpServer.builder();
+            b.bind("127.0.0.1:0");
+            b.handler((HttpRequest q, HttpResponse r) -> DispatchTests.handle(q, r));
+            b.serverLimits(#sl);
+            b.framers(1);
+            HttpServer srv #= b.build();
+            Task<int32> sv = spawn serveIt(srv);
+            DispatchTests.settle(srv);
+            int32 port = srv.server.listener.boundPort();
+            int64 d0 = srv.dispatches();
+
+            TcpStream stall #= DispatchTests.connectRaw(port);
+            DispatchTests.sendRaw(stall, "GET / HTTP/1.1\r\nhost: t\r\n");
+            int8[] buf = heap int8[512];
+            int32 got = DispatchTests.readSome(stall, buf, 20, 3000);
+            c.that(DispatchTests.contains(buf, got, " 408 "), "a stalled head is 408");
+            stall.close();
+
+            TcpStream big #= DispatchTests.connectRaw(port);
+            DispatchTests.sendRaw(big, "GET / HTTP/1.1\r\nhost: t\r\n");
+            int32 k = 0;
+            boolean alive = true;
+            while (k < 1200 && alive) {
+                try {
+                    DispatchTests.sendRaw(big, "x-fill: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\r\n");
+                } catch (Exception e) {
+                    alive = false;
+                }
+                k = k + 1;
+            }
+            int8[] buf2 = heap int8[512];
+            int32 got2 = DispatchTests.readSome(big, buf2, 20, 3000);
+            c.that(DispatchTests.contains(buf2, got2, " 431 "), "a head over the buffer is 431");
+            big.close();
+            c.eqInt(srv.dispatches(), d0, "neither refusal cost a dispatch");
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+    }
+
+    /** 3.1.8: maxInFlight(2) serializes a third slow request; parked handlers do not block others. */
+    static void maxInFlightBounds(Check c) {
+        scope {
+            HttpServer srv #= DispatchTests.server(2, 0, 1);
+            Task<int32> sv = spawn serveIt(srv);
+            DispatchTests.settle(srv);
+            int32 port = srv.server.listener.boundPort();
+            int64 t0 = DispatchTests.nowMs();
+            Task<int32> a = spawn getPath(port, "/slow", "slow-done");
+            Task<int32> b = spawn getPath(port, "/slow", "slow-done");
+            Task<int32> d = spawn getPath(port, "/slow", "slow-done");
+            int32 ra = await a;
+            int32 rb = await b;
+            int32 rd = await d;
+            int64 took = DispatchTests.nowMs() - t0;
+            c.that(ra == 1 && rb == 1 && rd == 1, "all three slow requests complete");
+            c.that(took >= (int64) 190, "the third waited for a slot (about 200 ms total)");
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+        scope {
+            HttpServer srv #= DispatchTests.server(8, 0, 1);
+            Task<int32> sv = spawn serveIt(srv);
+            DispatchTests.settle(srv);
+            int32 port = srv.server.listener.boundPort();
+            Task<int32> h1 = spawn getPath(port, "/hung", "hung-done");
+            Task<int32> h2 = spawn getPath(port, "/hung", "hung-done");
+            Task<int32> h3 = spawn getPath(port, "/hung", "hung-done");
+            Task<int32> h4 = spawn getPath(port, "/hung", "hung-done");
+            Fiber.sleep(Duration.ofMillis((int64) 50));
+            int64 t0 = DispatchTests.nowMs();
+            int32 fast = await spawn getPath(port, "/", "ok");
+            int64 took = DispatchTests.nowMs() - t0;
+            c.eqInt((int64) fast, (int64) 1, "a fast request completes while four are parked");
+            c.that(took < (int64) 300, "and it did not wait for them");
+            await h1; await h2; await h3; await h4;
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+    }
+
+    /** 3.1.9: at maxInFlight(1) a client past maxPendingUnits is paused, not refused; everything completes. */
+    static void backPressurePauses(Check c) {
+        scope {
+            HttpServer srv #= DispatchTests.server(1, 2, 1);
+            Task<int32> sv = spawn serveIt(srv);
+            DispatchTests.settle(srv);
+            int32 port = srv.server.listener.boundPort();
+            Task<int32> holder = spawn getPath(port, "/hung", "hung-done");
+            Fiber.sleep(Duration.ofMillis((int64) 50));
+            TcpStream s #= DispatchTests.connectRaw(port);
+            String one = "GET / HTTP/1.1\r\nhost: t\r\n\r\n";
+            DispatchTests.sendRaw(s, one + one + one + one + one + one);
+            Fiber.sleep(Duration.ofMillis((int64) 100));
+            c.that(srv.pausedSockets() >= 1, "a client past maxPendingUnits is paused");
+            int8[] buf = heap int8[4096];
+            int32 got = 0;
+            int64 deadline = DispatchTests.nowMs() + (int64) 5000;
+            boolean open = true;
+            while (open && DispatchTests.countOf(buf, got, "200 OK") < 6 && DispatchTests.nowMs() < deadline) {
+                int64 n = DispatchTests.readStep(s, buf, got, 50);
+                if (n > (int64) 0) { got = got + (int32) n; }
+                if (n == (int64) 0) { open = false; }
+            }
+            c.eqInt((int64) DispatchTests.countOf(buf, got, "200 OK"), (int64) 6, "all six complete, none refused");
+            int32 rh = await holder;
+            c.eqInt((int64) rh, (int64) 1, "the holder completed too");
+            s.close();
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+    }
+
+    /** 3.1.10: one client dribbling its head does not delay another on the same framer. */
+    static void dribbleDelaysNobody(Check c) {
+        scope {
+            HttpServer srv #= DispatchTests.server(0, 0, 1);
+            Task<int32> sv = spawn serveIt(srv);
+            DispatchTests.settle(srv);
+            int32 port = srv.server.listener.boundPort();
+            TcpStream drib #= DispatchTests.connectRaw(port);
+            DispatchTests.sendRaw(drib, "GET / HTTP/1.1\r\nhos");
+            int64 t0 = DispatchTests.nowMs();
+            int32 r = await spawn getPath(port, "/", "ok");
+            int64 took = DispatchTests.nowMs() - t0;
+            c.eqInt((int64) r, (int64) 1, "the other client is answered");
+            c.that(took < (int64) 500, "and not held behind the dribbler");
+            DispatchTests.sendRaw(drib, "t: t\r\n\r\n");
+            int8[] buf = heap int8[512];
+            int32 got = DispatchTests.readSome(drib, buf, 20, 3000);
+            c.that(DispatchTests.contains(buf, got, "200 OK"), "the dribbler is answered once its head completes");
+            drib.close();
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+    }
+
+    /** 3.1.12: a handler that calls a second server over the http client parks and returns; in-flight counted it meanwhile. */
+    static void handlerCallsAnotherServer(Check c) {
+        scope {
+            HttpServer up #= DispatchTests.server(0, 0, 1);
+            Task<int32> upTask = spawn serveIt(up);
+            DispatchTests.settle(up);
+            DispatchTests.upstreamPort = up.server.listener.boundPort();
+            HttpServer srv #= DispatchTests.server(0, 0, 1);
+            Task<int32> sv = spawn serveIt(srv);
+            DispatchTests.settle(srv);
+            int32 port = srv.server.listener.boundPort();
+            int32 r = await spawn getPath(port, "/proxy", "via:ok");
+            c.eqInt((int64) r, (int64) 1, "the proxied body came back through both servers");
+            c.that(srv.dispatches() >= (int64) 1 && up.dispatches() >= (int64) 1, "both servers dispatched through their pools");
+            c.eqInt((int64) srv.inFlight(), (int64) 0, "nothing in flight once the handler returned");
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+            up.shutdown(Duration.ofSeconds(2));
+            await upTask;
+        }
+    }
+
+    /** 3.3.2: `fiberPerConnection()` runs the connection loop: no framers, requests still answered. */
+    static void fiberPerConnectionExplicit(Check c) {
+        scope {
+            HttpServerBuilder b #= HttpServer.builder();
+            b.bind("127.0.0.1:0");
+            b.handler((HttpRequest q, HttpResponse r) -> DispatchTests.handle(q, r));
+            b.fiberPerConnection();
+            HttpServer srv #= b.build();
+            Task<int32> sv = spawn serveIt(srv);
+            Fiber.sleep(Duration.ofMillis((int64) 30));
+            int32 port = srv.server.listener.boundPort();
+            int32 r = await spawn getPath(port, "/", "ok");
+            c.eqInt((int64) r, (int64) 1, "GET / answered ok under fiber per connection");
+            c.eqInt((int64) srv.framerCount(), (int64) 0, "no framers run under fiber per connection");
+            c.eqInt(srv.dispatches(), (int64) 0, "and nothing went through a pool");
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+    }
+}

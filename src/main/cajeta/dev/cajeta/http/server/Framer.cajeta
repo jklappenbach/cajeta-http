@@ -1,0 +1,361 @@
+package dev.cajeta.http.server;
+
+import cajeta.lang.Optional;
+import cajeta.collection.ArrayList;
+import cajeta.concurrent.Channel;
+import cajeta.io.net.reactor.ReadySet;
+import cajeta.time.Clock;
+import cajeta.time.Instant;
+import dev.cajeta.http.Http1Framed;
+
+/**
+ * One framer fiber (request-dispatch spec §3): owns a ReadySet over its
+ * connections, reads and frames them without ever parking on a single
+ * socket, answers protocol traffic that needs no handler, and hands a
+ * connection holding complete units to the dispatch pool. Connections are
+ * owned by the framer's table for their whole life; the pool and its workers
+ * hold borrows. A dispatched connection is out of the set until its turn
+ * returns it, which is the back-pressure of §4.3.
+ */
+public final class Framer {
+    HttpServer srv;
+    int32 index;
+    ReadySet set;
+    int32 wakeFd;
+    Channel<Http1Framed> intake;     // accepted connections, owned handoff
+    Channel<Http1Framed> returns;    // back from a worker, borrowed handoff
+    ArrayList<Http1Framed> table;
+    int32[] slotOfFd;
+    int32 dispatchedCount;
+    int32 waitingCount;
+    public boolean stopping;
+    public boolean running;
+
+    public Framer(^HttpServer srv, int32 index) {
+        this.srv = srv;
+        this.index = index;
+        this.set = heap ReadySet();
+        this.wakeFd = Cajeta.eventfdCreate();
+        if (this.wakeFd >= 0) {
+            this.set.add(this.wakeFd, ReadySet.READ);
+        }
+        this.intake = heap Channel<Http1Framed>(1024);
+        this.returns = heap Channel<Http1Framed>(1024);
+        this.table = heap ArrayList<Http1Framed>();
+        this.slotOfFd = heap int32[1024];
+        int32 i = 0;
+        while (i < 1024) {
+            this.slotOfFd[i] = -1;
+            i = i + 1;
+        }
+        this.dispatchedCount = 0;
+        this.waitingCount = 0;
+        this.stopping = false;
+        this.running = false;
+    }
+
+    static int64 nowMs() {
+        Instant t = Clock.now();
+        return t.toEpochMilli();
+    }
+
+    /** The accept loop hands over a new connection. */
+    public void adopt(#Http1Framed f) {
+        this.intake.send(#f);
+        this.wake();
+    }
+
+    /** A worker hands a connection back after its turn. */
+    public void giveBack(Http1Framed f) {
+        this.returns.send(f);
+        this.wake();
+    }
+
+    public void wake() {
+        if (this.wakeFd >= 0) {
+            Cajeta.eventfdSignal(this.wakeFd);
+        }
+    }
+
+    public void stop() {
+        this.stopping = true;
+        this.wake();
+    }
+
+    public int32 connections() {
+        return this.table.count();
+    }
+
+    /** Connections neither dispatched nor waiting for the pool: idle on the wire. */
+    public int32 idle() {
+        int32 n = this.table.count() - this.dispatchedCount - this.waitingCount;
+        return n < 0 ? 0 : n;
+    }
+
+    /** Sockets the framer is not reading: a full mailbox, or waiting for pool capacity. */
+    public int32 paused() {
+        int32 n = 0;
+        int32 i = 0;
+        int32 count = this.table.count();
+        while (i < count) {
+            Http1Framed c = this.table.get(i);
+            if (c.waiting || (c.dispatched && c.mailboxFull())) {
+                n = n + 1;
+            }
+            i = i + 1;
+        }
+        return n;
+    }
+
+    public static async int32 run(Framer f) {
+        f.loop();
+        return 0;
+    }
+
+    void loop() {
+        this.running = true;
+        int32[] fds = heap int32[256];
+        int32[] evs = heap int32[256];
+        boolean go = true;
+        while (go) {
+            this.absorbIntake();
+            this.absorbReturns();
+            this.retryWaiting();
+            if (this.stopping) {
+                this.closeIdle();
+                if (this.table.count() == 0) {
+                    go = false;
+                }
+            }
+            if (go) {
+                int64 now = Framer.nowMs();
+                int32 timeout = this.nextTimeoutMs(now);
+                if (this.wakeFd < 0 && (timeout < 0 || timeout > 10)) {
+                    timeout = 10;   // no wake descriptor on this platform: poll the queues
+                }
+                int32 n = this.set.wait(fds, evs, 256, timeout);
+                now = Framer.nowMs();
+                if (n < 0) {
+                    go = false;
+                } else {
+                    int32 i = 0;
+                    while (i < n) {
+                        int32 fd = fds[i];
+                        if (fd == this.wakeFd) {
+                            Cajeta.eventfdConsume(this.wakeFd);
+                        } else {
+                            Http1Framed c = this.byFd(fd);
+                            if (c != null && !c.dispatched) {
+                                this.service(c, now);
+                            }
+                        }
+                        i = i + 1;
+                    }
+                    this.expireDeadlines(now);
+                }
+            }
+        }
+        this.running = false;
+        this.set.close();
+        if (this.wakeFd >= 0) {
+            Cajeta.fdClose(this.wakeFd);
+            this.wakeFd = -1;
+        }
+    }
+
+    Http1Framed byFd(int32 fd) {
+        if (fd < 0 || fd >= this.slotOfFd.count()) {
+            return null;
+        }
+        int32 s = this.slotOfFd[fd];
+        if (s < 0 || s >= this.table.count()) {
+            return null;
+        }
+        return this.table.get(s);
+    }
+
+    void remember(int32 fd, int32 slot) {
+        if (fd >= this.slotOfFd.count()) {
+            int32 n = this.slotOfFd.count();
+            while (n <= fd) {
+                n = n * 2;
+            }
+            int32[] grown = heap int32[n];
+            int32 i = 0;
+            while (i < n) {
+                grown[i] = i < this.slotOfFd.count() ? this.slotOfFd[i] : -1;
+                i = i + 1;
+            }
+            this.slotOfFd #= grown;   // the field keeps the title; `=` kept a dying borrow
+        }
+        this.slotOfFd[fd] = slot;
+    }
+
+    void absorbIntake() {
+        boolean more = true;
+        while (more) {
+            Optional<Http1Framed> o = this.intake.tryReceive();
+            if (!o.isPresent()) {
+                more = false;
+            } else {
+                Http1Framed f #= o.take();
+                int32 slot = this.table.count();
+                f.slot = slot;
+                f.framerIndex = this.index;
+                int32 fd = f.fd;
+                this.table.add(#f);
+                this.remember(fd, slot);
+                if (this.stopping) {
+                    this.drop(this.table.get(slot));
+                } else {
+                    int64 now = Framer.nowMs();
+                    this.service(this.table.get(slot), now);
+                }
+            }
+        }
+    }
+
+    void absorbReturns() {
+        boolean more = true;
+        while (more) {
+            Optional<Http1Framed> o = this.returns.tryReceive();
+            if (!o.isPresent()) {
+                more = false;
+            } else {
+                Http1Framed c = o.get();
+                c.dispatched = false;
+                this.dispatchedCount = this.dispatchedCount - 1;
+                if (c.closed || this.stopping) {
+                    this.drop(c);
+                } else {
+                    int64 now = Framer.nowMs();
+                    this.service(c, now);
+                }
+            }
+        }
+    }
+
+    /** Reads, frames, and dispatches or re-arms one connection. */
+    void service(Http1Framed c, int64 now) {
+        int32 r = c.pump(now);
+        if (r == Http1Framed.PUMP_CLOSED) {
+            this.drop(c);
+            return;
+        }
+        if (c.unitCount() > 0) {
+            this.set.remove(c.fd);
+            this.dispatch(c);
+            return;
+        }
+        this.set.add(c.fd, ReadySet.READ);
+    }
+
+    void dispatch(Http1Framed c) {
+        if (this.srv.pool.offer(c)) {
+            c.dispatched = true;
+            this.dispatchedCount = this.dispatchedCount + 1;
+        } else if (!c.waiting) {
+            c.waiting = true;
+            this.waitingCount = this.waitingCount + 1;
+        }
+    }
+
+    void retryWaiting() {
+        if (this.waitingCount == 0) {
+            return;
+        }
+        int32 i = 0;
+        int32 count = this.table.count();
+        while (i < count) {
+            Http1Framed c = this.table.get(i);
+            if (c.waiting) {
+                if (this.srv.pool.offer(c)) {
+                    c.waiting = false;
+                    this.waitingCount = this.waitingCount - 1;
+                    c.dispatched = true;
+                    this.dispatchedCount = this.dispatchedCount + 1;
+                }
+            }
+            i = i + 1;
+        }
+    }
+
+    int32 nextTimeoutMs(int64 now) {
+        int64 best = (int64) -1;
+        int32 i = 0;
+        int32 count = this.table.count();
+        while (i < count) {
+            Http1Framed c = this.table.get(i);
+            int64 d = c.deadlineMs();
+            if (d > (int64) 0 && !c.dispatched && (best < (int64) 0 || d < best)) {
+                best = d;
+            }
+            i = i + 1;
+        }
+        if (best < (int64) 0) {
+            return -1;
+        }
+        int64 left = best - now;
+        if (left < (int64) 1) {
+            return 1;
+        }
+        if (left > (int64) 60000) {
+            return 60000;
+        }
+        return (int32) left;
+    }
+
+    void expireDeadlines(int64 now) {
+        int32 i = 0;
+        while (i < this.table.count()) {
+            Http1Framed c = this.table.get(i);
+            if (!c.dispatched && c.expire(now)) {
+                this.drop(c);
+            } else {
+                i = i + 1;
+            }
+        }
+    }
+
+    void closeIdle() {
+        int32 i = 0;
+        while (i < this.table.count()) {
+            Http1Framed c = this.table.get(i);
+            if (!c.dispatched) {
+                this.drop(c);
+            } else {
+                i = i + 1;
+            }
+        }
+    }
+
+    /** Removes a connection from the set and the table, closes it, and returns its buffers. */
+    void drop(Http1Framed c) {
+        this.set.remove(c.fd);
+        if (c.waiting) {
+            c.waiting = false;
+            this.waitingCount = this.waitingCount - 1;
+        }
+        int32 slot = c.slot;
+        int32 last = this.table.count() - 1;
+        int32 fd = c.fd;
+        c.release(this.srv.buffers);
+        if (slot >= 0 && slot <= last) {
+            if (slot != last) {
+                // Swap-remove: the last element takes the hole, so no other
+                // slot moves and the fd index stays true. `set` drops the
+                // released occupant.
+                Http1Framed moved #= this.table.removeAt(last);
+                moved.slot = slot;
+                this.remember(moved.fd, slot);
+                this.table.set(slot, #moved);
+            } else {
+                Http1Framed gone #= this.table.removeAt(last);
+            }
+        }
+        if (fd >= 0 && fd < this.slotOfFd.count()) {
+            this.slotOfFd[fd] = -1;
+        }
+        this.srv.connectionGone();
+    }
+}

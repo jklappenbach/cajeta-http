@@ -1,0 +1,612 @@
+package dev.cajeta.http;
+
+import cajeta.lang.String;
+import cajeta.error.Exception;
+import cajeta.io.net.AsyncReader;
+import cajeta.io.net.AsyncWriter;
+import cajeta.io.net.ByteBuffer;
+import cajeta.io.net.TcpStream;
+import cajeta.io.net.TimedOutException;
+import cajeta.time.Clock;
+import cajeta.time.Instant;
+import dev.cajeta.http.h1.HttpParserLimits;
+import dev.cajeta.http.server.ConnectionBuffers;
+import dev.cajeta.http.server.ServerLimits;
+
+/**
+ * One plaintext HTTP/1.1 connection under the request-dispatch pool
+ * (request-dispatch spec §2.1, §3.2, §4.1). Two sides touch it, never at
+ * once:
+ *
+ *   - the framer calls `pump` on readiness: it drains the socket without
+ *     parking, scans and parses to each hold point, answers 100-continue and
+ *     the head and body refusals itself, and queues complete units;
+ *   - a pool worker calls `turn` once the connection is dispatched: it runs
+ *     every queued unit through the handler in order and writes the
+ *     responses, parking only on the socket's send side.
+ *
+ * Units are recorded as absolute offsets into `in`; the buffer is compacted
+ * only at the end of a turn, when no unit is outstanding.
+ */
+public final class Http1Framed {
+    static final int32 PHASE_HEAD = 0;
+    static final int32 PHASE_BODY_LENGTH = 1;
+    static final int32 PHASE_BODY_CHUNKED = 2;
+
+    /** `pump` results. */
+    public static final int32 PUMP_IDLE = 0;      // nothing new to dispatch
+    public static final int32 PUMP_READY = 1;     // at least one unit queued
+    public static final int32 PUMP_CLOSED = 2;    // closed: the caller drops it
+
+    public TcpStream conn;
+    public int32 fd;
+    public int32 framerIndex;
+    ByteBuffer in;
+    ByteBuffer out;
+    HeadScanner scanner;
+    HttpRequest req;
+    HttpResponse res;
+    (HttpRequest, HttpResponse) -> void handler;
+    int32 headMs;
+    int32 bodyMs;
+    int64 maxBody;
+    boolean expectEnabled;
+    boolean streaming;
+    RequestBodyChannel bodyChan;
+    RequestBody streamed;
+
+    // Parse state for the unit being framed.
+    int32 phase;
+    int32 headLen;
+    boolean continueSent;
+    int64 deadline;          // epoch ms the current unit must complete by; 0 = none
+
+    // Queued units, as absolute offsets into `in`.
+    int32 maxUnits;
+    int32[] uStart;
+    int32[] uHead;
+    int32[] uBodyOff;
+    int32[] uBodyLen;
+    int32[] uEnd;
+    boolean[] uStream;
+    int32 units;
+
+    public boolean dispatched;   // on a worker, or queued for one
+    public boolean waiting;      // complete units, but the pool refused the handoff
+    public boolean eof;          // the peer finished writing
+    public boolean closed;
+    public int32 slot;           // index in the framer's table
+
+    public Http1Framed(#TcpStream conn, #ByteBuffer in, #ByteBuffer out,
+                       HttpParserLimits parse, ServerLimits sl,
+                       (HttpRequest, HttpResponse) -> void handler,
+                       int32 maxUnits, int32 framerIndex) {
+        this.conn #= conn;
+        this.fd = this.conn.fd;
+        this.in #= in;
+        this.out #= out;
+        this.scanner = heap HeadScanner(parse);
+        this.req = heap HttpRequest(parse.maxHeaderCount);
+        this.res = heap HttpResponse(this.out, this.conn, 4096, 64);
+        this.handler #= handler;
+        this.headMs = sl.headReadTimeoutMs;
+        this.bodyMs = sl.bodyReadTimeoutMs;
+        this.maxBody = sl.maxBodyBytes;
+        this.expectEnabled = sl.expectContinueEnabled;
+        this.streaming = sl.streamRequestBody;
+        this.bodyChan = null;
+        this.streamed = null;
+        if (this.streaming) {
+            this.bodyChan = heap RequestBodyChannel();
+            this.streamed = heap RequestBody(this.bodyChan);
+        }
+        this.phase = Http1Framed.PHASE_HEAD;
+        this.headLen = 0;
+        this.continueSent = false;
+        this.deadline = (int64) 0;
+        this.maxUnits = maxUnits < 1 ? 1 : maxUnits;
+        this.uStart = heap int32[this.maxUnits];
+        this.uHead = heap int32[this.maxUnits];
+        this.uBodyOff = heap int32[this.maxUnits];
+        this.uBodyLen = heap int32[this.maxUnits];
+        this.uEnd = heap int32[this.maxUnits];
+        this.uStream = heap boolean[this.maxUnits];
+        this.units = 0;
+        this.dispatched = false;
+        this.waiting = false;
+        this.eof = false;
+        this.closed = false;
+        this.slot = -1;
+        this.framerIndex = framerIndex;
+    }
+
+    public int32 unitCount() {
+        return this.units;
+    }
+
+    /** True when the mailbox is full: the framer has stopped reading this socket. */
+    public boolean mailboxFull() {
+        return this.units >= this.maxUnits;
+    }
+
+    /** Bytes buffered beyond the queued units. */
+    public boolean hasUnframedBytes() {
+        return this.in.readable() > 0;
+    }
+
+    public int64 deadlineMs() {
+        return this.deadline;
+    }
+
+    static int64 nowMs() {
+        Instant t = Clock.now();
+        return t.toEpochMilli();
+    }
+
+    // ----- framer side -------------------------------------------------------
+
+    /**
+     * Drains the socket without parking and advances framing. Returns
+     * PUMP_READY when at least one unit is queued, PUMP_CLOSED when the
+     * connection was closed here (EOF, or a refusal was written), else
+     * PUMP_IDLE.
+     */
+    public int32 pump(int64 now) {
+        if (this.closed) {
+            return Http1Framed.PUMP_CLOSED;
+        }
+        boolean readMore = true;
+        boolean gotBytes = false;
+        while (readMore && !this.eof && this.in.writable() > 0) {
+            int64 n = (int64) 0;
+            try {
+                n = this.conn.readNow(this.in.array(), (int64) this.in.writePosition(),
+                    (int64) this.in.writable());
+            } catch (Exception e) {
+                this.close();
+                return Http1Framed.PUMP_CLOSED;
+            }
+            if (n < (int64) 0) {
+                readMore = false;
+            } else if (n == (int64) 0) {
+                this.eof = true;
+            } else {
+                this.in.advanceWrite((int32) n);
+                gotBytes = true;
+            }
+        }
+        // A body read that arrives inside the idle timeout keeps the request
+        // alive, whatever its total: the body deadline is per read, as the
+        // connection loop's `fillWithin(ch, bodyMs)` was.
+        if (gotBytes && this.phase != Http1Framed.PHASE_HEAD && this.bodyMs > 0) {
+            this.deadline = now + (int64) this.bodyMs;
+        }
+        try {
+            this.frame(now);
+        } catch (HeadersTooLargeException h) {
+            this.refuse(431);
+            return Http1Framed.PUMP_CLOSED;
+        } catch (PayloadTooLargeException p) {
+            this.refuse(413);
+            return Http1Framed.PUMP_CLOSED;
+        } catch (InvalidChunkEncodingException i) {
+            this.refuse(400);
+            return Http1Framed.PUMP_CLOSED;
+        } catch (HttpException e) {
+            this.refuse(e.httpStatus());
+            return Http1Framed.PUMP_CLOSED;
+        } catch (Exception e) {
+            this.refuse(400);
+            return Http1Framed.PUMP_CLOSED;
+        }
+        if (this.closed) {
+            return Http1Framed.PUMP_CLOSED;
+        }
+        if (this.units > 0) {
+            return Http1Framed.PUMP_READY;
+        }
+        if (this.eof) {
+            // The peer is done and left no complete unit behind.
+            this.close();
+            return Http1Framed.PUMP_CLOSED;
+        }
+        if (this.in.writable() == 0 && this.phase == Http1Framed.PHASE_HEAD) {
+            this.refuse(431);
+            return Http1Framed.PUMP_CLOSED;
+        }
+        return Http1Framed.PUMP_IDLE;
+    }
+
+    /** Frames as many complete units as the bytes hold, up to the mailbox size. */
+    void frame(int64 now) {
+        boolean progress = true;
+        while (progress && this.units < this.maxUnits && !this.closed) {
+            progress = false;
+            if (this.phase == Http1Framed.PHASE_HEAD) {
+                if (this.in.readable() == 0) {
+                    this.deadline = (int64) 0;
+                    return;
+                }
+                if (this.deadline == (int64) 0 && this.headMs > 0) {
+                    this.deadline = now + (int64) this.headMs;
+                }
+                int32 h = this.scanner.scan(this.in);
+                if (h < 0) {
+                    return;
+                }
+                this.headLen = h;
+                HeadScanner.parseRequest(this.in.array(), this.in.readPosition(), h, this.req);
+                int32 ex = this.expectation();
+                if (ex == 417 || ex == 413) {
+                    this.refuse(ex);
+                    return;
+                }
+                if (ex == 100 && this.in.readable() == h && !this.continueSent) {
+                    this.sendContinue();
+                    this.continueSent = true;
+                }
+                int32 start = this.in.readPosition() + h;
+                if (this.req.framing == HttpRequest.FRAMING_LENGTH
+                        && this.maxBody > (int64) 0 && this.req.declaredLength > this.maxBody) {
+                    throw heap PayloadTooLargeException("body over the limit", this.maxBody,
+                        this.req.declaredLength);
+                }
+                if (this.streaming && this.req.framing != HttpRequest.FRAMING_NONE) {
+                    // Streaming: the hold point is head complete; the handler
+                    // reads the body itself. One unit only: the rest of the
+                    // bytes belong to its body.
+                    this.queue(this.in.readPosition(), h, start, 0, start, true);
+                    this.in.advanceRead(h);
+                    this.scanner.reset();
+                    this.deadline = (int64) 0;
+                    return;
+                }
+                if (this.req.framing == HttpRequest.FRAMING_LENGTH) {
+                    if ((int64) start + this.req.declaredLength > (int64) this.in.capacity()) {
+                        throw heap PayloadTooLargeException("body exceeds the input buffer",
+                            (int64) (this.in.capacity() - start), this.req.declaredLength);
+                    }
+                    this.phase = Http1Framed.PHASE_BODY_LENGTH;
+                    if (this.bodyMs > 0) {
+                        this.deadline = now + (int64) this.bodyMs;
+                    }
+                } else if (this.req.framing == HttpRequest.FRAMING_CHUNKED) {
+                    this.phase = Http1Framed.PHASE_BODY_CHUNKED;
+                    if (this.bodyMs > 0) {
+                        this.deadline = now + (int64) this.bodyMs;
+                    }
+                } else {
+                    this.queue(this.in.readPosition(), h, start, 0, start, false);
+                    this.in.advanceRead(h);
+                    this.scanner.reset();
+                    this.deadline = (int64) 0;
+                    progress = true;
+                }
+            }
+            if (this.phase == Http1Framed.PHASE_BODY_LENGTH) {
+                int32 start = this.in.readPosition() + this.headLen;
+                int32 n = (int32) this.req.declaredLength;
+                if (this.in.writePosition() < start + n) {
+                    return;
+                }
+                this.queue(this.in.readPosition(), this.headLen, start, n, start + n, false);
+                this.in.advanceRead(this.headLen + n);
+                this.scanner.reset();
+                this.phase = Http1Framed.PHASE_HEAD;
+                this.deadline = (int64) 0;
+                progress = true;
+            } else if (this.phase == Http1Framed.PHASE_BODY_CHUNKED) {
+                int32 start = this.in.readPosition() + this.headLen;
+                int32 endOfChunks = this.measureChunks(start);
+                if (endOfChunks < 0) {
+                    return;
+                }
+                int32 bodyEnd = this.dechunk(start);
+                this.queue(this.in.readPosition(), this.headLen, start, bodyEnd - start, endOfChunks, false);
+                this.in.advanceRead(endOfChunks - this.in.readPosition());
+                this.scanner.reset();
+                this.phase = Http1Framed.PHASE_HEAD;
+                this.deadline = (int64) 0;
+                progress = true;
+            }
+        }
+    }
+
+    void queue(int32 start, int32 head, int32 bodyOff, int32 bodyLen, int32 end, boolean stream) {
+        int32 i = this.units;
+        this.uStart[i] = start;
+        this.uHead[i] = head;
+        this.uBodyOff[i] = bodyOff;
+        this.uBodyLen[i] = bodyLen;
+        this.uEnd[i] = end;
+        this.uStream[i] = stream;
+        this.units = i + 1;
+        this.continueSent = false;
+    }
+
+    /** The framer's deadline check: true when the unit expired and the connection was closed. */
+    public boolean expire(int64 now) {
+        if (this.closed || this.deadline == (int64) 0 || now < this.deadline) {
+            return false;
+        }
+        this.refuse(408);
+        return true;
+    }
+
+    int32 expectation() {
+        int32 i = this.req.table.find("expect", 0);
+        if (i < 0) {
+            return 0;
+        }
+        if (!Bytes.equalsIgnoreCase(this.req.table.valueAt(i), "100-continue")) {
+            return 417;
+        }
+        if (!this.expectEnabled) {
+            return 0;
+        }
+        if (this.req.framing == HttpRequest.FRAMING_LENGTH
+                && this.maxBody > (int64) 0 && this.req.declaredLength > this.maxBody) {
+            return 413;
+        }
+        if (this.req.versionKind != Version.HTTP_1_1) {
+            return 0;
+        }
+        return 100;
+    }
+
+    /** Writes a small protocol reply without parking; a peer that cannot take it is closed. */
+    boolean writeSmall(String text) {
+        int8[] b #= text.toBytes();
+        int32 n = text.byteLength();
+        int64 sent = (int64) 0;
+        try {
+            sent = this.conn.write(b, (int64) 0, (int64) n);
+        } catch (Exception e) {
+            sent = (int64) -1;
+        }
+        return sent == (int64) n;
+    }
+
+    void sendContinue() {
+        if (!this.writeSmall("HTTP/1.1 100 Continue\r\n\r\n")) {
+            this.close();
+        }
+    }
+
+    /** A status-only refusal from the framer, then close. */
+    void refuse(int32 status) {
+        if (this.closed) {
+            return;
+        }
+        String line = "HTTP/1.1 " + status + " " + Status.reasonLiteral(status)
+            + "\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+        this.writeSmall(line);
+        this.close();
+    }
+
+    // Chunked framing: a measuring pass that answers the end offset of the
+    // whole chunked body (after the trailer's blank line) or -1 when more
+    // bytes are needed, then the in-place pass that compacts the data.
+
+    int32 lineEnd(int32 from) {
+        int8[] a = this.in.array();
+        int32 end = this.in.writePosition();
+        int32 p = from;
+        while (p + 1 < end) {
+            if (a[p] == (int8) 13 && a[p + 1] == (int8) 10) {
+                return p;
+            }
+            p = p + 1;
+        }
+        return -1;
+    }
+
+    int32 measureChunks(int32 start) {
+        int8[] a = this.in.array();
+        int32 src = start;
+        int64 total = (int64) 0;
+        while (true) {
+            int32 le = this.lineEnd(src);
+            if (le < 0) {
+                return -1;
+            }
+            int64 size = (int64) 0;
+            int32 p = src;
+            int32 digits = 0;
+            while (p < le && a[p] != (int8) 59) {
+                int32 d = Bytes.hexValue(((int32) a[p]) & 255);
+                if (d < 0 || digits >= 8) {
+                    throw heap InvalidChunkEncodingException("bad chunk size", (int64) (p - start));
+                }
+                size = size * (int64) 16 + (int64) d;
+                digits = digits + 1;
+                p = p + 1;
+            }
+            if (digits == 0) {
+                throw heap InvalidChunkEncodingException("empty chunk size", (int64) (src - start));
+            }
+            src = le + 2;
+            if (size == (int64) 0) {
+                int32 t = this.lineEnd(src);
+                while (t >= 0 && t != src) {
+                    src = t + 2;
+                    t = this.lineEnd(src);
+                }
+                if (t < 0) {
+                    return -1;
+                }
+                return src + 2;
+            }
+            total = total + size;
+            if (this.maxBody > (int64) 0 && total > this.maxBody) {
+                throw heap PayloadTooLargeException("chunked body over the limit", this.maxBody, total);
+            }
+            int32 n = (int32) size;
+            if (src + n + 2 > this.in.capacity()) {
+                throw heap PayloadTooLargeException("chunked body exceeds the input buffer",
+                    (int64) this.in.capacity(), (int64) (src + n + 2));
+            }
+            if (this.in.writePosition() < src + n + 2) {
+                return -1;
+            }
+            if (a[src + n] != (int8) 13 || a[src + n + 1] != (int8) 10) {
+                throw heap InvalidChunkEncodingException("chunk data not followed by CRLF",
+                    (int64) (src + n - start));
+            }
+            src = src + n + 2;
+        }
+        return -1;
+    }
+
+    int32 dechunk(int32 start) {
+        int8[] a = this.in.array();
+        int32 dst = start;
+        int32 src = start;
+        while (true) {
+            int32 le = this.lineEnd(src);
+            int64 size = (int64) 0;
+            int32 p = src;
+            while (p < le && a[p] != (int8) 59) {
+                size = size * (int64) 16 + (int64) Bytes.hexValue(((int32) a[p]) & 255);
+                p = p + 1;
+            }
+            src = le + 2;
+            if (size == (int64) 0) {
+                return dst;
+            }
+            int32 n = (int32) size;
+            if (dst != src) {
+                int32 i = 0;
+                while (i < n) {
+                    a[dst + i] = a[src + i];
+                    i = i + 1;
+                }
+            }
+            dst = dst + n;
+            src = src + n + 2;
+        }
+        return dst;
+    }
+
+    // ----- worker side -------------------------------------------------------
+
+    /**
+     * Runs every queued unit through the handler in order and writes the
+     * responses. Returns true when the connection stays open for more.
+     */
+    public boolean turn() {
+        boolean keep = true;
+        int32 i = 0;
+        int32 n = this.units;
+        while (i < n && keep) {
+            HeadScanner.parseRequest(this.in.array(), this.uStart[i], this.uHead[i], this.req);
+            if (this.uStream[i]) {
+                boolean chunked = this.req.framing == HttpRequest.FRAMING_CHUNKED;
+                this.bodyChan.begin(this.conn, this.in.array(), this.uBodyOff[i],
+                    this.in.writePosition(), this.in.capacity(), chunked,
+                    this.req.declaredLength, this.bodyMs, this.maxBody);
+                this.streamed.reset(this.req, chunked ? (int64) -1 : this.req.declaredLength);
+                this.req.bindStream(this.streamed);
+            } else {
+                this.req.bodyOff = this.uBodyOff[i];
+                this.req.bodyLen = this.uBodyLen[i];
+            }
+            this.dispatch();
+            boolean reuse = this.req.reuse;
+            if (this.uStream[i] && !this.bodyChan.drain((int64) 262144)) {
+                reuse = false;
+            }
+            boolean omit = this.req.methodKind == Method.HEAD;
+            if (this.res.finish(reuse, this.req.versionKind, omit)) {
+                this.out.writeToAsync(this.conn);
+            }
+            keep = this.res.keepsAlive() && reuse;
+            if (this.uStream[i]) {
+                this.req.bindBody(0, 0);
+                this.bodyChan.restore(this.in);
+            }
+            if (this.res.upgrades()) {
+                keep = false;
+                this.units = 0;
+                this.switchProtocols();
+                return false;
+            }
+            i = i + 1;
+        }
+        this.units = 0;
+        if (keep) {
+            this.in.compact();
+            if (this.eof && this.in.readable() == 0) {
+                keep = false;
+            }
+        }
+        return keep;
+    }
+
+    void dispatch() {
+        this.res.reset();
+        try {
+            (HttpRequest, HttpResponse) -> void fn = this.handler;
+            fn(this.req, this.res);
+        } catch (TimedOutException t) {
+            if (this.res.isCommitted()) {
+                throw t;
+            }
+            this.res.reset();
+            this.res.status(408);
+        } catch (HttpException e) {
+            if (this.res.isCommitted()) {
+                throw e;
+            }
+            this.res.reset();
+            this.res.status(e.httpStatus());
+        } catch (Exception e) {
+            if (this.res.isCommitted()) {
+                throw e;
+            }
+            this.res.reset();
+            this.res.status(500);
+        }
+    }
+
+    /** Runs the response's takeover over this channel, bytes already read first. */
+    void switchProtocols() {
+        Takeover t #= this.res.takeUpgrade();
+        int32 cap = this.in.readable() > 8192 ? this.in.readable() : 8192;
+        AsyncReader reader = heap AsyncReader(this.conn, cap);
+        if (this.in.readable() > 0) {
+            reader.stage(this.in.array(), this.in.readable());
+            this.in.advanceRead(this.in.readable());
+        }
+        AsyncWriter writer = heap AsyncWriter(this.conn);
+        t.attach(this.conn);
+        t.run(reader, writer);
+    }
+
+    /** Closes the socket; the buffers go back through `release`. */
+    public void close() {
+        if (this.closed) {
+            return;
+        }
+        this.closed = true;
+        try {
+            this.conn.close();
+        } catch (Exception e) {
+        }
+    }
+
+    /** Hands the buffers back to `pool` and closes if not yet closed. */
+    public void release(ConnectionBuffers pool) {
+        this.close();
+        if (this.in != null) {
+            ByteBuffer bin #= this.in;
+            this.in = null;
+            pool.give(#bin);
+        }
+        if (this.out != null) {
+            ByteBuffer bout #= this.out;
+            this.out = null;
+            pool.give(#bout);
+        }
+    }
+}

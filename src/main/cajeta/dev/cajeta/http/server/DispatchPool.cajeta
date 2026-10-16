@@ -1,0 +1,69 @@
+package dev.cajeta.http.server;
+
+import cajeta.lang.Optional;
+import cajeta.concurrent.AtomicInt32;
+import cajeta.concurrent.AtomicInt64;
+import cajeta.concurrent.Channel;
+import dev.cajeta.http.Http1Framed;
+
+/**
+ * The dispatch pool (request-dispatch spec §4): `maxInFlight` worker fibers
+ * take connections that hold complete units off a bounded queue, run each
+ * connection's turn, and hand it back to its framer. The queue is as deep as
+ * the worker count, so a framer's non-parking offer is refused only when
+ * every worker is busy and the queue is full; the framer then keeps the
+ * connection waiting and retries when woken.
+ */
+public final class DispatchPool {
+    HttpServer srv;
+    Channel<Http1Framed> queue;
+    public int32 workers;
+    public AtomicInt32 inFlight;
+    public AtomicInt64 dispatches;
+
+    public DispatchPool(^HttpServer srv, int32 workers) {
+        this.srv = srv;
+        this.workers = workers < 1 ? 1 : workers;
+        this.queue = heap Channel<Http1Framed>(this.workers);
+        this.inFlight = heap AtomicInt32(0);
+        this.dispatches = heap AtomicInt64((int64) 0);
+    }
+
+    /** A framer's non-parking handoff: false when the pool cannot take it now. */
+    public boolean offer(Http1Framed c) {
+        if (this.queue.trySend(c)) {
+            this.dispatches.fetchAdd((int64) 1);
+            return true;
+        }
+        return false;
+    }
+
+    public void close() {
+        this.queue.close();
+    }
+
+    public static async int32 worker(DispatchPool p) {
+        boolean go = true;
+        while (go) {
+            Optional<Http1Framed> o = p.queue.receive();
+            if (!o.isPresent()) {
+                go = false;
+            } else {
+                Http1Framed c = o.get();
+                p.inFlight.fetchAdd(1);
+                boolean keep = false;
+                try {
+                    keep = c.turn();
+                } catch (Exception e) {
+                    keep = false;
+                }
+                p.inFlight.fetchAdd(-1);
+                if (!keep) {
+                    c.close();
+                }
+                p.srv.framerAt(c.framerIndex).giveBack(c);
+            }
+        }
+        return 0;
+    }
+}
