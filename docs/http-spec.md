@@ -36,19 +36,33 @@ primavera          — REST/web POLICY: @Rest endpoints, annotation routing, aut
 - **primavera provides (not here):** `@Rest`/`@WebSocket` endpoint annotations,
   routing-by-signature, and automatic serialization to/from a typed object model.
 
-## Execution model — inherited, un-colored
+## Execution model — request dispatch, un-colored
 
-HTTP does **not** define its own reactor or handler-coloring. A server runs under
-one of `cajeta.io.net`'s accept models, chosen at the listener:
+HTTP does **not** define its own reactor or handler-coloring. Handlers are
+ordinary blocking-looking code: the reactor turns a "blocking" read into
+park/resume, and there is no `AsyncHandler`. What the server decides is when a
+connection gets a fiber. Two models, chosen on the builder:
 
-- **fiber-per-connection** (default) — one fiber per connection; handlers are
-  ordinary blocking-looking code (the reactor turns "blocking" reads into
-  park/resume). Lowest latency; ~64KB stack/conn.
-- **shared-pool(N)** — a bounded worker pool drains a readiness/completion queue;
-  bounded memory for C10K-style mostly-idle fan-out.
+- **request dispatch** (default since 0.7) — framer fibers, one per carrier,
+  read every socket and hold a connection until it carries a complete unit of
+  work: an HTTP/1.1 request, an h2 stream at END_STREAM, a WebSocket message,
+  a multipart part on a `PART` route, or a unit a developer `Framer` reports.
+  Only then does a pooled fiber run the handler. Units from one connection run
+  in order on one fiber at a time (h2 streams in parallel by default,
+  `serializedStreams(true)` otherwise). `maxInFlight(n)` (256) bounds the units
+  on workers; `maxPendingUnits(n)` (4) bounds the complete units held per
+  connection before the framer stops reading its socket. Idle connections cost
+  no fiber. The framer answers WebSocket pings, completes close handshakes,
+  sends h2 control frames and refuses oversized input itself. The design is
+  `specs/request-dispatch-spec.md` in the cajeta repository.
+- **fiber-per-connection** (`fiberPerConnection()`) — one fiber per accepted
+  socket running the connection's own loop; the model for a small number of
+  long, busy connections, and exactly 0.6's behavior.
 
-Either way the handler is the **same** un-colored shape — `(HttpRequest) -> HttpResponse`.
-There is no `AsyncHandler`; fibers make "blocking" handlers non-blocking for free.
+The stdlib shared-pool model (`ServerModel.sharedPool(n)`, formerly
+`sharedPool(n)` on the builder) is not a model this server takes: it meant
+`n` workers owning whole connections, idle time included. `build()` refuses
+it, naming `maxInFlight`. See `docs/migrating-to-0.7.md`.
 
 ## Package layout
 
@@ -236,7 +250,7 @@ public class Users {
 
         HttpServer server #= HttpServer.builder()
             .bind("0.0.0.0:8443")
-            .fiberPerConnection()                // or .sharedPool(n), the cajeta.io.net models
+            .fiberPerConnection()                // omit it for the request-dispatch pool, the default
             .tls(cert, certLen, key, keyLen)     // PEM material for cajeta.io.net.tls
             .handler((HttpRequest q, HttpResponse r) -> router.dispatch(q, r))
             .build();
@@ -258,8 +272,8 @@ public class Users {
 - **Handlers** take the request and the response and return nothing. The
   response is the handler's `r` parameter, and each call on it writes into the
   connection's output buffer.
-- **Accept model** is `cajeta.io.net`'s (`fiberPerConnection()` / `sharedPool(n)`),
-  not an HTTP-specific mode. Handlers are un-colored.
+- **Model** is the request-dispatch pool by default, or `fiberPerConnection()`
+  for the connection's own loop. Handlers are un-colored either way.
 - **Router** — method + typed path patterns: `/users/{id}` (string),
   `/users/{id:int64}` (typed; mismatch → 404, never reaches the handler),
   `/files/{p:*}` (segment), `/static/{p:**}` (recursive). `mount(prefix, sub)` nests.

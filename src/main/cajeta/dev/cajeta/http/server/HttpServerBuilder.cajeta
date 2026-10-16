@@ -1,5 +1,7 @@
 package dev.cajeta.http.server;
 
+import cajeta.error.Exception;
+
 import cajeta.lang.String;
 import cajeta.io.net.ServerModel;
 import cajeta.io.net.SocketAddress;
@@ -30,6 +32,7 @@ public class HttpServerBuilder {
     private int64 bWsMaxMessage;
     private MultipartRoutes bMultipart;
     private int32 bMaxPartBytes;
+    private boolean bRefused;   // model(ServerModel.sharedPool(n)) was called
 
     /** A builder with the request-dispatch pool (spec §6) and default limits. */
     public HttpServerBuilder() {
@@ -53,6 +56,7 @@ public class HttpServerBuilder {
         this.bWsMaxMessage = (int64) 0;
         this.bMultipart = null;
         this.bMaxPartBytes = 0;
+        this.bRefused = false;
     }
 
     /** h2: one stream at a time per connection (spec §4.4); default false, streams run in parallel. */
@@ -117,30 +121,26 @@ public class HttpServerBuilder {
         return this;
     }
 
-    /** The server model: the stdlib shared pool maps onto the dispatch pool with its size as `maxInFlight`. */
+    /**
+     * The server model, for `fiberPerConnection()` spelled through the stdlib
+     * type. The stdlib shared-pool kind is not a model this server takes:
+     * `build()` refuses it, naming `maxInFlight` (spec §6.2). The old call
+     * meant N workers owning whole connections; the pool bounds units in
+     * flight instead, and `maxInFlight(n)` is the setting that replaces it.
+     */
     public HttpServerBuilder model(ServerModel model) {
         if (model.kind == ServerModel.SHARED_POOL_KIND) {
-            this.bMode = HttpServer.DISPATCH_POOL;
-            this.bMaxInFlight = model.poolSize < 1 ? 1 : model.poolSize;
-            this.model #= ServerModel.fiberPerConnection();
-        } else {
-            this.bMode = HttpServer.DISPATCH_FIBER;
-            this.model #= model;
+            this.bRefused = true;
+            return this;
         }
+        this.bMode = HttpServer.DISPATCH_FIBER;
+        this.model #= model;
         return this;
     }
 
     /** One fiber per connection, the connection's own loop (spec §4.6). */
     public HttpServerBuilder fiberPerConnection() {
         this.bMode = HttpServer.DISPATCH_FIBER;
-        this.model #= ServerModel.fiberPerConnection();
-        return this;
-    }
-
-    /** The dispatch pool with `poolSize` as `maxInFlight`; removed in request-dispatch Unit 9. */
-    public HttpServerBuilder sharedPool(int32 poolSize) {
-        this.bMode = HttpServer.DISPATCH_POOL;
-        this.bMaxInFlight = poolSize < 1 ? 1 : poolSize;
         this.model #= ServerModel.fiberPerConnection();
         return this;
     }
@@ -201,6 +201,12 @@ public class HttpServerBuilder {
 
     /** Binds and returns the server. A missing handler answers every request with 500. */
     public #HttpServer build() {
+        if (this.bRefused) {
+            String why = "HttpServerBuilder: the stdlib shared-pool model is not a server model here; "
+                + "the request-dispatch pool is the default and maxInFlight(n) bounds the units in flight "
+                + "(sharedPool(n) meant n workers owning whole connections)";
+            throw heap Exception(why.substring(0, why.byteLength()));
+        }
         (HttpRequest, HttpResponse) -> void h #= this.handler;
         this.handler = null;
         if (h == null) {

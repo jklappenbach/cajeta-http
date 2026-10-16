@@ -17,6 +17,8 @@ import cajeta.lang.String;
 //   Http2Demo       HTTP/2: prior-knowledge server, Http2Client, HPACK, frames
 //   SseDemo         Server-Sent Events with resume-on-reconnect
 //   WebSocketDemo   RFC 6455: handshake to permessage-deflate
+//   DispatchDemo    request dispatch: the pool's defaults, multipart parts,
+//                   a custom protocol over a Framer
 //
 // (HTTP/3 is intentionally absent: it requires QUIC, which the stdlib does
 // not ship yet — the library no longer advertises it.)
@@ -61,6 +63,8 @@ public final class HttpTour {
 
         WebSocketDemo websocket = heap WebSocketDemo();
         websocket.execute();
+        DispatchDemo dispatch = heap DispatchDemo();
+        dispatch.execute();
 
         System.stdout.println("");
         System.stdout.println("=== tour complete: {} checks passed, {} failed ===",

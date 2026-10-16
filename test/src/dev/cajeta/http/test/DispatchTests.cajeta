@@ -5,6 +5,7 @@ import cajeta.error.Exception;
 import cajeta.concurrent.Fiber;
 import cajeta.io.net.IpAddress;
 import cajeta.io.net.SocketAddress;
+import cajeta.io.net.ServerModel;
 import cajeta.io.net.TcpStream;
 import cajeta.io.net.TimedOutException;
 import cajeta.io.net.tls.TlsStream;
@@ -71,6 +72,10 @@ public final class DispatchTests {
         DispatchTests.handlerCallsAnotherServer(c);
         System.stdout.println("-- dispatch: fiberPerConnection() is the old model, explicitly (3.3.2) --");
         DispatchTests.fiberPerConnectionExplicit(c);
+        System.stdout.println("-- dispatch: no model call is the pool with its defaults (9.1.1) --");
+        DispatchTests.defaultsAreThePool(c);
+        System.stdout.println("-- dispatch: the stdlib shared-pool model is refused at build, naming maxInFlight (9.1.2) --");
+        DispatchTests.sharedPoolRefused(c);
         System.stdout.println("-- dispatch tls: idle TLS connections hold no fibers (4.1.1) --");
         DispatchTests.tlsIdleConnectionsHoldNoFibers(c);
         System.stdout.println("-- dispatch tls: an https GET runs on a pool fiber (4.1.2) --");
@@ -578,6 +583,42 @@ public final class DispatchTests {
             up.shutdown(Duration.ofSeconds(2));
             await upTask;
         }
+    }
+
+    /** 9.1.1 (spec 6.1): a builder with no model call reports the pool, 256, 4 and one framer per carrier. */
+    static void defaultsAreThePool(Check c) {
+        scope {
+            HttpServerBuilder b #= HttpServer.builder();
+            b.bind("127.0.0.1:0");
+            b.handler((HttpRequest q, HttpResponse r) -> DispatchTests.handle(q, r));
+            HttpServer srv #= b.build();
+            c.eqInt((int64) srv.dispatchMode, (int64) HttpServer.DISPATCH_POOL, "the pool");
+            c.eqInt((int64) srv.maxInFlight(), (int64) 256, "maxInFlight 256");
+            c.eqInt((int64) srv.maxPendingUnits(), (int64) 4, "maxPendingUnits 4");
+            Task<int32> sv = spawn serveIt(srv);
+            DispatchTests.settle(srv);
+            c.eqInt((int64) srv.framerCount(), (int64) Carriers.count(), "Carriers.count() framers");
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+    }
+
+    /** 9.1.2 (spec 6.2): `model(ServerModel.sharedPool(8))` is refused at build; the message names maxInFlight. */
+    static void sharedPoolRefused(Check c) {
+        HttpServerBuilder b #= HttpServer.builder();
+        b.bind("127.0.0.1:0");
+        b.handler((HttpRequest q, HttpResponse r) -> DispatchTests.handle(q, r));
+        b.model(ServerModel.sharedPool(8));
+        boolean refused = false;
+        String msg = "";
+        try {
+            HttpServer srv #= b.build();
+        } catch (Exception e) {
+            refused = true;
+            msg = "" + e.message;
+        }
+        c.that(refused, "build() refuses the shared-pool model");
+        c.that(msg.contains("maxInFlight"), "and names maxInFlight (" + msg + ")");
     }
 
     /** 3.3.2: `fiberPerConnection()` runs the connection loop: no framers, requests still answered. */

@@ -225,6 +225,70 @@ handler.
 refusing or queueing the surplus. `shutdown(deadline)` stops accepting and
 waits for open connections until the deadline.
 
+## Server models, admission and framing
+
+A server built with no model call runs the request-dispatch pool. Framer
+fibers, one per carrier, read every socket; a connection is held until it
+carries a complete unit of work, and only then does a pooled fiber run the
+handler. An idle keep-alive connection, an idle WebSocket, an h2 connection
+between streams: none of them costs a fiber. The handler sees what it always
+saw: a held body is read from memory, writes park on the socket, a client
+call inside the handler parks inside the client.
+
+Two numbers bound the pool. `maxInFlight(n)`, default 256, is how many units
+run on workers at once; a connection with a unit ready waits when they are
+all busy. `maxPendingUnits(n)`, default 4, is how many complete units the
+framer holds for one connection before it stops reading that socket, which
+is the back-pressure: a pipelining client is slowed, not buffered without
+bound. `framers(k)` sets the framer count, default `Carriers.count()`.
+`HttpServer` reports `dispatches()`, `inFlight()`, `idleConnections()` and
+`pausedSockets()` beside the settings.
+
+What a unit is depends on the protocol. For HTTP/1.1 it is one request, head
+and held body, or the head alone when the body streams. For HTTP/2 it is one
+stream at END_STREAM; streams on one connection run in parallel by default,
+because holding one request behind another is the head-of-line blocking h2
+removes, and `serializedStreams(true)` runs them one at a time. For a
+WebSocket it is one complete message, under `wsMaxMessageLength(bytes)`; a
+larger one closes with 1009 on the framer and `onMessage` never sees it. For
+multipart, `multipart(method, pattern, mode)` chooses per route: `WHOLE`, the
+default, holds the body; `PART` runs the handler once per completed part with
+`q.multipartPart()`, `q.multipartIndex()` and `q.multipartLast()` set, fed by
+the framer so the body never has to fit the input buffer, with
+`maxPartBytes(n)` capping a part; `STREAM` hands the handler the body at head
+complete for that route alone. Units from one connection run in order on one
+fiber at a time.
+
+A protocol of your own goes through `dev.cajeta.http.framing`. A `Framer`
+answers three questions from the bytes it is shown: how long the unit at the
+start is, or 0 for more; what kind it is; and how far it scanned, so the
+next call resumes there. It is pure and runs on the framer under a 1 ms
+budget per call. A `Protocol` registers it with handlers by kind, a `maxUnit`
+cap and an `onClose`, and a route upgrades into it:
+
+```cajeta
+Protocol p #= Protocol.over(Wire.INSTANCE);   // a server-wide framer is lent; over(#f) hands one over
+p.maxUnit(65536);
+p.on(Msg.SUBSCRIBE, (ProtocolConnection c, ProtocolUnit u) -> Feed.subscribe(c, u));
+p.on(Msg.PUBLISH, (ProtocolConnection c, ProtocolUnit u) -> Feed.publish(c, u));
+p.onClose((ProtocolConnection c, int32 code) -> Feed.drop(c));
+r.status(101);
+r.upgrade(#p);
+```
+
+Two units in one segment run on one turn, in order. A unit whose kind has no
+handler, a `Framer` that raises, or bytes past `maxUnit` with no boundary
+close the connection on the framer with nothing dispatched; `onClose`, when
+registered, is the final turn. `Protocol.overWebSocket(framer)` applies the
+same `Framer` to each binary WebSocket message. `samples/wire` is the whole
+shape in one file. Any other `r.upgrade(#takeover)` owns its connection on
+its own fiber, as before.
+
+`fiberPerConnection()` is the other model: one fiber per accepted socket,
+the connection's own loop, exactly as 0.6 ran. It suits a small number of
+long, busy connections. The multipart modes and the WebSocket message limit
+belong to the pool; under `fiberPerConnection()` every route is `WHOLE`.
+
 ## HTTP/2, WebSocket and server-sent events
 
 The same handler serves HTTP/2. Over TLS, ALPN picks h2 or HTTP/1.1. On a

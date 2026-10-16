@@ -1,0 +1,271 @@
+package tour.http;
+
+import cajeta.concurrent.Carriers;
+import cajeta.concurrent.Fiber;
+import cajeta.error.Exception;
+import cajeta.io.net.IpAddress;
+import cajeta.io.net.SocketAddress;
+import cajeta.io.net.TcpStream;
+import cajeta.io.net.TimedOutException;
+import cajeta.time.Duration;
+import dev.cajeta.http.Bytes;
+import dev.cajeta.http.ClientRequest;
+import dev.cajeta.http.ClientResponse;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.MediaType;
+import dev.cajeta.http.body.MultipartBody;
+import dev.cajeta.http.body.MultipartPart;
+import dev.cajeta.http.client.HttpClient;
+import dev.cajeta.http.framing.Framer;
+import dev.cajeta.http.framing.Protocol;
+import dev.cajeta.http.framing.ProtocolConnection;
+import dev.cajeta.http.framing.ProtocolUnit;
+import dev.cajeta.http.server.HttpServer;
+import dev.cajeta.http.server.HttpServerBuilder;
+import dev.cajeta.http.server.MultipartMode;
+
+// Request dispatch: the default server model since 0.7.
+//
+// A server built with no model call runs the request-dispatch pool: framer
+// fibers (one per carrier) read every socket and hold a connection until it
+// carries a complete unit of work (an HTTP/1.1 request, an h2 stream, a
+// WebSocket message, a multipart part, or a unit of a developer-framed
+// protocol); only then does a pooled fiber run the handler, serialized per
+// connection, under an admission cap (maxInFlight) with back-pressure by
+// pausing a socket (maxPendingUnits). Idle connections cost no fiber.
+//
+// This demo shows the defaults, a route that takes multipart bodies one part
+// at a time (MultipartMode.PART), and a route that upgrades into a custom
+// protocol: a Framer finds units on the framer, handlers run by kind.
+public class DispatchDemo extends DemoClass {
+    static final int32 ECHO = 1;
+    static final int32 UPPER = 2;
+    static LengthPrefixed WIRE = heap LengthPrefixed();
+    static int32 partRuns = 0;
+    static String partNames = "";
+
+    // ----- a PART-mode route: the handler runs once per completed part -----
+    public static void parts(HttpRequest q, HttpResponse r) {
+        if (q.multipartIndex() == 0) {
+            DispatchDemo.partRuns = 0;
+            DispatchDemo.partNames = "";
+        }
+        DispatchDemo.partRuns = DispatchDemo.partRuns + 1;
+        MultipartPart p = q.multipartPart();
+        if (p != null) {
+            DispatchDemo.partNames = DispatchDemo.partNames + p.name() + ",";
+        }
+        if (q.multipartLast()) {
+            r.body("parts " + DispatchDemo.partRuns);
+        }
+    }
+
+    // ----- a custom protocol: two kinds over a length-prefixed wire -----
+    public static void echo(ProtocolConnection c, ProtocolUnit u) {
+        c.send(u.bytes(), 0, u.length());
+    }
+
+    public static void upper(ProtocolConnection c, ProtocolUnit u) {
+        int32 n = u.length();
+        int8[] out = heap int8[n];
+        int8[] src = u.bytes();
+        int32 i = 0;
+        while (i < n) {
+            int8 ch = src[i];
+            if (i >= 3 && ch >= (int8) 97 && ch <= (int8) 122) {
+                ch = (int8) (ch - 32);
+            }
+            out[i] = ch;
+            i = i + 1;
+        }
+        c.send(out, 0, n);
+    }
+
+    public static void handle(HttpRequest q, HttpResponse r) {
+        if (Bytes.equals(q.path(), "/parts")) {
+            DispatchDemo.parts(q, r);
+            return;
+        }
+        if (Bytes.equals(q.path(), "/wire")) {
+            // The framer instance is server-wide, so it is lent; a fresh one
+            // would be handed over with Protocol.over(#f).
+            Protocol p #= Protocol.over(DispatchDemo.WIRE);
+            p.maxUnit(65536);
+            p.on(DispatchDemo.ECHO, (ProtocolConnection c, ProtocolUnit u) -> DispatchDemo.echo(c, u));
+            p.on(DispatchDemo.UPPER, (ProtocolConnection c, ProtocolUnit u) -> DispatchDemo.upper(c, u));
+            r.status(101);
+            r.header("Upgrade", "wire");
+            r.upgrade(#p);
+            return;
+        }
+        r.body("ok");
+    }
+
+    public static async int32 serveLoop(HttpServer srv) {
+        srv.serve();
+        return 1;
+    }
+
+    public static async int32 postParts(int32 port) {
+        HttpClient client #= heap HttpClient();
+        client.exchangeTimeout(15000);
+        client.defaultHeader("Connection", "close");
+        MultipartBody body #= MultipartBody.of();
+        body.addField("title", "quarterly");
+        MediaType t #= MediaType.parse("application/octet-stream");
+        int8[] d = heap int8[4096];
+        body.addFile("report", "q.bin", #t, #d, 4096);
+        ClientRequest req #= ClientRequest.post("http://127.0.0.1:" + port + "/parts");
+        req.body(#body);
+        ClientResponse resp #= client.send(req);
+        String got #= resp.bodyString();
+        return resp.status() == 200 && got.equals("parts 2") ? 1 : 0 - 1;
+    }
+
+    static int32 unit(int8[] b, int32 at, int32 kind, String payload) {
+        int32 n = payload.byteLength();
+        b[at] = (int8) ((n >> 8) & 255);
+        b[at + 1] = (int8) (n & 255);
+        b[at + 2] = (int8) kind;
+        int32 i = 0;
+        while (i < n) {
+            b[at + 3 + i] = payload.byteAt(i);
+            i = i + 1;
+        }
+        return at + 3 + n;
+    }
+
+    static int64 read(TcpStream s, int8[] buf, int32 at, int32 ms) {
+        try {
+            return s.readWithin(buf, (int64) at, (int64) (buf.count() - at), ms);
+        } catch (TimedOutException e) {
+            return (int64) -1;
+        }
+    }
+
+    static #String text(int8[] b, int32 off, int32 len) {
+        int8[] copy = heap int8[len];
+        int32 i = 0;
+        while (i < len) {
+            copy[i] = b[off + i];
+            i = i + 1;
+        }
+        return heap String(#copy, len);
+    }
+
+    // Upgrades, sends two units in one segment, and returns the replies as
+    // `kind:payload,`; two units in one segment run on one worker turn.
+    public static #String speakWire(int32 port) {
+        IpAddress ip #= IpAddress.loopbackV4();
+        SocketAddress a #= SocketAddress.of(#ip, port);
+        TcpStream s #= TcpStream.connectAsync(#a);
+        String head = "GET /wire HTTP/1.1\r\nHost: t\r\nUpgrade: wire\r\nConnection: Upgrade\r\n\r\n";
+        int8[] hb #= head.toBytes();
+        s.writeAllAsync(hb, (int64) 0, (int64) head.byteLength());
+        int8[] buf = heap int8[4096];
+        int32 got = 0;
+        boolean head101 = false;
+        while (!head101) {
+            int64 n = DispatchDemo.read(s, buf, got, 3000);
+            if (n <= (int64) 0) {
+                String none = "";
+                return none.substring(0, 0);
+            }
+            got = got + (int32) n;
+            head101 = got >= 4 && buf[got - 4] == (int8) 13 && buf[got - 3] == (int8) 10
+                && buf[got - 2] == (int8) 13 && buf[got - 1] == (int8) 10;
+        }
+        int8[] out = heap int8[64];
+        int32 at = DispatchDemo.unit(out, 0, DispatchDemo.ECHO, "hello");
+        at = DispatchDemo.unit(out, at, DispatchDemo.UPPER, "wire");
+        s.writeAllAsync(out, (int64) 0, (int64) at);
+        got = 0;
+        at = 0;
+        int32 count = 0;
+        String replies = "";
+        boolean going = true;
+        while (going && count < 2) {
+            if (got - at >= 3) {
+                int32 len = ((buf[at] & 255) << 8) | (buf[at + 1] & 255);
+                if (got - at >= 3 + len) {
+                    String t #= DispatchDemo.text(buf, at + 3, len);
+                    replies = replies + (buf[at + 2] & 255) + ":" + t + ",";
+                    at = at + 3 + len;
+                    count = count + 1;
+                    continue;
+                }
+            }
+            int64 n = DispatchDemo.read(s, buf, got, 3000);
+            if (n <= (int64) 0) {
+                going = false;
+            } else {
+                got = got + (int32) n;
+            }
+        }
+        s.close();
+        return replies.substring(0, replies.byteLength());
+    }
+
+    public void execute() {
+        System.stdout.println("");
+        System.stdout.println("--- request dispatch: the pool, multipart parts, a custom protocol ---");
+        HttpServerBuilder b #= HttpServer.builder();
+        b.bind("127.0.0.1:0");
+        b.handler((HttpRequest q, HttpResponse r) -> DispatchDemo.handle(q, r));
+        b.multipart("POST", "/parts", MultipartMode.PART);
+        HttpServer srv #= b.build();
+        this.check(srv.dispatchMode == HttpServer.DISPATCH_POOL, "no model call: the request-dispatch pool");
+        this.check(srv.maxInFlight() == 256, "default maxInFlight 256");
+        this.check(srv.maxPendingUnits() == 4, "default maxPendingUnits 4");
+        scope {
+            Task<int32> loop = spawn serveLoop(srv);
+            int32 waited = 0;
+            while (waited < 200 && srv.framerCount() == 0) {
+                Fiber.sleep(Duration.ofMillis((int64) 5));
+                waited = waited + 1;
+            }
+            int32 port = srv.server.listener.boundPort();
+            this.check(srv.framerCount() == Carriers.count(), "one framer per carrier");
+            int32 parts = await spawn postParts(port);
+            this.check(parts == 1, "a PART route runs the handler once per part and answers after the last");
+            this.check(DispatchDemo.partNames.equals("title,report,"), "parts arrive in order");
+            String replies #= DispatchDemo.speakWire(port);
+            this.check(replies.equals("1:hello,2:WIRE,"), "a custom protocol: two units, two handlers, in order");
+            Fiber.sleep(Duration.ofMillis((int64) 50));
+            this.check(srv.inFlight() == 0, "nothing in flight once the turns return");
+            srv.shutdown(Duration.ofSeconds(2));
+            await loop;
+        }
+    }
+}
+
+/** Two bytes of big-endian length, one byte of kind, the payload; reports how far it looked. */
+final class LengthPrefixed implements Framer {
+    int32 looked;
+
+    public LengthPrefixed() {
+        this.looked = 0;
+    }
+
+    public int32 unit(int8[] buf, int32 start, int32 end) {
+        if (end - start < 3) {
+            this.looked = end;
+            return 0;
+        }
+        this.looked = start + 3;
+        int32 len = ((buf[start] & 255) << 8) | (buf[start + 1] & 255);
+        if (end - start < 3 + len) {
+            return 0;
+        }
+        return 3 + len;
+    }
+
+    public int32 kind(int8[] buf, int32 start, int32 length) {
+        return buf[start + 2] & 255;
+    }
+
+    public int32 scanned() {
+        return this.looked;
+    }
+}

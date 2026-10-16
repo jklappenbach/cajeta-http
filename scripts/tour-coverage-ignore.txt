@@ -25,3 +25,20 @@ dev.cajeta.http.h2.Http2Stream
 dev.cajeta.http.h2.Http2StreamTable
 dev.cajeta.http.h2.Http2WriteSide
 dev.cajeta.http.h2.Http2SendGate
+
+# Request dispatch internals (request-dispatch spec). Users configure the
+# pool through HttpServerBuilder (maxInFlight, maxPendingUnits, framers,
+# multipart, serializedStreams; all toured) and read its counters through
+# HttpServer; these are the framer, the connection record it holds, the
+# dispatch record and the worker pool, the framer-side WebSocket and
+# protocol states, and the h2 pieces the framer feeds.
+dev.cajeta.http.Http1Framed
+dev.cajeta.http.server.ConnectionFramer
+dev.cajeta.http.server.Dispatch
+dev.cajeta.http.server.DispatchPool
+dev.cajeta.http.server.MultipartRoutes
+dev.cajeta.http.ws.WsFramed
+dev.cajeta.http.framing.ProtocolFramed
+dev.cajeta.http.framing.ProtocolCounters
+dev.cajeta.http.h2.Http2StreamSlot
+dev.cajeta.http.h2.NowWriter
