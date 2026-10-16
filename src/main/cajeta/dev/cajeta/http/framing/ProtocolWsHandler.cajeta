@@ -1,0 +1,72 @@
+package dev.cajeta.http.framing;
+
+import cajeta.collection.ArrayList;
+import cajeta.error.Exception;
+import dev.cajeta.http.ws.WebSocketConnection;
+import dev.cajeta.http.ws.WebSocketHandler;
+import dev.cajeta.http.ws.WsCloseCode;
+import dev.cajeta.http.ws.WsMessage;
+
+/**
+ * `Protocol.overWebSocket` (spec §5.3): the WebSocket handler that splits each
+ * binary message's payload into units with the protocol's `Framer` and runs
+ * their handlers in order on the message's turn. A text message, a payload
+ * with a trailing partial unit, or an unknown kind fails the connection.
+ */
+final class ProtocolWsHandler implements WebSocketHandler {
+    Protocol proto;
+    ProtocolConnection pc;
+    ProtocolUnit unit;
+
+    ProtocolWsHandler(#Protocol proto) {
+        this.proto #= proto;
+        this.pc = null;
+        this.unit = heap ProtocolUnit();
+    }
+
+    public void onConnect(WebSocketConnection conn) {
+        this.pc = heap ProtocolConnection(conn);
+    }
+
+    public void onMessage(WebSocketConnection conn, WsMessage message) {
+        if (!message.isBinary()) {
+            String why = "text where units were expected";
+            conn.close(WsCloseCode.UNSUPPORTED_DATA, why);
+            return;
+        }
+        int8[] b = message.bytes();
+        int32 at = 0;
+        int32 end = message.length();
+        while (at < end) {
+            int32 n = 0;
+            try {
+                n = this.proto.framer.unit(b, at, end);
+            } catch (Exception e) {
+                n = -1;
+            }
+            if (n <= 0 || n > end - at) {
+                String why = n < 0 ? "malformed unit" : "a partial unit at the end of a message";
+                conn.close(WsCloseCode.PROTOCOL_ERROR, why);
+                return;
+            }
+            int32 kind = this.proto.framer.kind(b, at, n);
+            int32 hi = Protocol.handlerIndex(this.proto.handlers, kind);
+            if (hi < 0) {
+                String why = "no handler for the unit's kind";
+                conn.close(WsCloseCode.POLICY_VIOLATION, why);
+                return;
+            }
+            this.unit.fill(kind, b, at, n);
+            ProtocolHandler h = this.proto.handlers.get(hi);
+            (ProtocolConnection, ProtocolUnit) -> void fn = h.fn;
+            fn(this.pc, this.unit);
+            at = at + n;
+        }
+    }
+
+    public void onClose(WebSocketConnection conn, int32 code) {
+        if (this.pc != null) {
+            Protocol.runClose(this.proto.handlers, this.pc, code);
+        }
+    }
+}

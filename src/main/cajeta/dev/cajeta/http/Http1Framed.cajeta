@@ -21,6 +21,9 @@ import dev.cajeta.http.body.MultipartParser;
 import dev.cajeta.http.body.MultipartPart;
 import dev.cajeta.http.server.MultipartMode;
 import dev.cajeta.http.server.MultipartRoutes;
+import dev.cajeta.http.framing.Protocol;
+import dev.cajeta.http.framing.ProtocolCounters;
+import dev.cajeta.http.framing.ProtocolFramed;
 import dev.cajeta.http.ws.WsFramed;
 import dev.cajeta.http.ws.WsTakeover;
 import dev.cajeta.http.server.ServerLimits;
@@ -63,6 +66,12 @@ public final class Http1Framed implements NowWriter {
     // a unit; the handler sees the part on the request.
     public MultipartRoutes mpRoutes;
     public int32 maxPartBytes;
+
+    // A developer-framed protocol after its upgrade (spec §5), and a plain
+    // takeover handed to its own fiber (spec §2.6): the socket moved with it.
+    ProtocolFramed framedProto;
+    public ProtocolCounters protoCounters;
+    public boolean detached;
     MultipartParser mp;
     int8[] mpHead;
     int32 mpHeadLen;
@@ -133,6 +142,9 @@ public final class Http1Framed implements NowWriter {
         this.wsMaxMessage = (int64) 67108864;
         this.mpRoutes = null;
         this.maxPartBytes = 16777216;
+        this.framedProto = null;
+        this.protoCounters = null;
+        this.detached = false;
         this.mp = null;
         this.mpHead = null;
         this.mpHeadLen = 0;
@@ -210,6 +222,9 @@ public final class Http1Framed implements NowWriter {
         if (this.ws != null) {
             return this.ws.unitCount();
         }
+        if (this.framedProto != null) {
+            return this.framedProto.unitCount();
+        }
         return this.units;
     }
 
@@ -217,6 +232,9 @@ public final class Http1Framed implements NowWriter {
     public boolean mailboxFull() {
         if (this.ws != null) {
             return this.ws.full();
+        }
+        if (this.framedProto != null) {
+            return this.framedProto.full();
         }
         return this.units >= this.maxUnits;
     }
@@ -315,6 +333,9 @@ public final class Http1Framed implements NowWriter {
         }
         if (this.ws != null) {
             return this.pumpWs();
+        }
+        if (this.framedProto != null) {
+            return this.pumpProto();
         }
         if (this.h2 == null && this.h2Prior && this.in.readable() >= 24 && this.units == 0
                 && this.phase == Http1Framed.PHASE_HEAD
@@ -470,6 +491,21 @@ public final class Http1Framed implements NowWriter {
             return Http1Framed.PUMP_IDLE;
         }
         return n > 0 ? Http1Framed.PUMP_STREAMS : Http1Framed.PUMP_IDLE;
+    }
+
+    /** Developer framing: run the Framer over what arrived; a complete unit is a unit of work. */
+    int32 pumpProto() {
+        int32 n = this.framedProto.feed(this.in);
+        this.in.compact();
+        if (this.eof) {
+            this.framedProto.transportEof();
+            n = this.framedProto.unitCount();
+        }
+        if (this.framedProto.finished()) {
+            this.close();
+            return Http1Framed.PUMP_CLOSED;
+        }
+        return n > 0 ? Http1Framed.PUMP_READY : Http1Framed.PUMP_IDLE;
     }
 
     /** WebSocket: decode what arrived; a message is a unit, pings and closes are answered here. */
@@ -908,6 +944,9 @@ public final class Http1Framed implements NowWriter {
         if (this.ws != null) {
             return this.ws.turn();
         }
+        if (this.framedProto != null) {
+            return this.framedProto.turn();
+        }
         boolean keep = true;
         int32 i = 0;
         int32 n = this.units;
@@ -1043,17 +1082,74 @@ public final class Http1Framed implements NowWriter {
             this.ws #= w.framed(this.channel(), this, this.wsMaxMessage, this.maxUnits);
             return this.ws.turn();
         }
-        int32 cap = this.in.readable() > 8192 ? this.in.readable() : 8192;
-        ByteChannel ch = this.channel();
-        AsyncReader reader = heap AsyncReader(ch, cap);
-        if (this.in.readable() > 0) {
-            reader.stage(this.in.array(), this.in.readable());
-            this.in.advanceRead(this.in.readable());
+        if (t instanceof Protocol p) {
+            this.framedProto #= p.framed(this.channel(), this.protoCounters, this.maxUnits);
+            return true;
         }
-        AsyncWriter writer = heap AsyncWriter(ch);
-        t.attach(ch);
-        t.run(reader, writer);
+        // Any other takeover owns the connection on its own fiber (spec §2.6):
+        // the socket and the bytes already read move with it, and this
+        // connection leaves the pool's table without closing anything. It is
+        // `detach`ed, not spawned: a statement-position spawn is joined when
+        // this frame exits, which held the worker for the takeover's life.
+        int32 preLen = this.in.readable();
+        int8[] pre = heap int8[preLen > 0 ? preLen : 1];
+        int8[] src = this.in.array();
+        int32 from = this.in.readPosition();
+        int32 i = 0;
+        while (i < preLen) {
+            pre[i] = src[from + i];
+            i = i + 1;
+        }
+        this.in.advanceRead(preLen);
+        this.detached = true;
+        if (this.tls != null) {
+            TlsStream ts #= this.tls;
+            this.tls = null;
+            detach runTakeoverTls(#t, #ts, #pre, preLen);
+        } else {
+            TcpStream sock #= this.conn;
+            this.conn = null;
+            detach runTakeoverTcp(#t, #sock, #pre, preLen);
+        }
         return false;
+    }
+
+    public static async int32 runTakeoverTcp(#Takeover t, #TcpStream s, #int8[] pre, int32 preLen) {
+        Takeover tk #= t;
+        TcpStream sock #= s;
+        int8[] staged #= pre;
+        int32 cap = preLen > 8192 ? preLen : 8192;
+        AsyncReader reader = heap AsyncReader(sock, cap);
+        if (preLen > 0) {
+            reader.stage(staged, preLen);
+        }
+        AsyncWriter writer = heap AsyncWriter(sock);
+        tk.attach(sock);
+        try {
+            tk.run(reader, writer);
+        } catch (Exception e) {
+        }
+        sock.close();
+        return 0;
+    }
+
+    public static async int32 runTakeoverTls(#Takeover t, #TlsStream s, #int8[] pre, int32 preLen) {
+        Takeover tk #= t;
+        TlsStream tls #= s;
+        int8[] staged #= pre;
+        int32 cap = preLen > 8192 ? preLen : 8192;
+        AsyncReader reader = heap AsyncReader(tls, cap);
+        if (preLen > 0) {
+            reader.stage(staged, preLen);
+        }
+        AsyncWriter writer = heap AsyncWriter(tls);
+        tk.attach(tls);
+        try {
+            tk.run(reader, writer);
+        } catch (Exception e) {
+        }
+        tls.close();
+        return 0;
     }
 
     /** The channel responses go through: the TLS stream under TLS, else the socket. */
@@ -1070,10 +1166,13 @@ public final class Http1Framed implements NowWriter {
             return;
         }
         this.closed = true;
+        if (this.detached) {
+            return;   // the takeover's fiber owns the socket now
+        }
         try {
             if (this.tls != null) {
                 this.tls.close();
-            } else {
+            } else if (this.conn != null) {
                 this.conn.close();
             }
         } catch (Exception e) {

@@ -18,7 +18,7 @@ import dev.cajeta.http.h2.Http2StreamSlot;
  * hold borrows. A dispatched connection is out of the set until its turn
  * returns it, which is the back-pressure of §4.3.
  */
-public final class Framer {
+public final class ConnectionFramer {
     HttpServer srv;
     int32 index;
     ReadySet set;
@@ -32,7 +32,7 @@ public final class Framer {
     public boolean stopping;
     public boolean running;
 
-    public Framer(^HttpServer srv, int32 index) {
+    public ConnectionFramer(^HttpServer srv, int32 index) {
         this.srv = srv;
         this.index = index;
         this.set = heap ReadySet();
@@ -108,7 +108,7 @@ public final class Framer {
         return n;
     }
 
-    public static async int32 run(Framer f) {
+    public static async int32 run(ConnectionFramer f) {
         f.loop();
         return 0;
     }
@@ -129,13 +129,13 @@ public final class Framer {
                 }
             }
             if (go) {
-                int64 now = Framer.nowMs();
+                int64 now = ConnectionFramer.nowMs();
                 int32 timeout = this.nextTimeoutMs(now);
                 if (this.wakeFd < 0 && (timeout < 0 || timeout > 10)) {
                     timeout = 10;   // no wake descriptor on this platform: poll the queues
                 }
                 int32 n = this.set.wait(fds, evs, 256, timeout);
-                now = Framer.nowMs();
+                now = ConnectionFramer.nowMs();
                 if (n < 0) {
                     go = false;
                 } else {
@@ -211,13 +211,14 @@ public final class Framer {
                 f.wsMaxMessage = this.srv.wsMaxMessageN;
                 f.mpRoutes = this.srv.multipartRoutes;
                 f.maxPartBytes = this.srv.maxPartBytesN;
+                f.protoCounters = this.srv.protocolCounters;
                 int32 fd = f.fd;
                 this.table.add(#f);
                 this.remember(fd, slot);
                 if (this.stopping) {
                     this.drop(this.table.get(slot));
                 } else {
-                    int64 now = Framer.nowMs();
+                    int64 now = ConnectionFramer.nowMs();
                     this.service(this.table.get(slot), now);
                 }
             }
@@ -250,7 +251,7 @@ public final class Framer {
                     if (c.closed || this.stopping) {
                         this.drop(c);
                     } else {
-                        int64 now = Framer.nowMs();
+                        int64 now = ConnectionFramer.nowMs();
                         this.service(c, now);
                     }
                 }

@@ -1,0 +1,197 @@
+package dev.cajeta.http.framing;
+
+import cajeta.collection.ArrayList;
+import cajeta.error.Exception;
+import cajeta.io.net.ByteBuffer;
+import cajeta.io.net.ByteChannel;
+import cajeta.time.Clock;
+
+/**
+ * A developer-framed connection on the framer (spec §5). `feed` runs the
+ * `Framer` over the buffered bytes under the time budget, copies each
+ * complete unit out as a unit of work, and closes the connection on an
+ * unknown kind, a framer failure, or bytes past `maxUnit` with no boundary;
+ * `turn` runs the queued units' handlers in order on a worker, and
+ * `onClose` last.
+ */
+public final class ProtocolFramed {
+    Framer framer;
+    ArrayList<ProtocolHandler> handlers;
+    int32 maxUnit;
+    ProtocolConnection conn;
+    ProtocolCounters counters;
+    ArrayList<ProtocolUnit> ready;
+    ArrayList<ProtocolUnit> spare;
+    int32 maxUnits;
+    boolean closing;
+    boolean closed;
+    int32 closeCode;
+    int64 consumed;        // bytes taken as units: the stream offset of the buffer's read position
+    int64 work;            // bytes the framer looked at, over every call, by its own report
+    int64 lastScanned;     // the stream offset `scanned()` last reported
+    boolean overrunCounted;
+
+    ProtocolFramed(#Framer framer, #ArrayList<ProtocolHandler> handlers, int32 maxUnit,
+                   ByteChannel ch, ^ProtocolCounters counters, int32 maxUnits) {
+        this.framer #= framer;
+        this.handlers #= handlers;
+        this.maxUnit = maxUnit;
+        this.conn = heap ProtocolConnection(ch);
+        this.counters = counters;
+        this.ready = heap ArrayList<ProtocolUnit>();
+        this.spare = heap ArrayList<ProtocolUnit>();
+        this.maxUnits = maxUnits < 1 ? 1 : maxUnits;
+        this.closing = false;
+        this.closed = false;
+        this.closeCode = Protocol.CLOSE_PEER;
+        this.consumed = (int64) 0;
+        this.work = (int64) 0;
+        this.lastScanned = (int64) 0;
+        this.overrunCounted = false;
+    }
+
+    /** Units waiting, plus the final `onClose` turn when one is registered. */
+    public int32 unitCount() {
+        int32 n = this.ready.count();
+        if (this.closing && !this.closed && Protocol.hasClose(this.handlers)) {
+            n = n + 1;
+        }
+        return n;
+    }
+
+    public boolean full() {
+        return this.ready.count() >= this.maxUnits;
+    }
+
+    /** True when nothing more will be dispatched: the socket can close. */
+    public boolean finished() {
+        if (this.closed) {
+            return true;
+        }
+        return this.closing && this.ready.count() == 0 && !Protocol.hasClose(this.handlers);
+    }
+
+    /** Frames what `in` holds into units, up to the mailbox; returns the units waiting. */
+    public int32 feed(ByteBuffer in) {
+        while (!this.closing && !this.full() && in.readable() > 0) {
+            int8[] arr = in.array();
+            int32 start = in.readPosition();
+            int32 end = in.writePosition();
+            int64 t0 = Clock.nanoTime();
+            int32 n = 0;
+            try {
+                n = this.framer.unit(arr, start, end);
+            } catch (Exception e) {
+                this.fail(Protocol.CLOSE_PROTOCOL);
+                return this.unitCount();
+            }
+            int64 dt = Clock.nanoTime() - t0;
+            if (dt > Protocol.BUDGET_NANOS) {
+                this.counters.budgetOverruns.fetchAdd((int64) 1);
+            }
+            if (n <= 0) {
+                // What the call cost, by the framer's own report: a framer
+                // that resumes is charged the new bytes; one that reports
+                // nothing scanned is charged the whole window every call.
+                int64 absStart = this.consumed;
+                int64 absEnd = this.consumed + (int64) (end - start);
+                int64 from = this.lastScanned > absStart ? this.lastScanned : absStart;
+                int32 sc = this.framer.scanned();
+                int64 absSc = this.consumed + (int64) (sc - start);
+                if (sc <= start) {
+                    this.work = this.work + (absEnd - from);
+                } else if (absSc > from) {
+                    this.work = this.work + (absSc - from);
+                }
+                if (absSc > this.lastScanned) {
+                    this.lastScanned = absSc;
+                }
+                if (in.readable() >= this.maxUnit) {
+                    this.fail(Protocol.CLOSE_TOO_BIG);
+                } else if (!this.overrunCounted
+                        && this.work > (int64) 2 * (this.consumed + (int64) in.readable()) + (int64) 65536) {
+                    // A framer that rescans from the start on every call: its
+                    // work grew past linear in the bytes it was given.
+                    this.overrunCounted = true;
+                    this.counters.budgetOverruns.fetchAdd((int64) 1);
+                }
+                return this.unitCount();
+            }
+            if (n > in.readable()) {
+                this.fail(Protocol.CLOSE_PROTOCOL);
+                return this.unitCount();
+            }
+            int32 kind = this.framer.kind(arr, start, n);
+            if (Protocol.handlerIndex(this.handlers, kind) < 0) {
+                this.counters.unknownKinds.fetchAdd((int64) 1);
+                this.fail(Protocol.CLOSE_UNKNOWN_KIND);
+                return this.unitCount();
+            }
+            ProtocolUnit u #= this.takeSpare();
+            u.fill(kind, arr, start, n);
+            this.ready.add(#u);
+            in.advanceRead(n);
+            this.consumed = this.consumed + (int64) n;
+        }
+        return this.unitCount();
+    }
+
+    /** The socket reached EOF. */
+    public void transportEof() {
+        if (!this.closing) {
+            this.closing = true;
+            this.closeCode = Protocol.CLOSE_PEER;
+        }
+    }
+
+    /** The connection loop's buffer filled with no unit boundary. */
+    public void failTooBig() {
+        this.fail(Protocol.CLOSE_TOO_BIG);
+    }
+
+    void fail(int32 code) {
+        if (this.closing) {
+            return;
+        }
+        this.closing = true;
+        this.closeCode = code;
+    }
+
+    #ProtocolUnit takeSpare() {
+        if (this.spare.count() > 0) {
+            return this.spare.removeAt(this.spare.count() - 1);
+        }
+        return heap ProtocolUnit();
+    }
+
+    /**
+     * One worker turn: every queued unit's handler in order, then `onClose`
+     * once the close is decided. False when the connection is over.
+     */
+    public boolean turn() {
+        while (this.ready.count() > 0 && !this.closing) {
+            ProtocolUnit u #= this.ready.removeAt(0);
+            int32 hi = Protocol.handlerIndex(this.handlers, u.kind());
+            try {
+                ProtocolHandler h = this.handlers.get(hi);
+                (ProtocolConnection, ProtocolUnit) -> void fn = h.fn;
+                fn(this.conn, u);
+            } catch (Exception e) {
+                this.fail(Protocol.CLOSE_HANDLER);
+            }
+            this.spare.add(#u);
+            if (this.conn.isClosed() && !this.closing) {
+                this.fail(Protocol.CLOSE_LOCAL);
+            }
+        }
+        if (this.closing && !this.closed) {
+            this.closed = true;
+            try {
+                Protocol.runClose(this.handlers, this.conn, this.closeCode);
+            } catch (Exception e) {
+            }
+            return false;
+        }
+        return true;
+    }
+}

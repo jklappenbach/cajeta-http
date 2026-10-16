@@ -1,0 +1,578 @@
+package dev.cajeta.http.test;
+
+import cajeta.concurrent.Fiber;
+import cajeta.error.Exception;
+import cajeta.io.net.AsyncReader;
+import cajeta.io.net.AsyncWriter;
+import cajeta.io.net.TcpStream;
+import cajeta.io.net.TimedOutException;
+import cajeta.io.net.uri.Uri;
+import cajeta.time.Duration;
+import dev.cajeta.http.Bytes;
+import dev.cajeta.http.ClientResponse;
+import dev.cajeta.http.client.HttpClient;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.Takeover;
+import dev.cajeta.http.framing.Framer;
+import dev.cajeta.http.framing.Protocol;
+import dev.cajeta.http.framing.ProtocolConnection;
+import dev.cajeta.http.framing.ProtocolUnit;
+import dev.cajeta.http.server.HttpServer;
+import dev.cajeta.http.server.HttpServerBuilder;
+import dev.cajeta.http.ws.ProtocolViolationException;
+import dev.cajeta.http.ws.WebSocket;
+import dev.cajeta.http.ws.WebSocketHandler;
+import dev.cajeta.http.ws.WsCloseCode;
+import dev.cajeta.http.ws.WsMessage;
+import dev.cajeta.http.ws.WsUpgrade;
+import dev.cajeta.unit.Check;
+
+/** Two-byte big-endian length, one byte of kind, the payload. Reports how far it looked. */
+final class LpFramer implements Framer {
+    int32 looked;
+
+    public LpFramer() {
+        this.looked = 0;
+    }
+
+    public int32 unit(int8[] buf, int32 start, int32 end) {
+        if (end - start < 3) {
+            this.looked = end;
+            return 0;
+        }
+        this.looked = start + 3;
+        int32 len = ((buf[start] & 255) << 8) | (buf[start + 1] & 255);
+        if (end - start < 3 + len) {
+            return 0;
+        }
+        return 3 + len;
+    }
+
+    public int32 kind(int8[] buf, int32 start, int32 length) {
+        return buf[start + 2] & 255;
+    }
+
+    public int32 scanned() {
+        return this.looked;
+    }
+}
+
+/** The same wire, but it cannot resume: it reports nothing scanned, so every call rescans. */
+final class RescanFramer implements Framer {
+    int32 start;
+
+    public RescanFramer() {
+        this.start = 0;
+    }
+
+    public int32 unit(int8[] buf, int32 start, int32 end) {
+        this.start = start;
+        if (end - start < 3) {
+            return 0;
+        }
+        int32 len = ((buf[start] & 255) << 8) | (buf[start + 1] & 255);
+        if (end - start < 3 + len) {
+            return 0;
+        }
+        return 3 + len;
+    }
+
+    public int32 kind(int8[] buf, int32 start, int32 length) {
+        return buf[start + 2] & 255;
+    }
+
+    public int32 scanned() {
+        return this.start;
+    }
+}
+
+/** Never finds a unit. */
+final class NeverFramer implements Framer {
+    public int32 unit(int8[] buf, int32 start, int32 end) {
+        return 0;
+    }
+
+    public int32 kind(int8[] buf, int32 start, int32 length) {
+        return 0;
+    }
+
+    public int32 scanned() {
+        return 0;
+    }
+}
+
+/** Raises on the first byte. */
+final class ThrowingFramer implements Framer {
+    public int32 unit(int8[] buf, int32 start, int32 end) {
+        String why = "bad stream";
+        throw heap ProtocolViolationException(why.substring(0, why.byteLength()));
+    }
+
+    public int32 kind(int8[] buf, int32 start, int32 length) {
+        return 0;
+    }
+
+    public int32 scanned() {
+        return 0;
+    }
+}
+
+/** A developer takeover: echoes bytes until the peer ends the stream. */
+final class EchoTakeover extends Takeover {
+    public void run(AsyncReader reader, AsyncWriter writer) {
+        int8[] buf = heap int8[4096];
+        boolean going = true;
+        while (going) {
+            int32 n = reader.read(buf, 0, 4096);
+            if (n <= 0) {
+                going = false;
+            } else {
+                writer.writeAll(buf, 0, n);
+                writer.flush();
+            }
+        }
+    }
+}
+
+/**
+ * request-dispatch plan Unit 8 (spec §5, §2.6): a developer `Framer` runs on
+ * the framer, each complete unit runs its handler by kind on a worker turn,
+ * in order; failures close the connection without a fiber; a plain takeover
+ * still owns its connection on its own fiber.
+ */
+public final class ProtocolDispatchTests {
+    static LpFramer LP = heap LpFramer();
+    static RescanFramer RESCAN = heap RescanFramer();
+    static NeverFramer NEVER = heap NeverFramer();
+    static ThrowingFramer THROWS = heap ThrowingFramer();
+    static int32 runs;
+    static int32 closes;
+    static int32 lastClose;
+    static String order;
+
+    public static void run(Check c) {
+        ProtocolDispatchTests.order = "";
+        System.stdout.println("-- protocol dispatch: two units in one segment run in order on one turn (8.1.1) --");
+        ProtocolDispatchTests.twoUnitsOneTurn(c);
+        System.stdout.println("-- protocol dispatch: an unknown kind closes and counts (8.1.2) --");
+        ProtocolDispatchTests.unknownKindCloses(c);
+        System.stdout.println("-- protocol dispatch: a framer that throws closes with nothing dispatched (8.1.3) --");
+        ProtocolDispatchTests.throwingFramerCloses(c);
+        System.stdout.println("-- protocol dispatch: bytes past maxUnit with no boundary close (8.1.4) --");
+        ProtocolDispatchTests.noBoundaryCloses(c);
+        System.stdout.println("-- protocol dispatch: a framer that rescans is caught by the budget counter (8.1.5) --");
+        ProtocolDispatchTests.rescanIsCaught(c);
+        System.stdout.println("-- protocol dispatch: Protocol.overWebSocket splits a binary message (8.1.6) --");
+        ProtocolDispatchTests.overWebSocket(c);
+        System.stdout.println("-- protocol dispatch: a takeover owns its connection on its own fiber (8.1.7) --");
+        ProtocolDispatchTests.takeoverOwnFiber(c);
+    }
+
+    // ----- handlers -------------------------------------------------------
+
+    static void echo(ProtocolConnection c, ProtocolUnit u) {
+        ProtocolDispatchTests.runs = ProtocolDispatchTests.runs + 1;
+        String t #= ProtocolDispatchTests.payload(u);
+        ProtocolDispatchTests.order = ProtocolDispatchTests.order + "1:" + t + ",";
+        c.send(u.bytes(), 0, u.length());
+    }
+
+    static void upper(ProtocolConnection c, ProtocolUnit u) {
+        ProtocolDispatchTests.runs = ProtocolDispatchTests.runs + 1;
+        String t #= ProtocolDispatchTests.payload(u);
+        ProtocolDispatchTests.order = ProtocolDispatchTests.order + "2:" + t + ",";
+        int32 n = u.length();
+        int8[] out = heap int8[n];
+        int8[] src = u.bytes();
+        int32 i = 0;
+        while (i < n) {
+            int8 ch = src[i];
+            if (i >= 3 && ch >= (int8) 97 && ch <= (int8) 122) {
+                ch = (int8) (ch - 32);
+            }
+            out[i] = ch;
+            i = i + 1;
+        }
+        c.send(out, 0, n);
+    }
+
+    static void closed(ProtocolConnection c, int32 code) {
+        ProtocolDispatchTests.closes = ProtocolDispatchTests.closes + 1;
+        ProtocolDispatchTests.lastClose = code;
+    }
+
+    static #String payload(ProtocolUnit u) {
+        int32 n = u.length() - 3;
+        int8[] copy = heap int8[n > 0 ? n : 0];
+        int8[] src = u.bytes();
+        int32 i = 0;
+        while (i < n) {
+            copy[i] = src[3 + i];
+            i = i + 1;
+        }
+        return heap String(#copy, n);
+    }
+
+    static void handle(HttpRequest q, HttpResponse r) {
+        if (Bytes.equals(q.path(), "/wire") || Bytes.equals(q.path(), "/wire-quiet")
+                || Bytes.equals(q.path(), "/rescan")) {
+            Protocol p = null;
+            if (Bytes.equals(q.path(), "/rescan")) {
+                p #= Protocol.over(ProtocolDispatchTests.RESCAN);
+            } else {
+                p #= Protocol.over(ProtocolDispatchTests.LP);
+            }
+            p.maxUnit(65536);
+            p.on(1, (ProtocolConnection c, ProtocolUnit u) -> ProtocolDispatchTests.echo(c, u));
+            p.on(2, (ProtocolConnection c, ProtocolUnit u) -> ProtocolDispatchTests.upper(c, u));
+            if (!Bytes.equals(q.path(), "/wire-quiet")) {
+                p.onClose((ProtocolConnection c, int32 code) -> ProtocolDispatchTests.closed(c, code));
+            }
+            r.status(101);
+            r.upgrade(#p);
+            return;
+        }
+        if (Bytes.equals(q.path(), "/never")) {
+            Protocol p #= Protocol.over(ProtocolDispatchTests.NEVER);
+            p.maxUnit(16384);
+            p.on(1, (ProtocolConnection c, ProtocolUnit u) -> ProtocolDispatchTests.echo(c, u));
+            r.status(101);
+            r.upgrade(#p);
+            return;
+        }
+        if (Bytes.equals(q.path(), "/throws")) {
+            Protocol p #= Protocol.over(ProtocolDispatchTests.THROWS);
+            p.on(1, (ProtocolConnection c, ProtocolUnit u) -> ProtocolDispatchTests.echo(c, u));
+            r.status(101);
+            r.upgrade(#p);
+            return;
+        }
+        if (Bytes.equals(q.path(), "/wirews")) {
+            Protocol p #= Protocol.overWebSocket(ProtocolDispatchTests.LP);
+            p.on(1, (ProtocolConnection c, ProtocolUnit u) -> ProtocolDispatchTests.echo(c, u));
+            p.on(2, (ProtocolConnection c, ProtocolUnit u) -> ProtocolDispatchTests.upper(c, u));
+            WebSocketHandler h #= Protocol.webSocketHandler(#p);
+            WsUpgrade.accept(q, r, #h, false);
+            return;
+        }
+        if (Bytes.equals(q.path(), "/echo-takeover")) {
+            Takeover t #= heap EchoTakeover();
+            r.status(101);
+            r.upgrade(#t);
+            return;
+        }
+        r.body("plain");
+    }
+
+    static #HttpServer server(int32 maxInFlight) {
+        HttpServerBuilder b #= HttpServer.builder();
+        b.bind("127.0.0.1:0");
+        b.handler((HttpRequest q, HttpResponse r) -> ProtocolDispatchTests.handle(q, r));
+        b.framers(1);
+        if (maxInFlight > 0) {
+            b.maxInFlight(maxInFlight);
+        }
+        return b.build();
+    }
+
+    public static async int32 serveIt(HttpServer srv) {
+        srv.serve();
+        return 1;
+    }
+
+    public static async int32 getPlain(int32 port) {
+        HttpClient client #= heap HttpClient();
+        client.exchangeTimeout(5000);
+        String url = "http://127.0.0.1:" + port + "/";
+        try {
+            ClientResponse resp #= client.get(url);
+            if (resp.status() != 200) { return -1; }
+            String got #= resp.bodyString();
+            return got.equals("plain") ? 1 : -2;
+        } catch (Exception e) {
+            return -3;
+        }
+    }
+
+    static int32 port(HttpServer srv) {
+        return srv.server.listener.boundPort();
+    }
+
+    /** Sends the upgrade for `path` and reads the 101. */
+    static boolean upgrade(TcpStream s, String path, int32 ms) {
+        DispatchTests.sendRaw(s, "GET " + path + " HTTP/1.1\r\nHost: t\r\nUpgrade: wire\r\nConnection: Upgrade\r\n\r\n");
+        int8[] buf = heap int8[2048];
+        int32 got = 0;
+        boolean done = false;
+        while (!done) {
+            int64 n = DispatchTests.readStep(s, buf, got, ms);
+            if (n <= (int64) 0) {
+                return false;
+            }
+            got = got + (int32) n;
+            done = WsDispatchTests.endsHead(buf, got);
+        }
+        return DispatchTests.contains(buf, got, " 101 ");
+    }
+
+    /** One unit: length, kind, payload; returns the end offset. */
+    static int32 unit(int8[] b, int32 at, int32 kind, String payload) {
+        int32 n = payload.byteLength();
+        b[at] = (int8) ((n >> 8) & 255);
+        b[at + 1] = (int8) (n & 255);
+        b[at + 2] = (int8) kind;
+        int32 i = 0;
+        while (i < n) {
+            b[at + 3 + i] = payload.byteAt(i);
+            i = i + 1;
+        }
+        return at + 3 + n;
+    }
+
+    /** Reads `want` reply units within `ms`; kinds and payloads joined as `kind:payload,`. */
+    static #String readUnits(TcpStream s, int32 want, int32 ms) {
+        int8[] buf = heap int8[65536];
+        int32 got = 0;
+        int32 at = 0;
+        int32 count = 0;
+        String out = "";
+        boolean going = true;
+        while (going && count < want) {
+            if (got - at >= 3) {
+                int32 len = ((buf[at] & 255) << 8) | (buf[at + 1] & 255);
+                if (got - at >= 3 + len) {
+                    int32 kind = buf[at + 2] & 255;
+                    String t #= WsDispatchTests.text(buf, at + 3, len);
+                    out = out + kind + ":" + t + ",";
+                    at = at + 3 + len;
+                    count = count + 1;
+                    continue;
+                }
+            }
+            int64 n = DispatchTests.readStep(s, buf, got, ms);
+            if (n <= (int64) 0) {
+                going = false;
+            } else {
+                got = got + (int32) n;
+            }
+        }
+        return out.substring(0, out.byteLength());
+    }
+
+    /** True when the peer closed within `ms`: a read answers EOF or a reset. */
+    static boolean closedWithin(TcpStream s, int32 ms) {
+        int8[] buf = heap int8[256];
+        try {
+            int64 n = s.readWithin(buf, (int64) 0, (int64) 256, ms);
+            return n == (int64) 0;
+        } catch (Exception e) {
+            return !(e instanceof TimedOutException);
+        }
+    }
+
+    // ----- cases ----------------------------------------------------------
+
+    /** 8.1.1 (5.2.4): two units in one segment: both handlers run, in order, on one turn. */
+    static void twoUnitsOneTurn(Check c) {
+        scope {
+            HttpServer srv #= ProtocolDispatchTests.server(0);
+            Task<int32> sv = spawn serveIt(srv);
+            DispatchTests.settle(srv);
+            int32 port = ProtocolDispatchTests.port(srv);
+            ProtocolDispatchTests.runs = 0;
+            ProtocolDispatchTests.closes = 0;
+            ProtocolDispatchTests.order = "";
+            TcpStream s #= DispatchTests.connectRaw(port);
+            c.that(ProtocolDispatchTests.upgrade(s, "/wire", 3000), "the upgrade is answered");
+            Fiber.sleep(Duration.ofMillis((int64) 30));
+            int64 d0 = srv.dispatches();
+            int8[] b = heap int8[64];
+            int32 at = ProtocolDispatchTests.unit(b, 0, 1, "hello");
+            at = ProtocolDispatchTests.unit(b, at, 2, "world");
+            s.writeAllAsync(b, (int64) 0, (int64) at);
+            String got #= ProtocolDispatchTests.readUnits(s, 2, 3000);
+            c.that(got.equals("1:hello,2:WORLD,"), "both replies, in order (" + got + ")");
+            c.that(ProtocolDispatchTests.order.equals("1:hello,2:world,"), "both handlers ran in order");
+            c.eqInt(srv.dispatches() - d0, (int64) 1, "on one turn");
+            s.close();
+            Fiber.sleep(Duration.ofMillis((int64) 100));
+            c.eqInt((int64) ProtocolDispatchTests.closes, (int64) 1, "onClose ran once the peer left");
+            c.eqInt((int64) ProtocolDispatchTests.lastClose, (int64) Protocol.CLOSE_PEER, "with the peer code");
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+    }
+
+    /** 8.1.2 (5.2.1): a unit of unknown kind closes the connection and increments the counter. */
+    static void unknownKindCloses(Check c) {
+        scope {
+            HttpServer srv #= ProtocolDispatchTests.server(0);
+            Task<int32> sv = spawn serveIt(srv);
+            DispatchTests.settle(srv);
+            int32 port = ProtocolDispatchTests.port(srv);
+            ProtocolDispatchTests.runs = 0;
+            TcpStream s #= DispatchTests.connectRaw(port);
+            c.that(ProtocolDispatchTests.upgrade(s, "/wire", 3000), "the upgrade is answered");
+            int8[] b = heap int8[64];
+            int32 at = ProtocolDispatchTests.unit(b, 0, 9, "what");
+            s.writeAllAsync(b, (int64) 0, (int64) at);
+            c.that(ProtocolDispatchTests.closedWithin(s, 3000), "the connection closes");
+            Fiber.sleep(Duration.ofMillis((int64) 50));
+            c.eqInt(srv.protocolUnknownKinds(), (int64) 1, "and the unknown-kind counter moved");
+            c.eqInt((int64) ProtocolDispatchTests.runs, (int64) 0, "no handler ran");
+            c.eqInt((int64) ProtocolDispatchTests.lastClose, (int64) Protocol.CLOSE_UNKNOWN_KIND, "onClose saw the code");
+            s.close();
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+    }
+
+    /** 8.1.3 (5.2.2): `unit` throwing closes with nothing dispatched. */
+    static void throwingFramerCloses(Check c) {
+        scope {
+            HttpServer srv #= ProtocolDispatchTests.server(0);
+            Task<int32> sv = spawn serveIt(srv);
+            DispatchTests.settle(srv);
+            int32 port = ProtocolDispatchTests.port(srv);
+            ProtocolDispatchTests.runs = 0;
+            TcpStream s #= DispatchTests.connectRaw(port);
+            c.that(ProtocolDispatchTests.upgrade(s, "/throws", 3000), "the upgrade is answered");
+            Fiber.sleep(Duration.ofMillis((int64) 30));
+            int64 d0 = srv.dispatches();
+            int8[] b = heap int8[64];
+            int32 at = ProtocolDispatchTests.unit(b, 0, 1, "x");
+            s.writeAllAsync(b, (int64) 0, (int64) at);
+            c.that(ProtocolDispatchTests.closedWithin(s, 3000), "the connection closes");
+            c.eqInt((int64) ProtocolDispatchTests.runs, (int64) 0, "no handler ran");
+            c.eqInt(srv.dispatches() - d0, (int64) 0, "nothing was dispatched");
+            s.close();
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+    }
+
+    /** 8.1.4 (5.2.3): bytes past maxUnit with no boundary close the connection. */
+    static void noBoundaryCloses(Check c) {
+        scope {
+            HttpServer srv #= ProtocolDispatchTests.server(0);
+            Task<int32> sv = spawn serveIt(srv);
+            DispatchTests.settle(srv);
+            int32 port = ProtocolDispatchTests.port(srv);
+            TcpStream s #= DispatchTests.connectRaw(port);
+            c.that(ProtocolDispatchTests.upgrade(s, "/never", 3000), "the upgrade is answered");
+            int8[] b = heap int8[4096];
+            int32 i = 0;
+            boolean wrote = true;
+            while (i < 256 && wrote) {
+                try {
+                    s.writeAllAsync(b, (int64) 0, (int64) 4096);
+                } catch (Exception e) {
+                    wrote = false;
+                }
+                i = i + 1;
+            }
+            c.that(ProtocolDispatchTests.closedWithin(s, 3000), "the connection closes once the cap is passed");
+            s.close();
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+    }
+
+    /** 8.1.5 (3.5): a framer that rescans from zero is caught; one that reports its scan is not. */
+    static void rescanIsCaught(Check c) {
+        scope {
+            HttpServer srv #= ProtocolDispatchTests.server(0);
+            Task<int32> sv = spawn serveIt(srv);
+            DispatchTests.settle(srv);
+            int32 port = ProtocolDispatchTests.port(srv);
+            ProtocolDispatchTests.trickle(c, srv, "/wire", 0, "the resuming framer is within budget");
+            ProtocolDispatchTests.trickle(c, srv, "/rescan", 1, "the rescanning framer is caught");
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+    }
+
+    /** A 48 KB unit in 1 KB pieces; checks the budget counter moved by `wantOverruns` or more. */
+    static void trickle(Check c, HttpServer srv, String path, int32 wantOverruns, String what) {
+        int32 port = ProtocolDispatchTests.port(srv);
+        int64 o0 = srv.framerBudgetOverruns();
+        TcpStream s #= DispatchTests.connectRaw(port);
+        c.that(ProtocolDispatchTests.upgrade(s, path, 3000), path + ": the upgrade is answered");
+        int32 n = 49152;
+        int8[] b = heap int8[3 + n];
+        b[0] = (int8) ((n >> 8) & 255);
+        b[1] = (int8) (n & 255);
+        b[2] = (int8) 1;
+        int32 i = 0;
+        while (i < n) {
+            b[3 + i] = (int8) 97;
+            i = i + 1;
+        }
+        int32 at = 0;
+        while (at < 3 + n) {
+            int32 step = 3 + n - at < 1024 ? 3 + n - at : 1024;
+            s.writeAllAsync(b, (int64) at, (int64) step);
+            at = at + step;
+            Fiber.sleep(Duration.ofMillis((int64) 2));
+        }
+        String got #= ProtocolDispatchTests.readUnits(s, 1, 5000);
+        c.that(got.byteLength() > 2, path + ": the unit is answered once complete");
+        s.close();
+        Fiber.sleep(Duration.ofMillis((int64) 50));
+        int64 moved = srv.framerBudgetOverruns() - o0;
+        if (wantOverruns == 0) {
+            c.eqInt(moved, (int64) 0, what);
+        } else {
+            c.that(moved >= (int64) wantOverruns, what + " (" + moved + " overruns)");
+        }
+    }
+
+    /** 8.1.6 (5.3): a binary message holding two units runs both handlers, in order. */
+    static void overWebSocket(Check c) {
+        scope {
+            HttpServer srv #= ProtocolDispatchTests.server(0);
+            Task<int32> sv = spawn serveIt(srv);
+            DispatchTests.settle(srv);
+            int32 port = ProtocolDispatchTests.port(srv);
+            ProtocolDispatchTests.order = "";
+            String url = "ws://127.0.0.1:" + port + "/wirews";
+            WebSocket client #= WebSocket.connect(url);
+            int8[] b = heap int8[64];
+            int32 at = ProtocolDispatchTests.unit(b, 0, 2, "abc");
+            at = ProtocolDispatchTests.unit(b, at, 1, "def");
+            client.sendBinary(b, 0, at);
+            WsMessage m1 #= client.receive();
+            WsMessage m2 #= client.receive();
+            String r1 #= WsDispatchTests.text(m1.bytes(), 3, m1.length() - 3);
+            String r2 #= WsDispatchTests.text(m2.bytes(), 3, m2.length() - 3);
+            c.that(r1.equals("ABC") && r2.equals("def"), "two replies in order (" + r1 + "," + r2 + ")");
+            c.that(ProtocolDispatchTests.order.equals("2:abc,1:def,"), "both handlers ran in order");
+            client.close(WsCloseCode.NORMAL, "bye");
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+    }
+
+    /** 8.1.7 (2.6, §9): a plain takeover owns its connection on its own fiber; the pool's worker is free. */
+    static void takeoverOwnFiber(Check c) {
+        scope {
+            HttpServer srv #= ProtocolDispatchTests.server(1);
+            Task<int32> sv = spawn serveIt(srv);
+            DispatchTests.settle(srv);
+            int32 port = ProtocolDispatchTests.port(srv);
+            TcpStream a #= DispatchTests.connectRaw(port);
+            c.that(ProtocolDispatchTests.upgrade(a, "/echo-takeover", 3000), "the takeover upgrade is answered");
+            DispatchTests.sendRaw(a, "ping");
+            int8[] buf = heap int8[64];
+            int64 n = DispatchTests.readStep(a, buf, 0, 3000);
+            c.that(n == (int64) 4 && DispatchTests.contains(buf, 4, "ping"), "the takeover echoes");
+            int32 r = await spawn getPlain(port);
+            c.eqInt((int64) r, (int64) 1, "the one worker is free while the takeover holds its connection");
+            c.eqInt((int64) srv.inFlight(), (int64) 0, "nothing in flight on the pool");
+            a.close();
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+    }
+}

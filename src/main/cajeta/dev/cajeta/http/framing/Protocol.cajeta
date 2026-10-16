@@ -1,0 +1,172 @@
+package dev.cajeta.http.framing;
+
+import cajeta.collection.ArrayList;
+import cajeta.error.Exception;
+import cajeta.io.net.AsyncReader;
+import cajeta.io.net.AsyncWriter;
+import cajeta.io.net.ByteBuffer;
+import cajeta.io.net.ByteChannel;
+import dev.cajeta.http.Takeover;
+import dev.cajeta.http.h2.NowWriter;
+import dev.cajeta.http.ws.WebSocketHandler;
+
+/**
+ * A developer-framed protocol after an upgrade (request-dispatch spec §5.2):
+ * a `Framer` that finds units, handlers by kind, a size cap, and an
+ * `onClose`. Under the pool the connection is framed on its framer and each
+ * unit runs its handler on a worker turn, in order; under
+ * fiberPerConnection() `run` frames on the connection's own fiber.
+ *
+ * ```cajeta
+ * Protocol p #= Protocol.over(heap Wire());
+ * p.maxUnit(65536);
+ * p.on(Msg.SUBSCRIBE, (ProtocolConnection c, ProtocolUnit u) -> Feed.subscribe(c, u));
+ * p.onClose((ProtocolConnection c, int32 code) -> Feed.drop(c, code));
+ * r.status(101);
+ * r.upgrade(#p);
+ * ```
+ */
+public class Protocol extends Takeover {
+    /** `onClose` codes. */
+    public static final int32 CLOSE_PEER = 0;        // the peer ended the stream
+    public static final int32 CLOSE_PROTOCOL = 1;    // the framer raised: a malformed stream
+    public static final int32 CLOSE_UNKNOWN_KIND = 2;
+    public static final int32 CLOSE_TOO_BIG = 3;     // bytes buffered past maxUnit with no unit
+    public static final int32 CLOSE_HANDLER = 4;     // a handler threw
+    public static final int32 CLOSE_LOCAL = 5;       // a handler closed it
+
+    public static final int32 DEFAULT_MAX_UNIT = 1048576;
+    public static final int64 BUDGET_NANOS = (int64) 1000000;   // spec §3.5: 1 ms per parser call
+
+    Framer framer;
+    ArrayList<ProtocolHandler> handlers;   // by kind; ProtocolHandler.CLOSE carries onClose
+    int32 maxUnitN;
+    ByteChannel ch;
+
+    Protocol(Framer framer) {
+        // `#=` records the caller's mode: a lent framer must outlive the
+        // connection (a server-wide instance), `over(#f)` hands one over.
+        this.framer #= framer;
+        this.handlers = heap ArrayList<ProtocolHandler>();
+        this.maxUnitN = Protocol.DEFAULT_MAX_UNIT;
+        this.ch = null;
+    }
+
+    /**
+     * A protocol framed by `framer` over the upgraded connection's bytes. A
+     * lent framer must outlive the connection, as a server-wide instance
+     * does; `over(#f)` hands a fresh one to the protocol.
+     */
+    public static #Protocol over(Framer framer) {
+        return heap Protocol(framer);
+    }
+
+    /**
+     * A protocol framed by `framer` over the payloads of WebSocket binary
+     * messages (spec §5.3). Register it as the WebSocket handler of a route:
+     * `WsUpgrade.accept(q, r, #Protocol.webSocketHandler(#p), false)`.
+     */
+    public static #Protocol overWebSocket(Framer framer) {
+        return heap Protocol(framer);
+    }
+
+    /** The WebSocket handler that applies `p`'s framing to each binary message. */
+    public static #WebSocketHandler webSocketHandler(#Protocol p) {
+        return heap ProtocolWsHandler(#p);
+    }
+
+    /** The most bytes buffered without a unit boundary before the connection closes; default 1 MiB. */
+    public Protocol maxUnit(int32 bytes) {
+        this.maxUnitN = bytes < 1 ? 1 : bytes;
+        return this;
+    }
+
+    public Protocol on(int32 kind, (ProtocolConnection, ProtocolUnit) -> void handler) {
+        ProtocolHandler h = heap ProtocolHandler(kind, handler);
+        this.handlers.add(#h);
+        return this;
+    }
+
+    public Protocol onClose((ProtocolConnection, int32) -> void handler) {
+        ProtocolHandler h #= ProtocolHandler.forClose(handler);
+        this.handlers.add(#h);
+        return this;
+    }
+
+    /** Runs the registered `onClose`, if any. */
+    static void runClose(ArrayList<ProtocolHandler> hs, ProtocolConnection c, int32 code) {
+        int32 i = Protocol.handlerIndex(hs, ProtocolHandler.CLOSE);
+        if (i < 0) {
+            return;
+        }
+        ProtocolHandler h = hs.get(i);
+        (ProtocolConnection, int32) -> void fn = h.closeFn;
+        fn(c, code);
+    }
+
+    static boolean hasClose(ArrayList<ProtocolHandler> hs) {
+        return Protocol.handlerIndex(hs, ProtocolHandler.CLOSE) >= 0;
+    }
+
+    /** The index of `kind`'s handler in `hs`, or -1 (an index, since a multi-parameter static cannot return a borrow). */
+    static int32 handlerIndex(ArrayList<ProtocolHandler> hs, int32 kind) {
+        int32 i = 0;
+        while (i < hs.count()) {
+            ProtocolHandler h = hs.get(i);
+            if (h.kind == kind) {
+                return i;
+            }
+            i = i + 1;
+        }
+        return -1;
+    }
+
+    public void attach(ByteChannel ch) {
+        this.ch #= ch;
+    }
+
+    /**
+     * The framer-side form under the pool (spec §5): the framer, the handlers
+     * and the cap move to a `ProtocolFramed` the connection's framer drives.
+     */
+    public #ProtocolFramed framed(ByteChannel ch, ProtocolCounters counters, int32 maxUnits) {
+        Framer f #= this.framer;
+        ArrayList<ProtocolHandler> hs #= this.handlers;
+        return heap ProtocolFramed(#f, #hs, this.maxUnitN, ch, counters, maxUnits);
+    }
+
+    /**
+     * The fiber-per-connection form: frames the stream on this fiber and runs
+     * each unit's handler inline, until the peer ends it or a failure closes it.
+     */
+    public void run(AsyncReader reader, AsyncWriter writer) {
+        ProtocolCounters counters = heap ProtocolCounters();
+        Framer f #= this.framer;
+        ArrayList<ProtocolHandler> hs #= this.handlers;
+        ProtocolFramed pf #= heap ProtocolFramed(#f, #hs, this.maxUnitN, this.ch, counters, 64);
+        ByteBuffer in = heap ByteBuffer(this.maxUnitN > 65536 ? 65536 : this.maxUnitN + 1);
+        boolean going = true;
+        while (going) {
+            pf.feed(in);
+            in.compact();
+            if (pf.finished()) {
+                going = false;
+            } else if (pf.unitCount() > 0) {
+                going = pf.turn();
+            } else {
+                if (in.writable() == 0) {
+                    pf.failTooBig();
+                    going = pf.turn();
+                } else {
+                    int32 n = reader.read(in.array(), in.writePosition(), in.writable());
+                    if (n <= 0) {
+                        pf.transportEof();
+                        going = pf.turn();
+                    } else {
+                        in.advanceWrite(n);
+                    }
+                }
+            }
+        }
+    }
+}

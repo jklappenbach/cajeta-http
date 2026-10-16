@@ -1,0 +1,22 @@
+package dev.cajeta.http.framing;
+
+/** A handler registered for one unit kind; kind `CLOSE` carries the `onClose` handler. */
+final class ProtocolHandler {
+    static final int32 CLOSE = -1;
+
+    int32 kind;
+    (ProtocolConnection, ProtocolUnit) -> void fn;
+    (ProtocolConnection, int32) -> void closeFn;
+
+    ProtocolHandler(int32 kind, (ProtocolConnection, ProtocolUnit) -> void fn) {
+        this.kind = kind;
+        this.fn #= fn;
+        this.closeFn = null;
+    }
+
+    static #ProtocolHandler forClose((ProtocolConnection, int32) -> void fn) {
+        ProtocolHandler h = heap ProtocolHandler(ProtocolHandler.CLOSE, null);
+        h.closeFn #= fn;
+        return #h;
+    }
+}

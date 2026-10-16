@@ -26,6 +26,7 @@ import dev.cajeta.http.HttpResponse;
 import dev.cajeta.http.Http1Connection;
 import dev.cajeta.http.Http1Framed;
 import dev.cajeta.http.h2.Http2;
+import dev.cajeta.http.framing.ProtocolCounters;
 import dev.cajeta.http.h2.Http2Connection;
 import dev.cajeta.http.h1.HttpParserLimits;
 
@@ -76,8 +77,9 @@ public class HttpServer {
     public int64 wsMaxMessageN;          // WebSocket: the largest message a route accepts
     public MultipartRoutes multipartRoutes;   // PART and STREAM routes; null when every route is WHOLE
     public int32 maxPartBytesN;          // PART routes: the largest single part
+    public ProtocolCounters protocolCounters;   // developer-framed connections (spec §5)
     public DispatchPool pool;
-    ArrayList<Framer> framerList;
+    ArrayList<ConnectionFramer> framerList;
     AtomicInt32 framersRunning;
     public boolean poolStopping;
     boolean poolRunning;
@@ -102,8 +104,9 @@ public class HttpServer {
         this.wsMaxMessageN = (int64) 67108864;
         this.multipartRoutes = null;
         this.maxPartBytesN = 16777216;
+        this.protocolCounters = heap ProtocolCounters();
         this.pool = null;
-        this.framerList = heap ArrayList<Framer>();
+        this.framerList = heap ArrayList<ConnectionFramer>();
         this.framersRunning = heap AtomicInt32(0);
         this.poolStopping = false;
         this.poolRunning = false;
@@ -439,7 +442,7 @@ public class HttpServer {
         this.pool = heap DispatchPool(this, this.maxInFlightN);
         int32 i = 0;
         while (i < k) {
-            this.framerList.add(heap Framer(this, i));
+            this.framerList.add(heap ConnectionFramer(this, i));
             i = i + 1;
         }
         scope {
@@ -503,8 +506,8 @@ public class HttpServer {
         return this.server.state.load() == ServerState.RUNNING;
     }
 
-    static async int32 runFramer(Framer f) {
-        return Framer.run(f);
+    static async int32 runFramer(ConnectionFramer f) {
+        return ConnectionFramer.run(f);
     }
 
     static async int32 runWorker(DispatchPool p) {
@@ -512,7 +515,7 @@ public class HttpServer {
     }
 
     /** The framer a connection belongs to. */
-    public Framer framerAt(int32 i) {
+    public ConnectionFramer framerAt(int32 i) {
         return this.framerList.get(i);
     }
 
@@ -541,6 +544,16 @@ public class HttpServer {
     /** TLS connections accepted and not yet gone, under either model. */
     public int32 tlsConnections() {
         return this.tlsInflight.load();
+    }
+
+    /** Units of a developer-framed protocol whose kind had no handler (spec 5.2.1). */
+    public int64 protocolUnknownKinds() {
+        return this.protocolCounters.unknownKinds.load();
+    }
+
+    /** ConnectionFramer parser calls over the time budget, and framers whose rescanning passed linear (spec 3.5). */
+    public int64 framerBudgetOverruns() {
+        return this.protocolCounters.budgetOverruns.load();
     }
 
     /** Units on a worker right now. */

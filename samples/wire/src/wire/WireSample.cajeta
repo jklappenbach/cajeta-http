@@ -1,0 +1,230 @@
+package wire;
+
+import cajeta.concurrent.Fiber;
+import cajeta.error.Exception;
+import cajeta.io.net.IpAddress;
+import cajeta.io.net.SocketAddress;
+import cajeta.io.net.TcpStream;
+import cajeta.io.net.TimedOutException;
+import cajeta.lang.String;
+import cajeta.time.Duration;
+import dev.cajeta.http.Bytes;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.framing.Framer;
+import dev.cajeta.http.framing.Protocol;
+import dev.cajeta.http.framing.ProtocolConnection;
+import dev.cajeta.http.framing.ProtocolUnit;
+import dev.cajeta.http.server.HttpServer;
+import dev.cajeta.http.server.HttpServerBuilder;
+
+/**
+ * The wire: two bytes of big-endian length, one byte of kind, the payload.
+ * `unit` looks at the header only and says so through `scanned`, so the
+ * server charges it three bytes per call, not the whole buffer.
+ */
+final class Wire implements Framer {
+    int32 looked;
+
+    public Wire() {
+        this.looked = 0;
+    }
+
+    public int32 unit(int8[] buf, int32 start, int32 end) {
+        if (end - start < 3) {
+            this.looked = end;
+            return 0;
+        }
+        this.looked = start + 3;
+        int32 len = ((buf[start] & 255) << 8) | (buf[start + 1] & 255);
+        if (end - start < 3 + len) {
+            return 0;
+        }
+        return 3 + len;
+    }
+
+    public int32 kind(int8[] buf, int32 start, int32 length) {
+        return buf[start + 2] & 255;
+    }
+
+    public int32 scanned() {
+        return this.looked;
+    }
+}
+
+/**
+ * A custom protocol end to end (request-dispatch spec §5): a route upgrades
+ * into a `Protocol` over `Wire`; kind 1 echoes, kind 2 answers in upper case.
+ * The server runs on the request-dispatch pool, so the framing runs on a
+ * framer and each unit's handler on a worker turn; the client here is a raw
+ * socket. Exit code 0 when both replies match.
+ */
+public final class WireSample {
+    public static final int32 ECHO = 1;
+    public static final int32 UPPER = 2;
+
+    static Wire WIRE = heap Wire();
+    static int32 closes;
+
+    // ----- the server side -----------------------------------------------
+
+    static void echo(ProtocolConnection c, ProtocolUnit u) {
+        c.send(u.bytes(), 0, u.length());
+    }
+
+    static void upper(ProtocolConnection c, ProtocolUnit u) {
+        int32 n = u.length();
+        int8[] out = heap int8[n];
+        int8[] src = u.bytes();
+        int32 i = 0;
+        while (i < n) {
+            int8 ch = src[i];
+            if (i >= 3 && ch >= (int8) 97 && ch <= (int8) 122) {
+                ch = (int8) (ch - 32);
+            }
+            out[i] = ch;
+            i = i + 1;
+        }
+        c.send(out, 0, n);
+    }
+
+    static void closed(ProtocolConnection c, int32 code) {
+        WireSample.closes = WireSample.closes + 1;
+        System.stdout.println("server: connection closed, code {}", code);
+    }
+
+    static void handle(HttpRequest q, HttpResponse r) {
+        if (Bytes.equals(q.path(), "/wire")) {
+            Protocol p #= Protocol.over(WireSample.WIRE);
+            p.maxUnit(65536);
+            p.on(WireSample.ECHO, (ProtocolConnection c, ProtocolUnit u) -> WireSample.echo(c, u));
+            p.on(WireSample.UPPER, (ProtocolConnection c, ProtocolUnit u) -> WireSample.upper(c, u));
+            p.onClose((ProtocolConnection c, int32 code) -> WireSample.closed(c, code));
+            r.status(101);
+            r.header("Upgrade", "wire");
+            r.upgrade(#p);
+            return;
+        }
+        r.status(404);
+    }
+
+    public static async int32 serve(HttpServer srv) {
+        srv.serve();
+        return 0;
+    }
+
+    // ----- the client side -----------------------------------------------
+
+    static int32 unit(int8[] b, int32 at, int32 kind, String payload) {
+        int32 n = payload.byteLength();
+        b[at] = (int8) ((n >> 8) & 255);
+        b[at + 1] = (int8) (n & 255);
+        b[at + 2] = (int8) kind;
+        int32 i = 0;
+        while (i < n) {
+            b[at + 3 + i] = payload.byteAt(i);
+            i = i + 1;
+        }
+        return at + 3 + n;
+    }
+
+    static int64 read(TcpStream s, int8[] buf, int32 at, int32 ms) {
+        try {
+            return s.readWithin(buf, (int64) at, (int64) (buf.count() - at), ms);
+        } catch (TimedOutException t) {
+            return (int64) -1;
+        }
+    }
+
+    static boolean endsHead(int8[] b, int32 n) {
+        return n >= 4 && b[n - 4] == (int8) 13 && b[n - 3] == (int8) 10
+            && b[n - 2] == (int8) 13 && b[n - 1] == (int8) 10;
+    }
+
+    static #String text(int8[] b, int32 off, int32 len) {
+        int8[] copy = heap int8[len];
+        int32 i = 0;
+        while (i < len) {
+            copy[i] = b[off + i];
+            i = i + 1;
+        }
+        return heap String(#copy, len);
+    }
+
+    /** Reads `want` reply units; returns them as `kind:payload,`. */
+    static #String readUnits(TcpStream s, int32 want, int32 ms) {
+        int8[] buf = heap int8[4096];
+        int32 got = 0;
+        int32 at = 0;
+        int32 count = 0;
+        String out = "";
+        boolean going = true;
+        while (going && count < want) {
+            if (got - at >= 3) {
+                int32 len = ((buf[at] & 255) << 8) | (buf[at + 1] & 255);
+                if (got - at >= 3 + len) {
+                    int32 kind = buf[at + 2] & 255;
+                    String t #= WireSample.text(buf, at + 3, len);
+                    out = out + kind + ":" + t + ",";
+                    at = at + 3 + len;
+                    count = count + 1;
+                    continue;
+                }
+            }
+            int64 n = WireSample.read(s, buf, got, ms);
+            if (n <= (int64) 0) {
+                going = false;
+            } else {
+                got = got + (int32) n;
+            }
+        }
+        return out.substring(0, out.byteLength());
+    }
+
+    public static int32 main(String[] args) {
+        HttpServerBuilder b #= HttpServer.builder();
+        b.bind("127.0.0.1:0");
+        b.handler((HttpRequest q, HttpResponse r) -> WireSample.handle(q, r));
+        HttpServer srv #= b.build();
+        Task<int32> sv = spawn serve(srv);
+        int32 i = 0;
+        while (i < 200 && srv.framerCount() == 0) {
+            Fiber.sleep(Duration.ofMillis((int64) 5));
+            i = i + 1;
+        }
+        int32 port = srv.server.listener.boundPort();
+        System.stdout.println("server: wire protocol on 127.0.0.1:{} under the request-dispatch pool", port);
+
+        IpAddress ip #= IpAddress.loopbackV4();
+        SocketAddress a #= SocketAddress.of(#ip, port);
+        TcpStream s #= TcpStream.connectAsync(#a);
+        String head = "GET /wire HTTP/1.1\r\nHost: wire\r\nUpgrade: wire\r\nConnection: Upgrade\r\n\r\n";
+        int8[] hb #= head.toBytes();
+        s.writeAllAsync(hb, (int64) 0, (int64) head.byteLength());
+        int8[] buf = heap int8[1024];
+        int32 got = 0;
+        while (!WireSample.endsHead(buf, got)) {
+            int64 n = WireSample.read(s, buf, got, 3000);
+            if (n <= (int64) 0) {
+                System.stdout.println("client: no 101 within 3 s");
+                return 2;
+            }
+            got = got + (int32) n;
+        }
+        System.stdout.println("client: upgraded ({} bytes of head)", got);
+
+        int8[] out = heap int8[64];
+        int32 at = WireSample.unit(out, 0, WireSample.ECHO, "hello");
+        at = WireSample.unit(out, at, WireSample.UPPER, "wire");
+        s.writeAllAsync(out, (int64) 0, (int64) at);
+        String replies #= WireSample.readUnits(s, 2, 3000);
+        System.stdout.println("client: replies {}", replies);
+        s.close();
+        Fiber.sleep(Duration.ofMillis((int64) 100));
+        srv.shutdown(Duration.ofSeconds(2));
+        await sv;
+        boolean ok = replies.equals("1:hello,2:WIRE,") && WireSample.closes == 1;
+        System.stdout.println(ok ? "wire sample: ok" : "wire sample: FAILED");
+        return ok ? 0 : 1;
+    }
+}

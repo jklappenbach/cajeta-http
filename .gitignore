@@ -12,3 +12,4 @@ tmp/
 # IDE-local project files.
 .idea/
 samples/view-tour/build-native/
+samples/wire/build-native/

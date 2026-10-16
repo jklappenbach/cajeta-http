@@ -1,0 +1,25 @@
+package dev.cajeta.http.framing;
+
+/**
+ * Developer-defined framing (request-dispatch spec §5.1). Pure,
+ * allocation-free and non-blocking: it runs on the framer under the time
+ * budget of spec §3.5, never on a handler's fiber.
+ */
+public interface Framer {
+    /**
+     * The length of one complete unit at `buf[start, end)`, or 0 when more
+     * bytes are needed. Throws `ProtocolViolationException` for a malformed
+     * stream.
+     */
+    int32 unit(int8[] buf, int32 start, int32 end);
+
+    /** The unit's kind, used to select its handler. */
+    int32 kind(int8[] buf, int32 start, int32 length);
+
+    /**
+     * How far `unit` scanned when it returned 0, so the next call can start
+     * there. A framer that cannot resume answers `start`; the server counts a
+     * budget overrun when the rescanning grows past linear.
+     */
+    int32 scanned();
+}

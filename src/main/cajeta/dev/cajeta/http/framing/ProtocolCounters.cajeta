@@ -1,0 +1,14 @@
+package dev.cajeta.http.framing;
+
+import cajeta.concurrent.AtomicInt64;
+
+/** The server's counters for developer-framed connections (spec §5.2.1, §3.5). */
+public final class ProtocolCounters {
+    public AtomicInt64 unknownKinds;
+    public AtomicInt64 budgetOverruns;
+
+    public ProtocolCounters() {
+        this.unknownKinds = heap AtomicInt64((int64) 0);
+        this.budgetOverruns = heap AtomicInt64((int64) 0);
+    }
+}

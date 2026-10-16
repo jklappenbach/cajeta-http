@@ -1,0 +1,68 @@
+package dev.cajeta.http.framing;
+
+import cajeta.concurrent.Lock;
+import cajeta.concurrent.LockGuard;
+import cajeta.io.net.AsyncWriter;
+import cajeta.io.net.ByteChannel;
+import dev.cajeta.http.ws.WebSocketConnection;
+import dev.cajeta.http.ws.WsCloseCode;
+
+/**
+ * What a unit handler sends on. Over a raw connection a send is a parking
+ * write on the socket under a lock, so two handlers' units never interleave;
+ * over a WebSocket (`Protocol.overWebSocket`) a send is one binary message.
+ */
+public final class ProtocolConnection {
+    ByteChannel ch;
+    AsyncWriter writer;
+    Lock lock;
+    WebSocketConnection ws;
+    boolean closedN;
+
+    ProtocolConnection(^ByteChannel ch) {
+        this.ch = ch;
+        this.writer = heap AsyncWriter(ch);
+        this.lock = heap Lock();
+        this.ws = null;
+        this.closedN = false;
+    }
+
+    ProtocolConnection(^WebSocketConnection ws) {
+        this.ch = null;
+        this.writer = null;
+        this.lock = heap Lock();
+        this.ws = ws;
+        this.closedN = false;
+    }
+
+    public void send(int8[] data, int32 off, int32 len) {
+        if (this.closedN) {
+            return;
+        }
+        if (this.ws != null) {
+            this.ws.sendBinary(data, off, len);
+            return;
+        }
+        LockGuard g #= this.lock.acquire();
+        this.writer.writeAll(data, off, len);
+        this.writer.flush();
+    }
+
+    /** Ends the connection; a registered `onClose` still runs. */
+    public void close() {
+        if (this.closedN) {
+            return;
+        }
+        this.closedN = true;
+        if (this.ws != null) {
+            String none = "";
+            this.ws.close(WsCloseCode.NORMAL, none);
+            return;
+        }
+        this.ch.close();
+    }
+
+    public boolean isClosed() {
+        return this.closedN;
+    }
+}
