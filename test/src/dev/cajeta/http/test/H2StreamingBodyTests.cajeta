@@ -6,6 +6,7 @@ import cajeta.io.net.AsyncReader;
 import cajeta.io.net.AsyncWriter;
 import cajeta.io.net.IpAddress;
 import cajeta.io.net.SocketAddress;
+import cajeta.io.net.TcpListener;
 import cajeta.io.net.TcpStream;
 import cajeta.io.net.TimedOutException;
 import cajeta.time.Duration;
@@ -38,9 +39,12 @@ public final class H2StreamingBodyTests {
     static boolean streamedSeen;
     static int64 counted;
     static int64 alloc;
+    static int32 readCalls;    // reads the /count handlers made
     static boolean startedBeforeData;
     static boolean readRaised;
     static boolean liveAfterFail;
+    static int64 maxStreamWindow;   // the largest stream window the multi-stream client ever saw
+    static int64 creditTotal;       // stream credit it received, all streams
     static final int32 SEND = 0;          // send the body under the windows
     static final int32 WAIT_HANDLER = 1;  // first wait for the handler to start
     static final int32 RESET_EARLY = 2;   // one frame, then RST_STREAM(CANCEL)
@@ -56,6 +60,12 @@ public final class H2StreamingBodyTests {
         H2StreamingBodyTests.wholeUnchanged(c);
         System.stdout.println("-- h2 streaming body: a reset under an open body raises in the handler's read (1.1.5) --");
         H2StreamingBodyTests.resetRaises(c);
+        System.stdout.println("-- h2 streaming body: 100 streams at once, memory bounded by the slab, credit never past it (2.1.1, 2.1.3) --");
+        H2StreamingBodyTests.hundredStreams(c);
+        System.stdout.println("-- h2 streaming body: a stalled handler closes only its own stream's window (2.1.2) --");
+        H2StreamingBodyTests.stallIsolation(c);
+        System.stdout.println("-- h2 streaming body: maxBodyBytes does not bound an open stream, and still bounds a held one (2.1.4) --");
+        H2StreamingBodyTests.maxBodyNotApplied(c);
     }
 
     // ----- server --------------------------------------------------------
@@ -77,6 +87,7 @@ public final class H2StreamingBodyTests {
             boolean going = true;
             while (going) {
                 int32 n = 0;
+                H2StreamingBodyTests.readCalls = H2StreamingBodyTests.readCalls + 1;
                 try {
                     n = rd.read(buf, 0, 65536);
                 } catch (Exception e) {
@@ -97,6 +108,34 @@ public final class H2StreamingBodyTests {
             r.body("n=" + total);
             return;
         }
+        if (Bytes.equals(q.path(), "/stall")) {
+            Body b = q.bodyStream();
+            if (b == null) {
+                r.status(500);
+                r.body("not streamed");
+                return;
+            }
+            boolean mine = true;
+            AsyncReader rd = b.reader();
+            int8[] buf = heap int8[65536];
+            int64 total = (int64) 0;
+            boolean going = true;
+            boolean first = true;
+            while (going) {
+                int32 n = rd.read(buf, 0, 65536);
+                if (n <= 0) {
+                    going = false;
+                } else {
+                    total = total + (int64) n;
+                    if (first && mine) {
+                        first = false;
+                        Fiber.sleep(Duration.ofMillis((int64) 1000));
+                    }
+                }
+            }
+            r.body("n=" + total);
+            return;
+        }
         if (Bytes.equals(q.path(), "/whole")) {
             r.body("len=" + q.bodyLength() + " streamed=" + q.bodyStreamed());
             return;
@@ -105,14 +144,18 @@ public final class H2StreamingBodyTests {
     }
 
     static #HttpServer server(boolean streaming) {
+        return H2StreamingBodyTests.serverWith(streaming, (int64) 0);
+    }
+
+    static #HttpServer serverWith(boolean streaming, int64 maxBody) {
         HttpServerBuilder b #= HttpServer.builder();
         b.bind("127.0.0.1:0");
         b.handler((HttpRequest q, HttpResponse r) -> H2StreamingBodyTests.handle(q, r));
         b.h2PriorKnowledge();
         b.framers(1);
-        if (streaming) {
-            ServerLimits l #= ServerLimits.of(5000, 15000, (int64) 0, false);
-            l.streamRequestBody = true;
+        if (streaming || maxBody > (int64) 0) {
+            ServerLimits l #= ServerLimits.of(5000, 15000, maxBody, false);
+            l.streamRequestBody = streaming;
             b.serverLimits(#l);
         }
         return b.build();
@@ -385,11 +428,14 @@ public final class H2StreamingBodyTests {
             H2StreamingBodyTests.handlerStarted = false;
             H2StreamingBodyTests.counted = (int64) 0;
             int64 total = (int64) 67108864;
+            int64 p0 = Cajeta.allocatedBytes();
             String got #= H2StreamingBodyTests.upload(port, "/count", total, H2StreamingBodyTests.SEND, 90000);
+            int64 pGrew = Cajeta.allocatedBytes() - p0;
             c.that(got.equals("n=" + total), "the handler read every byte (" + got + ")");
             c.eqInt(H2StreamingBodyTests.counted, total, "counted incrementally");
             c.that(H2StreamingBodyTests.alloc < (int64) 8388608,
                 "in bounded memory (" + H2StreamingBodyTests.alloc + " bytes allocated)");
+            System.stdout.println("    [measure] 64 MB on one stream: the handler allocated {} bytes over {} reads, the whole process {} bytes", H2StreamingBodyTests.alloc, H2StreamingBodyTests.readCalls, pGrew);
             srv.shutdown(Duration.ofSeconds(2));
             await sv;
         }
@@ -448,6 +494,392 @@ public final class H2StreamingBodyTests {
             }
             c.that(H2StreamingBodyTests.readRaised, "the handler's read raised after the reset (" + got + ")");
             c.that(!H2StreamingBodyTests.liveAfterFail, "and the body reports not live");
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+    }
+
+    // ----- a multi-stream flow-controlled client ------------------------------
+
+    static void putSid(int8[] frame, int32 sid) {
+        frame[5] = (int8) ((sid >> 24) & 0x7F);
+        frame[6] = (int8) ((sid >> 16) & 0xFF);
+        frame[7] = (int8) ((sid >> 8) & 0xFF);
+        frame[8] = (int8) (sid & 0xFF);
+    }
+
+    /** The reader fiber of the multi-stream client: frames in, windows credited, responses counted. Blocking reads, no timers. */
+    public static async int32 multiReader(H2MultiState st, AsyncReader reader) {
+        int8[] hdr = heap int8[9];
+        int8[] pl = heap int8[16384 + 256];
+        boolean going = true;
+        while (going) {
+            try {
+                reader.readExact(hdr, 0, 9);
+            } catch (Exception e) {
+                going = false;
+            }
+            if (going) {
+                Http2FrameHeader h #= Http2FrameHeader(hdr);
+                int32 type = h.typeCode();
+                int32 flags = h.flags();
+                int32 sid = h.streamId();
+                int32 len = h.length();
+                if (len > pl.count()) {
+                    pl = heap int8[len];
+                }
+                if (len > 0) {
+                    try {
+                        reader.readExact(pl, 0, len);
+                    } catch (Exception e) {
+                        going = false;
+                    }
+                }
+                if (!going) {
+                } else if (type == Http2.FRAME_SETTINGS) {
+                    if ((flags & Http2.FLAG_ACK) == 0) {
+                        Http2SettingsList sl #= Http2Frames.parseSettings(pl, 0, len, flags, sid);
+                        st.enter();
+                        int64 iw = sl.get(Http2.SETTINGS_INITIAL_WINDOW_SIZE, st.serverInitial);
+                        int32 q = 0;
+                        while (q < st.n) { st.win[q] = st.win[q] + (iw - st.serverInitial); q = q + 1; }
+                        st.serverInitial = iw;
+                        st.settingsSeen = true;
+                        st.needAck = true;
+                        st.signal();
+                        st.leave();
+                    }
+                } else if (type == Http2.FRAME_WINDOW_UPDATE) {
+                    int32 inc = Http2Frames.parseWindowUpdate(pl, 0, len, sid);
+                    st.enter();
+                    if (sid == 0) {
+                        st.connWin = st.connWin + (int64) inc;
+                    } else {
+                        int32 k = (sid - 1) / 2;
+                        if (k >= 0 && k < st.n) {
+                            st.win[k] = st.win[k] + (int64) inc;
+                            st.credit[k] = st.credit[k] + (int64) inc;
+                            if (st.win[k] > st.maxWindow) {
+                                st.maxWindow = st.win[k];
+                            }
+                        }
+                    }
+                    st.signal();
+                    st.leave();
+                } else if (type == Http2.FRAME_DATA || type == Http2.FRAME_HEADERS) {
+                    if ((flags & Http2.FLAG_END_STREAM) != 0) {
+                        int32 k = (sid - 1) / 2;
+                        st.enter();
+                        if (k >= 0 && k < st.n && !st.done[k]) {
+                            st.done[k] = true;
+                            st.finished = st.finished + 1;
+                        }
+                        if (st.finished >= st.n) {
+                            going = false;
+                        }
+                        st.signal();
+                        st.leave();
+                    }
+                } else if (type == Http2.FRAME_RST_STREAM || type == Http2.FRAME_GOAWAY) {
+                    st.enter();
+                    st.ended = true;
+                    st.signal();
+                    st.leave();
+                    going = false;
+                }
+            }
+        }
+        st.enter();
+        st.readerDone = true;
+        st.signal();
+        st.leave();
+        return 0;
+    }
+
+    /** The multi-stream client's watchdog: past `ms`, ends the exchange so a stuck server cannot hang the suite. */
+    public static async int32 multiWatchdog(H2MultiState st, int32 ms) {
+        int32 waited = 0;
+        boolean going = true;
+        while (going && waited < ms) {
+            Fiber.sleep(Duration.ofMillis((int64) 100));
+            waited = waited + 100;
+            st.enter();
+            if (st.readerDone || st.finished >= st.n) {
+                going = false;
+            }
+            st.leave();
+        }
+        st.enter();
+        if (going) {
+            st.ended = true;
+        }
+        st.signal();
+        st.leave();
+        return 0;
+    }
+
+    /**
+     * Opens one connection and `n` streams (ids 1, 3, 5, ...) POSTing
+     * `perStream` bytes each, stream 1 to `firstPath` and the rest to `path`,
+     * under the server's windows, round robin; a second fiber reads frames and
+     * credits windows, so this fiber parks on a condition instead of polling
+     * and the client allocates nothing per frame. Returns how many streams
+     * were answered. `stallWatchMs` > 0 measures the bytes the other streams
+     * move while stream 1 sits at a closed window, into `stallMoved[0]`, and
+     * stream 1's credit in that window into `stallMoved[1]`.
+     */
+    static int32 multiUpload(int32 port, String firstPath, String path, int32 n, int64 perStream, int32 ms,
+                             int32 stallWatchMs, int64[] stallMoved) {
+        IpAddress ca #= IpAddress.loopbackV4();
+        SocketAddress connAddr #= SocketAddress.of(#ca, port);
+        TcpStream sock #= TcpStream.connectAsync(#connAddr);
+        AsyncReader reader = heap AsyncReader(sock, 65536);
+        AsyncWriter writer = heap AsyncWriter(sock);
+        int8[] pf #= Http2.preface();
+        writer.writeAll(pf, 0, 24);
+        Http2FrameWriter fw = heap Http2FrameWriter();
+        Http2SettingsList empty = heap Http2SettingsList();
+        Http2Frames.writeSettings(fw, empty);
+        HpackEncoder enc = heap HpackEncoder(Http2.DEFAULT_HEADER_TABLE_SIZE, true);
+        int32 i = 0;
+        while (i < n) {
+            HpackFieldList fl = heap HpackFieldList();
+            fl.put(H2StreamingBodyTests.own(":method"), H2StreamingBodyTests.own("POST"));
+            fl.put(H2StreamingBodyTests.own(":path"), H2StreamingBodyTests.own(i == 0 ? firstPath : path));
+            fl.put(H2StreamingBodyTests.own(":scheme"), H2StreamingBodyTests.own("http"));
+            fl.put(H2StreamingBodyTests.own(":authority"), H2StreamingBodyTests.own("127.0.0.1"));
+            fl.put(H2StreamingBodyTests.own("content-length"), H2StreamingBodyTests.own("" + perStream));
+            int8[] block #= enc.encode(fl);
+            Http2ContentFrames.writeHeaders(fw, 1 + 2 * i, block, (int32) block.count(), false, true, 0);
+            i = i + 1;
+        }
+        int8[] out #= fw.toBytes();
+        writer.writeAll(out, 0, (int32) out.count());
+        writer.flush();
+
+        int8[] chunk = heap int8[16384];
+        int32 ci = 0;
+        while (ci < 16384) {
+            chunk[ci] = (int8) (97 + (ci % 23));
+            ci = ci + 1;
+        }
+        Http2FrameWriter fullW = heap Http2FrameWriter();
+        Http2ContentFrames.writeData(fullW, 1, chunk, 16384, false, 0);
+        int8[] fullFrame #= fullW.toBytes();
+        Http2FrameWriter ackW = heap Http2FrameWriter();
+        Http2Frames.writeSettingsAck(ackW);
+        int8[] ackFrame #= ackW.toBytes();
+        int8[] partFrame = heap int8[9 + 16384];   // a short or final DATA frame, built in place
+        int64[] sent = heap int64[n];
+        i = 0;
+        while (i < n) {
+            sent[i] = (int64) 0;
+            i = i + 1;
+        }
+        H2MultiState st = heap H2MultiState(n);
+        Task<int32> rt = spawn multiReader(st, reader);
+        Task<int32> wt = spawn multiWatchdog(st, ms);
+        int32 next = 0;
+        boolean watching = false;
+        boolean watched = stallWatchMs <= 0;
+        int64 watchEnd = (int64) 0;
+        int64 othersAtStart = (int64) 0;
+        int64 creditAtStart = (int64) 0;
+        boolean running = true;
+        while (running) {
+            boolean sendAck = false;
+            int32 sendSid = 0;
+            int64 sendLen = (int64) 0;
+            boolean sendLast = false;
+            st.enter();
+            if (st.finished >= n || st.ended || st.readerDone) {
+                running = false;
+            } else {
+                if (st.needAck) {
+                    st.needAck = false;
+                    sendAck = true;
+                }
+                int32 tries = 0;
+                while (sendSid == 0 && tries < n && st.connWin > (int64) 0) {
+                    int32 k = next;
+                    next = (next + 1) % n;
+                    tries = tries + 1;
+                    if (sent[k] < perStream && st.win[k] > (int64) 0) {
+                        int64 m = perStream - sent[k];
+                        if (m > (int64) 16384) { m = (int64) 16384; }
+                        if (m > st.win[k]) { m = st.win[k]; }
+                        if (m > st.connWin) { m = st.connWin; }
+                        sendSid = 1 + 2 * k;
+                        sendLen = m;
+                        sendLast = sent[k] + m >= perStream;
+                        sent[k] = sent[k] + m;
+                        st.win[k] = st.win[k] - m;
+                        st.connWin = st.connWin - m;
+                    }
+                }
+                if (!watched && !watching && sent[0] >= (int64) 65536 && st.win[0] <= (int64) 0) {
+                    watching = true;
+                    watchEnd = DispatchTests.nowMs() + (int64) stallWatchMs;
+                    othersAtStart = (int64) 0;
+                    int32 q = 1;
+                    while (q < n) { othersAtStart = othersAtStart + sent[q]; q = q + 1; }
+                    creditAtStart = st.credit[0];
+                }
+                if (watching && DispatchTests.nowMs() >= watchEnd) {
+                    watching = false;
+                    watched = true;
+                    int64 others = (int64) 0;
+                    int32 q = 1;
+                    while (q < n) { others = others + sent[q]; q = q + 1; }
+                    stallMoved[0] = others - othersAtStart;
+                    stallMoved[1] = st.credit[0] - creditAtStart;
+                }
+                if (sendSid == 0 && !sendAck) {
+                    // Every window closed, or everything sent: wait for credit, a response, or the end.
+                    if (watching) {
+                        st.leave();
+                        Fiber.sleep(Duration.ofMillis((int64) 20));
+                        st.enter();
+                    } else {
+                        st.parkForCredit();
+                    }
+                }
+            }
+            st.leave();
+            if (running && (sendAck || sendSid != 0)) {
+                try {
+                    if (sendAck) {
+                        writer.writeAll(ackFrame, 0, (int32) ackFrame.count());
+                    }
+                    if (sendSid != 0) {
+                        if (sendLen == (int64) 16384 && !sendLast) {
+                            H2StreamingBodyTests.putSid(fullFrame, sendSid);
+                            writer.writeAll(fullFrame, 0, (int32) fullFrame.count());
+                        } else {
+                            int32 m = (int32) sendLen;
+                            partFrame[0] = (int8) ((m >> 16) & 0xFF);
+                            partFrame[1] = (int8) ((m >> 8) & 0xFF);
+                            partFrame[2] = (int8) (m & 0xFF);
+                            partFrame[3] = (int8) Http2.FRAME_DATA;
+                            partFrame[4] = (int8) (sendLast ? Http2.FLAG_END_STREAM : 0);
+                            H2StreamingBodyTests.putSid(partFrame, sendSid);
+                            int32 pi = 0;
+                            while (pi < m) {
+                                partFrame[9 + pi] = chunk[pi];
+                                pi = pi + 1;
+                            }
+                            writer.writeAll(partFrame, 0, 9 + m);
+                        }
+                    }
+                    writer.flush();
+                } catch (Exception e) {
+                    st.enter();
+                    st.ended = true;
+                    st.leave();
+                    running = false;
+                }
+            }
+        }
+        st.enter();
+        int32 finished = st.finished;
+        int64 total = (int64) 0;
+        i = 0;
+        while (i < n) { total = total + st.credit[i]; i = i + 1; }
+        H2StreamingBodyTests.creditTotal = total;
+        H2StreamingBodyTests.maxStreamWindow = st.maxWindow;
+        boolean readerStillIn = !st.readerDone;
+        st.leave();
+        if (readerStillIn) {
+            sock.close();   // unblocks the reader's read
+        }
+        await rt;
+        await wt;
+        if (!readerStillIn) {
+            sock.close();
+        }
+        return finished;
+    }
+
+    /** 2.1.1 and 2.1.3: 100 streams at once; allocation grows by less than a slab per stream; credit never passes the slab. */
+    static void hundredStreams(Check c) {
+        scope {
+            HttpServer srv #= H2StreamingBodyTests.server(true);
+            Task<int32> sv = spawn serveIt(srv);
+            DispatchTests.settle(srv);
+            int32 port = H2StreamingBodyTests.port(srv);
+            int32 n = 100;
+            int64 per = (int64) 4194304;
+            int64[] none = heap int64[2];
+            // Cold: slots, their request and response objects and the pool's
+            // slabs are built on first use. Measured, not asserted.
+            int32 slabs0 = srv.buffers.allocations();
+            int64 a0 = Cajeta.allocatedBytes();
+            int32 warm = H2StreamingBodyTests.multiUpload(port, "/count", "/count", n, per, 120000, 0, none);
+            int64 coldGrew = Cajeta.allocatedBytes() - a0;
+            int32 coldSlabs = srv.buffers.allocations() - slabs0;
+            System.stdout.println("    [measure] cold, 100 x 4 MB: {} bytes allocated, {} new pool slabs, {} beyond them", coldGrew, coldSlabs, coldGrew - (int64) coldSlabs * (int64) 65536);
+            c.eqInt((int64) warm, (int64) n, "every stream was answered on the warm-up run");
+            // Warm: what a stream costs once the pools hold what they keep.
+            slabs0 = srv.buffers.allocations();
+            a0 = Cajeta.allocatedBytes();
+            int32 finished = H2StreamingBodyTests.multiUpload(port, "/count", "/count", n, per, 120000, 0, none);
+            int64 grew = Cajeta.allocatedBytes() - a0;
+            int32 slabs = srv.buffers.allocations() - slabs0;
+            int64 beyond = grew - (int64) slabs * (int64) 65536;
+            System.stdout.println("    [measure] warm, 100 x 4 MB: {} bytes allocated, {} new pool slabs, {} beyond them", grew, slabs, beyond);
+            c.eqInt((int64) finished, (int64) n, "every stream was answered");
+            c.that(slabs <= 3 * n + 8, "the pool grew by at most three slabs per open stream (" + slabs + " for " + n + ")");
+            c.that(beyond < (int64) n * (int64) 65536,
+                "beyond the pooled slabs, allocation grew by less than a slab per stream (" + beyond + " bytes, client included)");
+            c.that(H2StreamingBodyTests.maxStreamWindow <= (int64) 65536,
+                "no stream window ever exceeded the slab (" + H2StreamingBodyTests.maxStreamWindow + ")");
+            int64 minCredit = (int64) n * (per - (int64) 65536 - (int64) 16384);
+            c.that(H2StreamingBodyTests.creditTotal >= minCredit && H2StreamingBodyTests.creditTotal <= (int64) n * per,
+                "stream credit totals what was consumed, bar the last partial quarter (" + H2StreamingBodyTests.creditTotal + ")");
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+    }
+
+    /** 2.1.2: one handler stalls a second after its first read; its window closes and the others keep moving. */
+    static void stallIsolation(Check c) {
+        scope {
+            HttpServer srv #= H2StreamingBodyTests.server(true);
+            Task<int32> sv = spawn serveIt(srv);
+            DispatchTests.settle(srv);
+            int32 port = H2StreamingBodyTests.port(srv);
+            int64[] moved = heap int64[2];
+            moved[0] = (int64) -1;
+            moved[1] = (int64) -1;
+            int32 finished = H2StreamingBodyTests.multiUpload(port, "/stall", "/count", 8, (int64) 2097152, 30000, 600, moved);
+            c.eqInt((int64) finished, (int64) 8, "every stream was answered in the end");
+            c.that(moved[0] > (int64) 1048576, "the other streams moved while stream 1 stalled (" + moved[0] + " bytes in 600 ms)");
+            c.eqInt(moved[1], (int64) 0, "and stream 1 got no credit meanwhile");
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+    }
+
+    /** 2.1.4: maxBodyBytes(1 MB): an open 4 MB stream is read in full; a held one is refused as before. */
+    static void maxBodyNotApplied(Check c) {
+        scope {
+            HttpServer srv #= H2StreamingBodyTests.serverWith(true, (int64) 1048576);
+            Task<int32> sv = spawn serveIt(srv);
+            DispatchTests.settle(srv);
+            int32 port = H2StreamingBodyTests.port(srv);
+            int64 total = (int64) 4194304;
+            String got #= H2StreamingBodyTests.upload(port, "/count", total, H2StreamingBodyTests.SEND, 30000);
+            c.that(got.equals("n=" + total), "with streaming on the 4 MB body is read past maxBodyBytes (" + got + ")");
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+        scope {
+            HttpServer srv #= H2StreamingBodyTests.serverWith(false, (int64) 1048576);
+            Task<int32> sv = spawn serveIt(srv);
+            DispatchTests.settle(srv);
+            int32 port = H2StreamingBodyTests.port(srv);
+            String got #= H2StreamingBodyTests.upload(port, "/whole", (int64) 4194304, H2StreamingBodyTests.SEND, 30000);
+            c.that(!got.startsWith("len="), "with streaming off the same body is refused (" + got + ")");
             srv.shutdown(Duration.ofSeconds(2));
             await sv;
         }

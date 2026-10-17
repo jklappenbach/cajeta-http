@@ -178,7 +178,11 @@ public final class Http2WriteSide {
      */
     public void writeControl(Http2FrameWriter fw) {
         int8[] bytes #= fw.toBytes();
-        int32 n = (int32) bytes.count();
+        this.writeControlBytes(bytes, (int32) bytes.count());
+    }
+
+    /** A control frame already encoded in `bytes[0 .. n)`: the no-allocation form, for credit a handler returns per quarter slab. */
+    public void writeControlBytes(int8[] bytes, int32 n) {
         LockGuard g #= this.lock.acquire();
         this.drainPending();
         this.writer.writeAll(bytes, 0, n);

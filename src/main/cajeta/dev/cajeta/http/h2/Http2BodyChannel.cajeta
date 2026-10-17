@@ -16,7 +16,7 @@ import dev.cajeta.http.UnexpectedEofException;
  * Connection-level credit stays with the framer, returned on receipt as for
  * every stream; the per-stream window is what bounds memory.
  */
-public final class Http2BodyChannel implements ByteChannel {
+final class Http2BodyChannel implements ByteChannel {
     pointer lock;
     pointer cond;
     int8[] a;           // the body slab, borrowed from the slot while the stream is open
@@ -32,6 +32,7 @@ public final class Http2BodyChannel implements ByteChannel {
     int32 grantStep;
     Http2WriteSide ws;
     int32 sid;
+    int8[] creditFrame;   // one WINDOW_UPDATE frame, rewritten in place per grant: no allocation per quarter slab
 
     public Http2BodyChannel() {
         this.lock = Cajeta.lockNew();
@@ -49,6 +50,7 @@ public final class Http2BodyChannel implements ByteChannel {
         this.grantStep = 16384;
         this.ws = null;
         this.sid = 0;
+        this.creditFrame = heap int8[13];
     }
 
     public ~Http2BodyChannel() {
@@ -206,8 +208,20 @@ public final class Http2BodyChannel implements ByteChannel {
         if (this.ws == null || n <= 0) {
             return;
         }
-        Http2FrameWriter fw = heap Http2FrameWriter();
-        Http2Frames.writeWindowUpdate(fw, this.sid, n);
-        this.ws.writeControl(fw);
+        int8[] f = this.creditFrame;
+        f[0] = (int8) 0;
+        f[1] = (int8) 0;
+        f[2] = (int8) 4;                       // length 4
+        f[3] = (int8) Http2.FRAME_WINDOW_UPDATE;
+        f[4] = (int8) 0;                       // flags
+        f[5] = (int8) ((this.sid >> 24) & 0x7F);
+        f[6] = (int8) ((this.sid >> 16) & 0xFF);
+        f[7] = (int8) ((this.sid >> 8) & 0xFF);
+        f[8] = (int8) (this.sid & 0xFF);
+        f[9] = (int8) ((n >> 24) & 0x7F);
+        f[10] = (int8) ((n >> 16) & 0xFF);
+        f[11] = (int8) ((n >> 8) & 0xFF);
+        f[12] = (int8) (n & 0xFF);
+        this.ws.writeControlBytes(f, 13);
     }
 }

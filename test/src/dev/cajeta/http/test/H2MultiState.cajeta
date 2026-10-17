@@ -1,0 +1,73 @@
+package dev.cajeta.http.test;
+
+/**
+ * Shared state of H2StreamingBodyTests' two-fiber client: one fiber reads
+ * frames and credits windows, the other sends DATA under them. Fields are
+ * touched under `lock`; the sender parks on `cond` when every window is
+ * closed and the reader wakes it on credit. No timers anywhere, so the
+ * client allocates nothing per frame and the process-wide allocation count
+ * measures the server.
+ */
+public final class H2MultiState {
+    public pointer lock;
+    public pointer cond;
+    public int32 n;
+    public int64[] win;
+    public int64[] credit;
+    public boolean[] done;
+    public int64 connWin;
+    public int64 serverInitial;
+    public int32 finished;
+    public boolean ended;
+    public boolean settingsSeen;
+    public boolean needAck;      // the reader saw SETTINGS; the sender, the only writer, acknowledges
+    public boolean readerDone;
+    public int64 maxWindow;
+
+    public H2MultiState(int32 n) {
+        this.lock = Cajeta.lockNew();
+        this.cond = Cajeta.condvarNew();
+        this.n = n;
+        this.win = heap int64[n];
+        this.credit = heap int64[n];
+        this.done = heap boolean[n];
+        int32 i = 0;
+        while (i < n) {
+            this.win[i] = (int64) 65535;
+            this.credit[i] = (int64) 0;
+            this.done[i] = false;
+            i = i + 1;
+        }
+        this.connWin = (int64) 65535;
+        this.serverInitial = (int64) 65535;
+        this.finished = 0;
+        this.ended = false;
+        this.settingsSeen = false;
+        this.needAck = false;
+        this.readerDone = false;
+        this.maxWindow = (int64) 0;
+    }
+
+    public ~H2MultiState() {
+        Cajeta.condvarDestroy(this.cond);
+        Cajeta.lockDestroy(this.lock);
+    }
+
+    public void enter() {
+        Cajeta.lockAcquire(this.lock);
+    }
+
+    public void leave() {
+        Cajeta.lockRelease(this.lock);
+    }
+
+    /** Under the lock: parks until the reader signals. */
+    public void parkForCredit() {
+        Cajeta.condvarWait(this.cond, this.lock);
+    }
+
+    /** Under the lock: wakes the sender. */
+    public void signal() {
+        Cajeta.condvarNotifyAll(this.cond);
+    }
+}
