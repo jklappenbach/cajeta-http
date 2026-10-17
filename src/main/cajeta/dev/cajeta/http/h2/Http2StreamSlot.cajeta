@@ -2,6 +2,8 @@ package dev.cajeta.http.h2;
 
 import cajeta.lang.String;
 import cajeta.lang.Slice;
+import cajeta.error.Exception;
+import dev.cajeta.http.PayloadTooLargeException;
 import cajeta.concurrent.AtomicInt32;
 import cajeta.io.net.ByteBuffer;
 import dev.cajeta.http.Bytes;
@@ -9,6 +11,8 @@ import dev.cajeta.http.HeadScanner;
 import dev.cajeta.http.HttpRequest;
 import dev.cajeta.http.HttpResponse;
 import dev.cajeta.http.ResponseTransport;
+import dev.cajeta.http.MediaType;
+import dev.cajeta.http.body.MultipartParser;
 import dev.cajeta.http.h1.HttpParserLimits;
 import dev.cajeta.http.server.ConnectionBuffers;
 
@@ -46,6 +50,15 @@ public final class Http2StreamSlot implements ResponseTransport {
     public AtomicInt32 handlerDone;  // the worker's: the handler returned and the response is out
     int64 expectedBody;              // open stream: the declared content-length, or -1
     int64 drainLeft;                 // after an early return: bytes the framer still discards before a reset
+    // A PART multipart route (spec §2.7): the framer feeds the parser from
+    // DATA and dispatches one unit per completed part, one at a time.
+    public boolean partMode;
+    MultipartParser mp;
+    int32 mpQueued;                  // parts dispatched so far
+    public boolean partBusy;         // a part unit is on a worker
+    public int32 partIndex;          // the unit on the worker: a part's ordinal, -1 an empty form, -2 a failure
+    public boolean partLast;         // that unit sends the response
+    public int32 partFailStatus;     // 413 or 400 once the parser refused the body, else 0
 
     Http2StreamSlot(ConnectionBuffers bufs, HttpParserLimits limits,
                     Http2WriteSide ws, Http2SendGate gate) {
@@ -67,6 +80,13 @@ public final class Http2StreamSlot implements ResponseTransport {
         this.handlerDone = heap AtomicInt32(0);
         this.expectedBody = (int64) -1;
         this.drainLeft = (int64) 0;
+        this.partMode = false;
+        this.mp = null;
+        this.mpQueued = 0;
+        this.partBusy = false;
+        this.partIndex = -1;
+        this.partLast = false;
+        this.partFailStatus = 0;
     }
 
     void recycle(ConnectionBuffers bufs) {
@@ -246,6 +266,51 @@ public final class Http2StreamSlot implements ResponseTransport {
     /** Bytes of body the framer has fed so far. */
     int64 bodyReceived() {
         return this.body.receivedBytes();
+    }
+
+    /** Enters PART mode for a stream whose head is parsed: false when the content-type names no boundary. */
+    boolean beginParts(int32 maxPartBytes) {
+        MediaType ct #= this.req.contentType();
+        String bound #= MultipartParser.boundaryOf(ct);
+        if (bound == null || bound.byteLength() == 0) {
+            return false;
+        }
+        this.mp #= MultipartParser.forBoundaryWithLimits(bound, MultipartParser.DEFAULT_MAX_PARTS, maxPartBytes);
+        this.mpQueued = 0;
+        this.partMode = true;
+        this.partBusy = false;
+        this.partIndex = -1;
+        this.partLast = false;
+        this.partFailStatus = 0;
+        this.bodyEnded = false;
+        this.handlerDone.store(0);
+        return true;
+    }
+
+    /** Feeds DATA to the parser; records 413 when a part is over the limit, 400 when the body is malformed. */
+    void feedParts(int8[] src, int32 off, int32 len, boolean endStream) {
+        if (this.partFailStatus != 0) {
+            return;
+        }
+        try {
+            if (len > 0) {
+                this.mp.feedFrom(src, off, len);
+            }
+            if (endStream) {
+                this.mp.endInput();
+            }
+        } catch (PayloadTooLargeException e) {
+            this.partFailStatus = 413;
+        } catch (Exception e) {
+            this.partFailStatus = 400;
+        }
+    }
+
+    /** Leaves PART mode once the stream is done with it. */
+    void endParts() {
+        this.partMode = false;
+        this.mp = null;
+        this.req.bindPart(null, -1, false);
     }
 
     /** The stream window an open body can take: its slab. */

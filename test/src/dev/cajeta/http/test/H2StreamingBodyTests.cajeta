@@ -1,6 +1,7 @@
 package dev.cajeta.http.test;
 
 import cajeta.concurrent.Fiber;
+import cajeta.lang.Slice;
 import cajeta.error.Exception;
 import cajeta.io.net.AsyncReader;
 import cajeta.io.net.AsyncWriter;
@@ -13,7 +14,12 @@ import cajeta.time.Duration;
 import dev.cajeta.http.Bytes;
 import dev.cajeta.http.HttpRequest;
 import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.MediaType;
 import dev.cajeta.http.body.Body;
+import dev.cajeta.http.body.MultipartBody;
+import dev.cajeta.http.body.MultipartPart;
+import dev.cajeta.http.server.MultipartMode;
+import dev.cajeta.http.h2.HpackDecoder;
 import dev.cajeta.http.h2.HpackEncoder;
 import dev.cajeta.http.h2.HpackFieldList;
 import dev.cajeta.http.h2.Http2;
@@ -44,6 +50,9 @@ public final class H2StreamingBodyTests {
     static boolean readRaised;
     static boolean liveAfterFail;
     static int64 raisedAfter;      // bytes the raising handler had counted: tells one case's handler from a stale one's
+    static String partOrder;       // PART routes: "name:index," per handler run, across streams
+    static int32 partRunsA;
+    static int32 partRunsB;
     static int64 maxStreamWindow;   // the largest stream window the multi-stream client ever saw
     static int64 creditTotal;       // stream credit it received, all streams
     static final int32 SEND = 0;          // send the body under the windows
@@ -77,6 +86,14 @@ public final class H2StreamingBodyTests {
         H2StreamingBodyTests.earlyResponseCutsTheStream(c);
         System.stdout.println("-- h2 streaming body: a small unread remainder is drained and the stream closes with no reset (3.1.4) --");
         H2StreamingBodyTests.smallRemainderDrained(c);
+        System.stdout.println("-- h2 PART: a five-file form on one stream runs the handler five times in order (4.1.1) --");
+        H2StreamingBodyTests.partsOnOneStream(c);
+        System.stdout.println("-- h2 PART: two streams' forms interleave across streams and stay ordered within each (4.1.2) --");
+        H2StreamingBodyTests.partsOnTwoStreams(c);
+        System.stdout.println("-- h2 PART: a part over maxPartBytes ends the request with 413 (4.1.3) --");
+        H2StreamingBodyTests.partTooBig(c);
+        System.stdout.println("-- h2 PART: a DATA split inside the closing delimiter still answers after the fifth part (4.1.4) --");
+        H2StreamingBodyTests.partSplitClose(c);
     }
 
     // ----- server --------------------------------------------------------
@@ -121,6 +138,22 @@ public final class H2StreamingBodyTests {
             H2StreamingBodyTests.counted = total;
             H2StreamingBodyTests.alloc = Cajeta.allocatedBytes() - a0;
             r.body("n=" + total);
+            return;
+        }
+        if (Bytes.equals(q.path(), "/parts")) {
+            MultipartPart p = q.multipartPart();
+            if (p != null) {
+                String name #= p.name();
+                H2StreamingBodyTests.partOrder = H2StreamingBodyTests.partOrder + name + ":" + q.multipartIndex() + ",";
+                if (name.startsWith("a")) {
+                    H2StreamingBodyTests.partRunsA = H2StreamingBodyTests.partRunsA + 1;
+                } else {
+                    H2StreamingBodyTests.partRunsB = H2StreamingBodyTests.partRunsB + 1;
+                }
+            }
+            if (q.multipartLast()) {
+                r.body("got " + (q.multipartIndex() + 1));
+            }
             return;
         }
         if (Bytes.equals(q.path(), "/early")) {
@@ -177,11 +210,26 @@ public final class H2StreamingBodyTests {
     }
 
     static #HttpServer serverWith(boolean streaming, int64 maxBody) {
+        return H2StreamingBodyTests.serverFull(streaming, maxBody, 0);
+    }
+
+    /** A server with a PART route on /parts; `maxPart` > 0 sets maxPartBytes. */
+    static #HttpServer partServer(int32 maxPart) {
+        return H2StreamingBodyTests.serverFull(false, (int64) 0, maxPart > 0 ? maxPart : -1);
+    }
+
+    static #HttpServer serverFull(boolean streaming, int64 maxBody, int32 maxPart) {
         HttpServerBuilder b #= HttpServer.builder();
         b.bind("127.0.0.1:0");
         b.handler((HttpRequest q, HttpResponse r) -> H2StreamingBodyTests.handle(q, r));
         b.h2PriorKnowledge();
         b.framers(1);
+        if (maxPart != 0) {
+            b.multipart("POST", "/parts", MultipartMode.PART);
+            if (maxPart > 0) {
+                b.maxPartBytes(maxPart);
+            }
+        }
         if (streaming || maxBody > (int64) 0) {
             ServerLimits l #= ServerLimits.of(5000, 15000, maxBody, false);
             l.streamRequestBody = streaming;
@@ -1075,6 +1123,276 @@ public final class H2StreamingBodyTests {
         String resp = heap String(body, bodyLen);
         String r = "resp=" + resp + ";rst=" + (rst ? "y" : "n") + ";after=" + (sentAtResponse < (int64) 0 ? (int64) -1 : sent - sentAtResponse) + ";next=" + (nextDone ? "y" : "n");
         return r.substring(0, r.byteLength());
+    }
+
+    static #int8[] fill(int32 n, int32 seed) {
+        int8[] d = heap int8[n];
+        int32 i = 0;
+        while (i < n) {
+            d[i] = (int8) (97 + ((i + seed) % 23));
+            i = i + 1;
+        }
+        return #d;
+    }
+
+    /** A form of `files` octet-stream files of `each` bytes named `prefix`0, `prefix`1, ... */
+    static #MultipartBody form(String prefix, int32 files, int32 each) {
+        MultipartBody b #= MultipartBody.of();
+        int32 i = 0;
+        while (i < files) {
+            MediaType t #= MediaType.parse("application/octet-stream");
+            int8[] d #= H2StreamingBodyTests.fill(each, i);
+            b.addFile(prefix + i, prefix + i + ".bin", #t, #d, each);
+            i = i + 1;
+        }
+        return #b;
+    }
+
+    static void encodePost(HpackEncoder enc, Http2FrameWriter fw, int32 sid, String path, String ctText, int32 len) {
+        HpackFieldList fl = heap HpackFieldList();
+        fl.put(H2StreamingBodyTests.own(":method"), H2StreamingBodyTests.own("POST"));
+        fl.put(H2StreamingBodyTests.own(":path"), H2StreamingBodyTests.own(path));
+        fl.put(H2StreamingBodyTests.own(":scheme"), H2StreamingBodyTests.own("http"));
+        fl.put(H2StreamingBodyTests.own(":authority"), H2StreamingBodyTests.own("127.0.0.1"));
+        fl.put(H2StreamingBodyTests.own("content-type"), H2StreamingBodyTests.own(ctText));
+        fl.put(H2StreamingBodyTests.own("content-length"), H2StreamingBodyTests.own("" + len));
+        int8[] block #= enc.encode(fl);
+        Http2ContentFrames.writeHeaders(fw, sid, block, (int32) block.count(), false, true, 0);
+    }
+
+    /**
+     * POSTs `n` small bodies (each under the default window, so no credit is
+     * needed) on streams 1, 3, ..., DATA frames of 16 KB round robin;
+     * `splitAt` > 0 sends stream 1's body up to that offset, pauses
+     * `pauseMs`, then sends the rest. Returns the responses joined with "|"
+     * in stream order, "-" for a stream that got none.
+     */
+    static #String h2Post(int32 port, String path, String ctText, int8[] wire, int32 n, int32 splitAt, int32 pauseMs, int32 ms) {
+        IpAddress ca #= IpAddress.loopbackV4();
+        SocketAddress connAddr #= SocketAddress.of(#ca, port);
+        TcpStream sock #= TcpStream.connectAsync(#connAddr);
+        AsyncReader reader = heap AsyncReader(sock);
+        AsyncWriter writer = heap AsyncWriter(sock);
+        int64 deadline = DispatchTests.nowMs() + (int64) ms;
+        int32 total = (int32) wire.count();
+        int8[] pf #= Http2.preface();
+        writer.writeAll(pf, 0, 24);
+        Http2FrameWriter fw = heap Http2FrameWriter();
+        Http2SettingsList empty = heap Http2SettingsList();
+        Http2Frames.writeSettings(fw, empty);
+        HpackEncoder enc = heap HpackEncoder(Http2.DEFAULT_HEADER_TABLE_SIZE, true);
+        int32 i = 0;
+        while (i < n) {
+            H2StreamingBodyTests.encodePost(enc, fw, 1 + 2 * i, path, ctText, total);
+            i = i + 1;
+        }
+        int32[] sent = heap int32[n];
+        boolean paused = false;
+        boolean more = true;
+        while (more) {
+            more = false;
+            i = 0;
+            while (i < n) {
+                int32 limit = (i == 0 && splitAt > 0 && !paused) ? splitAt : total;
+                if (sent[i] < limit) {
+                    int32 m = limit - sent[i];
+                    if (m > 16384) { m = 16384; }
+                    boolean last = sent[i] + m >= total;
+                    int8[] piece = heap int8[m];
+                    int32 k = 0;
+                    while (k < m) { piece[k] = wire[sent[i] + k]; k = k + 1; }
+                    Http2ContentFrames.writeData(fw, 1 + 2 * i, piece, m, last, 0);
+                    sent[i] = sent[i] + m;
+                    more = true;
+                }
+                i = i + 1;
+            }
+            if (!more && splitAt > 0 && !paused) {
+                int8[] out1 #= fw.toBytes();
+                writer.writeAll(out1, 0, (int32) out1.count());
+                writer.flush();
+                fw = heap Http2FrameWriter();
+                Fiber.sleep(Duration.ofMillis((int64) pauseMs));
+                paused = true;
+                more = true;
+            }
+        }
+        int8[] out #= fw.toBytes();
+        if (out.count() > (int64) 0) {
+            writer.writeAll(out, 0, (int32) out.count());
+        }
+        writer.flush();
+        String[] got = heap String[n];
+        int8[] bodies = heap int8[n * 512];   // 512 bytes of response body per stream, flat
+        int32[] bodyLen = heap int32[n];
+        int32[] status = heap int32[n];
+        HpackDecoder dec = heap HpackDecoder(Http2.DEFAULT_HEADER_TABLE_SIZE);
+        i = 0;
+        while (i < n) { got[i] = null; bodyLen[i] = 0; status[i] = 0; i = i + 1; }
+        int32 done = 0;
+        int8[] hdr = heap int8[9];
+        boolean over = false;
+        while (!over && done < n && DispatchTests.nowMs() < deadline) {
+            int32 ph = H2StreamingBodyTests.pollHeader(reader, hdr, 50, deadline);
+            if (ph == 0) {
+                over = true;
+            } else if (ph == 1) {
+                Http2FrameHeader h #= Http2FrameHeader(hdr);
+                int32 type = h.typeCode();
+                int32 flags = h.flags();
+                int32 sid = h.streamId();
+                int32 len = h.length();
+                int8[] pl = heap int8[len > 0 ? len : 1];
+                if (len > 0 && !H2StreamingBodyTests.readExact(reader, pl, len, deadline)) {
+                    over = true;
+                } else if (type == Http2.FRAME_SETTINGS) {
+                    if ((flags & Http2.FLAG_ACK) == 0) {
+                        Http2FrameWriter afw = heap Http2FrameWriter();
+                        Http2Frames.writeSettingsAck(afw);
+                        int8[] ab #= afw.toBytes();
+                        writer.writeAll(ab, 0, (int32) ab.count());
+                        writer.flush();
+                    }
+                } else if (type == Http2.FRAME_DATA || type == Http2.FRAME_HEADERS) {
+                    int32 k = (sid - 1) / 2;
+                    if (type == Http2.FRAME_HEADERS && k >= 0 && k < n) {
+                        int64 hreg = Http2ContentFrames.headersRegion(pl, len, flags, sid);
+                        int32 hOff = (int32) (hreg >> 32);
+                        int32 hLen = (int32) (hreg & (int64) 0xFFFFFFFF);
+                        int32 nf = dec.decodeInto(pl, hOff, hLen);
+                        int32 f = 0;
+                        while (f < nf) {
+                            if (Bytes.equals(dec.fieldName(f), ":status")) {
+                                Slice<int8> v = dec.fieldValue(f);
+                                int32 st = 0;
+                                int64 d = 0;
+                                while (d < v.count()) { st = st * 10 + ((((int32) v[d]) & 0xFF) - 48); d = d + 1; }
+                                status[k] = st;
+                            }
+                            f = f + 1;
+                        }
+                    }
+                    if (type == Http2.FRAME_DATA && k >= 0 && k < n) {
+                        int64 reg = Http2ContentFrames.dataRegion(pl, len, flags, sid);
+                        int32 dOff = (int32) (reg >> 32);
+                        int32 dLen = (int32) (reg & (int64) 0xFFFFFFFF);
+                        int32 q = 0;
+                        while (q < dLen && bodyLen[k] < 512) { bodies[k * 512 + bodyLen[k]] = pl[dOff + q]; bodyLen[k] = bodyLen[k] + 1; q = q + 1; }
+                    }
+                    if ((flags & Http2.FLAG_END_STREAM) != 0 && k >= 0 && k < n && got[k] == null) {
+                        int8[] one = heap int8[bodyLen[k]];
+                        int32 q = 0;
+                        while (q < bodyLen[k]) { one[q] = bodies[k * 512 + q]; q = q + 1; }
+                        String text = heap String(one, bodyLen[k]);
+                        got[k] = "" + status[k] + ":" + text;
+                        done = done + 1;
+                    }
+                } else if (type == Http2.FRAME_RST_STREAM) {
+                    int32 k = (sid - 1) / 2;
+                    if (k >= 0 && k < n && got[k] == null) {
+                        got[k] = "RST";
+                        done = done + 1;
+                    }
+                } else if (type == Http2.FRAME_GOAWAY) {
+                    over = true;
+                }
+            }
+        }
+        sock.close();
+        String joined = "";
+        i = 0;
+        while (i < n) {
+            joined = joined + (i > 0 ? "|" : "") + (got[i] == null ? "-" : got[i]);
+            i = i + 1;
+        }
+        return joined.substring(0, joined.byteLength());
+    }
+
+    /** 4.1.1: five 8 KB files on one stream: five handler runs in order, the response after the fifth (spec 2.7.1). */
+    static void partsOnOneStream(Check c) {
+        scope {
+            HttpServer srv #= H2StreamingBodyTests.partServer(0);
+            Task<int32> sv = spawn serveIt(srv);
+            DispatchTests.settle(srv);
+            int32 port = H2StreamingBodyTests.port(srv);
+            H2StreamingBodyTests.partOrder = "";
+            H2StreamingBodyTests.partRunsA = 0;
+            MultipartBody body #= H2StreamingBodyTests.form("a", 5, 8192);
+            int8[] wire #= body.wire();
+            MediaType ct #= body.contentType();
+            String ctText #= ct.format();
+            String got #= H2StreamingBodyTests.h2Post(port, "/parts", ctText, wire, 1, 0, 0, 10000);
+            c.that(got.equals("200:got 5"), "the response came after the fifth part (" + got + ")");
+            c.eqInt((int64) H2StreamingBodyTests.partRunsA, (int64) 5, "the handler ran once per part");
+            c.that(H2StreamingBodyTests.partOrder.equals("a0:0,a1:1,a2:2,a3:3,a4:4,"), "in order (" + H2StreamingBodyTests.partOrder + ")");
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+    }
+
+    /** 4.1.2: two streams each with a five-file form: both answered, each stream's parts in order (spec 2.7.2). */
+    static void partsOnTwoStreams(Check c) {
+        scope {
+            HttpServer srv #= H2StreamingBodyTests.partServer(0);
+            Task<int32> sv = spawn serveIt(srv);
+            DispatchTests.settle(srv);
+            int32 port = H2StreamingBodyTests.port(srv);
+            H2StreamingBodyTests.partOrder = "";
+            H2StreamingBodyTests.partRunsA = 0;
+            H2StreamingBodyTests.partRunsB = 0;
+            // One wire for both streams, so the names repeat; order within a stream is what the index checks.
+            MultipartBody body #= H2StreamingBodyTests.form("a", 5, 8192);
+            int8[] wire #= body.wire();
+            MediaType ct #= body.contentType();
+            String ctText #= ct.format();
+            String got #= H2StreamingBodyTests.h2Post(port, "/parts", ctText, wire, 2, 0, 0, 10000);
+            c.that(got.equals("200:got 5|200:got 5"), "both streams answered after their fifth part (" + got + ")");
+            c.eqInt((int64) H2StreamingBodyTests.partRunsA, (int64) 10, "ten handler runs");
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+    }
+
+    /** 4.1.3: maxPartBytes(1024) and a 4 KB part: 413 (spec 2.7.3). */
+    static void partTooBig(Check c) {
+        scope {
+            HttpServer srv #= H2StreamingBodyTests.partServer(1024);
+            Task<int32> sv = spawn serveIt(srv);
+            DispatchTests.settle(srv);
+            int32 port = H2StreamingBodyTests.port(srv);
+            MultipartBody body #= H2StreamingBodyTests.form("a", 1, 4096);
+            int8[] wire #= body.wire();
+            MediaType ct #= body.contentType();
+            String ctText #= ct.format();
+            H2StreamingBodyTests.partOrder = "";
+            String got #= H2StreamingBodyTests.h2Post(port, "/parts", ctText, wire, 1, 0, 0, 10000);
+            c.that(got.startsWith("413:"), "the request ends with 413 (" + got + ")");
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+    }
+
+    /** 4.1.4: the DATA split falls between the final `--boundary` and its `--`: still five parts and a response (request-dispatch 12.1.2 on h2). */
+    static void partSplitClose(Check c) {
+        scope {
+            HttpServer srv #= H2StreamingBodyTests.partServer(0);
+            Task<int32> sv = spawn serveIt(srv);
+            DispatchTests.settle(srv);
+            int32 port = H2StreamingBodyTests.port(srv);
+            H2StreamingBodyTests.partOrder = "";
+            H2StreamingBodyTests.partRunsA = 0;
+            MultipartBody body #= H2StreamingBodyTests.form("a", 5, 1024);
+            int8[] wire #= body.wire();
+            int32 n = (int32) wire.count();
+            c.that(wire[n - 4] == (int8) 45 && wire[n - 3] == (int8) 45, "the wire ends with the close delimiter");
+            MediaType ct #= body.contentType();
+            String ctText #= ct.format();
+            String got #= H2StreamingBodyTests.h2Post(port, "/parts", ctText, wire, 1, n - 4, 150, 10000);
+            c.that(got.equals("200:got 5"), "the response came after the fifth part (" + got + ")");
+            c.eqInt((int64) H2StreamingBodyTests.partRunsA, (int64) 5, "the handler ran once per part");
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
     }
 
     /** 3.1.1: a trailing HEADERS frame ends the body like END_STREAM (spec 2.4.1). */

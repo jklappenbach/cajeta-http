@@ -448,7 +448,7 @@ public final class Http1Framed implements NowWriter {
         this.h2Writer = heap AsyncWriter(this.channel());
         this.h2 #= Http2Connection.framed(this.h2Writer, this.handler, this.bufs, this.parse,
             this.maxBody, this);
-        this.h2.streaming(this.streaming, this.mpRoutes);
+        this.h2.streaming(this.streaming, this.mpRoutes, this.maxPartBytes);
         this.deadline = (int64) 0;
     }
 

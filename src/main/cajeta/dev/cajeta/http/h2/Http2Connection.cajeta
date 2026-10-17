@@ -77,6 +77,8 @@ public final class Http2Connection {
     int32 openN;
     Channel<Http2StreamSlot> finishedOpen;   // titles a worker hands back once its handler returned
     ArrayList<Http2StreamSlot> draining;     // answered with the body still open: discarded up to DRAIN_LIMIT, then reset
+    ArrayList<Http2StreamSlot> partSlots;    // PART streams between units: the framer feeds their parsers
+    int32 maxPartBytes;
     static final int64 DRAIN_LIMIT = (int64) 262144;
 
     public Http2Connection(AsyncReader reader, AsyncWriter writer,
@@ -122,12 +124,82 @@ public final class Http2Connection {
         this.openN = 0;
         this.finishedOpen = heap Channel<Http2StreamSlot>(256);
         this.draining = heap ArrayList<Http2StreamSlot>();
+        this.partSlots = heap ArrayList<Http2StreamSlot>();
+        this.maxPartBytes = 16777216;
     }
 
-    /** The server's body modes: `all` is `streamRequestBody`; `routes` the PART and STREAM routes, or null. */
-    public void streaming(boolean all, MultipartRoutes routes) {
+    /** The server's body modes: `all` is `streamRequestBody`; `routes` the PART and STREAM routes, or null; `maxPartBytes` bounds a PART. */
+    public void streaming(boolean all, MultipartRoutes routes, int32 maxPartBytes) {
         this.streamAll = all;
         this.mpRoutes #= routes;
+        this.maxPartBytes = maxPartBytes;
+    }
+
+    /** True when `req`'s route takes its multipart body per part (spec §2.7). */
+    boolean wantsParts(HttpRequest req) {
+        return this.mpRoutes != null && this.mpRoutes.modeFor(req) == MultipartMode.PART;
+    }
+
+    /** A unit for the pool: onto the ready list when framer-fed, else `ready` for the connection loop. */
+    void enqueueReady(#Http2StreamSlot t) {
+        if (this.fed) {
+            this.readyList.add(#t);
+        } else {
+            this.ready = #t;
+        }
+    }
+
+    int32 partSlotIndex(int32 sid) {
+        int32 i = 0;
+        while (i < this.partSlots.count()) {
+            if (this.partSlots.get(i).sid == sid) {
+                return i;
+            }
+            i = i + 1;
+        }
+        return -1;
+    }
+
+    /**
+     * Dispatches the next unit of a PART stream when one is due and none is
+     * on a worker: a part once a later part has begun or the closing
+     * delimiter is seen (so `multipartLast()` is known), an empty form once,
+     * or the failure the parser recorded.
+     */
+    void offerParts(Http2StreamSlot s) {
+        if (s.partBusy) {
+            return;
+        }
+        int32 idx = -3;
+        boolean last = false;
+        if (s.partFailStatus != 0) {
+            idx = -2;
+            last = true;
+        } else {
+            int32 count = s.mp.partCount();
+            boolean complete = s.mp.isComplete();
+            if (s.mpQueued < count && (s.mpQueued < count - 1 || complete)) {
+                idx = s.mpQueued;
+                last = complete && s.mpQueued == count - 1;
+                s.mpQueued = s.mpQueued + 1;
+            } else if (complete && count == 0 && s.mpQueued == 0) {
+                idx = -1;
+                last = true;
+                s.mpQueued = 1;
+            }
+        }
+        if (idx == -3) {
+            return;
+        }
+        int32 pi = this.partSlotIndex(s.sid);
+        if (pi < 0) {
+            return;
+        }
+        Http2StreamSlot t #= this.partSlots.removeAt(pi);
+        t.partBusy = true;
+        t.partIndex = idx;
+        t.partLast = last;
+        this.enqueueReady(#t);
     }
 
     /** Whether a stream with a body opens at head complete (spec §2.1). */
@@ -250,6 +322,30 @@ public final class Http2Connection {
                 more = false;
             } else {
                 Http2StreamSlot t #= o.take();
+                if (t.partMode) {
+                    t.partBusy = false;
+                    if (t.partLast || t.partFailStatus < 0) {
+                        this.untrackOpen(t.sid);
+                        boolean bodyOpen = !t.bodyEnded;
+                        t.endParts();
+                        if (bodyOpen) {
+                            // A 413 or 400 answered while the form still arrives: drain, then cut (spec §2.5).
+                            t.drainLeft = Http2Connection.DRAIN_LIMIT;
+                            this.grantStream(t.sid, (int32) Http2Connection.DRAIN_LIMIT);
+                            this.draining.add(#t);
+                        } else {
+                            this.giveSlot(#t);
+                        }
+                    } else {
+                        int32 sid = t.sid;
+                        this.partSlots.add(#t);
+                        Http2StreamSlot again = this.openSlot(sid);
+                        if (again != null) {
+                            this.offerParts(again);
+                        }
+                    }
+                    continue;
+                }
                 this.untrackOpen(t.sid);
                 if (!t.bodyEnded) {
                     // The handler returned with the body open (spec §2.5): the
@@ -379,8 +475,12 @@ public final class Http2Connection {
         this.ended = true;
         int32 i = 0;
         while (i < this.openN) {
-            if (!this.openArr[i].bodyEnded) {
-                this.openArr[i].failOpenBody("connection closed under the request body");
+            Http2StreamSlot s = this.openArr[i];
+            if (s.partMode) {
+                s.bodyEnded = true;
+                s.partFailStatus = -1;
+            } else if (!s.bodyEnded) {
+                s.failOpenBody("connection closed under the request body");
             }
             i = i + 1;
         }
@@ -410,6 +510,18 @@ public final class Http2Connection {
         int32 maxFrame = (int32) c.remote.maxFrameSize;
         boolean pushOk = c.remote.pushEnabled();
         int32 initWin = (int32) c.remote.initialWindowSize;
+        if (slot.partMode) {
+            // One part of a PART stream (spec §2.7): the handler runs with the
+            // part bound; the title goes back for the next part or the end.
+            int32 psid = slot.sid;
+            try {
+                Http2Connection.answerPart(c, slot, maxFrame);
+            } catch (Exception e) {
+            }
+            slot.handlerDone.store(1);
+            c.finishedOpen.send(#slot);
+            return psid;
+        }
         if (slot.open) {
             // An open stream: the handler runs here, then the title goes back
             // to the connection, whose framer frees the slot once the body is
@@ -447,6 +559,11 @@ public final class Http2Connection {
         while (this.draining.count() > 0) {
             Http2StreamSlot t #= this.draining.removeAt(0);
             this.giveSlot(#t);
+        }
+        while (this.partSlots.count() > 0) {
+            Http2StreamSlot p #= this.partSlots.removeAt(0);
+            p.endParts();
+            this.giveSlot(#p);
         }
         this.releaseSlots();
     }
@@ -620,6 +737,12 @@ public final class Http2Connection {
         // trailers (the stream machine refused one without END_STREAM): they
         // end the body (spec §2.4.1); their fields are not exposed (§7.1).
         Http2StreamSlot tos = this.openSlot(sid);
+        if (tos != null && tos.partMode) {
+            tos.feedParts(block, 0, 0, true);
+            tos.bodyEnded = true;
+            this.offerParts(tos);
+            return;
+        }
         if (tos != null) {
             this.finishOpenBody(tos);
             return;
@@ -655,6 +778,13 @@ public final class Http2Connection {
         if (endStream) {
             s.endBody();
             this.ready = #s;
+        } else if (this.wantsParts(s.req) && s.beginParts(this.maxPartBytes)) {
+            // A PART route (spec §2.7): the framer feeds the parser and the
+            // stream flows like a held one; its memory is bounded by
+            // maxPartBytes, not a slab. Units follow per completed part.
+            this.grantStream(sid, Http2Connection.RECV_WINDOW - Http2.DEFAULT_INITIAL_WINDOW_SIZE);
+            this.trackOpen(s);
+            this.partSlots.add(#s);
         } else if (this.wantsOpen(s.req)) {
             // Head complete is the hold point (spec §2.1): the slot opens over
             // one more slab, its window becomes that slab, and the connection
@@ -726,6 +856,15 @@ public final class Http2Connection {
         int32 dOff = (int32) (reg >> 32);
         int32 dLen = (int32) (reg & (int64) 0xFFFFFFFF);
         Http2StreamSlot os = this.openSlot(sid);
+        if (os != null && os.partMode) {
+            this.replenish(sid, len, endStream);
+            os.feedParts(payload, dOff, dLen, endStream);
+            if (endStream) {
+                os.bodyEnded = true;
+            }
+            this.offerParts(os);
+            return;
+        }
         if (os != null) {
             // An open stream: connection credit returns on receipt as for any
             // stream; stream credit returns as the handler consumes (spec §2.3),
@@ -793,7 +932,19 @@ public final class Http2Connection {
         }
         this.gate.cancel(sid);
         Http2StreamSlot os = this.openSlot(sid);
-        if (os != null && !os.bodyEnded) {
+        if (os != null && os.partMode) {
+            os.bodyEnded = true;
+            int32 pi = this.partSlotIndex(sid);
+            if (pi >= 0) {
+                // Idle between units: gone now. On a worker: freed on its return.
+                this.untrackOpen(sid);
+                Http2StreamSlot t #= this.partSlots.removeAt(pi);
+                t.endParts();
+                this.giveSlot(#t);
+            } else {
+                os.partFailStatus = -1;
+            }
+        } else if (os != null && !os.bodyEnded) {
             os.failOpenBody("stream reset by the peer");
         }
         int32 di = this.drainingIndex(sid);
@@ -833,20 +984,7 @@ public final class Http2Connection {
         s.maxFrame = maxFrame;
         HttpResponse r = s.res;
         r.reset();
-        (HttpRequest, HttpResponse) -> void fn = c.handler;
-        try {
-            fn(s.req, r);
-        } catch (HttpException e) {
-            if (!r.isCommitted()) {
-                r.reset();
-                r.status(e.httpStatus());
-            }
-        } catch (Exception e) {
-            if (!r.isCommitted()) {
-                r.reset();
-                r.status(500);
-            }
-        }
+        Http2Connection.callHandler(c, s);
         int32 sid = s.sid;
         if (pushEnabled && r.pushCount() > 0 && !r.isCommitted()) {
             String authority #= Http2Connection.authorityOf(s.req);
@@ -872,6 +1010,54 @@ public final class Http2Connection {
         } catch (Exception e) {
         }
         c.gate.closeStream(sid);
+    }
+
+    /** The handler over the slot's request and response, errors mapped to a status unless the response is committed. */
+    static void callHandler(Http2Connection c, Http2StreamSlot s) {
+        HttpResponse r = s.res;
+        (HttpRequest, HttpResponse) -> void fn = c.handler;
+        try {
+            fn(s.req, r);
+        } catch (HttpException e) {
+            if (!r.isCommitted()) {
+                r.reset();
+                r.status(e.httpStatus());
+            }
+        } catch (Exception e) {
+            if (!r.isCommitted()) {
+                r.reset();
+                r.status(500);
+            }
+        }
+    }
+
+    /**
+     * One unit of a PART stream: the handler runs with the part bound (the
+     * response is reset only before the first); after the last part, or for
+     * the parser's refusal, the response goes out and the stream's send side
+     * closes.
+     */
+    static void answerPart(Http2Connection c, Http2StreamSlot s, int32 maxFrame) {
+        s.maxFrame = maxFrame;
+        HttpResponse r = s.res;
+        if (s.partIndex == -2) {
+            r.reset();
+            r.status(s.partFailStatus > 0 ? s.partFailStatus : 400);
+        } else {
+            if (s.partIndex <= 0) {
+                r.reset();
+            }
+            s.req.bindPart(s.partIndex >= 0 ? s.mp.part(s.partIndex) : null,
+                           s.partIndex < 0 ? 0 : s.partIndex, s.partLast);
+            Http2Connection.callHandler(c, s);
+        }
+        if (s.partLast || s.partIndex == -2) {
+            try {
+                r.finishStream();
+            } catch (Exception e) {
+            }
+            c.gate.closeStream(s.sid);
+        }
     }
 
     static void streamBody(Http2WriteSide ws, Http2SendGate gate, int32 streamId,

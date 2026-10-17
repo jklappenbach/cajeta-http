@@ -292,6 +292,13 @@ public final class HttpRequest {
         return this.stream;
     }
 
+    /** Binds the part a PART-mode handler call is for: `p` is borrowed for the call, `index` its ordinal, `last` whether the response follows. */
+    public void bindPart(^MultipartPart p, int32 index, boolean last) {
+        this.mpPart = p;
+        this.mpIndex = index;
+        this.mpLast = last;
+    }
+
     /**
      * On a `PART` multipart route, the completed part this handler call is
      * for (a borrow, valid for the call); null on any other request and on
