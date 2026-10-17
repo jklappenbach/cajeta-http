@@ -25,7 +25,7 @@ cajeta-http provides the **imperative HTTP engine** (`HttpClient`, `HttpServer`,
 `Router`, `WebSocket`). Annotation-driven endpoints and automatic
 serialization-to-object-model are **primavera's** job, layered on top.
 
-## Status: v0.7.0
+## Status: v0.7.1
 
 | Capability | State |
 |---|---|
@@ -73,6 +73,15 @@ for a peer that has stopped reading, and `HttpServer.idleBuffers()`.
 `WsUpgrade.accept(q, r, #h, ...)` hands a per-connection handler to its
 connection, which frees it at close; before, it was freed when `accept`
 returned.
+
+v0.7.1 makes the per-route multipart modes hold under `fiberPerConnection()`
+as they do under the pool: a PART route runs the handler per completed part
+and a STREAM route hands the body over at head complete on the connection
+loop too (request-dispatch §4.6, amended). It also fixes a PART-mode hole in
+both models: a read that ended between the final `--boundary` and its
+closing `--` ran the last part with `multipartLast()` false and never sent
+the response; a counted part now waits until it is known to be last. h2
+streams still take every route as whole; that is cajeta-http 0.8.0's work.
 
 v0.7.0 changes how a server assigns fibers. Request dispatch is the default:
 framer fibers, one per carrier, read every socket and hold a connection until
