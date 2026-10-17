@@ -77,9 +77,12 @@
         // dispatch are not wired up yet), while the workflow's pin is what CI
         // actually installs. A stale value here is a false claim about what
         // builds, which is exactly how the workflow pin came to be wrong.
-        // 0.39.0 is the release 0.6.0 is cut on.
+        // 0.39.0 was the release 0.6.0 was cut on; 0.43.0 carries the stdlib
+        // request dispatch reads (ReadySet, Carriers.count, TcpStream.readNow,
+        // Channel.trySend, the TlsStream non-parking entries) and is the
+        // release 0.7.0 is cut on.
         "toolchain": {
-            "version": "0.39.0"
+            "version": "0.43.0"
         },
 
         // Uses the network transport stack (sockets + TLS via cajeta.io.net).

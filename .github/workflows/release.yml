@@ -85,7 +85,12 @@ jobs:
       # Raised to v0.32.0, which frees an owned temporary at its statement end
       # and refuses a kept borrow of one. The tour bound its assembler for it.
       # Raised to v0.35.0, which enforces the field-store rule, then to v0.36.0, v0.38.0 and v0.39.0.
-      cajeta-version: v0.39.0
+      # Raised to v0.43.0 for request dispatch: the framers wait on
+      # cajeta.io.net.reactor.ReadySet and read with TcpStream.readNow, the
+      # pool admits with Channel.trySend, a server sizes its framers by
+      # Carriers.count(), and TLS on the framer uses TlsStream's non-parking
+      # entries; none of these exist before v0.43.0.
+      cajeta-version: v0.43.0
       # Suite + tour + tour-coverage gate, chained in scripts/ci-checks.sh.
       # (`./run-tests.sh` rather than `cajeta test` because the suite needs the
       # codec's native zlib backend extracted out of its .cja with

@@ -84,7 +84,8 @@ the old model. New: `multipart(method, pattern, mode)`, `wsMaxMessageLength`,
 `maxPartBytes`, and the `dev.cajeta.http.framing` package (`Framer`,
 `Protocol`) for developer-framed streams over an upgraded connection. The
 handler, request, response and WebSocket surfaces are unchanged; see
-`docs/migrating-to-0.7.md`.
+`docs/migrating-to-0.7.md`. Built on cajeta v0.43.0, which carries the stdlib
+reads the framers need.
 
 Earlier releases: v0.3.0 made long HTTP/2 connections flat (receive-window
 credit returns, per-request state is reclaimed) and v0.3.1 republished it on
