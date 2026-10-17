@@ -86,9 +86,6 @@ public final class DispatchPool {
                     } catch (Exception e) {
                         keep = false;
                     }
-                    if (c.streamedInTurn > 0) {
-                        p.streamed.fetchAdd((int64) c.streamedInTurn);
-                    }
                     p.inFlight.fetchAdd(-1);
                     if (!keep) {
                         c.close();

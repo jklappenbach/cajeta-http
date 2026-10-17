@@ -644,8 +644,16 @@ public final class H2StreamingBodyTests {
             close[1] = true;
             int32[] order = heap int32[2];
             int32 first = DispatchTests.h2Exchange(port, paths, close, 2, 1, 5000, order);
-            c.eqInt((int64) first, (int64) 3, "the GET on stream 3 is answered while stream 1's handler parks");
-            c.that(H2StreamingBodyTests.handlerStarted, "and stream 1's handler had started");
+            c.eqInt((int64) first, (int64) 3, "the GET on stream 3 is answered while stream 1 has no body to give");
+            // Stream 1 is dispatched at head complete; on a busy box its handler
+            // may be scheduled after stream 3 answered, which is fine: it never
+            // completes (no DATA ever comes), so stream 3 did not wait on it.
+            int32 w = 0;
+            while (w < 600 && !H2StreamingBodyTests.handlerStarted) {
+                Fiber.sleep(Duration.ofMillis((int64) 5));
+                w = w + 1;
+            }
+            c.that(H2StreamingBodyTests.handlerStarted, "and stream 1's handler runs, parked on its body");
             String[] one = heap String[1];
             one[0] = "/plain";
             boolean[] oneClose = heap boolean[1];

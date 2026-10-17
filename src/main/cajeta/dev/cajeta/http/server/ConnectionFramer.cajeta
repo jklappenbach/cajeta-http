@@ -213,6 +213,7 @@ public final class ConnectionFramer {
                 f.mpRoutes = this.srv.multipartRoutes;
                 f.maxPartBytes = this.srv.maxPartBytesN;
                 f.protoCounters = this.srv.protocolCounters;
+                f.streamedCounter = this.srv.pool.streamed;
                 int32 fd = f.fd;
                 this.table.add(#f);
                 this.remember(fd, slot);
