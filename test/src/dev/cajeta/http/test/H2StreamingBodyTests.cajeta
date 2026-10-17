@@ -52,6 +52,7 @@ public final class H2StreamingBodyTests {
     static int64 raisedAfter;      // bytes the raising handler had counted: tells one case's handler from a stale one's
     static String partOrder;       // PART routes: "name:index," per handler run, across streams
     static boolean fiberModel;     // Unit 5: the cases run again under fiberPerConnection()
+    public static boolean measure; // --h2measure=1: the spec §5 figures (2 GB streams), printed, not asserted
     static int32 partRunsA;
     static int32 partRunsB;
     static int64 maxStreamWindow;   // the largest stream window the multi-stream client ever saw
@@ -77,6 +78,59 @@ public final class H2StreamingBodyTests {
         H2StreamingBodyTests.partsOnOneStream(c);
         H2StreamingBodyTests.partSplitClose(c);
         H2StreamingBodyTests.wholeUnchanged(c);
+        H2StreamingBodyTests.fiberModel = false;
+        if (H2StreamingBodyTests.measure) {
+            System.stdout.println("-- h2 streaming body: the spec §5 figures (--h2measure) --");
+            H2StreamingBodyTests.measureFigures(c);
+        }
+    }
+
+    /** Spec §5.1 and §5.2 at full size, under both models; printed for the plan, asserted only for completion. */
+    static void measureFigures(Check c) {
+        int32 m = 0;
+        while (m < 2) {
+            H2StreamingBodyTests.fiberModel = m == 1;
+            String model = m == 1 ? "fiber per connection" : "pool";
+            scope {
+                HttpServer srv #= H2StreamingBodyTests.server(true);
+                Task<int32> sv = spawn serveIt(srv);
+                H2StreamingBodyTests.settle(srv);
+                int32 port = H2StreamingBodyTests.port(srv);
+                int64 total = (int64) 2147483648;
+                int32 slabs0 = srv.buffers.allocations();
+                int64 a0 = Cajeta.allocatedBytes();
+                int64 t0 = DispatchTests.nowMs();
+                String got #= H2StreamingBodyTests.upload(port, "/count", total, H2StreamingBodyTests.SEND, 600000);
+                int64 ms = DispatchTests.nowMs() - t0;
+                int64 grew = Cajeta.allocatedBytes() - a0;
+                int32 slabs = srv.buffers.allocations() - slabs0;
+                c.that(got.equals("n=" + total), "2 GB on one stream, " + model + " (" + got + ")");
+                System.stdout.println("    [measure] {}: 2 GB on one stream in {} ms, handler allocated {} bytes, process {} bytes, {} new slabs", model, ms, H2StreamingBodyTests.alloc, grew, slabs);
+                srv.shutdown(Duration.ofSeconds(2));
+                await sv;
+            }
+            scope {
+                HttpServer srv #= H2StreamingBodyTests.server(true);
+                Task<int32> sv = spawn serveIt(srv);
+                H2StreamingBodyTests.settle(srv);
+                int32 port = H2StreamingBodyTests.port(srv);
+                int64[] moved = heap int64[2];
+                moved[0] = (int64) -1;
+                moved[1] = (int64) -1;
+                int32 slabs0 = srv.buffers.allocations();
+                int64 a0 = Cajeta.allocatedBytes();
+                int64 t0 = DispatchTests.nowMs();
+                int32 finished = H2StreamingBodyTests.multiUpload(port, "/stall", "/count", 50, (int64) 41943040, 600000, 600, moved);
+                int64 ms = DispatchTests.nowMs() - t0;
+                int64 grew = Cajeta.allocatedBytes() - a0;
+                int32 slabs = srv.buffers.allocations() - slabs0;
+                c.eqInt((int64) finished, (int64) 50, "50 x 40 MB streams, " + model);
+                System.stdout.println("    [measure] {}: 50 x 40 MB on one connection in {} ms, {} bytes allocated, {} new slabs, {} beyond them; while stream 1 stalled the others moved {} bytes in 600 ms and stream 1 got {} credit", model, ms, grew, slabs, grew - (int64) slabs * (int64) 65536, moved[0], moved[1]);
+                srv.shutdown(Duration.ofSeconds(2));
+                await sv;
+            }
+            m = m + 1;
+        }
         H2StreamingBodyTests.fiberModel = false;
     }
 
@@ -532,8 +586,11 @@ public final class H2StreamingBodyTests {
             H2StreamingBodyTests.startedBeforeData = false;
             H2StreamingBodyTests.counted = (int64) 0;
             int64 total = (int64) 1048576;
+            int64 sd0 = srv.streamedDispatches();
             String got #= H2StreamingBodyTests.upload(port, "/count", total, H2StreamingBodyTests.WAIT_HANDLER, 20000);
             c.that(H2StreamingBodyTests.startedBeforeData, "the handler started before the client sent any DATA");
+            int64 wantStreamed = H2StreamingBodyTests.fiberModel ? (int64) 0 : (int64) 1;
+            c.eqInt(srv.streamedDispatches() - sd0, wantStreamed, "streamedDispatches() counts the unit dispatched at head complete under the pool (6.1.1)");
             c.that(H2StreamingBodyTests.streamedSeen, "and saw a streamed body");
             c.that(got.equals("n=" + total), "and read all of it once it came (" + got + ")");
             c.eqInt(H2StreamingBodyTests.counted, total, "counted every byte");

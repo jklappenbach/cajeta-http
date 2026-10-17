@@ -543,6 +543,15 @@ public class HttpServer {
         return this.pool == null ? (int64) 0 : this.pool.dispatches.load();
     }
 
+    /**
+     * Units the pool ran from head complete with the body still arriving: an
+     * HTTP/1.1 or h2 request whose body streams (`streamRequestBody`, a STREAM
+     * multipart route). One count across protocols; 0 under fiberPerConnection().
+     */
+    public int64 streamedDispatches() {
+        return this.pool == null ? (int64) 0 : this.pool.streamed.load();
+    }
+
     /** TLS connections accepted and not yet gone, under either model. */
     public int32 tlsConnections() {
         return this.tlsInflight.load();

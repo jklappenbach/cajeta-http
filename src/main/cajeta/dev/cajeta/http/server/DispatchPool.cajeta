@@ -22,6 +22,7 @@ public final class DispatchPool {
     public int32 workers;
     public AtomicInt32 inFlight;
     public AtomicInt64 dispatches;
+    public AtomicInt64 streamed;     // units dispatched at head complete, body still arriving (h2 spec §4)
 
     public DispatchPool(^HttpServer srv, int32 workers) {
         this.srv = srv;
@@ -29,6 +30,7 @@ public final class DispatchPool {
         this.queue = heap Channel<Dispatch>(this.workers);
         this.inFlight = heap AtomicInt32(0);
         this.dispatches = heap AtomicInt64((int64) 0);
+        this.streamed = heap AtomicInt64((int64) 0);
     }
 
     /**
@@ -68,6 +70,9 @@ public final class DispatchPool {
                     // connection stays with its framer, which keeps reading.
                     Http2StreamSlot s #= d.slot;
                     d.slot = null;
+                    if (s.open) {
+                        p.streamed.fetchAdd((int64) 1);
+                    }
                     try {
                         Http2Connection.runStream(c.h2, #s);
                     } catch (Exception e) {
@@ -80,6 +85,9 @@ public final class DispatchPool {
                         keep = c.turn();
                     } catch (Exception e) {
                         keep = false;
+                    }
+                    if (c.streamedInTurn > 0) {
+                        p.streamed.fetchAdd((int64) c.streamedInTurn);
                     }
                     p.inFlight.fetchAdd(-1);
                     if (!keep) {

@@ -84,6 +84,7 @@ public final class Http1Framed implements NowWriter {
     public boolean handshaking;  // TLS: the handshake has not completed
     public Http2Connection h2;   // non-null once the connection speaks h2
     AsyncWriter h2Writer;        // owned here: the h2 write side keeps a borrow of it
+    public int32 streamedInTurn; // HTTP/1.1 units this turn ran with the body still arriving, for the pool's count
     public int32 h2InFlight;     // streams on workers; the framer alone moves it, so no worker touches a dropped connection
     public boolean h2Prior;      // plaintext: a preface switches the connection to h2
     public ConnectionBuffers bufs;   // for the h2 slots
@@ -137,6 +138,7 @@ public final class Http1Framed implements NowWriter {
         this.h2 = null;
         this.h2Writer = null;
         this.h2InFlight = 0;
+        this.streamedInTurn = 0;
         this.h2Prior = false;
         this.ws = null;
         this.wsMaxMessage = (int64) 67108864;
@@ -958,6 +960,7 @@ public final class Http1Framed implements NowWriter {
         boolean keep = true;
         int32 i = 0;
         int32 n = this.units;
+        this.streamedInTurn = 0;
         while (i < n && keep) {
             if (this.uIsPart[i]) {
                 keep = this.partTurn(i);
@@ -966,6 +969,7 @@ public final class Http1Framed implements NowWriter {
             }
             HeadScanner.parseRequest(this.in.array(), this.uStart[i], this.uHead[i], this.req);
             if (this.uStream[i]) {
+                this.streamedInTurn = this.streamedInTurn + 1;
                 this.ensureStreamObjects();
                 boolean chunked = this.req.framing == HttpRequest.FRAMING_CHUNKED;
                 this.bodyChan.begin(this.channel(), this.in.array(), this.uBodyOff[i],

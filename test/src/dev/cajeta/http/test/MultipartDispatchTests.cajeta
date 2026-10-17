@@ -345,6 +345,7 @@ public final class MultipartDispatchTests {
             int32 chunk = 1048576;
             int32 chunks = 64;
             int64 total = (int64) chunk * (int64) chunks;
+            int64 sd0 = srv.streamedDispatches();
             int8[] data #= MultipartDispatchTests.fill(chunk, 3);
             TcpStream s #= DispatchTests.connectRaw(port);
             DispatchTests.sendRaw(s, "POST /big HTTP/1.1\r\nHost: t\r\n"
@@ -378,6 +379,8 @@ public final class MultipartDispatchTests {
             c.eqInt(MultipartDispatchTests.streamBytes, total, "counted incrementally");
             c.that(MultipartDispatchTests.streamAlloc < (int64) 8388608,
                 "in bounded memory (" + MultipartDispatchTests.streamAlloc + " bytes allocated)");
+            int64 wantStreamed = MultipartDispatchTests.fiberModel ? (int64) 0 : (int64) 1;
+            c.eqInt(srv.streamedDispatches() - sd0, wantStreamed, "streamedDispatches() counts the STREAM route's unit under the pool (h2 plan 6.1.1)");
             s.close();
             srv.shutdown(Duration.ofSeconds(2));
             await sv;
