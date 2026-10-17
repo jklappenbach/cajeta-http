@@ -32,6 +32,7 @@ public final class WsFramed {
     boolean closing;            // the close is decided; onClose is the last unit
     boolean closed;             // onClose ran
     int32 closeCode;
+    int32 failPending;          // a failure decided behind queued messages; the worker closes with it
     int32 maxUnits;
 
     WsFramed(WebSocketHandler handler, PmdParams params, ByteChannel ch, ^NowWriter now,
@@ -51,6 +52,7 @@ public final class WsFramed {
         this.closing = false;
         this.closed = false;
         this.closeCode = WsCloseCode.NORMAL;
+        this.failPending = 0;
         this.maxUnits = maxUnits < 1 ? 1 : maxUnits;
     }
 
@@ -68,6 +70,11 @@ public final class WsFramed {
         return this.ready.count() >= this.maxUnits;
     }
 
+    /** True when the framer decodes no more: a close is decided or a failure waits on the worker. */
+    boolean stopped() {
+        return this.closing || this.failPending != 0;
+    }
+
     /** True once `onClose` ran: nothing more will be dispatched. */
     public boolean finished() {
         return this.closed;
@@ -77,17 +84,18 @@ public final class WsFramed {
      * Decodes what `in` holds, up to the mailbox size. Pings are answered
      * here; a close from the peer is answered here and leaves one final unit;
      * a protocol failure or an oversized message closes with its code here,
-     * so no fiber is spent on it. Returns the units waiting.
+     * so no fiber is spent on it, unless messages are queued ahead of it, which
+     * the worker runs before it closes. Returns the units waiting.
      */
     public int32 feed(ByteBuffer in) {
         this.flushPending();
         try {
             boolean more = true;
             while (more) {
-                while (this.ws.decoder.hasFrame() && !this.full() && !this.closing) {
+                while (this.ws.decoder.hasFrame() && !this.full() && !this.stopped()) {
                     this.oneFrame();
                 }
-                if (this.closing || this.full() || in.readable() == 0) {
+                if (this.stopped() || this.full() || in.readable() == 0) {
                     more = false;
                 } else {
                     int32 took = this.ws.decoder.feedSome(in.array(), in.readPosition(), in.readable());
@@ -181,9 +189,16 @@ public final class WsFramed {
         }
     }
 
-    /** Fails the connection from the framer: the close frame goes out now, onClose is the final unit. */
+    /**
+     * Fails the connection from the framer: the close frame goes out now, onClose is the final unit.
+     * Behind queued messages the worker runs them first and then closes with `code`.
+     */
     void failClose(int32 code) {
-        if (this.closing) {
+        if (this.stopped()) {
+            return;
+        }
+        if (this.ready.count() > 0) {
+            this.failPending = code;
             return;
         }
         if (!this.ws.closeSent) {
@@ -274,6 +289,11 @@ public final class WsFramed {
             this.failOnWorker(WsCloseCode.PROTOCOL_ERROR);
         } catch (Exception e) {
             this.failOnWorker(WsCloseCode.INTERNAL_ERROR);
+        }
+        if (this.failPending != 0 && (this.ready.count() == 0 || this.ws.closeSent)) {
+            int32 code = this.failPending;
+            this.failPending = 0;
+            this.failOnWorker(code);
         }
         if (this.ws.abortedWith() != 0) {
             // Decided by abort, whether or not the framer concluded a close

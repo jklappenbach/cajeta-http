@@ -85,6 +85,8 @@ public final class WsDispatchTests {
         WsDispatchTests.compressedMessageThroughThePool(c);
         System.stdout.println("-- ws dispatch: an abort from another fiber closes with the abort's code (6.1.6) --");
         WsDispatchTests.abortFromAnotherFiberReportsItsCode(c);
+        System.stdout.println("-- ws dispatch: a message queued before a protocol failure is echoed before the close (6.1.7) --");
+        WsDispatchTests.queuedMessageRunsBeforeAFailure(c);
     }
 
     // ----- fixtures -------------------------------------------------------
@@ -466,6 +468,39 @@ public final class WsDispatchTests {
             int64 n = DispatchTests.readStep(s, buf, 0, 2000);
             c.that(n <= (int64) 0, "the peer's socket ended without a close frame (" + n + ")");
             c.eqInt((int64) srv.inFlight(), (int64) 0, "no worker is held");
+            s.close();
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+    }
+
+    /** 6.1.7: a message and then a frame with a reserved bit, in one segment: the echo, then a 1002 close. */
+    static void queuedMessageRunsBeforeAFailure(Check c) {
+        scope {
+            HttpServer srv #= WsDispatchTests.wsServer((int64) 0);
+            Task<int32> sv = spawn serveIt(srv);
+            DispatchTests.settle(srv);
+            int32 port = WsDispatchTests.port(srv);
+            TcpStream s #= DispatchTests.connectRaw(port);
+            c.that(WsDispatchTests.handshake(s, "/ws", 3000), "the upgrade is answered");
+            Fiber.sleep(Duration.ofMillis((int64) 30));
+            int8[] b = heap int8[64];
+            int32 at = WsDispatchTests.frame(b, 0, WsOpcode.TEXT, "hello");
+            int32 bad = at;
+            at = WsDispatchTests.frame(b, at, WsOpcode.TEXT, "x");
+            b[bad] = (int8) (b[bad] | 32);
+            s.writeAllAsync(b, (int64) 0, (int64) at);
+            int32[] ops = heap int32[2];
+            int32[] cc = heap int32[1];
+            String got #= WsDispatchTests.readFrames(s, 2, 3000, ops, cc);
+            c.eqInt((int64) ops[0], (int64) WsOpcode.TEXT, "the echo comes first");
+            c.that(got.equals("hello,"), "the queued message is echoed (" + got + ")");
+            c.eqInt((int64) ops[1], (int64) WsOpcode.CLOSE, "then the close frame");
+            c.eqInt((int64) cc[0], (int64) WsCloseCode.PROTOCOL_ERROR, "with PROTOCOL_ERROR");
+            Fiber.sleep(Duration.ofMillis((int64) 50));
+            c.eqInt((int64) WsDispatchTests.ECHO.messages, (int64) 1, "onMessage ran for the queued message");
+            c.eqInt((int64) WsDispatchTests.ECHO.closes, (int64) 1, "onClose ran once");
+            c.eqInt((int64) WsDispatchTests.ECHO.lastCode, (int64) WsCloseCode.PROTOCOL_ERROR, "with the code");
             s.close();
             srv.shutdown(Duration.ofSeconds(2));
             await sv;
