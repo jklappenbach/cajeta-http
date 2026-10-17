@@ -25,7 +25,7 @@ cajeta-http provides the **imperative HTTP engine** (`HttpClient`, `HttpServer`,
 `Router`, `WebSocket`). Annotation-driven endpoints and automatic
 serialization-to-object-model are **primavera's** job, layered on top.
 
-## Status: v0.7.2
+## Status: v0.8.0
 
 | Capability | State |
 |---|---|
@@ -73,6 +73,23 @@ for a peer that has stopped reading, and `HttpServer.idleBuffers()`.
 `WsUpgrade.accept(q, r, #h, ...)` hands a per-connection handler to its
 connection, which frees it at close; before, it was freed when `accept`
 returned.
+
+v0.8.0 gives an HTTP/2 stream's request body the same three modes an
+HTTP/1.1 request has, under both server models. With `streamRequestBody` on,
+or on a STREAM multipart route, the handler starts at end of HEADERS and reads
+the body through `bodyStream()` as it arrives, in the memory of one pooled slab
+whose size is the stream's flow-control window, so a slow handler slows only
+its own stream (2 GB on one stream allocated 1.9 MB in the process; 50
+concurrent 40 MB uploads cost 2.8 MB beyond their slabs). A PART route runs
+the handler once per completed part. Trailers end a body; a body that misses
+its content-length resets the stream; a handler that returns early has the
+stream drained up to 256 KB, then reset after its response. A held stream's
+trailers no longer fail the connection. The server now advertises the default
+65,535-byte initial stream window and raises it per stream at head complete.
+`HttpServer.streamedDispatches()` counts units dispatched at head complete.
+Behavior change: a server with `streamRequestBody` on now dispatches h2
+handlers at head complete rather than at END_STREAM, as that flag always
+meant for HTTP/1.1.
 
 v0.7.2 fixes a 0.7.0 WebSocket regression: a message that arrives just
 before a protocol violation is delivered to `onMessage` before the 1002
