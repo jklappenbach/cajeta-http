@@ -44,6 +44,8 @@ public final class Http2StreamSlot implements ResponseTransport {
     public boolean open;
     public boolean bodyEnded;        // the framer's view: END_STREAM or a reset has arrived
     public AtomicInt32 handlerDone;  // the worker's: the handler returned and the response is out
+    int64 expectedBody;              // open stream: the declared content-length, or -1
+    int64 drainLeft;                 // after an early return: bytes the framer still discards before a reset
 
     Http2StreamSlot(ConnectionBuffers bufs, HttpParserLimits limits,
                     Http2WriteSide ws, Http2SendGate gate) {
@@ -63,6 +65,8 @@ public final class Http2StreamSlot implements ResponseTransport {
         this.open = false;
         this.bodyEnded = false;
         this.handlerDone = heap AtomicInt32(0);
+        this.expectedBody = (int64) -1;
+        this.drainLeft = (int64) 0;
     }
 
     void recycle(ConnectionBuffers bufs) {
@@ -235,6 +239,13 @@ public final class Http2StreamSlot implements ResponseTransport {
         this.open = true;
         this.bodyEnded = false;
         this.handlerDone.store(0);
+        this.expectedBody = expected;
+        this.drainLeft = (int64) 0;
+    }
+
+    /** Bytes of body the framer has fed so far. */
+    int64 bodyReceived() {
+        return this.body.receivedBytes();
     }
 
     /** The stream window an open body can take: its slab. */

@@ -76,6 +76,8 @@ public final class Http2Connection {
     Http2StreamSlot[] openArr;      // borrows of the open slots, for feeding DATA by stream id
     int32 openN;
     Channel<Http2StreamSlot> finishedOpen;   // titles a worker hands back once its handler returned
+    ArrayList<Http2StreamSlot> draining;     // answered with the body still open: discarded up to DRAIN_LIMIT, then reset
+    static final int64 DRAIN_LIMIT = (int64) 262144;
 
     public Http2Connection(AsyncReader reader, AsyncWriter writer,
                            (HttpRequest, HttpResponse) -> void handler,
@@ -119,6 +121,7 @@ public final class Http2Connection {
         this.openArr = heap Http2StreamSlot[16];
         this.openN = 0;
         this.finishedOpen = heap Channel<Http2StreamSlot>(256);
+        this.draining = heap ArrayList<Http2StreamSlot>();
     }
 
     /** The server's body modes: `all` is `streamRequestBody`; `routes` the PART and STREAM routes, or null. */
@@ -187,6 +190,51 @@ public final class Http2Connection {
         }
     }
 
+    /** The draining slot of stream `sid`, or -1. */
+    int32 drainingIndex(int32 sid) {
+        int32 i = 0;
+        while (i < this.draining.count()) {
+            if (this.draining.get(i).sid == sid) {
+                return i;
+            }
+            i = i + 1;
+        }
+        return -1;
+    }
+
+    /** Ends a drain: cleanly when the body ended, else with RST_STREAM(NO_ERROR). */
+    void endDrain(int32 i, boolean reset) {
+        Http2StreamSlot t #= this.draining.removeAt(i);
+        if (reset) {
+            if (this.streams.has(t.sid)) {
+                this.streams.sendRst(t.sid);
+            }
+            Http2FrameWriter fw = heap Http2FrameWriter();
+            Http2Frames.writeRstStream(fw, t.sid, (int64) Http2.NO_ERROR);
+            this.control(fw);
+        }
+        this.giveSlot(#t);
+    }
+
+    /**
+     * The peer ended an open stream's body (END_STREAM on DATA, or trailers):
+     * a body shorter than its content-length is a stream error the reader
+     * raises (spec §2.4.2); otherwise the reader returns 0 after what came.
+     */
+    void finishOpenBody(Http2StreamSlot os) {
+        if (os.expectedBody >= (int64) 0 && os.bodyReceived() != os.expectedBody) {
+            os.failOpenBody("request body ended before its content-length");
+            if (this.streams.has(os.sid)) {
+                this.streams.sendRst(os.sid);
+            }
+            Http2FrameWriter fw = heap Http2FrameWriter();
+            Http2Frames.writeRstStream(fw, os.sid, (int64) Http2.PROTOCOL_ERROR);
+            this.control(fw);
+            return;
+        }
+        os.endOpenBody();
+    }
+
     /**
      * Frees every open slot whose handler has returned (its title came back
      * through `finishedOpen`). One whose body is still open is cut with
@@ -204,16 +252,20 @@ public final class Http2Connection {
                 Http2StreamSlot t #= o.take();
                 this.untrackOpen(t.sid);
                 if (!t.bodyEnded) {
+                    // The handler returned with the body open (spec §2.5): the
+                    // body slab goes back now, and the stream drains up to
+                    // DRAIN_LIMIT more bytes before a reset cuts it.
                     t.failOpenBody("handler returned before the body ended");
-                    if (this.streams.has(t.sid)) {
-                        this.streams.sendRst(t.sid);
-                    }
-                    Http2FrameWriter fw = heap Http2FrameWriter();
-                    Http2Frames.writeRstStream(fw, t.sid, (int64) Http2.NO_ERROR);
-                    this.control(fw);
+                    t.closeOpen(this.bufs);
+                    t.drainLeft = Http2Connection.DRAIN_LIMIT;
+                    // The budget is the window: the peer may send this much
+                    // more; a body that ends inside it closes cleanly.
+                    this.grantStream(t.sid, (int32) Http2Connection.DRAIN_LIMIT);
+                    this.draining.add(#t);
+                } else {
+                    t.closeOpen(this.bufs);
+                    this.giveSlot(#t);
                 }
-                t.closeOpen(this.bufs);
-                this.giveSlot(#t);
             }
         }
     }
@@ -392,6 +444,10 @@ public final class Http2Connection {
             i = i + 1;
         }
         this.openN = 0;
+        while (this.draining.count() > 0) {
+            Http2StreamSlot t #= this.draining.removeAt(0);
+            this.giveSlot(#t);
+        }
         this.releaseSlots();
     }
 
@@ -560,6 +616,26 @@ public final class Http2Connection {
 
     void completeRequest(int32 sid, int8[] block, int32 off, int32 blockLen, boolean endStream) {
         int32 n = this.hdec.decodeInto(block, off, blockLen);
+        // A second HEADERS on a stream that already has its request is the
+        // trailers (the stream machine refused one without END_STREAM): they
+        // end the body (spec §2.4.1); their fields are not exposed (§7.1).
+        Http2StreamSlot tos = this.openSlot(sid);
+        if (tos != null) {
+            this.finishOpenBody(tos);
+            return;
+        }
+        int32 di = this.drainingIndex(sid);
+        if (di >= 0) {
+            this.endDrain(di, false);
+            return;
+        }
+        if (this.cur != null && this.cur.sid == sid) {
+            Http2StreamSlot held #= this.cur;
+            this.cur = null;
+            held.endBody();
+            this.ready = #held;
+            return;
+        }
         if (this.streams.ignoring(sid)) {
             return;
         }
@@ -655,11 +731,30 @@ public final class Http2Connection {
             // stream; stream credit returns as the handler consumes (spec §2.3),
             // and `maxBodyBytes` does not bound what the handler reads (§2.6).
             this.replenishConn(len);
+            if (os.expectedBody >= (int64) 0 && os.bodyReceived() + (int64) dLen > os.expectedBody) {
+                os.failOpenBody("request body longer than its content-length");
+                this.sendRst(sid, Http2.PROTOCOL_ERROR);
+                return;
+            }
             if (!os.feedBody(payload, dOff, dLen)) {
                 throw heap Http2Exception("DATA past the stream's window", Http2.FLOW_CONTROL_ERROR, sid);
             }
             if (endStream) {
-                os.endOpenBody();
+                this.finishOpenBody(os);
+            }
+            return;
+        }
+        int32 di = this.drainingIndex(sid);
+        if (di >= 0) {
+            // Answered already: the bytes are discarded, credited so the peer
+            // can finish a small remainder, and cut past the limit (spec §2.5).
+            this.replenishConn(len);
+            Http2StreamSlot ds = this.draining.get(di);
+            ds.drainLeft = ds.drainLeft - (int64) dLen;
+            if (endStream) {
+                this.endDrain(di, false);
+            } else if (ds.drainLeft <= (int64) 0) {
+                this.endDrain(di, true);
             }
             return;
         }
@@ -700,6 +795,11 @@ public final class Http2Connection {
         Http2StreamSlot os = this.openSlot(sid);
         if (os != null && !os.bodyEnded) {
             os.failOpenBody("stream reset by the peer");
+        }
+        int32 di = this.drainingIndex(sid);
+        if (di >= 0) {
+            Http2StreamSlot t #= this.draining.removeAt(di);
+            this.giveSlot(#t);
         }
         if (this.cur != null && this.cur.sid == sid) {
             Http2StreamSlot s #= this.cur;
