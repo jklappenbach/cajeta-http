@@ -213,6 +213,7 @@ public class HttpServer {
             sl.headReadTimeoutMs, sl.bodyReadTimeoutMs, sl.maxBodyBytes,
             sl.expectContinueEnabled, this.handler);
         conn.streamRequestBodies(sl.streamRequestBody);
+        conn.multipartRoutes(this.multipartRoutes, this.maxPartBytesN);
         try {
             conn.serve();
         } catch (Exception e) {

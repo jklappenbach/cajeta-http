@@ -37,16 +37,37 @@ public final class MultipartDispatchTests {
     static int64 streamBytes;
     static int64 streamAlloc;
 
+    /** Which server model the current case builds: the pool, or `fiberPerConnection()` (12.1.1). */
+    static boolean fiberModel;
+
     public static void run(Check c) {
         MultipartDispatchTests.partOrder = "";
-        System.stdout.println("-- multipart dispatch: whole, a 3 MB two-file form runs the handler once (7.1.1) --");
+        MultipartDispatchTests.fiberModel = false;
+        MultipartDispatchTests.runModel(c, "pool");
+        MultipartDispatchTests.fiberModel = true;
+        MultipartDispatchTests.runModel(c, "fiber per connection (12.1.1)");
+    }
+
+    static void runModel(Check c, String model) {
+        System.stdout.println("-- multipart dispatch, " + model + ": whole, a 3 MB two-file form runs the handler once (7.1.1) --");
         MultipartDispatchTests.wholeMode(c);
-        System.stdout.println("-- multipart dispatch: part, five files run the handler five times in order (7.1.2) --");
+        System.stdout.println("-- multipart dispatch, " + model + ": part, five files run the handler five times in order (7.1.2) --");
         MultipartDispatchTests.partMode(c);
-        System.stdout.println("-- multipart dispatch: part, a part over maxPartBytes is 413 (7.1.2) --");
+        System.stdout.println("-- multipart dispatch, " + model + ": part, a part over maxPartBytes is 413 (7.1.2) --");
         MultipartDispatchTests.partTooBig(c);
-        System.stdout.println("-- multipart dispatch: stream, a 64 MB part is read incrementally in bounded memory (7.1.3) --");
+        System.stdout.println("-- multipart dispatch, " + model + ": part, a read ending inside the closing delimiter still answers (12.1.2) --");
+        MultipartDispatchTests.partSplitClose(c);
+        System.stdout.println("-- multipart dispatch, " + model + ": stream, a 64 MB part is read incrementally in bounded memory (7.1.3) --");
         MultipartDispatchTests.streamMode(c);
+    }
+
+    /** Waits for the server to be serving under either model. */
+    static void settle(HttpServer srv) {
+        if (MultipartDispatchTests.fiberModel) {
+            Fiber.sleep(Duration.ofMillis((int64) 30));
+            return;
+        }
+        DispatchTests.settle(srv);
     }
 
     // ----- fixtures -------------------------------------------------------
@@ -118,7 +139,11 @@ public final class MultipartDispatchTests {
         HttpServerBuilder b #= HttpServer.builder();
         b.bind("127.0.0.1:0");
         b.handler((HttpRequest q, HttpResponse r) -> MultipartDispatchTests.handle(q, r));
-        b.framers(1);
+        if (MultipartDispatchTests.fiberModel) {
+            b.fiberPerConnection();
+        } else {
+            b.framers(1);
+        }
         b.multipart("POST", "/parts", MultipartMode.PART);
         b.multipart("POST", "/big", MultipartMode.STREAM);
         if (bufferBytes > 0) {
@@ -184,7 +209,7 @@ public final class MultipartDispatchTests {
         scope {
             HttpServer srv #= MultipartDispatchTests.server(4194304, 0);
             Task<int32> sv = spawn serveIt(srv);
-            DispatchTests.settle(srv);
+            MultipartDispatchTests.settle(srv);
             int32 port = MultipartDispatchTests.port(srv);
             MultipartDispatchTests.wholeRuns = 0;
             int64 d0 = srv.dispatches();
@@ -195,7 +220,8 @@ public final class MultipartDispatchTests {
             c.that(got[0].equals("parts 2"), "the handler saw both parts");
             c.eqInt((int64) MultipartDispatchTests.wholeRuns, (int64) 1, "the handler ran once");
             c.eqInt(MultipartDispatchTests.wholeBytes, (int64) 3145728, "with 3 MB of part content");
-            c.eqInt(srv.dispatches() - d0, (int64) 1, "one dispatch");
+            int64 wantDispatches = MultipartDispatchTests.fiberModel ? (int64) 0 : (int64) 1;
+            c.eqInt(srv.dispatches() - d0, wantDispatches, "one dispatch under the pool, none under fiber per connection");
             srv.shutdown(Duration.ofSeconds(2));
             await sv;
         }
@@ -206,7 +232,7 @@ public final class MultipartDispatchTests {
         scope {
             HttpServer srv #= MultipartDispatchTests.server(0, 0);
             Task<int32> sv = spawn serveIt(srv);
-            DispatchTests.settle(srv);
+            MultipartDispatchTests.settle(srv);
             int32 port = MultipartDispatchTests.port(srv);
             MultipartBody body #= MultipartDispatchTests.form(5, 102400);
             String[] got = heap String[1];
@@ -226,7 +252,7 @@ public final class MultipartDispatchTests {
         scope {
             HttpServer srv #= MultipartDispatchTests.server(0, 1024);
             Task<int32> sv = spawn serveIt(srv);
-            DispatchTests.settle(srv);
+            MultipartDispatchTests.settle(srv);
             int32 port = MultipartDispatchTests.port(srv);
             MultipartBody body #= MultipartDispatchTests.form(1, 4096);
             int8[] wire #= body.wire();
@@ -257,12 +283,64 @@ public final class MultipartDispatchTests {
         }
     }
 
+    /**
+     * 12.1.2: part mode when the body arrives in two reads split between the
+     * final `--boundary` and its closing `--`. The parser counts the last part
+     * at the first read and resolves the close at the second, so the server
+     * must hold the last part until it knows it is last; otherwise the handler
+     * runs it with multipartLast() false and no response is ever sent.
+     */
+    static void partSplitClose(Check c) {
+        scope {
+            HttpServer srv #= MultipartDispatchTests.server(0, 0);
+            Task<int32> sv = spawn serveIt(srv);
+            MultipartDispatchTests.settle(srv);
+            int32 port = MultipartDispatchTests.port(srv);
+            MultipartBody body #= MultipartDispatchTests.form(5, 1024);
+            int8[] wire #= body.wire();
+            int32 n = (int32) wire.count();
+            // The wire ends with `--boundary--CRLF`; cut before the `--CRLF`.
+            int32 split = n - 4;
+            c.that(wire[split] == (int8) 45 && wire[split + 1] == (int8) 45
+                && wire[n - 2] == (int8) 13 && wire[n - 1] == (int8) 10,
+                "the form's wire ends with the close delimiter");
+            TcpStream s #= DispatchTests.connectRaw(port);
+            MediaType ct #= body.contentType();
+            String ctText #= ct.format();
+            DispatchTests.sendRaw(s, "POST /parts HTTP/1.1\r\nHost: t\r\nContent-Type: " + ctText
+                + "\r\nContent-Length: " + n + "\r\n\r\n");
+            s.writeAllAsync(wire, (int64) 0, (int64) split);
+            Fiber.sleep(Duration.ofMillis((int64) 150));
+            s.writeAllAsync(wire, (int64) split, (int64) (n - split));
+            int8[] buf = heap int8[2048];
+            int32 got = 0;
+            boolean going = true;
+            while (going) {
+                int64 r = DispatchTests.readStep(s, buf, got, 3000);
+                if (r <= (int64) 0) {
+                    going = false;
+                } else {
+                    got = got + (int32) r;
+                    if (DispatchTests.contains(buf, got, "got 5")) {
+                        going = false;
+                    }
+                }
+            }
+            c.that(DispatchTests.contains(buf, got, " 200 "), "the form is answered");
+            c.that(DispatchTests.contains(buf, got, "got 5"), "after the fifth part, which saw multipartLast()");
+            c.eqInt((int64) MultipartDispatchTests.partRuns, (int64) 5, "the handler ran once per part");
+            s.close();
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+    }
+
     /** 7.1.3: stream mode: a 64 MB part is read incrementally by the handler, in bounded memory. */
     static void streamMode(Check c) {
         scope {
             HttpServer srv #= MultipartDispatchTests.server(0, 0);
             Task<int32> sv = spawn serveIt(srv);
-            DispatchTests.settle(srv);
+            MultipartDispatchTests.settle(srv);
             int32 port = MultipartDispatchTests.port(srv);
             int32 chunk = 1048576;
             int32 chunks = 64;
@@ -272,9 +350,14 @@ public final class MultipartDispatchTests {
             DispatchTests.sendRaw(s, "POST /big HTTP/1.1\r\nHost: t\r\n"
                 + "Content-Type: multipart/form-data; boundary=XYZ\r\nContent-Length: " + total + "\r\n\r\n");
             int32 i = 0;
-            while (i < chunks) {
-                s.writeAllAsync(data, (int64) 0, (int64) chunk);
-                i = i + 1;
+            try {
+                while (i < chunks) {
+                    s.writeAllAsync(data, (int64) 0, (int64) chunk);
+                    i = i + 1;
+                }
+            } catch (Exception e) {
+                // A server that refuses the body closes under the writer; the
+                // checks below read whatever it answered.
             }
             int8[] buf = heap int8[2048];
             int32 n = 0;

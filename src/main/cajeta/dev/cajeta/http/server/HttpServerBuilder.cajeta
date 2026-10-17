@@ -70,6 +70,9 @@ public class HttpServerBuilder {
      * `MultipartMode.WHOLE` (the default for every route), `PART` (the handler
      * runs once per completed part, with `HttpRequest.multipartPart` set) or
      * `STREAM` (the handler gets `HttpRequest.bodyStream` at head complete).
+     * The modes apply under both server models, the pool and
+     * `fiberPerConnection()` (spec §4.6), to HTTP/1.1 requests; an h2 stream
+     * takes every route as WHOLE until the h2 streaming-body work lands.
      */
     public HttpServerBuilder multipart(String method, String pattern, int32 mode) {
         if (this.bMultipart == null) {

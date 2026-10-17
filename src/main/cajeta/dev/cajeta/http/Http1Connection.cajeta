@@ -10,6 +10,9 @@ import cajeta.io.net.TimedOutException;
 import cajeta.error.Exception;
 import cajeta.time.Clock;
 import dev.cajeta.http.h1.HttpParserLimits;
+import dev.cajeta.http.body.MultipartParser;
+import dev.cajeta.http.server.MultipartMode;
+import dev.cajeta.http.server.MultipartRoutes;
 
 /**
  * One HTTP/1.1 connection: reads each request into the input buffer,
@@ -35,6 +38,15 @@ public final class Http1Connection {
     RequestBodyChannel bodyChan;
     RequestBody streamed;
     boolean inStream;
+    // Multipart per route (spec §2.3, §4.6): the server's PART and STREAM
+    // routes, the largest part a PART route accepts, and the PART state: the
+    // head copied aside (the body streams through `in` and is compacted
+    // away) and the parser the loop feeds.
+    MultipartRoutes mpRoutes;
+    int32 maxPartBytes;
+    int8[] mpHead;
+    int32 mpHeadLen;
+    MultipartParser mp;
 
     static final int64 DRAIN_LIMIT = 262144;
 
@@ -62,6 +74,11 @@ public final class Http1Connection {
         this.bodyChan = null;
         this.streamed = null;
         this.inStream = false;
+        this.mpRoutes = null;
+        this.maxPartBytes = MultipartParser.DEFAULT_MAX_PART_BYTES;
+        this.mpHead = null;
+        this.mpHeadLen = 0;
+        this.mp = null;
     }
 
     /**
@@ -70,11 +87,30 @@ public final class Http1Connection {
      */
     public Http1Connection streamRequestBodies(boolean on) {
         this.streaming = on;
-        if (on && this.bodyChan == null) {
+        if (on) {
+            this.ensureStreamObjects();
+        }
+        return this;
+    }
+
+    /**
+     * Applies the server's per-route multipart modes (spec §2.3) on this
+     * connection, as the framer does under the pool (spec §4.6): a PART route
+     * runs the handler once per completed part, a STREAM route hands the body
+     * over at head complete. `routes` may be null when every route is WHOLE.
+     */
+    public Http1Connection multipartRoutes(MultipartRoutes routes, int32 maxPartBytes) {
+        this.mpRoutes #= routes;   // the server lends its routes; the store records the borrow
+        this.maxPartBytes = maxPartBytes;
+        return this;
+    }
+
+    /** The streamed-body objects, built on first use: a STREAM route needs them without global streaming. */
+    void ensureStreamObjects() {
+        if (this.bodyChan == null) {
             this.bodyChan = heap RequestBodyChannel();
             this.streamed = heap RequestBody(this.bodyChan);
         }
-        return this;
     }
 
     boolean overCap(int64 n) {
@@ -276,14 +312,22 @@ public final class Http1Connection {
         return dst;
     }
 
-    boolean readBody(int32 headLen) {
+    /**
+     * Reads or binds the request body after a head of `headLen` bytes.
+     * `streamThis` is a STREAM multipart route (spec §2.3): the body is handed
+     * to the handler at head complete as it is for every request under
+     * `streamRequestBodies(true)`, and the declared length is not held to
+     * `maxBodyBytes`, as under the framer.
+     */
+    boolean readBody(int32 headLen, boolean streamThis) {
         int32 start = this.in.readPosition() + headLen;
         this.consumed = start;
         this.inStream = false;
-        if (this.req.framing == HttpRequest.FRAMING_LENGTH && this.overCap(this.req.declaredLength)) {
+        if (!streamThis && this.req.framing == HttpRequest.FRAMING_LENGTH && this.overCap(this.req.declaredLength)) {
             throw heap PayloadTooLargeException("body over the limit", this.maxBody, this.req.declaredLength);
         }
-        if (this.streaming && this.req.framing != HttpRequest.FRAMING_NONE) {
+        if ((this.streaming || streamThis) && this.req.framing != HttpRequest.FRAMING_NONE) {
+            this.ensureStreamObjects();
             if (start >= this.in.capacity()) {
                 throw heap HeadersTooLargeException("head leaves no room for the body",
                     (int64) this.in.capacity(), (int64) start);
@@ -322,6 +366,10 @@ public final class Http1Connection {
 
     void dispatch() {
         this.res.reset();
+        this.runHandler();
+    }
+
+    void runHandler() {
         try {
             (HttpRequest, HttpResponse) -> void fn = this.handler;
             fn(this.req, this.res);
@@ -376,7 +424,15 @@ public final class Http1Connection {
         if (ex == 100 && this.in.readable() == h) {
             this.sendContinue();
         }
-        this.readBody(h);
+        int32 mode = MultipartMode.WHOLE;
+        if (this.mpRoutes != null && this.req.framing != HttpRequest.FRAMING_NONE) {
+            mode = this.mpRoutes.modeFor(this.req);
+        }
+        if (mode == MultipartMode.PART && this.req.framing == HttpRequest.FRAMING_LENGTH) {
+            // A chunked multipart body on a PART route is held whole, as under the framer.
+            return this.serveParts(h);
+        }
+        this.readBody(h, mode == MultipartMode.STREAM);
         this.dispatch();
         boolean reuse = this.req.reuse;
         if (this.inStream && !this.bodyChan.drain(Http1Connection.DRAIN_LIMIT)) {
@@ -399,5 +455,108 @@ public final class Http1Connection {
             return false;
         }
         return keep;
+    }
+
+    /**
+     * Serves a length-framed request on a PART multipart route (spec §2.3.2):
+     * the head is copied aside, the body is fed to the parser from the input
+     * buffer as it arrives, and the handler runs once per completed part, in
+     * order, with the response sent after the last. A part is dispatched only
+     * once it is known whether it is the last, so a delimiter split across
+     * reads cannot run the final part with `multipartLast()` false. An empty
+     * form runs the handler once with no part. Returns the keep-alive decision.
+     */
+    boolean serveParts(int32 h) {
+        MediaType ct #= this.req.contentType();
+        String bound #= MultipartParser.boundaryOf(ct);
+        if (bound == null || bound.byteLength() == 0) {
+            this.refuse(400);
+            return false;
+        }
+        if (this.mpHead == null || this.mpHead.count() < (int64) h) {
+            this.mpHead = heap int8[h];
+        }
+        int8[] src = this.in.array();
+        int32 from = this.in.readPosition();
+        int32 i = 0;
+        while (i < h) {
+            this.mpHead[i] = src[from + i];
+            i = i + 1;
+        }
+        this.mpHeadLen = h;
+        this.mp #= MultipartParser.forBoundaryWithLimits(bound, MultipartParser.DEFAULT_MAX_PARTS,
+            this.maxPartBytes);
+        int64 remaining = this.req.declaredLength;
+        this.in.advanceRead(h);
+        this.in.compact();
+        int32 queued = 0;
+        boolean keep = true;
+        boolean done = false;
+        while (!done) {
+            int32 avail = this.in.readable();
+            if ((int64) avail > remaining) {
+                avail = (int32) remaining;
+            }
+            if (avail > 0) {
+                this.mp.feedFrom(this.in.array(), this.in.readPosition(), avail);
+                this.in.advanceRead(avail);
+                remaining = remaining - (int64) avail;
+                this.in.compact();
+            }
+            boolean complete = this.mp.isComplete();
+            // Part i is dispatched once a later part has begun or the closing
+            // delimiter has been seen: only then is `last` known.
+            while (queued < this.mp.partCount() && (queued < this.mp.partCount() - 1 || complete)) {
+                boolean last = complete && queued == this.mp.partCount() - 1;
+                keep = this.partTurn(queued, last);
+                queued = queued + 1;
+            }
+            if (complete && this.mp.partCount() == 0 && queued == 0) {
+                // An empty form: the handler runs once with no part.
+                keep = this.partTurn(-1, true);
+                queued = 1;
+            }
+            if (remaining <= (int64) 0) {
+                this.mp.endInput();   // raises when the closing delimiter never came
+                done = true;
+            } else if (this.in.fillWithin(this.ch, this.bodyMs) == 0) {
+                throw heap UnexpectedEofException("stream ended inside the request body",
+                    (int64) this.in.readable());
+            }
+        }
+        this.mp = null;
+        this.req.mpPart = null;
+        if (this.res.upgrades()) {
+            this.switchProtocols();
+            return false;
+        }
+        return keep;
+    }
+
+    /**
+     * One part of a PART-mode request: the handler runs with the part on the
+     * request; after the last part the response goes out as for any request.
+     * Returns the keep-alive decision (true while parts remain).
+     */
+    boolean partTurn(int32 idx, boolean last) {
+        HeadScanner.parseRequest(this.mpHead, 0, this.mpHeadLen, this.req);
+        this.req.bodyOff = 0;
+        this.req.bodyLen = 0;
+        this.req.mpIndex = idx < 0 ? 0 : idx;
+        this.req.mpPart = idx >= 0 ? this.mp.part(idx) : null;
+        this.req.mpLast = last;
+        if (idx <= 0) {
+            this.res.reset();
+        }
+        this.runHandler();
+        if (!last) {
+            return true;
+        }
+        boolean reuse = this.req.reuse;
+        boolean omit = this.req.methodKind == Method.HEAD;
+        if (this.res.finish(reuse, this.req.versionKind, omit)) {
+            this.out.writeToAsync(this.ch);
+        }
+        return this.res.keepsAlive() && reuse;
     }
 }

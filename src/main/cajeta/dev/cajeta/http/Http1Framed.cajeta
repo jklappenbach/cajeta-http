@@ -629,7 +629,14 @@ public final class Http1Framed implements NowWriter {
                     }
                 }
                 boolean complete = this.mp.isComplete();
-                while (this.mpQueued < this.mp.partCount() && this.units < this.maxUnits) {
+                // Part i is queued once a later part has begun or the closing
+                // delimiter has been seen: only then is `last` known. The parser
+                // counts a part at its content's end and resolves the delimiter
+                // after it, so a read ending between `--boundary` and `--` would
+                // otherwise run the final part with multipartLast() false and
+                // never send the response (12.1.2).
+                while (this.mpQueued < this.mp.partCount() && this.units < this.maxUnits
+                        && (this.mpQueued < this.mp.partCount() - 1 || complete)) {
                     boolean last = complete && this.mpQueued == this.mp.partCount() - 1;
                     this.queuePart(this.mpQueued, last);
                     this.mpQueued = this.mpQueued + 1;
