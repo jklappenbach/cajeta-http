@@ -45,8 +45,9 @@ connection gets a fiber. Two models, chosen on the builder:
 
 - **request dispatch** (default since 0.7) — framer fibers, one per carrier,
   read every socket and hold a connection until it carries a complete unit of
-  work: an HTTP/1.1 request, an h2 stream at END_STREAM, a WebSocket message,
-  a multipart part on a `PART` route, or a unit a developer `Framer` reports.
+  work: an HTTP/1.1 request, an h2 stream at END_STREAM (or at end of HEADERS
+  when its body streams, see HTTP/2 below), a WebSocket message, a multipart
+  part on a `PART` route, or a unit a developer `Framer` reports.
   Only then does a pooled fiber run the handler. Units from one connection run
   in order on one fiber at a time (h2 streams in parallel by default,
   `serializedStreams(true)` otherwise). `maxInFlight(n)` (256) bounds the units
@@ -57,7 +58,9 @@ connection gets a fiber. Two models, chosen on the builder:
   `specs/request-dispatch-spec.md` in the cajeta repository.
 - **fiber-per-connection** (`fiberPerConnection()`) — one fiber per accepted
   socket running the connection's own loop; the model for a small number of
-  long, busy connections, and exactly 0.6's behavior.
+  long, busy connections. What differs from the pool is only who reads the
+  socket: since 0.7.1 the per-route multipart modes hold here too, and since
+  0.8.0 so do streaming h2 request bodies.
 
 The stdlib shared-pool model (`ServerModel.sharedPool(n)`, formerly
 `sharedPool(n)` on the builder) is not a model this server takes: it meant
@@ -299,14 +302,37 @@ same shape, so composition is function composition.
 
 ---
 
-## HTTP/2 (planned)
+## HTTP/2
 
 HPACK header compression, frame framing, stream multiplexing, flow control, server
 push (opt-in; deprecated upstream but kept for non-browser clients). Negotiated via
-ALPN over TLS, h2c upgrade for cleartext. Plugs in behind the same client/server
+ALPN over TLS, prior knowledge for cleartext. Plugs in behind the same client/server
 surface — user code unchanged. Frame parsing is the canonical zero-copy **`view`**
 use case: the 9-byte frame header decodes in place over a pooled buffer
-(`H2FrameHeader(buf)`), no per-frame allocation.
+(`Http2FrameHeader(buf)`), no per-frame allocation.
+
+**Request bodies on a stream (0.8.0).** A stream's body takes the same three
+modes an HTTP/1.1 request does. Held whole (the default): DATA collects in the
+stream's slot and the handler runs at END_STREAM, bounded by `maxBodyBytes`.
+Streaming (`streamRequestBody`, or a `STREAM` multipart route): the handler
+runs at end of HEADERS and reads the body through `HttpRequest.bodyStream()`
+as it arrives; its reads park on the stream's body channel, never on the
+socket, and the stream's flow-control window is the back-pressure. An open
+stream's body lives in one more pooled slab, and that slab is the window: the
+server advertises the default 65,535-byte initial window, tops a held stream
+up to its receive window and an open stream up to its slab at head complete,
+and returns stream credit as the handler consumes, a WINDOW_UPDATE per
+quarter slab from the handler's own fiber. So a slow handler slows only its
+own stream, and 100 concurrent uploads cost 100 slabs beyond their slots, not
+a growing heap. `PART`: the connection feeds `MultipartParser` from DATA and
+runs the handler once per completed part, in order, one unit at a time per
+stream. Trailers end a body like END_STREAM (their fields are not exposed); a
+body shorter or longer than its content-length resets the stream with
+PROTOCOL_ERROR and the handler's read raises. A handler that returns with the
+body still open has the stream drained up to 256 KB and then, if it has not
+ended, cut with RST_STREAM(NO_ERROR) after the response. Both server models.
+The design is `specs/h2-streaming-request-body-spec.md` in the cajeta
+repository.
 
 ## HTTP/3 (deferred)
 

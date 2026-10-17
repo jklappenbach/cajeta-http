@@ -6,6 +6,7 @@ import cajeta.concurrent.LockGuard;
 import cajeta.io.net.AsyncReader;
 import cajeta.io.net.AsyncWriter;
 import cajeta.io.net.NetException;
+import cajeta.io.net.TimedOutException;
 import cajeta.io.net.tls.TlsException;
 import dev.cajeta.http.HttpException;
 import dev.cajeta.http.HttpRequest;
@@ -140,13 +141,9 @@ public final class Http2Connection {
         return this.mpRoutes != null && this.mpRoutes.modeFor(req) == MultipartMode.PART;
     }
 
-    /** A unit for the pool: onto the ready list when framer-fed, else `ready` for the connection loop. */
+    /** A unit for the pool or the connection loop: onto the ready list, which either drains. */
     void enqueueReady(#Http2StreamSlot t) {
-        if (this.fed) {
-            this.readyList.add(#t);
-        } else {
-            this.ready = #t;
-        }
+        this.readyList.add(#t);
     }
 
     int32 partSlotIndex(int32 sid) {
@@ -572,15 +569,72 @@ public final class Http2Connection {
     public static void serve(AsyncReader reader, AsyncWriter writer,
                              (HttpRequest, HttpResponse) -> void handler,
                              ConnectionBuffers bufs, HttpParserLimits limits, int64 maxBodyBytes) {
+        Http2Connection.serveWith(reader, writer, handler, bufs, limits, maxBodyBytes, false, null, 16777216);
+    }
+
+    /** `serve` with the server's body modes (spec §2.8): the connection loop feeds open and PART streams itself. */
+    public static void serveWith(AsyncReader reader, AsyncWriter writer,
+                                 (HttpRequest, HttpResponse) -> void handler,
+                                 ConnectionBuffers bufs, HttpParserLimits limits, int64 maxBodyBytes,
+                                 boolean streamAll, MultipartRoutes routes, int32 maxPartBytes) {
         Http2Connection c = heap Http2Connection(reader, writer, handler, bufs, limits);
         c.maxBody = maxBodyBytes;
+        c.streaming(streamAll, routes, maxPartBytes);
         try {
             c.run();
         } catch (Http2Exception e) {
         } catch (NetException e) {
         } catch (TlsException e) {
         }
-        c.releaseSlots();
+        c.release();
+    }
+
+    /** Open or PART streams in play: the connection loop then reaps between frames (spec §2.8). */
+    boolean needsReaping() {
+        return this.openN > 0 || this.draining.count() > 0 || this.partSlots.count() > 0;
+    }
+
+    /**
+     * The connection loop's frame-header read. While open streams are in
+     * play it waits in short steps and reaps finished units between them, so
+     * a handler that returned early is drained or cut without waiting for the
+     * peer's next frame; otherwise it blocks as before.
+     */
+    int32 readHeader(int8[] hdr) {
+        int32 off = 0;
+        while (off < 9) {
+            int32 g = 0;
+            if (this.needsReaping()) {
+                boolean timedOut = false;
+                try {
+                    g = this.reader.readWithin(hdr, off, 9 - off, 50);
+                } catch (TimedOutException t) {
+                    timedOut = true;
+                }
+                this.reapOpen();
+                if (timedOut) {
+                    if (off == 0 && this.readyList.count() > 0) {
+                        return 2;   // a reaped unit wants a fiber before the next frame
+                    }
+                    continue;
+                }
+            } else {
+                g = this.reader.read(hdr, off, 9 - off);
+            }
+            if (g == 0) {
+                if (off == 0) {
+                    return 0;
+                }
+                throw heap Http2Exception("truncated frame at EOF", Http2.PROTOCOL_ERROR);
+            }
+            off = off + g;
+        }
+        return 1;
+    }
+
+    /** A unit of an open or PART stream on its own fiber under the old model; the title returns through `finishedOpen`. */
+    public static async int32 runUnit(Http2Connection c, #Http2StreamSlot slot) {
+        return Http2Connection.runStream(c, #slot);
     }
 
     #Http2StreamSlot takeSlot() {
@@ -609,21 +663,37 @@ public final class Http2Connection {
             boolean running = true;
             while (running) {
                 int8[] hdr = this.frameHdr;
-                if (!this.readFully(hdr, 9)) {
+                int32 rh = this.readHeader(hdr);
+                if (rh == 0) {
                     running = false;
                 } else {
-                    running = this.readAndDispatch(hdr);
+                    if (rh == 1) {
+                        running = this.readAndDispatch(hdr);
+                        this.reapOpen();
+                    }
                     if (this.ready != null) {
-                        Http2StreamSlot s #= this.ready;
+                        Http2StreamSlot r #= this.ready;
                         this.ready = null;
-                        int32 maxFrame = (int32) this.remote.maxFrameSize;
-                        boolean pushOk = this.remote.pushEnabled();
-                        int32 initWin = (int32) this.remote.initialWindowSize;
-                        spawn handleStream(this, #s, maxFrame, pushOk, initWin);
+                        this.readyList.add(#r);
+                    }
+                    while (this.readyList.count() > 0) {
+                        Http2StreamSlot s #= this.readyList.removeAt(0);
+                        if (s.open || s.partMode) {
+                            spawn runUnit(this, #s);
+                        } else {
+                            int32 maxFrame = (int32) this.remote.maxFrameSize;
+                            boolean pushOk = this.remote.pushEnabled();
+                            int32 initWin = (int32) this.remote.initialWindowSize;
+                            spawn handleStream(this, #s, maxFrame, pushOk, initWin);
+                        }
                     }
                 }
             }
+            // The peer is done: a handler parked on an open body wakes and raises,
+            // and the scope waits for every unit's fiber before the slots go back.
+            this.endInput();
         }
+        this.reapOpen();
     }
 
     boolean readAndDispatch(int8[] hdr) {

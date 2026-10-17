@@ -51,6 +51,7 @@ public final class H2StreamingBodyTests {
     static boolean liveAfterFail;
     static int64 raisedAfter;      // bytes the raising handler had counted: tells one case's handler from a stale one's
     static String partOrder;       // PART routes: "name:index," per handler run, across streams
+    static boolean fiberModel;     // Unit 5: the cases run again under fiberPerConnection()
     static int32 partRunsA;
     static int32 partRunsB;
     static int64 maxStreamWindow;   // the largest stream window the multi-stream client ever saw
@@ -62,6 +63,33 @@ public final class H2StreamingBodyTests {
     static final int32 SHORT = 4;         // declare `total`, send 65,536 bytes and END_STREAM
 
     public static void run(Check c) {
+        H2StreamingBodyTests.fiberModel = false;
+        H2StreamingBodyTests.runPool(c);
+        H2StreamingBodyTests.fiberModel = true;
+        System.stdout.println("-- h2 streaming body under fiberPerConnection() (5.1.1): the same cases on the connection loop --");
+        H2StreamingBodyTests.dispatchAtHead(c);
+        H2StreamingBodyTests.readsIncrementally(c);
+        H2StreamingBodyTests.resetRaises(c);
+        H2StreamingBodyTests.stallIsolation(c);
+        H2StreamingBodyTests.trailersEndTheBody(c);
+        H2StreamingBodyTests.earlyResponseCutsTheStream(c);
+        H2StreamingBodyTests.smallRemainderDrained(c);
+        H2StreamingBodyTests.partsOnOneStream(c);
+        H2StreamingBodyTests.partSplitClose(c);
+        H2StreamingBodyTests.wholeUnchanged(c);
+        H2StreamingBodyTests.fiberModel = false;
+    }
+
+    /** Waits for the server to be serving under either model. */
+    static void settle(HttpServer srv) {
+        if (H2StreamingBodyTests.fiberModel) {
+            Fiber.sleep(Duration.ofMillis((int64) 30));
+            return;
+        }
+        DispatchTests.settle(srv);
+    }
+
+    static void runPool(Check c) {
         System.stdout.println("-- h2 streaming body: dispatched at end of HEADERS, before any DATA (1.1.1) --");
         H2StreamingBodyTests.dispatchAtHead(c);
         System.stdout.println("-- h2 streaming body: 64 MB read in 64 KB steps, parking between frames (1.1.2) --");
@@ -223,7 +251,11 @@ public final class H2StreamingBodyTests {
         b.bind("127.0.0.1:0");
         b.handler((HttpRequest q, HttpResponse r) -> H2StreamingBodyTests.handle(q, r));
         b.h2PriorKnowledge();
-        b.framers(1);
+        if (H2StreamingBodyTests.fiberModel) {
+            b.fiberPerConnection();
+        } else {
+            b.framers(1);
+        }
         if (maxPart != 0) {
             b.multipart("POST", "/parts", MultipartMode.PART);
             if (maxPart > 0) {
@@ -318,7 +350,9 @@ public final class H2StreamingBodyTests {
      * `startedBeforeData`.
      */
     static #String upload(int32 port, String path, int64 total, int32 mode, int32 ms) {
-        boolean waitForHandler = mode == H2StreamingBodyTests.WAIT_HANDLER;
+        // A reset is sent only once the handler has started: a stream reset and
+        // closed before dispatch is dropped unrun, which is correct and not this case.
+        boolean waitForHandler = mode == H2StreamingBodyTests.WAIT_HANDLER || mode == H2StreamingBodyTests.RESET_EARLY;
         IpAddress ca #= IpAddress.loopbackV4();
         SocketAddress connAddr #= SocketAddress.of(#ca, port);
         TcpStream sock #= TcpStream.connectAsync(#connAddr);
@@ -492,7 +526,7 @@ public final class H2StreamingBodyTests {
         scope {
             HttpServer srv #= H2StreamingBodyTests.server(true);
             Task<int32> sv = spawn serveIt(srv);
-            DispatchTests.settle(srv);
+            H2StreamingBodyTests.settle(srv);
             int32 port = H2StreamingBodyTests.port(srv);
             H2StreamingBodyTests.handlerStarted = false;
             H2StreamingBodyTests.startedBeforeData = false;
@@ -513,7 +547,7 @@ public final class H2StreamingBodyTests {
         scope {
             HttpServer srv #= H2StreamingBodyTests.server(true);
             Task<int32> sv = spawn serveIt(srv);
-            DispatchTests.settle(srv);
+            H2StreamingBodyTests.settle(srv);
             int32 port = H2StreamingBodyTests.port(srv);
             H2StreamingBodyTests.handlerStarted = false;
             H2StreamingBodyTests.counted = (int64) 0;
@@ -540,7 +574,7 @@ public final class H2StreamingBodyTests {
         scope {
             HttpServer srv #= H2StreamingBodyTests.server(true);
             Task<int32> sv = spawn serveIt(srv);
-            DispatchTests.settle(srv);
+            H2StreamingBodyTests.settle(srv);
             int32 port = H2StreamingBodyTests.port(srv);
             H2StreamingBodyTests.handlerStarted = false;
             // Stream 1: a POST to /count with no DATA ever sent; its handler
@@ -572,11 +606,14 @@ public final class H2StreamingBodyTests {
         scope {
             HttpServer srv #= H2StreamingBodyTests.server(true);
             Task<int32> sv = spawn serveIt(srv);
-            DispatchTests.settle(srv);
+            H2StreamingBodyTests.settle(srv);
             int32 port = H2StreamingBodyTests.port(srv);
             H2StreamingBodyTests.readRaised = false;
             H2StreamingBodyTests.liveAfterFail = true;
             H2StreamingBodyTests.raisedAfter = (int64) -1;
+            H2StreamingBodyTests.handlerStarted = false;
+            H2StreamingBodyTests.startedBeforeData = false;
+            H2StreamingBodyTests.counted = (int64) -1;
             String got #= H2StreamingBodyTests.upload(port, "/count", (int64) 1048576, H2StreamingBodyTests.RESET_EARLY, 5000);
             // This case's handler had read exactly the one 16 KB frame when the reset came.
             int32 w = 0;
@@ -585,7 +622,8 @@ public final class H2StreamingBodyTests {
                 w = w + 1;
             }
             c.that(H2StreamingBodyTests.readRaised && H2StreamingBodyTests.raisedAfter == (int64) 16384,
-                "the handler's read raised after the reset, past the one frame it got (" + got + ", after " + H2StreamingBodyTests.raisedAfter + ")");
+                "the handler's read raised after the reset, past the one frame it got (" + got + ", after " + H2StreamingBodyTests.raisedAfter
+                + ", started " + H2StreamingBodyTests.handlerStarted + ", counted " + H2StreamingBodyTests.counted + ", streamed " + H2StreamingBodyTests.streamedSeen + ")");
             c.that(!H2StreamingBodyTests.liveAfterFail, "and the body reports not live");
             srv.shutdown(Duration.ofSeconds(2));
             await sv;
@@ -898,7 +936,7 @@ public final class H2StreamingBodyTests {
         scope {
             HttpServer srv #= H2StreamingBodyTests.server(true);
             Task<int32> sv = spawn serveIt(srv);
-            DispatchTests.settle(srv);
+            H2StreamingBodyTests.settle(srv);
             int32 port = H2StreamingBodyTests.port(srv);
             int32 n = 100;
             int64 per = (int64) 4194304;
@@ -939,7 +977,7 @@ public final class H2StreamingBodyTests {
         scope {
             HttpServer srv #= H2StreamingBodyTests.server(true);
             Task<int32> sv = spawn serveIt(srv);
-            DispatchTests.settle(srv);
+            H2StreamingBodyTests.settle(srv);
             int32 port = H2StreamingBodyTests.port(srv);
             int64[] moved = heap int64[2];
             moved[0] = (int64) -1;
@@ -958,7 +996,7 @@ public final class H2StreamingBodyTests {
         scope {
             HttpServer srv #= H2StreamingBodyTests.serverWith(true, (int64) 1048576);
             Task<int32> sv = spawn serveIt(srv);
-            DispatchTests.settle(srv);
+            H2StreamingBodyTests.settle(srv);
             int32 port = H2StreamingBodyTests.port(srv);
             int64 total = (int64) 4194304;
             String got #= H2StreamingBodyTests.upload(port, "/count", total, H2StreamingBodyTests.SEND, 30000);
@@ -969,7 +1007,7 @@ public final class H2StreamingBodyTests {
         scope {
             HttpServer srv #= H2StreamingBodyTests.serverWith(false, (int64) 1048576);
             Task<int32> sv = spawn serveIt(srv);
-            DispatchTests.settle(srv);
+            H2StreamingBodyTests.settle(srv);
             int32 port = H2StreamingBodyTests.port(srv);
             String got #= H2StreamingBodyTests.upload(port, "/whole", (int64) 4194304, H2StreamingBodyTests.SEND, 30000);
             c.that(!got.startsWith("len="), "with streaming off the same body is refused (" + got + ")");
@@ -1313,7 +1351,7 @@ public final class H2StreamingBodyTests {
         scope {
             HttpServer srv #= H2StreamingBodyTests.partServer(0);
             Task<int32> sv = spawn serveIt(srv);
-            DispatchTests.settle(srv);
+            H2StreamingBodyTests.settle(srv);
             int32 port = H2StreamingBodyTests.port(srv);
             H2StreamingBodyTests.partOrder = "";
             H2StreamingBodyTests.partRunsA = 0;
@@ -1335,7 +1373,7 @@ public final class H2StreamingBodyTests {
         scope {
             HttpServer srv #= H2StreamingBodyTests.partServer(0);
             Task<int32> sv = spawn serveIt(srv);
-            DispatchTests.settle(srv);
+            H2StreamingBodyTests.settle(srv);
             int32 port = H2StreamingBodyTests.port(srv);
             H2StreamingBodyTests.partOrder = "";
             H2StreamingBodyTests.partRunsA = 0;
@@ -1358,7 +1396,7 @@ public final class H2StreamingBodyTests {
         scope {
             HttpServer srv #= H2StreamingBodyTests.partServer(1024);
             Task<int32> sv = spawn serveIt(srv);
-            DispatchTests.settle(srv);
+            H2StreamingBodyTests.settle(srv);
             int32 port = H2StreamingBodyTests.port(srv);
             MultipartBody body #= H2StreamingBodyTests.form("a", 1, 4096);
             int8[] wire #= body.wire();
@@ -1377,7 +1415,7 @@ public final class H2StreamingBodyTests {
         scope {
             HttpServer srv #= H2StreamingBodyTests.partServer(0);
             Task<int32> sv = spawn serveIt(srv);
-            DispatchTests.settle(srv);
+            H2StreamingBodyTests.settle(srv);
             int32 port = H2StreamingBodyTests.port(srv);
             H2StreamingBodyTests.partOrder = "";
             H2StreamingBodyTests.partRunsA = 0;
@@ -1400,7 +1438,7 @@ public final class H2StreamingBodyTests {
         scope {
             HttpServer srv #= H2StreamingBodyTests.server(true);
             Task<int32> sv = spawn serveIt(srv);
-            DispatchTests.settle(srv);
+            H2StreamingBodyTests.settle(srv);
             int32 port = H2StreamingBodyTests.port(srv);
             int64 total = (int64) 1048576;
             String got #= H2StreamingBodyTests.upload(port, "/count", total, H2StreamingBodyTests.TRAILERS, 20000);
@@ -1415,7 +1453,7 @@ public final class H2StreamingBodyTests {
         scope {
             HttpServer srv #= H2StreamingBodyTests.server(true);
             Task<int32> sv = spawn serveIt(srv);
-            DispatchTests.settle(srv);
+            H2StreamingBodyTests.settle(srv);
             int32 port = H2StreamingBodyTests.port(srv);
             H2StreamingBodyTests.readRaised = false;
             H2StreamingBodyTests.raisedAfter = (int64) -1;
@@ -1437,7 +1475,7 @@ public final class H2StreamingBodyTests {
         scope {
             HttpServer srv #= H2StreamingBodyTests.server(true);
             Task<int32> sv = spawn serveIt(srv);
-            DispatchTests.settle(srv);
+            H2StreamingBodyTests.settle(srv);
             int32 port = H2StreamingBodyTests.port(srv);
             String got #= H2StreamingBodyTests.earlyExchange(port, (int64) 1073741824, 20000);
             c.that(got.startsWith("resp=too big;"), "the 413 response arrived (" + got + ")");
@@ -1453,7 +1491,7 @@ public final class H2StreamingBodyTests {
         scope {
             HttpServer srv #= H2StreamingBodyTests.server(true);
             Task<int32> sv = spawn serveIt(srv);
-            DispatchTests.settle(srv);
+            H2StreamingBodyTests.settle(srv);
             int32 port = H2StreamingBodyTests.port(srv);
             String got #= H2StreamingBodyTests.earlyExchange(port, (int64) 167936, 20000);
             c.that(got.startsWith("resp=too big;"), "the 413 response arrived (" + got + ")");
@@ -1469,7 +1507,7 @@ public final class H2StreamingBodyTests {
         scope {
             HttpServer srv #= H2StreamingBodyTests.server(false);
             Task<int32> sv = spawn serveIt(srv);
-            DispatchTests.settle(srv);
+            H2StreamingBodyTests.settle(srv);
             int32 port = H2StreamingBodyTests.port(srv);
             int64 total = (int64) 102400;
             String got #= H2StreamingBodyTests.upload(port, "/whole", total, H2StreamingBodyTests.SEND, 20000);

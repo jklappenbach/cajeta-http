@@ -223,8 +223,9 @@ public class HttpServer {
     }
 
     void serveH2(AsyncReader reader, AsyncWriter writer) {
-        Http2Connection.serve(reader, writer, this.handler, this.buffers, this.limits,
-                              this.serverLimits.maxBodyBytes);
+        Http2Connection.serveWith(reader, writer, this.handler, this.buffers, this.limits,
+                                  this.serverLimits.maxBodyBytes, this.serverLimits.streamRequestBody,
+                                  this.multipartRoutes, this.maxPartBytesN);
     }
 
     static boolean sniffPreface(ByteChannel ch, ByteBuffer in) {
