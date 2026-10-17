@@ -1,0 +1,470 @@
+package dev.cajeta.http.test;
+
+import cajeta.concurrent.Fiber;
+import cajeta.error.Exception;
+import cajeta.io.net.AsyncReader;
+import cajeta.io.net.AsyncWriter;
+import cajeta.io.net.IpAddress;
+import cajeta.io.net.SocketAddress;
+import cajeta.io.net.TcpStream;
+import cajeta.io.net.TimedOutException;
+import cajeta.time.Duration;
+import dev.cajeta.http.Bytes;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.body.Body;
+import dev.cajeta.http.h2.HpackEncoder;
+import dev.cajeta.http.h2.HpackFieldList;
+import dev.cajeta.http.h2.Http2;
+import dev.cajeta.http.h2.Http2ContentFrames;
+import dev.cajeta.http.h2.Http2FrameHeader;
+import dev.cajeta.http.h2.Http2FrameWriter;
+import dev.cajeta.http.h2.Http2Frames;
+import dev.cajeta.http.h2.Http2SettingsList;
+import dev.cajeta.http.server.HttpServer;
+import dev.cajeta.http.server.HttpServerBuilder;
+import dev.cajeta.http.server.ServerLimits;
+import dev.cajeta.unit.Check;
+
+/**
+ * h2-streaming-request-body plan Unit 1 (spec §2.1, §2.2): an h2 stream whose
+ * body streams is dispatched at end of HEADERS, and the handler's reads park
+ * on the stream's body channel until DATA arrives. The client here honors the
+ * server's flow-control windows, so what it measures is the server's
+ * behavior, not a window violation.
+ */
+public final class H2StreamingBodyTests {
+    static boolean handlerStarted;
+    static boolean streamedSeen;
+    static int64 counted;
+    static int64 alloc;
+    static boolean startedBeforeData;
+    static boolean readRaised;
+    static boolean liveAfterFail;
+    static final int32 SEND = 0;          // send the body under the windows
+    static final int32 WAIT_HANDLER = 1;  // first wait for the handler to start
+    static final int32 RESET_EARLY = 2;   // one frame, then RST_STREAM(CANCEL)
+
+    public static void run(Check c) {
+        System.stdout.println("-- h2 streaming body: dispatched at end of HEADERS, before any DATA (1.1.1) --");
+        H2StreamingBodyTests.dispatchAtHead(c);
+        System.stdout.println("-- h2 streaming body: 64 MB read in 64 KB steps, parking between frames (1.1.2) --");
+        H2StreamingBodyTests.readsIncrementally(c);
+        System.stdout.println("-- h2 streaming body: a parked read blocks neither another stream nor another connection (1.1.3) --");
+        H2StreamingBodyTests.parkedReadBlocksNothingElse(c);
+        System.stdout.println("-- h2 streaming body: without streaming a body is held whole at END_STREAM as before (1.1.4) --");
+        H2StreamingBodyTests.wholeUnchanged(c);
+        System.stdout.println("-- h2 streaming body: a reset under an open body raises in the handler's read (1.1.5) --");
+        H2StreamingBodyTests.resetRaises(c);
+    }
+
+    // ----- server --------------------------------------------------------
+
+    static void handle(HttpRequest q, HttpResponse r) {
+        if (Bytes.equals(q.path(), "/count")) {
+            H2StreamingBodyTests.handlerStarted = true;
+            H2StreamingBodyTests.streamedSeen = q.bodyStreamed();
+            Body b = q.bodyStream();
+            if (b == null) {
+                r.status(500);
+                r.body("not streamed");
+                return;
+            }
+            int64 a0 = Cajeta.allocatedBytes();
+            AsyncReader rd = b.reader();
+            int8[] buf = heap int8[65536];
+            int64 total = (int64) 0;
+            boolean going = true;
+            while (going) {
+                int32 n = 0;
+                try {
+                    n = rd.read(buf, 0, 65536);
+                } catch (Exception e) {
+                    H2StreamingBodyTests.readRaised = true;
+                    H2StreamingBodyTests.liveAfterFail = b.live();
+                    r.status(400);
+                    r.body("body ended early");
+                    return;
+                }
+                if (n <= 0) {
+                    going = false;
+                } else {
+                    total = total + (int64) n;
+                }
+            }
+            H2StreamingBodyTests.counted = total;
+            H2StreamingBodyTests.alloc = Cajeta.allocatedBytes() - a0;
+            r.body("n=" + total);
+            return;
+        }
+        if (Bytes.equals(q.path(), "/whole")) {
+            r.body("len=" + q.bodyLength() + " streamed=" + q.bodyStreamed());
+            return;
+        }
+        r.body("plain");
+    }
+
+    static #HttpServer server(boolean streaming) {
+        HttpServerBuilder b #= HttpServer.builder();
+        b.bind("127.0.0.1:0");
+        b.handler((HttpRequest q, HttpResponse r) -> H2StreamingBodyTests.handle(q, r));
+        b.h2PriorKnowledge();
+        b.framers(1);
+        if (streaming) {
+            ServerLimits l #= ServerLimits.of(5000, 15000, (int64) 0, false);
+            l.streamRequestBody = true;
+            b.serverLimits(#l);
+        }
+        return b.build();
+    }
+
+    public static async int32 serveIt(HttpServer srv) {
+        srv.serve();
+        return 1;
+    }
+
+    static int32 port(HttpServer srv) {
+        return srv.server.listener.boundPort();
+    }
+
+    // ----- a flow-controlled h2 client --------------------------------------
+
+    static #String own(String s) {
+        return s.substring(0, s.byteLength());
+    }
+
+    /**
+     * Reads one frame header, polling: returns -1 when no byte arrived within
+     * `pollMs` (nothing consumed), 0 when the stream ended, 1 with the header
+     * in `hdr` once all nine bytes are in.
+     */
+    static int32 pollHeader(AsyncReader r, int8[] hdr, int32 pollMs, int64 deadline) {
+        int32 off = 0;
+        while (off < 9) {
+            int32 g = 0;
+            try {
+                g = r.readWithin(hdr, off, 9 - off, pollMs);
+            } catch (TimedOutException t) {
+                // Nothing within the poll: a miss when no byte of this header
+                // has arrived yet, otherwise keep waiting for the rest.
+                if (off == 0) {
+                    return -1;
+                }
+                if (DispatchTests.nowMs() >= deadline) {
+                    return 0;
+                }
+                g = 0;
+            } catch (Exception e) {
+                return 0;
+            }
+            if (g == 0 && off > 0 && DispatchTests.nowMs() >= deadline) {
+                return 0;
+            }
+            if (g == 0 && off == 0) {
+                return 0;   // EOF before the header
+            }
+            off = off + g;
+        }
+        return 1;
+    }
+
+    static boolean readExact(AsyncReader r, int8[] buf, int32 n, int64 deadline) {
+        int32 off = 0;
+        while (off < n) {
+            int32 g = 0;
+            try {
+                g = r.readWithin(buf, off, n - off, 2000);
+            } catch (TimedOutException t) {
+                if (DispatchTests.nowMs() >= deadline) {
+                    return false;
+                }
+                g = 0;
+            } catch (Exception e) {
+                return false;
+            }
+            if (g == 0 && DispatchTests.nowMs() >= deadline) {
+                return false;
+            }
+            off = off + g;
+        }
+        return true;
+    }
+
+    /**
+     * POSTs `total` bytes to `path` on stream 1 under the server's windows and
+     * returns the response body text (or a tag naming what ended the
+     * exchange). With `waitForHandler` the client sends no DATA until the
+     * handler has started or three seconds pass, and records which in
+     * `startedBeforeData`.
+     */
+    static #String upload(int32 port, String path, int64 total, int32 mode, int32 ms) {
+        boolean waitForHandler = mode == H2StreamingBodyTests.WAIT_HANDLER;
+        IpAddress ca #= IpAddress.loopbackV4();
+        SocketAddress connAddr #= SocketAddress.of(#ca, port);
+        TcpStream sock #= TcpStream.connectAsync(#connAddr);
+        AsyncReader reader = heap AsyncReader(sock);
+        AsyncWriter writer = heap AsyncWriter(sock);
+        int64 deadline = DispatchTests.nowMs() + (int64) ms;
+
+        int8[] pf #= Http2.preface();
+        writer.writeAll(pf, 0, 24);
+        Http2FrameWriter fw = heap Http2FrameWriter();
+        Http2SettingsList empty = heap Http2SettingsList();
+        Http2Frames.writeSettings(fw, empty);
+        HpackEncoder enc = heap HpackEncoder(Http2.DEFAULT_HEADER_TABLE_SIZE, true);
+        HpackFieldList fl = heap HpackFieldList();
+        fl.put(H2StreamingBodyTests.own(":method"), H2StreamingBodyTests.own("POST"));
+        fl.put(H2StreamingBodyTests.own(":path"), H2StreamingBodyTests.own(path));
+        fl.put(H2StreamingBodyTests.own(":scheme"), H2StreamingBodyTests.own("http"));
+        fl.put(H2StreamingBodyTests.own(":authority"), H2StreamingBodyTests.own("127.0.0.1"));
+        fl.put(H2StreamingBodyTests.own("content-length"), H2StreamingBodyTests.own("" + total));
+        int8[] block #= enc.encode(fl);
+        Http2ContentFrames.writeHeaders(fw, 1, block, (int32) block.count(), total == (int64) 0, true, 0);
+        int8[] out #= fw.toBytes();
+        writer.writeAll(out, 0, (int32) out.count());
+        writer.flush();
+
+        if (waitForHandler) {
+            int32 w = 0;
+            while (w < 600 && !H2StreamingBodyTests.handlerStarted) {
+                Fiber.sleep(Duration.ofMillis((int64) 5));
+                w = w + 1;
+            }
+            H2StreamingBodyTests.startedBeforeData = H2StreamingBodyTests.handlerStarted;
+        }
+
+        int8[] chunk = heap int8[16384];
+        int32 ci = 0;
+        while (ci < 16384) {
+            chunk[ci] = (int8) (97 + (ci % 23));
+            ci = ci + 1;
+        }
+        // One full DATA frame, built once: the client must not be the
+        // allocator the bounded-memory check sees, since it shares the process.
+        Http2FrameWriter fullW = heap Http2FrameWriter();
+        Http2ContentFrames.writeData(fullW, 1, chunk, 16384, false, 0);
+        int8[] fullFrame #= fullW.toBytes();
+        int64 streamWin = (int64) 65535;
+        int64 connWin = (int64) 65535;
+        int64 serverInitial = (int64) 65535;
+        int64 sent = (int64) 0;
+        int8[] hdr = heap int8[9];
+        int8[] body = heap int8[4096];
+        int32 bodyLen = 0;
+        String ended = null;
+        boolean responseDone = false;
+        while (ended == null && !responseDone && DispatchTests.nowMs() < deadline) {
+            boolean canSend = sent < total && streamWin > (int64) 0 && connWin > (int64) 0;
+            if (canSend) {
+                int64 n = total - sent;
+                if (n > (int64) 16384) { n = (int64) 16384; }
+                if (n > streamWin) { n = streamWin; }
+                if (n > connWin) { n = connWin; }
+                boolean last = sent + n >= total;
+                try {
+                    if (n == (int64) 16384 && !last) {
+                        writer.writeAll(fullFrame, 0, (int32) fullFrame.count());
+                    } else {
+                        Http2FrameWriter dw = heap Http2FrameWriter();
+                        Http2ContentFrames.writeData(dw, 1, chunk, (int32) n, last, 0);
+                        int8[] db #= dw.toBytes();
+                        writer.writeAll(db, 0, (int32) db.count());
+                    }
+                    writer.flush();
+                } catch (Exception e) {
+                    ended = "write failed after " + sent;
+                }
+                sent = sent + n;
+                streamWin = streamWin - n;
+                connWin = connWin - n;
+                if (mode == H2StreamingBodyTests.RESET_EARLY) {
+                    Http2FrameWriter rw = heap Http2FrameWriter();
+                    Http2Frames.writeRstStream(rw, 1, (int64) Http2.CANCEL);
+                    int8[] rb #= rw.toBytes();
+                    writer.writeAll(rb, 0, (int32) rb.count());
+                    writer.flush();
+                    ended = "reset sent after " + sent;
+                }
+            }
+            int32 ph = H2StreamingBodyTests.pollHeader(reader, hdr, canSend ? 1 : 50, deadline);
+            if (ph == 0) {
+                ended = "connection ended after " + sent;
+            } else if (ph == 1) {
+                Http2FrameHeader h #= Http2FrameHeader(hdr);
+                int32 type = h.typeCode();
+                int32 flags = h.flags();
+                int32 sid = h.streamId();
+                int32 len = h.length();
+                int8[] pl = heap int8[len > 0 ? len : 1];
+                if (len > 0 && !H2StreamingBodyTests.readExact(reader, pl, len, deadline)) {
+                    ended = "payload cut after " + sent;
+                } else if (type == Http2.FRAME_SETTINGS) {
+                    if ((flags & Http2.FLAG_ACK) == 0) {
+                        Http2SettingsList sl #= Http2Frames.parseSettings(pl, 0, len, flags, sid);
+                        int64 iw = sl.get(Http2.SETTINGS_INITIAL_WINDOW_SIZE, serverInitial);
+                        streamWin = streamWin + (iw - serverInitial);
+                        serverInitial = iw;
+                        Http2FrameWriter afw = heap Http2FrameWriter();
+                        Http2Frames.writeSettingsAck(afw);
+                        int8[] ab #= afw.toBytes();
+                        writer.writeAll(ab, 0, (int32) ab.count());
+                        writer.flush();
+                    }
+                } else if (type == Http2.FRAME_WINDOW_UPDATE) {
+                    int32 inc = Http2Frames.parseWindowUpdate(pl, 0, len, sid);
+                    if (sid == 0) {
+                        connWin = connWin + (int64) inc;
+                    } else if (sid == 1) {
+                        streamWin = streamWin + (int64) inc;
+                    }
+                } else if (type == Http2.FRAME_DATA) {
+                    int64 reg = Http2ContentFrames.dataRegion(pl, len, flags, sid);
+                    int32 dOff = (int32) (reg >> 32);
+                    int32 dLen = (int32) (reg & (int64) 0xFFFFFFFF);
+                    int32 k = 0;
+                    while (k < dLen && bodyLen < 4096) {
+                        body[bodyLen] = pl[dOff + k];
+                        bodyLen = bodyLen + 1;
+                        k = k + 1;
+                    }
+                    if ((flags & Http2.FLAG_END_STREAM) != 0) {
+                        responseDone = true;
+                    }
+                } else if (type == Http2.FRAME_HEADERS) {
+                    if ((flags & Http2.FLAG_END_STREAM) != 0) {
+                        responseDone = true;
+                    }
+                } else if (type == Http2.FRAME_RST_STREAM) {
+                    ended = "RST_STREAM after " + sent;
+                } else if (type == Http2.FRAME_GOAWAY) {
+                    ended = "GOAWAY after " + sent;
+                }
+            }
+        }
+        sock.close();
+        if (responseDone) {
+            String s = heap String(body, bodyLen);
+            return #s;
+        }
+        if (ended == null) {
+            ended = "timed out after " + sent + " of " + total;
+        }
+        return ended.substring(0, ended.byteLength());
+    }
+
+    // ----- cases ----------------------------------------------------------
+
+    /** 1.1.1: with streamRequestBody on, the handler starts before any DATA is sent (spec 2.1.1). */
+    static void dispatchAtHead(Check c) {
+        scope {
+            HttpServer srv #= H2StreamingBodyTests.server(true);
+            Task<int32> sv = spawn serveIt(srv);
+            DispatchTests.settle(srv);
+            int32 port = H2StreamingBodyTests.port(srv);
+            H2StreamingBodyTests.handlerStarted = false;
+            H2StreamingBodyTests.startedBeforeData = false;
+            H2StreamingBodyTests.counted = (int64) 0;
+            int64 total = (int64) 1048576;
+            String got #= H2StreamingBodyTests.upload(port, "/count", total, H2StreamingBodyTests.WAIT_HANDLER, 20000);
+            c.that(H2StreamingBodyTests.startedBeforeData, "the handler started before the client sent any DATA");
+            c.that(H2StreamingBodyTests.streamedSeen, "and saw a streamed body");
+            c.that(got.equals("n=" + total), "and read all of it once it came (" + got + ")");
+            c.eqInt(H2StreamingBodyTests.counted, total, "counted every byte");
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+    }
+
+    /** 1.1.2: a 64 MB body is read in 64 KB steps as it arrives, in bounded memory (spec 2.2.1). */
+    static void readsIncrementally(Check c) {
+        scope {
+            HttpServer srv #= H2StreamingBodyTests.server(true);
+            Task<int32> sv = spawn serveIt(srv);
+            DispatchTests.settle(srv);
+            int32 port = H2StreamingBodyTests.port(srv);
+            H2StreamingBodyTests.handlerStarted = false;
+            H2StreamingBodyTests.counted = (int64) 0;
+            int64 total = (int64) 67108864;
+            String got #= H2StreamingBodyTests.upload(port, "/count", total, H2StreamingBodyTests.SEND, 90000);
+            c.that(got.equals("n=" + total), "the handler read every byte (" + got + ")");
+            c.eqInt(H2StreamingBodyTests.counted, total, "counted incrementally");
+            c.that(H2StreamingBodyTests.alloc < (int64) 8388608,
+                "in bounded memory (" + H2StreamingBodyTests.alloc + " bytes allocated)");
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+    }
+
+    /**
+     * 1.1.3: a handler parked on its body read holds nothing but its own
+     * stream: a second stream on the connection and a second connection are
+     * answered meanwhile (spec 2.2.2).
+     */
+    static void parkedReadBlocksNothingElse(Check c) {
+        scope {
+            HttpServer srv #= H2StreamingBodyTests.server(true);
+            Task<int32> sv = spawn serveIt(srv);
+            DispatchTests.settle(srv);
+            int32 port = H2StreamingBodyTests.port(srv);
+            H2StreamingBodyTests.handlerStarted = false;
+            // Stream 1: a POST to /count with no DATA ever sent; its handler
+            // parks. Stream 3: a GET answered at once.
+            String[] paths = heap String[2];
+            paths[0] = "/count";
+            paths[1] = "/plain";
+            boolean[] close = heap boolean[2];
+            close[0] = false;
+            close[1] = true;
+            int32[] order = heap int32[2];
+            int32 first = DispatchTests.h2Exchange(port, paths, close, 2, 1, 5000, order);
+            c.eqInt((int64) first, (int64) 3, "the GET on stream 3 is answered while stream 1's handler parks");
+            c.that(H2StreamingBodyTests.handlerStarted, "and stream 1's handler had started");
+            String[] one = heap String[1];
+            one[0] = "/plain";
+            boolean[] oneClose = heap boolean[1];
+            oneClose[0] = true;
+            int32[] order2 = heap int32[1];
+            int32 other = DispatchTests.h2Exchange(port, one, oneClose, 1, 1, 5000, order2);
+            c.eqInt((int64) other, (int64) 1, "a second connection is answered too");
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+    }
+
+    /** 1.1.5: RST_STREAM from the client under an open body: the handler's next read raises and the body is not live (spec 2.2.3). */
+    static void resetRaises(Check c) {
+        scope {
+            HttpServer srv #= H2StreamingBodyTests.server(true);
+            Task<int32> sv = spawn serveIt(srv);
+            DispatchTests.settle(srv);
+            int32 port = H2StreamingBodyTests.port(srv);
+            H2StreamingBodyTests.readRaised = false;
+            H2StreamingBodyTests.liveAfterFail = true;
+            String got #= H2StreamingBodyTests.upload(port, "/count", (int64) 1048576, H2StreamingBodyTests.RESET_EARLY, 5000);
+            int32 w = 0;
+            while (w < 600 && !H2StreamingBodyTests.readRaised) {
+                Fiber.sleep(Duration.ofMillis((int64) 5));
+                w = w + 1;
+            }
+            c.that(H2StreamingBodyTests.readRaised, "the handler's read raised after the reset (" + got + ")");
+            c.that(!H2StreamingBodyTests.liveAfterFail, "and the body reports not live");
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+    }
+
+    /** 1.1.4: with streaming off, a body is held whole and the handler runs at END_STREAM as before (spec 2.1.3). */
+    static void wholeUnchanged(Check c) {
+        scope {
+            HttpServer srv #= H2StreamingBodyTests.server(false);
+            Task<int32> sv = spawn serveIt(srv);
+            DispatchTests.settle(srv);
+            int32 port = H2StreamingBodyTests.port(srv);
+            int64 total = (int64) 102400;
+            String got #= H2StreamingBodyTests.upload(port, "/whole", total, H2StreamingBodyTests.SEND, 20000);
+            c.that(got.equals("len=" + total + " streamed=false"), "the body is held whole (" + got + ")");
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+    }
+}

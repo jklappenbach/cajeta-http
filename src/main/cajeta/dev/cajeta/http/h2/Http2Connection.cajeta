@@ -14,9 +14,13 @@ import dev.cajeta.http.PushEntry;
 import dev.cajeta.http.h1.HttpParserLimits;
 import dev.cajeta.http.server.ConnectionBuffers;
 import cajeta.collection.ArrayList;
+import cajeta.concurrent.Channel;
+import cajeta.lang.Optional;
 import cajeta.concurrent.AtomicInt32;
 import cajeta.io.net.ByteBuffer;
 import dev.cajeta.http.server.ServerLimits;
+import dev.cajeta.http.server.MultipartMode;
+import dev.cajeta.http.server.MultipartRoutes;
 
 /**
  * The HTTP/2 server engine for one connection. Frames are read in order, each
@@ -63,6 +67,15 @@ public final class Http2Connection {
     public AtomicInt32 streamsInFlight;
     public boolean ended;      // GOAWAY sent or received, or the peer finished
     NowWriter nowWriter;
+    // Streaming request bodies (h2-streaming-request-body spec §2.1): a
+    // stream opens at head complete when every body streams or its route is
+    // a STREAM multipart route. Open slots belong to this list for their
+    // whole life; the pool runs their handlers on borrows.
+    boolean streamAll;
+    MultipartRoutes mpRoutes;
+    Http2StreamSlot[] openArr;      // borrows of the open slots, for feeding DATA by stream id
+    int32 openN;
+    Channel<Http2StreamSlot> finishedOpen;   // titles a worker hands back once its handler returned
 
     public Http2Connection(AsyncReader reader, AsyncWriter writer,
                            (HttpRequest, HttpResponse) -> void handler,
@@ -78,7 +91,10 @@ public final class Http2Connection {
         this.frameBuf = heap int8[Http2.DEFAULT_MAX_FRAME_SIZE];
         this.local = heap Http2Settings();
         this.local.maxConcurrentStreams = (int64) 100;
-        this.local.initialWindowSize = (int64) Http2Connection.RECV_WINDOW;
+        // Streams start at the default window; a stream held whole is topped
+        // up to the receive window at head complete, an open stream to its
+        // slab (spec §2.3), so a window never exceeds what can hold it.
+        this.local.initialWindowSize = (int64) Http2.DEFAULT_INITIAL_WINDOW_SIZE;
         this.remote = heap Http2Settings();
         this.pendConnRecv = 0;
         this.pendStreamRecv = 0;
@@ -98,6 +114,113 @@ public final class Http2Connection {
         this.streamsInFlight = heap AtomicInt32(0);
         this.ended = false;
         this.nowWriter = null;
+        this.streamAll = false;
+        this.mpRoutes = null;
+        this.openArr = heap Http2StreamSlot[16];
+        this.openN = 0;
+        this.finishedOpen = heap Channel<Http2StreamSlot>(256);
+    }
+
+    /** The server's body modes: `all` is `streamRequestBody`; `routes` the PART and STREAM routes, or null. */
+    public void streaming(boolean all, MultipartRoutes routes) {
+        this.streamAll = all;
+        this.mpRoutes #= routes;
+    }
+
+    /** Whether a stream with a body opens at head complete (spec §2.1). */
+    boolean wantsOpen(HttpRequest req) {
+        if (this.streamAll) {
+            return true;
+        }
+        return this.mpRoutes != null && this.mpRoutes.modeFor(req) == MultipartMode.STREAM;
+    }
+
+    /** Grants `n` bytes of stream credit from the framer. */
+    void grantStream(int32 sid, int32 n) {
+        if (n <= 0) {
+            return;
+        }
+        Http2FrameWriter fw = heap Http2FrameWriter();
+        Http2Frames.writeWindowUpdate(fw, sid, n);
+        this.control(fw);
+    }
+
+    /** The open slot of stream `sid`, or null. */
+    Http2StreamSlot openSlot(int32 sid) {
+        int32 i = 0;
+        while (i < this.openN) {
+            if (this.openArr[i].sid == sid) {
+                return this.openArr[i];
+            }
+            i = i + 1;
+        }
+        return null;
+    }
+
+    /** Remembers a borrow of an open slot while its title rides to the pool. */
+    void trackOpen(^Http2StreamSlot s) {
+        if (this.openN == this.openArr.count()) {
+            Http2StreamSlot[] g = heap Http2StreamSlot[this.openN * 2];
+            int32 i = 0;
+            while (i < this.openN) {
+                g[i] = this.openArr[i];
+                this.openArr[i] = null;
+                i = i + 1;
+            }
+            this.openArr #= g;
+        }
+        this.openArr[this.openN] = s;
+        this.openN = this.openN + 1;
+    }
+
+    void untrackOpen(int32 sid) {
+        int32 i = 0;
+        while (i < this.openN) {
+            if (this.openArr[i].sid == sid) {
+                int32 last = this.openN - 1;
+                this.openArr[i] = this.openArr[last];
+                this.openArr[last] = null;
+                this.openN = last;
+                return;
+            }
+            i = i + 1;
+        }
+    }
+
+    /**
+     * Frees every open slot whose handler has returned (its title came back
+     * through `finishedOpen`). One whose body is still open is cut with
+     * RST_STREAM(NO_ERROR) after its response (spec §2.5; the 256 KB drain is
+     * the plan's Unit 3). Runs on the framer, or on the connection loop under
+     * the old model: the owner of the open list.
+     */
+    public void reapOpen() {
+        boolean more = true;
+        while (more) {
+            Optional<Http2StreamSlot> o = this.finishedOpen.tryReceive();
+            if (!o.isPresent()) {
+                more = false;
+            } else {
+                Http2StreamSlot t #= o.take();
+                this.untrackOpen(t.sid);
+                if (!t.bodyEnded) {
+                    t.failOpenBody("handler returned before the body ended");
+                    if (this.streams.has(t.sid)) {
+                        this.streams.sendRst(t.sid);
+                    }
+                    Http2FrameWriter fw = heap Http2FrameWriter();
+                    Http2Frames.writeRstStream(fw, t.sid, (int64) Http2.NO_ERROR);
+                    this.control(fw);
+                }
+                t.closeOpen(this.bufs);
+                this.giveSlot(#t);
+            }
+        }
+    }
+
+    /** Open streams whose handlers are still running or whose bodies are still arriving. */
+    public int32 openCount() {
+        return this.openN;
     }
 
     /**
@@ -199,9 +322,16 @@ public final class Http2Connection {
         return this.readyList.count();
     }
 
-    /** The peer finished writing: no more frames can complete. */
+    /** The peer finished writing: no more frames can complete; a handler parked on an open body wakes and raises. */
     public void endInput() {
         this.ended = true;
+        int32 i = 0;
+        while (i < this.openN) {
+            if (!this.openArr[i].bodyEnded) {
+                this.openArr[i].failOpenBody("connection closed under the request body");
+            }
+            i = i + 1;
+        }
     }
 
     public int32 readyCount() {
@@ -228,6 +358,19 @@ public final class Http2Connection {
         int32 maxFrame = (int32) c.remote.maxFrameSize;
         boolean pushOk = c.remote.pushEnabled();
         int32 initWin = (int32) c.remote.initialWindowSize;
+        if (slot.open) {
+            // An open stream: the handler runs here, then the title goes back
+            // to the connection, whose framer frees the slot once the body is
+            // over (reapOpen) and keeps feeding it until then.
+            int32 osid = slot.sid;
+            try {
+                Http2Connection.answer(c, slot, maxFrame, pushOk, initWin);
+            } catch (Exception e) {
+            }
+            slot.handlerDone.store(1);
+            c.finishedOpen.send(#slot);
+            return osid;
+        }
         int32 sid = 0;
         try {
             sid = Http2Connection.handleStream(c, #slot, maxFrame, pushOk, initWin);
@@ -236,12 +379,19 @@ public final class Http2Connection {
         return sid;
     }
 
-    /** Returns every slot's buffers; the framer calls it when it drops the connection. */
+    /** Returns every slot's buffers; the framer calls it when it drops the connection, once nothing is in flight. */
     public void release() {
         while (this.readyList.count() > 0) {
             Http2StreamSlot s #= this.readyList.removeAt(0);
             this.giveSlot(#s);
         }
+        this.reapOpen();
+        int32 i = 0;
+        while (i < this.openN) {
+            this.openArr[i] = null;
+            i = i + 1;
+        }
+        this.openN = 0;
         this.releaseSlots();
     }
 
@@ -429,7 +579,17 @@ public final class Http2Connection {
         if (endStream) {
             s.endBody();
             this.ready = #s;
+        } else if (this.wantsOpen(s.req)) {
+            // Head complete is the hold point (spec §2.1): the slot opens over
+            // one more slab, its window becomes that slab, and the connection
+            // keeps the title while a borrow rides to the pool.
+            s.openBody(this.bufs, s.req.contentLength());
+            this.grantStream(sid, s.bodyWindow() - Http2.DEFAULT_INITIAL_WINDOW_SIZE);
+            this.trackOpen(s);
+            this.ready = #s;
         } else {
+            // Held whole: the stream may take the connection's receive window.
+            this.grantStream(sid, Http2Connection.RECV_WINDOW - Http2.DEFAULT_INITIAL_WINDOW_SIZE);
             if (this.cur != null) {
                 Http2StreamSlot old #= this.cur;
                 this.giveSlot(#old);
@@ -489,6 +649,20 @@ public final class Http2Connection {
         int64 reg = Http2ContentFrames.dataRegion(payload, len, flags, sid);
         int32 dOff = (int32) (reg >> 32);
         int32 dLen = (int32) (reg & (int64) 0xFFFFFFFF);
+        Http2StreamSlot os = this.openSlot(sid);
+        if (os != null) {
+            // An open stream: connection credit returns on receipt as for any
+            // stream; stream credit returns as the handler consumes (spec §2.3),
+            // and `maxBodyBytes` does not bound what the handler reads (§2.6).
+            this.replenishConn(len);
+            if (!os.feedBody(payload, dOff, dLen)) {
+                throw heap Http2Exception("DATA past the stream's window", Http2.FLOW_CONTROL_ERROR, sid);
+            }
+            if (endStream) {
+                os.endOpenBody();
+            }
+            return;
+        }
         int32 have = this.cur != null && this.cur.sid == sid ? this.cur.bodyLen : 0;
         if (this.maxBody > 0 && (int64) have + (int64) dLen > this.maxBody) {
             throw heap Http2Exception("request body exceeds maxBodyBytes (" + this.maxBody + ")",
@@ -523,6 +697,10 @@ public final class Http2Connection {
             this.streams.recvRst(sid);
         }
         this.gate.cancel(sid);
+        Http2StreamSlot os = this.openSlot(sid);
+        if (os != null && !os.bodyEnded) {
+            os.failOpenBody("stream reset by the peer");
+        }
         if (this.cur != null && this.cur.sid == sid) {
             Http2StreamSlot s #= this.cur;
             this.cur = null;
@@ -543,6 +721,15 @@ public final class Http2Connection {
     public static async int32 handleStream(Http2Connection c, #Http2StreamSlot slot, int32 maxFrame,
                                            boolean pushEnabled, int32 initWin) {
         Http2StreamSlot s #= slot;
+        int32 sid = s.sid;
+        Http2Connection.answer(c, s, maxFrame, pushEnabled, initWin);
+        c.giveSlot(#s);
+        return sid;
+    }
+
+    /** Runs the handler on the slot's request, writes the response and any pushes, and closes the stream's send side. */
+    static void answer(Http2Connection c, Http2StreamSlot s, int32 maxFrame,
+                       boolean pushEnabled, int32 initWin) {
         s.maxFrame = maxFrame;
         HttpResponse r = s.res;
         r.reset();
@@ -585,8 +772,6 @@ public final class Http2Connection {
         } catch (Exception e) {
         }
         c.gate.closeStream(sid);
-        c.giveSlot(#s);
-        return sid;
     }
 
     static void streamBody(Http2WriteSide ws, Http2SendGate gate, int32 streamId,

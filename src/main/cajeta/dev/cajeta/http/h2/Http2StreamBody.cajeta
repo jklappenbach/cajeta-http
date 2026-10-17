@@ -1,0 +1,60 @@
+package dev.cajeta.http.h2;
+
+import cajeta.io.net.AsyncReader;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.MediaType;
+import dev.cajeta.http.body.Body;
+
+/** The streamed body of an open h2 stream: what `HttpRequest.bodyStream()` hands the handler (spec §2.2). */
+final class Http2StreamBody implements Body {
+    Http2BodyChannel chan;
+    HttpRequest req;
+    AsyncReader rd;
+    MediaType type;
+    boolean typed;
+    int64 length;
+
+    Http2StreamBody(Http2BodyChannel chan) {
+        this.chan #= chan;
+        this.req = null;
+        this.rd = null;
+        this.type = null;
+        this.typed = false;
+        this.length = (int64) -1;
+    }
+
+    /** Rebinds to the stream being opened, whose body is `length` bytes or -1 when undeclared. */
+    void reset(HttpRequest req, int64 length) {
+        this.req #= req;
+        this.rd = null;
+        this.type = null;
+        this.typed = false;
+        this.length = length;
+    }
+
+    public int64 contentLength() {
+        return this.length;
+    }
+
+    public MediaType contentType() {
+        if (!this.typed) {
+            this.typed = true;
+            this.type #= this.req.contentType();
+        }
+        return this.type;
+    }
+
+    public AsyncReader reader() {
+        if (this.rd == null) {
+            this.rd = heap AsyncReader(this.chan);
+        }
+        return this.rd;
+    }
+
+    public void abort() {
+    }
+
+    public boolean live() {
+        return !this.chan.isOver();
+    }
+}

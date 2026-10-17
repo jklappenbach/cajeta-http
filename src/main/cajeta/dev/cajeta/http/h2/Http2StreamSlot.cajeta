@@ -2,6 +2,7 @@ package dev.cajeta.http.h2;
 
 import cajeta.lang.String;
 import cajeta.lang.Slice;
+import cajeta.concurrent.AtomicInt32;
 import cajeta.io.net.ByteBuffer;
 import dev.cajeta.http.Bytes;
 import dev.cajeta.http.HeadScanner;
@@ -33,6 +34,16 @@ public final class Http2StreamSlot implements ResponseTransport {
     int32 maxFrame;
     boolean headPending;
     Http2StreamSlot next;
+    // An open stream (h2-streaming-request-body spec §2.1): the handler runs
+    // from head complete and reads the body as it arrives through `body`,
+    // which lives in one more pooled slab. The connection owns an open slot
+    // for its whole life; the pool runs the handler on a borrow of it.
+    ByteBuffer bodyBuf;
+    Http2BodyChannel body;
+    Http2StreamBody streamBody;
+    public boolean open;
+    public boolean bodyEnded;        // the framer's view: END_STREAM or a reset has arrived
+    public AtomicInt32 handlerDone;  // the worker's: the handler returned and the response is out
 
     Http2StreamSlot(ConnectionBuffers bufs, HttpParserLimits limits,
                     Http2WriteSide ws, Http2SendGate gate) {
@@ -46,6 +57,12 @@ public final class Http2StreamSlot implements ResponseTransport {
         this.big = null;
         this.headPending = false;
         this.next = null;
+        this.bodyBuf = null;
+        this.body = null;
+        this.streamBody = null;
+        this.open = false;
+        this.bodyEnded = false;
+        this.handlerDone = heap AtomicInt32(0);
     }
 
     void recycle(ConnectionBuffers bufs) {
@@ -55,6 +72,11 @@ public final class Http2StreamSlot implements ResponseTransport {
         ByteBuffer o #= this.out;
         this.out = null;
         bufs.give(#o);
+        if (this.bodyBuf != null) {
+            ByteBuffer b #= this.bodyBuf;
+            this.bodyBuf = null;
+            bufs.give(#b);
+        }
     }
 
     static boolean pseudo(Slice<int8> n) {
@@ -190,6 +212,59 @@ public final class Http2StreamSlot implements ResponseTransport {
             return;
         }
         this.req.bindBody(this.headLen, this.bodyLen);
+    }
+
+    /**
+     * Opens the body for streaming at head complete (spec §2.1): one pooled
+     * slab holds what the stream's window admits, the handler reads it
+     * through `HttpRequest.bodyStream()`, and `expected` is the declared
+     * length or -1.
+     */
+    void openBody(ConnectionBuffers bufs, int64 expected) {
+        if (this.bodyBuf == null) {
+            this.bodyBuf #= bufs.take();
+        }
+        if (this.body == null) {
+            this.body = heap Http2BodyChannel();
+            this.streamBody = heap Http2StreamBody(this.body);
+        }
+        this.bodyBuf.clear();
+        this.body.open(this.bodyBuf.array(), this.bodyBuf.capacity(), this.ws, this.sid);
+        this.streamBody.reset(this.req, expected);
+        this.req.bindStream(this.streamBody);
+        this.open = true;
+        this.bodyEnded = false;
+        this.handlerDone.store(0);
+    }
+
+    /** The stream window an open body can take: its slab. */
+    int32 bodyWindow() {
+        return this.bodyBuf.capacity();
+    }
+
+    boolean feedBody(int8[] src, int32 off, int32 len) {
+        return this.body.feed(src, off, len);
+    }
+
+    void endOpenBody() {
+        this.bodyEnded = true;
+        this.body.end();
+    }
+
+    void failOpenBody(^String why) {
+        this.bodyEnded = true;
+        this.body.fail(why);
+    }
+
+    /** Done with an open stream: the body slab goes back and the request forgets the stream. */
+    void closeOpen(ConnectionBuffers bufs) {
+        this.open = false;
+        this.req.bindBody(this.headLen, 0);
+        if (this.bodyBuf != null) {
+            ByteBuffer b #= this.bodyBuf;
+            this.bodyBuf = null;
+            bufs.give(#b);
+        }
     }
 
     public void head(HttpResponse r, boolean endStream) {

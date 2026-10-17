@@ -239,6 +239,7 @@ public final class ConnectionFramer {
                     // The count moves here and only here, so a worker is
                     // never past a drop while it still holds the connection.
                     c.h2InFlight = c.h2InFlight - 1;
+                    c.h2.reapOpen();
                     if (c.closed || (c.h2.ended && c.h2Quiet())) {
                         this.drop(c);
                     } else if (this.stopping && c.h2Quiet()) {

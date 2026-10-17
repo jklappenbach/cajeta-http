@@ -1,0 +1,213 @@
+package dev.cajeta.http.h2;
+
+import cajeta.lang.String;
+import cajeta.error.Exception;
+import cajeta.io.net.ByteChannel;
+import dev.cajeta.http.UnexpectedEofException;
+
+/**
+ * The body of an open h2 stream (h2-streaming-request-body spec §2.2, §2.3):
+ * the framer feeds DATA into one pooled slab, the handler's reader consumes
+ * it in place and parks here, never on the socket, while nothing has
+ * arrived. Credit for the stream returns as the handler consumes: once a
+ * quarter of the slab has been read since the last grant, a WINDOW_UPDATE
+ * for the stream goes out through the connection's write side, so the peer
+ * can never have more bytes in flight for the stream than the slab holds.
+ * Connection-level credit stays with the framer, returned on receipt as for
+ * every stream; the per-stream window is what bounds memory.
+ */
+public final class Http2BodyChannel implements ByteChannel {
+    pointer lock;
+    pointer cond;
+    int8[] a;           // the body slab, borrowed from the slot while the stream is open
+    int32 cap;
+    int32 rd;
+    int32 wr;
+    boolean ended;
+    boolean failed;
+    String reason;
+    int64 consumed;
+    int64 received;
+    int32 sinceGrant;
+    int32 grantStep;
+    Http2WriteSide ws;
+    int32 sid;
+
+    public Http2BodyChannel() {
+        this.lock = Cajeta.lockNew();
+        this.cond = Cajeta.condvarNew();
+        this.a = null;
+        this.cap = 0;
+        this.rd = 0;
+        this.wr = 0;
+        this.ended = true;
+        this.failed = false;
+        this.reason = null;
+        this.consumed = (int64) 0;
+        this.received = (int64) 0;
+        this.sinceGrant = 0;
+        this.grantStep = 16384;
+        this.ws = null;
+        this.sid = 0;
+    }
+
+    public ~Http2BodyChannel() {
+        Cajeta.condvarDestroy(this.cond);
+        Cajeta.lockDestroy(this.lock);
+    }
+
+    /** Opens over `a[0 .. cap)` for stream `sid`; credit goes back through `ws`. */
+    void open(int8[] a, int32 cap, Http2WriteSide ws, int32 sid) {
+        Cajeta.lockAcquire(this.lock);
+        this.a #= a;
+        this.cap = cap;
+        this.rd = 0;
+        this.wr = 0;
+        this.ended = false;
+        this.failed = false;
+        this.reason = null;
+        this.consumed = (int64) 0;
+        this.received = (int64) 0;
+        this.sinceGrant = 0;
+        this.grantStep = cap / 4 < 1024 ? 1024 : cap / 4;
+        this.ws #= ws;
+        this.sid = sid;
+        Cajeta.lockRelease(this.lock);
+    }
+
+    // ----- the framer's side ----------------------------------------------
+
+    /**
+     * Appends DATA. False when the bytes do not fit even after the unread
+     * run is shifted down: the peer sent past the window it was granted.
+     */
+    boolean feed(int8[] src, int32 off, int32 len) {
+        Cajeta.lockAcquire(this.lock);
+        if (this.ended || this.failed) {
+            Cajeta.lockRelease(this.lock);
+            return true;
+        }
+        if (this.cap - this.wr < len) {
+            int32 n = this.wr - this.rd;
+            int32 i = 0;
+            while (i < n) {
+                this.a[i] = this.a[this.rd + i];
+                i = i + 1;
+            }
+            this.rd = 0;
+            this.wr = n;
+            if (this.cap - this.wr < len) {
+                Cajeta.lockRelease(this.lock);
+                return false;
+            }
+        }
+        Http2.blit(this.a, (int64) this.wr, src, (int64) off, (int64) len);
+        this.wr = this.wr + len;
+        this.received = this.received + (int64) len;
+        Cajeta.condvarNotifyAll(this.cond);
+        Cajeta.lockRelease(this.lock);
+        return true;
+    }
+
+    /** END_STREAM: the reader returns 0 once it has drained what arrived. */
+    void end() {
+        Cajeta.lockAcquire(this.lock);
+        this.ended = true;
+        Cajeta.condvarNotifyAll(this.cond);
+        Cajeta.lockRelease(this.lock);
+    }
+
+    /** A reset or a lost connection: the reader raises once it has drained what arrived. */
+    void fail(^String why) {
+        Cajeta.lockAcquire(this.lock);
+        this.failed = true;
+        this.reason = why;
+        Cajeta.condvarNotifyAll(this.cond);
+        Cajeta.lockRelease(this.lock);
+    }
+
+    boolean isOver() {
+        Cajeta.lockAcquire(this.lock);
+        boolean over = this.ended || this.failed;
+        Cajeta.lockRelease(this.lock);
+        return over;
+    }
+
+    int64 receivedBytes() {
+        Cajeta.lockAcquire(this.lock);
+        int64 n = this.received;
+        Cajeta.lockRelease(this.lock);
+        return n;
+    }
+
+    int64 consumedBytes() {
+        Cajeta.lockAcquire(this.lock);
+        int64 n = this.consumed;
+        Cajeta.lockRelease(this.lock);
+        return n;
+    }
+
+    // ----- the handler's side ---------------------------------------------
+
+    public int64 readAsync(int8[] buf, int64 offset, int64 length) {
+        if (length <= (int64) 0) {
+            return (int64) 0;
+        }
+        Cajeta.lockAcquire(this.lock);
+        while (this.rd == this.wr && !this.ended && !this.failed) {
+            Cajeta.condvarWait(this.cond, this.lock);
+        }
+        if (this.rd == this.wr && this.failed) {
+            String why = this.reason;
+            int64 at = this.consumed;
+            Cajeta.lockRelease(this.lock);
+            throw heap UnexpectedEofException(why == null ? "request body ended early" : why, at);
+        }
+        int32 n = this.wr - this.rd;
+        if ((int64) n > length) {
+            n = (int32) length;
+        }
+        if (n > 0) {
+            Http2.blit(buf, offset, this.a, (int64) this.rd, (int64) n);
+            this.rd = this.rd + n;
+            this.consumed = this.consumed + (int64) n;
+            this.sinceGrant = this.sinceGrant + n;
+            if (this.rd == this.wr) {
+                this.rd = 0;
+                this.wr = 0;
+            }
+        }
+        boolean grant = !this.ended && !this.failed && this.sinceGrant >= this.grantStep;
+        int32 g = this.sinceGrant;
+        if (grant) {
+            this.sinceGrant = 0;
+        }
+        Cajeta.lockRelease(this.lock);
+        if (grant) {
+            this.credit(g);
+        }
+        return (int64) n;
+    }
+
+    /** The body has no per-read clock of its own; the stream's deadline is the connection's. */
+    public int64 readWithin(int8[] buf, int64 offset, int64 length, int32 timeoutMs) {
+        return this.readAsync(buf, offset, length);
+    }
+
+    public void writeAllAsync(int8[] data, int64 offset, int64 length) {
+        throw heap Exception("a request body is read, not written");
+    }
+
+    public void close() {
+    }
+
+    /** Returns `n` bytes of stream credit: the handler's fiber writes the frame, parking on the write lock if it must. */
+    void credit(int32 n) {
+        if (this.ws == null || n <= 0) {
+            return;
+        }
+        Http2FrameWriter fw = heap Http2FrameWriter();
+        Http2Frames.writeWindowUpdate(fw, this.sid, n);
+        this.ws.writeControl(fw);
+    }
+}

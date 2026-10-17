@@ -271,7 +271,7 @@ public final class HttpRequest {
     }
 
     /** Streams the body from `b` for the rest of this request, dropping any held body. */
-    void bindStream(Body b) {
+    public void bindStream(Body b) {
         this.bodyOwned = false;
         this.ownBody = null;
         this.bodyOff = 0;
