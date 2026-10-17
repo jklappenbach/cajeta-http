@@ -30,6 +30,7 @@ final class RecordingWsHandler implements WebSocketHandler {
     public int32 lastCode;
     public int32 sleepMs;
     public String joined;
+    public WebSocketConnection held;   // a borrow: the connection is the framer's
 
     public RecordingWsHandler(int32 sleepMs) {
         this.connects = 0;
@@ -38,10 +39,12 @@ final class RecordingWsHandler implements WebSocketHandler {
         this.lastCode = 0;
         this.sleepMs = sleepMs;
         this.joined = "";
+        this.held = null;
     }
 
     public void onConnect(WebSocketConnection conn) {
         this.connects = this.connects + 1;
+        this.held #= conn;
     }
 
     public void onMessage(WebSocketConnection conn, WsMessage message) {
@@ -80,6 +83,8 @@ public final class WsDispatchTests {
         WsDispatchTests.slowHandlerHoldsOnlyItsClient(c);
         System.stdout.println("-- ws dispatch: a compressed message and a close handshake through the pool (6.1.5) --");
         WsDispatchTests.compressedMessageThroughThePool(c);
+        System.stdout.println("-- ws dispatch: an abort from another fiber closes with the abort's code (6.1.6) --");
+        WsDispatchTests.abortFromAnotherFiberReportsItsCode(c);
     }
 
     // ----- fixtures -------------------------------------------------------
@@ -423,6 +428,45 @@ public final class WsDispatchTests {
             c.eqInt((int64) WsDispatchTests.ECHO.closes, (int64) 1, "onClose ran once");
             c.eqInt((int64) WsDispatchTests.ECHO.lastCode, (int64) WsCloseCode.NORMAL, "with the peer's code");
             sock.close();
+            srv.shutdown(Duration.ofSeconds(2));
+            await sv;
+        }
+    }
+
+    /**
+     * 6.1.6: a server aborts a connection from outside any turn (primavera's
+     * broadcaster does this to a reader that never reads, with 1008). The
+     * framer then sees the dead socket before any worker runs; onClose must
+     * still report the abort's code, not 1006.
+     */
+    static void abortFromAnotherFiberReportsItsCode(Check c) {
+        scope {
+            HttpServer srv #= WsDispatchTests.wsServer((int64) 0);
+            Task<int32> sv = spawn serveIt(srv);
+            DispatchTests.settle(srv);
+            int32 port = WsDispatchTests.port(srv);
+            TcpStream s #= DispatchTests.connectRaw(port);
+            c.that(WsDispatchTests.handshake(s, "/ws", 3000), "the upgrade is answered");
+            int32 w = 0;
+            while (WsDispatchTests.ECHO.held == null && w < 300) {
+                Fiber.sleep(Duration.ofMillis((int64) 10));
+                w = w + 1;
+            }
+            c.that(WsDispatchTests.ECHO.held != null, "onConnect handed the handler its connection");
+            WsDispatchTests.ECHO.held.abort(WsCloseCode.POLICY_VIOLATION);
+            w = 0;
+            while (WsDispatchTests.ECHO.closes == 0 && w < 300) {
+                Fiber.sleep(Duration.ofMillis((int64) 10));
+                w = w + 1;
+            }
+            c.eqInt((int64) WsDispatchTests.ECHO.closes, (int64) 1, "onClose ran once");
+            c.eqInt((int64) WsDispatchTests.ECHO.lastCode, (int64) WsCloseCode.POLICY_VIOLATION,
+                "with the abort's code (" + WsDispatchTests.ECHO.lastCode + ")");
+            int8[] buf = heap int8[64];
+            int64 n = DispatchTests.readStep(s, buf, 0, 2000);
+            c.that(n <= (int64) 0, "the peer's socket ended without a close frame (" + n + ")");
+            c.eqInt((int64) srv.inFlight(), (int64) 0, "no worker is held");
+            s.close();
             srv.shutdown(Duration.ofSeconds(2));
             await sv;
         }
