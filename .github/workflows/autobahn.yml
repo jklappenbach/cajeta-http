@@ -1,0 +1,46 @@
+name: autobahn
+
+# Autobahn|Testsuite conformance for the WebSocket server, on demand only:
+# test/autobahn/run.sh as is (about 500 cases, docker), reports/ uploaded.
+on:
+  workflow_dispatch:
+    inputs:
+      cajeta-version:
+        description: 'cajeta release tag to build with'
+        default: 'v0.43.0'
+
+permissions:
+  contents: read
+
+jobs:
+  autobahn:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cajeta toolchain (${{ inputs.cajeta-version }})
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release download "${{ inputs.cajeta-version }}" \
+            --repo jklappenbach/cajeta --pattern 'cajeta_*_amd64.deb' --dir /tmp
+          sudo apt-get update
+          sudo apt-get install -y /tmp/cajeta_*_amd64.deb
+          cajeta --version
+
+      # Resolves dev.cajeta.codec into $OLLA_HOME, where run-tests.sh finds it.
+      - name: Resolve dependencies
+        run: cajeta build
+
+      - name: Autobahn fuzzingclient
+        run: test/autobahn/run.sh
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: autobahn-reports
+          path: test/autobahn/reports/
+          if-no-files-found: warn
