@@ -25,7 +25,7 @@ cajeta-http provides the **imperative HTTP engine** (`HttpClient`, `HttpServer`,
 `Router`, `WebSocket`). Annotation-driven endpoints and automatic
 serialization-to-object-model are **primavera's** job, layered on top.
 
-## Status: v0.7.1
+## Status: v0.7.2
 
 | Capability | State |
 |---|---|
@@ -73,6 +73,16 @@ for a peer that has stopped reading, and `HttpServer.idleBuffers()`.
 `WsUpgrade.accept(q, r, #h, ...)` hands a per-connection handler to its
 connection, which frees it at close; before, it was freed when `accept`
 returned.
+
+v0.7.2 fixes a 0.7.0 WebSocket regression: a message that arrives just
+before a protocol violation is delivered to `onMessage` before the 1002
+close; 0.7.0 dropped it (Autobahn now matches 0.6.0 case for case). It also
+carries the first two units of h2 streaming request bodies, ahead of their
+0.8.0 release: with `streamRequestBody` on, or on a STREAM multipart route,
+an h2 stream's handler now starts at end of HEADERS and reads the body as it
+arrives in the memory of one slab, with the stream's flow-control window as
+the back-pressure. Servers without either setting see no change beyond one
+WINDOW_UPDATE per stream with a body.
 
 v0.7.1 makes the per-route multipart modes hold under `fiberPerConnection()`
 as they do under the pool: a PART route runs the handler per completed part
