@@ -55,7 +55,7 @@ connection gets a fiber. Two models, chosen on the builder:
   connection before the framer stops reading its socket. Idle connections cost
   no fiber. The framer answers WebSocket pings, completes close handshakes,
   sends h2 control frames and refuses oversized input itself. The design is
-  `specs/request-dispatch-spec.md` in the cajeta repository.
+  `specs/archive/request-dispatch-spec.md` in the cajeta repository.
 - **fiber-per-connection** (`fiberPerConnection()`) — one fiber per accepted
   socket running the connection's own loop; the model for a small number of
   long, busy connections. What differs from the pool is only who reads the
@@ -331,7 +331,7 @@ body shorter or longer than its content-length resets the stream with
 PROTOCOL_ERROR and the handler's read raises. A handler that returns with the
 body still open has the stream drained up to 256 KB and then, if it has not
 ended, cut with RST_STREAM(NO_ERROR) after the response. Both server models.
-The design is `specs/h2-streaming-request-body-spec.md` in the cajeta
+The design is `specs/archive/h2-streaming-request-body-spec.md` in the cajeta
 repository.
 
 ## HTTP/3 (deferred)
