@@ -6,7 +6,7 @@ import cajeta.io.net.AsyncWriter;
 import cajeta.io.net.IpAddress;
 import cajeta.io.net.SocketAddress;
 import cajeta.io.net.TcpStream;
-import cajeta.io.net.tls.TlsStream;
+import dev.cajeta.crypto.tls.TlsStream;
 import cajeta.error.Exception;
 import dev.cajeta.http.ClientResponse;
 import dev.cajeta.http.HttpRequest;

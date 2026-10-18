@@ -17,7 +17,7 @@ import dev.cajeta.http.server.HttpServer;
 import dev.cajeta.http.server.HttpServerBuilder;
 import cajeta.codec.json.JsonValue;
 import cajeta.codec.json.JsonObject;
-import cajeta.hash.Sha256;
+import dev.cajeta.crypto.Sha256;
 import cajeta.io.file.File;
 import cajeta.io.file.Path;
 import cajeta.io.net.NetException;

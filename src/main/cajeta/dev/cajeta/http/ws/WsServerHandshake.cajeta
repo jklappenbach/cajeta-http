@@ -1,7 +1,7 @@
 package dev.cajeta.http.ws;
 
 import cajeta.lang.String;
-import cajeta.hash.Sha1;
+import dev.cajeta.crypto.Sha1;
 import cajeta.codec.Base64;
 import dev.cajeta.http.HttpRequest;
 import dev.cajeta.http.HttpResponse;

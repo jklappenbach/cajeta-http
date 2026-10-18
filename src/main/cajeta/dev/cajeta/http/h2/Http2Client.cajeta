@@ -5,7 +5,7 @@ import cajeta.lang.Slice;
 import cajeta.io.net.AsyncReader;
 import cajeta.io.net.AsyncWriter;
 import cajeta.io.net.ByteBuffer;
-import cajeta.io.net.tls.TlsException;
+import dev.cajeta.crypto.tls.TlsException;
 import dev.cajeta.http.Bytes;
 import dev.cajeta.http.ClientRequest;
 import dev.cajeta.http.ClientResponse;

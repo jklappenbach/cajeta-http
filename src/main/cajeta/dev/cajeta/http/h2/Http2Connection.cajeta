@@ -7,7 +7,7 @@ import cajeta.io.net.AsyncReader;
 import cajeta.io.net.AsyncWriter;
 import cajeta.io.net.NetException;
 import cajeta.io.net.TimedOutException;
-import cajeta.io.net.tls.TlsException;
+import dev.cajeta.crypto.tls.TlsException;
 import dev.cajeta.http.HttpException;
 import dev.cajeta.http.HttpRequest;
 import dev.cajeta.http.HttpResponse;

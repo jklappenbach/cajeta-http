@@ -170,13 +170,26 @@ if [ -z "$ART" ]; then
 fi
 echo "==> library: $ART"
 
+# dev.cajeta.crypto carries the TLS engine and the digests. The `cajeta build`
+# above resolved it into the store, and its published .cja bakes the
+# cajeta_crypto shim for every platform, which the compiler links from the
+# classpath archive itself.
+CRYPTO_VER="$(sed -n 's/.*"dev\.cajeta\.crypto"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+    cajeta.json | head -1)"
+CRYPTO_CJA="$OLLA_HOME/dev.cajeta.crypto/$CRYPTO_VER/dev.cajeta.crypto-$CRYPTO_VER.cja"
+if [ -z "$CRYPTO_VER" ] || [ ! -f "$CRYPTO_CJA" ]; then
+    echo "run-tests.sh: crypto archive not found: $CRYPTO_CJA" >&2
+    exit 1
+fi
+echo "==> crypto $CRYPTO_VER: $CRYPTO_CJA"
+
 if [ -n "${AUTOBAHN:-}" ]; then
     echo "==> compiling the Autobahn testee and report reader"
     mkdir -p test/autobahn/build
     "$CAJETA_BIN" "dev.cajeta.http.autobahn.AutobahnEchoServer::main" test/autobahn/src test/autobahn/build \
-        --emit=exe --classpath="$ART,$CODEC_CJA" -o test/autobahn/build/autobahn-echo
+        --emit=exe --classpath="$ART,$CODEC_CJA,$CRYPTO_CJA" -o test/autobahn/build/autobahn-echo
     "$CAJETA_BIN" "dev.cajeta.http.autobahn.AutobahnReport::main" test/autobahn/src test/autobahn/build \
-        --emit=exe --classpath="$ART,$CODEC_CJA" -o test/autobahn/build/autobahn-report
+        --emit=exe --classpath="$ART,$CODEC_CJA,$CRYPTO_CJA" -o test/autobahn/build/autobahn-report
     exit 0
 fi
 
@@ -184,7 +197,7 @@ echo "==> compiling test suite"
 mkdir -p build/test
 "$CAJETA_BIN" "dev.cajeta.http.test.TestMain::main" test/src build/test \
     --emit=exe \
-    --classpath="$ART,$CODEC_CJA" \
+    --classpath="$ART,$CODEC_CJA,$CRYPTO_CJA" \
     -o build/test/http-tests
 
 # The suite writes relative paths (downloadTo), so it must run from the repo

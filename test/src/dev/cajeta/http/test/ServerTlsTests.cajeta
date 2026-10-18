@@ -9,7 +9,7 @@ import cajeta.io.net.IpAddress;
 import cajeta.io.net.LoadShedPolicy;
 import cajeta.io.net.SocketAddress;
 import cajeta.io.net.TcpStream;
-import cajeta.io.net.tls.TlsStream;
+import dev.cajeta.crypto.tls.TlsStream;
 import cajeta.io.net.uri.Uri;
 import cajeta.time.Clock;
 import cajeta.time.Duration;

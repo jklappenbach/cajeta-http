@@ -90,7 +90,9 @@ jobs:
       # pool admits with Channel.trySend, a server sizes its framers by
       # Carriers.count(), and TLS on the framer uses TlsStream's non-parking
       # entries; none of these exist before v0.43.0.
-      cajeta-version: v0.43.0
+      # Raised to v0.43.1 with dev.cajeta.crypto 0.1.0, whose archive that
+      # release built.
+      cajeta-version: v0.43.1
       # Suite + tour + tour-coverage gate, chained in scripts/ci-checks.sh.
       # (`./run-tests.sh` rather than `cajeta test` because the suite needs the
       # codec's native zlib backend extracted out of its .cja with

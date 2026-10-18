@@ -1,6 +1,6 @@
 package dev.cajeta.http.client;
 
-import cajeta.hash.Sha256;
+import dev.cajeta.crypto.Sha256;
 import cajeta.io.file.FileWriter;
 import dev.cajeta.http.BodySink;
 

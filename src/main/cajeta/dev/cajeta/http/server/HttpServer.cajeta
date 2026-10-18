@@ -14,7 +14,7 @@ import cajeta.io.net.ByteBuffer;
 import cajeta.io.net.ByteChannel;
 import cajeta.io.net.AsyncReader;
 import cajeta.io.net.AsyncWriter;
-import cajeta.io.net.tls.TlsStream;
+import dev.cajeta.crypto.tls.TlsStream;
 import cajeta.concurrent.AtomicInt32;
 import cajeta.concurrent.Carriers;
 import cajeta.collection.ArrayList;

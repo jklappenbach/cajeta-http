@@ -2,7 +2,7 @@ package dev.cajeta.http.middleware;
 
 import cajeta.lang.String;
 import cajeta.lang.Slice;
-import cajeta.hash.Sha256;
+import dev.cajeta.crypto.Sha256;
 import dev.cajeta.http.Bytes;
 import dev.cajeta.http.HttpRequest;
 import dev.cajeta.http.HttpResponse;

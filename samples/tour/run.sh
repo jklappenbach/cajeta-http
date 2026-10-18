@@ -95,6 +95,17 @@ if [[ ! -f "${CODEC_CJA}" ]]; then
 fi
 echo ">> codec ${CODEC_VER}: ${CODEC_CJA##*/}"
 
+# dev.cajeta.crypto (TLS and the digests): the compiler links its baked shim
+# from the classpath archive itself, so it needs no extract-bridge.
+CRYPTO_VER="$(sed -n 's/.*"dev\.cajeta\.crypto"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+    "${REPO_ROOT}/cajeta.json" | head -1)"
+CRYPTO_CJA="${CRYPTO_CJA:-${OLLA_HOME}/dev.cajeta.crypto/${CRYPTO_VER}/dev.cajeta.crypto-${CRYPTO_VER}.cja}"
+if [[ -z "${CRYPTO_VER}" || ! -f "${CRYPTO_CJA}" ]]; then
+    echo "run.sh: crypto archive not found: ${CRYPTO_CJA}" >&2
+    exit 1
+fi
+echo ">> crypto ${CRYPTO_VER}: ${CRYPTO_CJA##*/}"
+
 # 3. extract-bridge (same as run-tests.sh): the codec .cja bakes the native
 #    zlib archives, but the toolchain doesn't yet auto-extract natives from a
 #    classpath .cja — explode native/ and point the linker at it.
@@ -117,7 +128,7 @@ fi
 OUT="${SCRIPT_DIR}/build/http-tour"
 "${CAJETA_BIN}" "tour.http.HttpTour::main" \
     "${SCRIPT_DIR}/src" "${SCRIPT_DIR}/build" \
-    --emit=exe --classpath="${LIB_CJA},${CODEC_CJA}" -o "${OUT}"
+    --emit=exe --classpath="${LIB_CJA},${CODEC_CJA},${CRYPTO_CJA}" -o "${OUT}"
 
 # 5. Run it (RUN=0 skips).
 if [[ "${RUN:-1}" != "0" ]]; then

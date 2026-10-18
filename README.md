@@ -8,7 +8,7 @@ ships QUIC — see Status.)
 > **Why a library, not stdlib?** HTTP is an *application* protocol, not transport.
 > HTTP/1.1 and HTTP/2 ride TCP; **HTTP/3 rides QUIC over UDP** — so HTTP sits
 > *above* the transport layer and picks one. The language stdlib ships the
-> transport substrate (`cajeta.io.net`: sockets, the cross-platform reactor, TLS);
+> transport substrate (`cajeta.io.net`: sockets and the cross-platform reactor);
 > HTTP ships here as an opt-in library, the way Rust keeps `std::net` but leaves
 > HTTP to crates. A program that only speaks raw TCP or UDP multicast never pulls
 > HTTP in.
@@ -18,14 +18,20 @@ ships QUIC — see Status.)
 ```
 primavera          — REST/web policy: @Rest endpoints, routing-by-annotation, auto-serde
    └─ cajeta-http  — HTTP/1.1·2, WebSocket, SSE; client + server     ← this repo
-        └─ cajeta.io.net (stdlib)  — sockets, TCP/UDP/multicast, reactor, TLS, URI
+        ├─ dev.cajeta.crypto       — TLS, SHA-1 and SHA-256 (used here since 0.9.0)
+        └─ cajeta.io.net (stdlib)  — sockets, TCP/UDP/multicast, reactor, URI
 ```
 
 cajeta-http provides the **imperative HTTP engine** (`HttpClient`, `HttpServer`,
 `Router`, `WebSocket`). Annotation-driven endpoints and automatic
 serialization-to-object-model are **primavera's** job, layered on top.
 
-## Status: v0.8.0
+## Status: v0.9.0
+
+0.9.0 takes TLS and its digests from `dev.cajeta.crypto` 0.1.0 rather than the stdlib, which is
+removing `cajeta.io.net.tls` and the `cajeta.hash` cryptographic types. Nothing in this library's
+API changes. A caller that imports `TlsStream` itself changes `cajeta.io.net.tls` to
+`dev.cajeta.crypto.tls`, and `cajeta.hash.Sha256` to `dev.cajeta.crypto.Sha256`.
 
 | Capability | State |
 |---|---|
