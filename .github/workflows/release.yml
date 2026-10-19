@@ -92,7 +92,9 @@ jobs:
       # entries; none of these exist before v0.43.0.
       # Raised to v0.43.1 with dev.cajeta.crypto 0.1.0, whose archive that
       # release built.
-      cajeta-version: v0.43.1
+      # Raised to v0.44.0, the first release without the stdlib crypto: 1981
+      # passed on it locally (cajeta-crypto plan Unit 8).
+      cajeta-version: v0.44.0
       # Suite + tour + tour-coverage gate, chained in scripts/ci-checks.sh.
       # (`./run-tests.sh` rather than `cajeta test` because the suite needs the
       # codec's native zlib backend extracted out of its .cja with

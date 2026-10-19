@@ -82,7 +82,7 @@
         // Channel.trySend, the TlsStream non-parking entries) and is the
         // release 0.7.0 is cut on.
         "toolchain": {
-            "version": "0.43.1"
+            "version": "0.44.0"
         },
 
         // Uses the network transport stack (sockets + TLS via cajeta.io.net).
