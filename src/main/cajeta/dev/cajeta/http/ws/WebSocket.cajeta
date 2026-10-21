@@ -11,8 +11,11 @@ import cajeta.io.net.dns.Dns;
 import cajeta.io.net.dns.ResolveFamily;
 import dev.cajeta.crypto.tls.TlsStream;
 import cajeta.io.net.uri.Uri;
+import cajeta.concurrent.AtomicInt32;
+import cajeta.concurrent.Fiber;
 import cajeta.concurrent.Lock;
 import cajeta.concurrent.LockGuard;
+import cajeta.time.Duration;
 import dev.cajeta.http.ClientResponse;
 
 /**
@@ -167,6 +170,9 @@ public class WebSocket {
     // ended the connection with (0 when it did not).
     ByteChannel transport;
     int32 abortCode;
+    // Fibers inside a send or close, parked on the write lock or writing:
+    // the socket's owner waits for zero before it drops the socket.
+    AtomicInt32 inFlight;
     // Control frames the framer could not write because a worker held the
     // lock, or the socket took only part of one: the next sender drains them
     // first, so the two sides' frames never interleave (WsFramed).
@@ -209,6 +215,7 @@ public class WebSocket {
         this.header = heap int8[10];
         this.transport = null;
         this.abortCode = 0;
+        this.inFlight = heap AtomicInt32(0);
         this.framerPend = heap int8[256];
         this.framerPendOff = 0;
         this.framerPendLen = 0;
@@ -425,15 +432,21 @@ public class WebSocket {
             n = text.byteLength();
         }
         if (this.direct()) {
-            LockGuard g #= this.writeLock.acquire();
-            this.drainFramerPending();
-            this.writeHeader(WsOpcode.TEXT, n);
-            int32 j = 0;
-            while (j < n) {
-                this.writer.writeByte(text.byteAt(j));
-                j = j + 1;
+            this.inFlight.fetchAdd(1);
+            try {
+                LockGuard g #= this.writeLock.acquire();
+                this.requireNotAborted();
+                this.drainFramerPending();
+                this.writeHeader(WsOpcode.TEXT, n);
+                int32 j = 0;
+                while (j < n) {
+                    this.writer.writeByte(text.byteAt(j));
+                    j = j + 1;
+                }
+                this.writer.flush();
+            } finally {
+                this.inFlight.fetchAdd(-1);
             }
-            this.writer.flush();
             return;
         }
         int8[] pay = heap int8[n];
@@ -467,13 +480,19 @@ public class WebSocket {
     public void sendText(int8[] data, int32 offset, int32 length) {
         this.requireOpen();
         if (this.direct()) {
-            LockGuard g #= this.writeLock.acquire();
-            this.drainFramerPending();
-            this.writeHeader(WsOpcode.TEXT, length);
-            if (length > 0) {
-                this.writer.writeAll(data, offset, length);
+            this.inFlight.fetchAdd(1);
+            try {
+                LockGuard g #= this.writeLock.acquire();
+                this.requireNotAborted();
+                this.drainFramerPending();
+                this.writeHeader(WsOpcode.TEXT, length);
+                if (length > 0) {
+                    this.writer.writeAll(data, offset, length);
+                }
+                this.writer.flush();
+            } finally {
+                this.inFlight.fetchAdd(-1);
             }
-            this.writer.flush();
             return;
         }
         int8[] pay = heap int8[length];
@@ -494,13 +513,19 @@ public class WebSocket {
         this.requireOpen();
         int32 n = length;
         if (this.direct()) {
-            LockGuard g #= this.writeLock.acquire();
-            this.drainFramerPending();
-            this.writeHeader(WsOpcode.BINARY, n);
-            if (n > 0) {
-                this.writer.writeAll(data, offset, n);
+            this.inFlight.fetchAdd(1);
+            try {
+                LockGuard g #= this.writeLock.acquire();
+                this.requireNotAborted();
+                this.drainFramerPending();
+                this.writeHeader(WsOpcode.BINARY, n);
+                if (n > 0) {
+                    this.writer.writeAll(data, offset, n);
+                }
+                this.writer.flush();
+            } finally {
+                this.inFlight.fetchAdd(-1);
             }
-            this.writer.flush();
             return;
         }
         int8[] pay = heap int8[n];
@@ -826,20 +851,62 @@ public class WebSocket {
      * applies the policy.
      */
     void writeFrame(WsFrame frame) {
-        LockGuard g #= this.writeLock.acquire();
-        this.drainFramerPending();
-        if (this.isClient) {
-            // Client: mask with a fresh per-frame key (see the scope note).
-            int8[] key #= this.nextMaskKey();
-            int8[] wire #= WsFrameEncoder.encode(frame, key);
-            this.writer.writeAll(wire, 0, wire.count());
-        } else {
-            // Server: frames MUST NOT be masked (RFC 6455 §5.1).
-            int8[] wire #= WsFrameEncoder.encodeUnmasked(frame);
-            this.writer.writeAll(wire, 0, wire.count());
+        this.inFlight.fetchAdd(1);
+        try {
+            LockGuard g #= this.writeLock.acquire();
+            this.requireNotAborted();
+            this.drainFramerPending();
+            if (this.isClient) {
+                // Client: mask with a fresh per-frame key (see the scope note).
+                int8[] key #= this.nextMaskKey();
+                int8[] wire #= WsFrameEncoder.encode(frame, key);
+                this.writer.writeAll(wire, 0, wire.count());
+            } else {
+                // Server: frames MUST NOT be masked (RFC 6455 §5.1).
+                int8[] wire #= WsFrameEncoder.encodeUnmasked(frame);
+                this.writer.writeAll(wire, 0, wire.count());
+            }
+            this.writer.flush();
+            // `g` drops here → the write lock releases (also on a throw above).
+        } finally {
+            this.inFlight.fetchAdd(-1);
         }
-        this.writer.flush();
-        // `g` drops here → the write lock releases (also on a throw above).
+    }
+
+    /**
+     * A write that reached the lock after [`abort`](#abort) ended the
+     * connection: the socket is shut, so it raises instead of writing.
+     */
+    void requireNotAborted() {
+        if (this.abortCode != 0) {
+            throw heap ConnectionClosedException("WebSocket aborted", this.abortCode);
+        }
+    }
+
+    /** Fibers inside a send or close right now, parked or writing. */
+    public int32 writersInFlight() {
+        return this.inFlight.load();
+    }
+
+    /**
+     * Ends the transport once the read loop is over, then waits until no
+     * fiber is inside a send or close, so the socket's owner can drop it.
+     * A writer parked on the socket fails its wait when the socket shuts,
+     * and one parked on the write lock then raises at the lock, so the wait
+     * is short. The abort code, if any, is kept. Idempotent; a socket
+     * without a transport only waits when nothing is in flight.
+     */
+    public void finish() {
+        if (this.transport == null) {
+            return;
+        }
+        if (this.transport instanceof TcpStream t) {
+            t.shutdown(2);
+        }
+        this.transport.close();
+        while (this.inFlight.load() > 0) {
+            Fiber.sleep(Duration.ofMillis(1));
+        }
     }
 
     /**

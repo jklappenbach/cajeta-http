@@ -1,0 +1,275 @@
+package dev.cajeta.http.test;
+
+import cajeta.concurrent.Fiber;
+import cajeta.io.net.Server;
+import cajeta.io.net.SocketAddress;
+import cajeta.io.net.TcpStream;
+import cajeta.lang.String;
+import cajeta.time.Duration;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.server.HttpServer;
+import dev.cajeta.http.server.HttpServerBuilder;
+import dev.cajeta.http.ws.WebSocketConnection;
+import dev.cajeta.http.ws.WebSocketHandler;
+import dev.cajeta.http.ws.WsMessage;
+import dev.cajeta.http.ws.WsUpgrade;
+
+/** Keeps the connection for the closing fiber and records how it closed. */
+final class CloseAbortHandler implements WebSocketHandler {
+    WebSocketConnection conn;
+    int32 closes;
+    int32 code;
+
+    CloseAbortHandler() {
+        this.conn = null;
+        this.closes = 0;
+        this.code = 0;
+    }
+
+    void reset() {
+        this.conn = null;
+        this.closes = 0;
+        this.code = 0;
+    }
+
+    public void onConnect(WebSocketConnection conn) { this.conn #= conn; }
+    public void onMessage(WebSocketConnection conn, WsMessage message) { }
+    public void onClose(WebSocketConnection conn, int32 code) {
+        this.closes = this.closes + 1;
+        this.code = code;
+    }
+}
+
+/**
+ * A server shutdown that says goodbye first: `close(code, reason)` sends the
+ * CLOSE frame, then `abort(code)` ends the connection without waiting for the
+ * peer's reply. The serve loop's `next()` must end either way, so `onClose`
+ * runs with the abort's code, whatever the peer does next (open-defects D-19:
+ * on 0.9.0 the reader stayed parked and `onClose` never ran, so primavera's
+ * shutdown aborted without a close frame and peers saw 1006).
+ */
+public final class WsCloseAbortTests {
+    static CloseAbortHandler H = heap CloseAbortHandler();
+
+    static void handle(HttpRequest q, HttpResponse r) {
+        WsUpgrade.accept(q, r, WsCloseAbortTests.H, false);
+    }
+
+    public static async int32 acceptOne(Server core) {
+        TcpStream conn #= core.acceptNext();
+        core.dispatch(#conn);
+        return 1;
+    }
+
+    /** The server side of the shutdown: a close frame, then the abort. */
+    public static async int32 closeThenAbort() {
+        int32 waited = 0;
+        while (WsCloseAbortTests.H.conn == null && waited < 400) {
+            Fiber.sleep(Duration.ofMillis(5));
+            waited = waited + 1;
+        }
+        String bye = "bye";
+        WsCloseAbortTests.H.conn.close(1001, bye);
+        WsCloseAbortTests.H.conn.abort(1001);
+        return 1;
+    }
+
+    static void handshake(TcpStream peer) {
+        String hello = "GET /ws HTTP/1.1\r\nHost: t\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+            + "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n";
+        int8[] hb #= hello.toBytes();
+        peer.writeAllAsync(hb, (int64) 0, (int64) hello.byteLength());
+    }
+
+    /**
+     * Reads the 101 and the frame after it. Returns the close code the
+     * server sent, 0 when the bytes read hold no close frame.
+     */
+    static int32 readServerClose(TcpStream peer) {
+        int8[] buf = heap int8[4096];
+        int32 total = 0;
+        int32 reads = 0;
+        while (reads < 200) {
+            int64 got = peer.readAsync(buf, (int64) total, (int64) (4096 - total));
+            if (got <= 0) {
+                break;
+            }
+            total = total + (int32) got;
+            reads = reads + 1;
+            // The head ends at the first blank line; a close frame follows it.
+            int32 i = 0;
+            while (i + 3 < total) {
+                if (buf[i] == 13 && buf[i + 1] == 10 && buf[i + 2] == 13 && buf[i + 3] == 10) {
+                    int32 f = i + 4;
+                    if (f + 1 < total && (((int32) buf[f]) & 255) == 136) {
+                        int32 len = ((int32) buf[f + 1]) & 127;
+                        if (f + 2 + len <= total && len >= 2) {
+                            return ((((int32) buf[f + 2]) & 255) << 8) | (((int32) buf[f + 3]) & 255);
+                        }
+                    }
+                    break;
+                }
+                i = i + 1;
+            }
+        }
+        return 0;
+    }
+
+    /** A masked client CLOSE frame carrying 1000. */
+    static void replyClose(TcpStream peer) {
+        int8[] frame = heap int8[8];
+        frame[0] = (int8) -120;   // FIN | CLOSE
+        frame[1] = (int8) -126;   // masked, 2 bytes
+        frame[2] = 1;
+        frame[3] = 2;
+        frame[4] = 3;
+        frame[5] = 4;
+        frame[6] = (int8) (3 ^ 1);   // 0x03E8 = 1000
+        frame[7] = (int8) (-24 ^ 2);
+        peer.writeAllAsync(frame, (int64) 0, (int64) 8);
+    }
+
+    static boolean waitForClose() {
+        int32 w = 0;
+        while (WsCloseAbortTests.H.closes == 0 && w < 200) {
+            Fiber.sleep(Duration.ofMillis(10));
+            w = w + 1;
+        }
+        return WsCloseAbortTests.H.closes > 0;
+    }
+
+    /** One scenario: `peer` is 0 silent, 1 replies with a close, 2 disconnects. */
+    static void shutdownWithGoodbye(Check c, int32 peerKind, String label) {
+        WsCloseAbortTests.H.reset();
+        scope {
+            HttpServerBuilder b #= HttpServer.builder();
+            b.bind("127.0.0.1:0");
+            b.handler((HttpRequest q, HttpResponse r) -> WsCloseAbortTests.handle(q, r));
+            HttpServer srv #= b.build();
+            Server core = srv.server;
+            int32 port = core.listener.boundPort();
+            Task<int32> acc = spawn acceptOne(core);
+            TcpStream peer #= TcpStream.connectAsync(SocketAddress.parse("127.0.0.1:" + port));
+            WsCloseAbortTests.handshake(peer);
+            Task<int32> closer = spawn closeThenAbort();
+            await closer;
+            c.that(WsCloseAbortTests.H.conn != null, label + ": the connection opened");
+            if (peerKind != 0) {
+                int32 sent = WsCloseAbortTests.readServerClose(peer);
+                c.eqInt((int64) sent, 1001, label + ": the peer received the close frame");
+                if (peerKind == 1) {
+                    try {
+                        WsCloseAbortTests.replyClose(peer);
+                    } catch (Exception e) {
+                    }
+                } else {
+                    peer.close();
+                }
+            }
+            boolean closed = WsCloseAbortTests.waitForClose();
+            c.that(closed, label + ": onClose runs after close then abort");
+            if (closed) {
+                c.eqInt((int64) WsCloseAbortTests.H.closes, 1, label + ": onClose fires once");
+                c.eqInt((int64) WsCloseAbortTests.H.code, 1001, label + ": onClose carries the abort's code");
+            }
+            core.listener.close();
+            await acc;
+            peer.close();
+        }
+    }
+
+    static int32 sent;
+    static boolean senderEnded;
+    static boolean closerEnded;
+
+    /** Fills the peer's socket until a send parks holding the write lock. */
+    public static async int32 flood() {
+        int8[] big = heap int8[65536];
+        try {
+            while (true) {
+                WsCloseAbortTests.H.conn.sendBinary(big, 0, 65536);
+                WsCloseAbortTests.sent = WsCloseAbortTests.sent + 1;
+            }
+        } catch (Exception e) {
+        }
+        WsCloseAbortTests.senderEnded = true;
+        return WsCloseAbortTests.sent;
+    }
+
+    /** A close from its own fiber: it parks behind the sender's write lock. */
+    public static async int32 closeOnly() {
+        String bye = "bye";
+        try {
+            WsCloseAbortTests.H.conn.close(1001, bye);
+        } catch (Exception e) {
+        }
+        WsCloseAbortTests.closerEnded = true;
+        return 1;
+    }
+
+    /**
+     * The primavera shutdown shape: the peer has stopped reading, a sender is
+     * parked on its socket, and the shutdown says `close` then `abort`. The
+     * close parks behind the write lock, so the abort must come from another
+     * fiber, and it must end both the close and the reader.
+     */
+    static void abortEndsAParkedClose(Check c) {
+        WsCloseAbortTests.H.reset();
+        WsCloseAbortTests.sent = 0;
+        WsCloseAbortTests.senderEnded = false;
+        WsCloseAbortTests.closerEnded = false;
+        scope {
+            HttpServerBuilder b #= HttpServer.builder();
+            b.bind("127.0.0.1:0");
+            b.handler((HttpRequest q, HttpResponse r) -> WsCloseAbortTests.handle(q, r));
+            HttpServer srv #= b.build();
+            Server core = srv.server;
+            int32 port = core.listener.boundPort();
+            Task<int32> acc = spawn acceptOne(core);
+            TcpStream peer #= TcpStream.connectAsync(SocketAddress.parse("127.0.0.1:" + port));
+            WsCloseAbortTests.handshake(peer);
+            int32 waited = 0;
+            while (WsCloseAbortTests.H.conn == null && waited < 400) {
+                Fiber.sleep(Duration.ofMillis(5));
+                waited = waited + 1;
+            }
+            Task<int32> fl = spawn flood();
+            int32 last = -1;
+            waited = 0;
+            while (WsCloseAbortTests.sent != last && waited < 400) {
+                last = WsCloseAbortTests.sent;
+                Fiber.sleep(Duration.ofMillis(50));
+                waited = waited + 1;
+            }
+            c.that(!WsCloseAbortTests.senderEnded, "parked close: the sender is parked on a peer that does not read");
+            Task<int32> cl = spawn closeOnly();
+            Fiber.sleep(Duration.ofMillis(100));
+            c.that(!WsCloseAbortTests.closerEnded, "parked close: close parks behind the parked sender");
+            WsCloseAbortTests.H.conn.abort(1001);
+            await fl;
+            await cl;
+            c.that(WsCloseAbortTests.senderEnded, "parked close: abort fails the parked send");
+            c.that(WsCloseAbortTests.closerEnded, "parked close: abort ends the parked close");
+            boolean closed = WsCloseAbortTests.waitForClose();
+            c.that(closed, "parked close: onClose runs");
+            if (closed) {
+                c.eqInt((int64) WsCloseAbortTests.H.code, 1001, "parked close: onClose carries the abort's code");
+            }
+            core.listener.close();
+            await acc;
+            peer.close();
+        }
+    }
+
+    public static void run(Check c) {
+        System.stdout.println("-- ws close then abort --");
+        String silent = "silent peer";
+        String replies = "peer replies close";
+        String leaves = "peer disconnects";
+        WsCloseAbortTests.shutdownWithGoodbye(c, 0, silent);
+        WsCloseAbortTests.shutdownWithGoodbye(c, 1, replies);
+        WsCloseAbortTests.shutdownWithGoodbye(c, 2, leaves);
+        WsCloseAbortTests.abortEndsAParkedClose(c);
+    }
+}

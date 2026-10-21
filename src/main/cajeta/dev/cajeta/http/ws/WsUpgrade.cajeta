@@ -116,6 +116,9 @@ public final class WsUpgrade {
         if (ws.abortedWith() != 0) {
             code = ws.abortedWith();
         }
+        // The read loop is over: end the socket and let every fiber inside a
+        // send or close leave before onClose runs and the socket drops.
+        ws.finish();
         try {
             handler.onClose(conn, code);
         } catch (Exception e) {

@@ -303,6 +303,9 @@ public final class WsFramed {
         }
         if (this.closing && !this.closed) {
             this.closed = true;
+            // Every fiber inside a send or close leaves before onClose runs
+            // and the socket drops.
+            this.ws.finish();
             try {
                 this.handler.onClose(this.conn, this.closeCode);
             } catch (Exception e) {

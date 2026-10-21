@@ -26,7 +26,14 @@ cajeta-http provides the **imperative HTTP engine** (`HttpClient`, `HttpServer`,
 `Router`, `WebSocket`). Annotation-driven endpoints and automatic
 serialization-to-object-model are **primavera's** job, layered on top.
 
-## Status: v0.9.0
+## Status: v0.9.1
+
+0.9.1 fixes a server-side WebSocket crash: a `close` parked behind a sender on a peer that had
+stopped reading resumed after `abort` on a socket the serve loop had already dropped (cajeta
+open-defects D-19). The serve loop now ends the transport and waits for every fiber inside a
+send or close before `onClose` runs, and a write that resumes after an abort raises
+`ConnectionClosedException` with the abort's code. A shutdown may say `close` then `abort` from
+two fibers; from one fiber the `close` parks until the peer reads, as any send does.
 
 0.9.0 takes TLS and its digests from `dev.cajeta.crypto` 0.1.0 rather than the stdlib, which is
 removing `cajeta.io.net.tls` and the `cajeta.hash` cryptographic types. Nothing in this library's
