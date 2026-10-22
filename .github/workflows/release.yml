@@ -13,7 +13,48 @@ permissions:
 # Builds the library .cja on every PR; on a v* tag also publishes a GitHub
 # Release and a signed publish to Olla. Logic lives in the reusable workflow.
 jobs:
+  # Releases are cut from `release` only (main is the conduit, `release` is the
+  # train). lib-release.yml publishes on a v* tag and nothing else, so a branch
+  # push or a dispatch passes; a tag whose commit is not on `release` is refused.
+  # Same check as the cajeta compiler's release workflow. To release:
+  #   git push origin <sha>:refs/heads/release   (fast-forward only)
+  #   git tag v<version> <sha> && git push origin v<version>
+  guard:
+    name: release branch guard
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: The tag must be on the release branch
+        env:
+          REF: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          BRANCH=release
+          if [ "${REF#refs/tags/}" = "$REF" ]; then
+            echo "::notice::'$REF_NAME' is not a tag — publishes nothing, guard not applied"
+            exit 0
+          fi
+          if ! git fetch --no-tags origin \
+                 "+refs/heads/$BRANCH:refs/remotes/origin/$BRANCH" 2>/dev/null; then
+            echo "::error::there is no '$BRANCH' branch on origin. Releases are cut" \
+                 "from it and only from it."
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$SHA" "origin/$BRANCH"; then
+            echo "::error::tag '$REF_NAME' points at $SHA, which is NOT on '$BRANCH'." \
+                 "Nothing ships from a tag that is only on main. Fast-forward" \
+                 "'$BRANCH' to the commit you mean to release, push it, then move the tag."
+            exit 1
+          fi
+          echo "::notice::tag '$REF_NAME' is on '$BRANCH' — guard satisfied"
+
   release:
+    needs: [guard]
     uses: jklappenbach/cajeta/.github/workflows/lib-release.yml@main
     with:
       # Toolchain that can compile AND correctly run this repo. The reusable
