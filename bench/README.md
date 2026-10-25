@@ -159,5 +159,5 @@ bench/
 ├── loadgen/                                 Go: ws, sse, startup, idle-rss, wait, free
 ├── fixtures/tls/                            the P-256 test certificate and key
 ├── test/bench_smoke.sh
-└── results/<machine>/<run-id>/              results.csv + env.csv
+└── results/<machine>/<run-id>/              results.csv + env.csv (gitignored: smoke runs are never committed)
 ```

@@ -9,3 +9,6 @@ competitors/*/node_modules/
 competitors/*/.venv/
 competitors/**/__pycache__/
 loadgen/build/
+# Run outputs: smoke runs are never committed (benchmark-reference spec 1.5.1, 9.3);
+# a published run is copied into the compiler repo by its publish step.
+results/
