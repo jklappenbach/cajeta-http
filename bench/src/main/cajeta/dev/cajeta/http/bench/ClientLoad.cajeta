@@ -1,0 +1,90 @@
+package dev.cajeta.http.bench;
+
+import cajeta.time.Clock;
+import dev.cajeta.http.Bytes;
+import dev.cajeta.http.ClientResponse;
+import dev.cajeta.http.client.HttpClient;
+
+/** Per-worker counters; each worker writes only its own slot. */
+final class ClientStats {
+    public int64[] requests;
+    public int64[] errors;
+
+    public ClientStats(int32 n) {
+        this.requests = heap int64[n];
+        this.errors = heap int64[n];
+    }
+}
+
+/**
+ * cajeta-http's client under the competitor client contract:
+ * `http-bench --client get <url> <total> <conns> <keepalive 1|0>` runs `total`
+ * GETs across `conns` fibers, each with its own HttpClient (one reused
+ * keep-alive connection; with keepalive 0 every request carries
+ * `Connection: close`, so each one opens a fresh connection). Every response
+ * must be 200 with the body `Hello, World!`. Prints
+ * `{"requests":N,"errors":E,"elapsed_ns":T}`.
+ */
+public final class ClientLoad {
+
+    public static async int32 worker(ClientStats st, int32 slot, String url, int32 count, boolean keepAlive) {
+        HttpClient client #= heap HttpClient();
+        client.exchangeTimeout(30000);
+        if (!keepAlive) {
+            client.defaultHeader("Connection", "close");
+        }
+        int32 i = 0;
+        while (i < count) {
+            try {
+                ClientResponse resp #= client.get(url);
+                st.requests[slot] = st.requests[slot] + 1;
+                if (resp.status() != 200 || !Bytes.equals(resp.body(), "Hello, World!")) {
+                    st.errors[slot] = st.errors[slot] + 1;
+                }
+            } catch (Throwable e) {
+                st.errors[slot] = st.errors[slot] + 1;
+            }
+            i = i + 1;
+        }
+        return 1;
+    }
+
+    public static int32 main(String[] args) {
+        if (args.count() < 6 || !args[1].equals("get")) {
+            System.stdout.println("usage: http-bench --client get <url> <total> <conns> <keepalive 1|0>");
+            return 2;
+        }
+        String url = args[2];
+        int32 total = (int32) Num.parse(args[3], (int64) 0);
+        int32 conns = (int32) Num.parse(args[4], (int64) 1);
+        boolean keepAlive = !args[5].equals("0");
+        if (total <= 0 || conns <= 0) {
+            System.stdout.println("http-bench --client: total and conns must be positive");
+            return 2;
+        }
+        ClientStats st = heap ClientStats(conns);
+        int64 t0 = Clock.nanoTime();
+        scope {
+            int32 w = 0;
+            while (w < conns) {
+                int32 share = total / conns;
+                if (w < total % conns) {
+                    share = share + 1;
+                }
+                spawn worker(st, w, url, share, keepAlive);
+                w = w + 1;
+            }
+        }
+        int64 t1 = Clock.nanoTime();
+        int64 req = (int64) 0;
+        int64 err = (int64) 0;
+        int32 k = 0;
+        while (k < conns) {
+            req = req + st.requests[k];
+            err = err + st.errors[k];
+            k = k + 1;
+        }
+        System.stdout.println("{\"requests\":" + req + ",\"errors\":" + err + ",\"elapsed_ns\":" + (t1 - t0) + "}");
+        return 0;
+    }
+}

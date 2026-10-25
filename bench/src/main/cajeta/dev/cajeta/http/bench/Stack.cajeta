@@ -1,0 +1,74 @@
+package dev.cajeta.http.bench;
+
+import dev.cajeta.bench.detect.Sys;
+
+/**
+ * One serving stack: cajeta-http (this binary) or a competitor under
+ * `competitors/<name>/`. Its identity comes from `key=value` lines: a
+ * competitor's `versions.sh` prints them from the installed toolchain; ours are
+ * the pins in this project's cajeta.json (Versions). The `name` is the row's
+ * `platform` column.
+ *
+ *   language, language_version
+ *   server, h2, ws, sse, tls, client   `<library> <version>`, or `none`
+ *   ws_deflate                         `no` when the WebSocket library cannot negotiate permessage-deflate
+ */
+public class Stack {
+    public String name;
+    public String dir;
+    public String facts;
+    public boolean ours;
+
+    public Stack(String name, String dir, String facts, boolean ours) {
+        this.name = "" + name;
+        this.dir = "" + dir;
+        this.facts = "" + facts;
+        this.ours = ours;
+    }
+
+    public #String value(String key) {
+        return Sys.keyValue(this.facts, key);
+    }
+
+    public #String language() {
+        return this.value("language");
+    }
+
+    public #String languageVersion() {
+        return this.value("language_version");
+    }
+
+    /** False when the stack declares `<key>=none` or says nothing about it. */
+    public boolean has(String key) {
+        String v #= this.value(key);
+        if (v.isEmpty()) {
+            return false;
+        }
+        return !v.equals("none");
+    }
+
+    public boolean wsDeflate() {
+        String v #= this.value("ws_deflate");
+        return !v.equals("no");
+    }
+
+    /** The library name of `<key>`: the text before the first space. */
+    public #String libName(String key) {
+        String v #= this.value(key);
+        int64 sp = v.indexOf(" ");
+        if (sp < 0) {
+            return v;
+        }
+        return v.substring(0, (int32) sp);
+    }
+
+    /** The library version of `<key>`: the text after the first space. */
+    public #String libVersion(String key) {
+        String v #= this.value(key);
+        int64 sp = v.indexOf(" ");
+        if (sp < 0) {
+            return "";
+        }
+        return v.substring((int32) sp + 1, (int32) v.byteLength());
+    }
+}

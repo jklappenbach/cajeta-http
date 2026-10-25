@@ -1,0 +1,63 @@
+package dev.cajeta.http.bench;
+
+/**
+ * Server-sent events fan-out (`http/sse-fanout-1k`): loadgen opens every
+ * subscriber at once (1000; 100 in smoke mode) on `GET /sse?n=1000`, and each
+ * must receive `data: 0` .. `data: 999` in order and then the end of the
+ * stream. The row's throughput is events delivered per second across all
+ * subscribers; a subscriber that misses, reorders or adds an event is an
+ * error. Before load the stack's `/sse?n=3` body is byte-compared with ours.
+ */
+public class SseBench extends StackBench {
+    public int32 events;
+    public String bodyNote;
+
+    public SseBench(^Ctx ctx, String id) {
+        super(ctx, id, "sse", "events/s", ctx.smoke ? "100" : "1000");
+        this.events = 1000;
+        this.bodyNote = "";
+        this.timeoutMillis((int64) 180000);
+    }
+
+    public void prepareStack(Stack s) {
+        this.startServer("h1");
+        this.bodyNote #= this.ctx.byteCheck(s, "h1", this.port(), "/sse?n=3");
+    }
+
+    public #String[] argvFor(String label) {
+        String[] a = heap String[5];
+        a[0] = "" + this.ctx.loadgen;
+        a[1] = "sse";
+        a[2] = "http://127.0.0.1:" + this.port() + "/sse";
+        a[3] = "" + this.variantInt(1000);
+        a[4] = "" + this.events;
+        return a;
+    }
+
+    public void absorb(String out) {
+        int64 clients = (int64) this.variantInt(1000);
+        int64 complete = Num.jsonInt(out, "complete");
+        int64 got = Num.jsonInt(out, "events");
+        int64 errs = Num.jsonInt(out, "errors");
+        int64 elapsed = Num.jsonInt(out, "elapsed_ns");
+        this.trialRequests = got;
+        this.trialErrors = errs + (clients - complete);
+        if (elapsed > 0) {
+            this.trialValueMilli = (int64) ((float64) got * 1000000000000.0 / (float64) elapsed);
+        }
+        this.trialNote = "complete=" + complete + " of " + clients + ", events=" + got;
+        if (got != clients * (int64) this.events) {
+            this.trialOk = false;
+        }
+    }
+
+    public #String details() {
+        int32 c = this.variantInt(1000);
+        String s = "loadgen=loadgen sse; clients=" + c + "; events=" + ((int64) c * (int64) this.events)
+            + " (" + this.events + " per client, in order, counted)";
+        if (!this.bodyNote.isEmpty()) {
+            s = s + "; " + this.bodyNote;
+        }
+        return s;
+    }
+}

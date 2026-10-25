@@ -1,0 +1,18 @@
+# Jars on the netty stack's classpath, by item name in
+# /home/julian/code/cpp/cajeta/bench/competitors/pins.tsv (path + sha256 come from there;
+# the jars live READ-ONLY under cajeta/bench/competitors/third_party/java and are never copied here).
+netty-buffer
+netty-codec-base
+netty-codec-compression
+netty-codec-http
+netty-codec-http2
+netty-common
+netty-handler
+netty-resolver
+netty-transport
+netty-transport-classes-epoll
+netty-transport-native-epoll
+netty-transport-native-unix-common
+jackson-core
+jackson-databind
+jackson-annotations

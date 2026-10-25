@@ -1,0 +1,107 @@
+package dev.cajeta.http.bench;
+
+import cajeta.process.Command;
+import cajeta.process.Process;
+import cajeta.process.ProcessResult;
+import dev.cajeta.bench.detect.Sys;
+
+/**
+ * A server process the bench started: its port, its PID (recorded in
+ * build/pids so a crashed run can be cleaned up by PID), readiness, its
+ * resident set, and the kill. Nothing is ever killed by name.
+ */
+public class ServerProc {
+    public Process proc;
+    public int32 pid;
+    public int32 port;
+    public String stackName;
+    public String mode;
+    public boolean live;
+
+    public ServerProc() {
+        this.proc = null;
+        this.pid = -1;
+        this.port = 0;
+        this.stackName = "";
+        this.mode = "";
+        this.live = false;
+    }
+
+    /** Start `stack` in `mode` on a free port and wait until it answers. Throws when it does not. */
+    public static #ServerProc start(Ctx ctx, Stack who, String mode) {
+        ServerProc s = heap ServerProc();
+        s.port = ctx.freePort();
+        s.stackName = "" + who.name;
+        s.mode = "" + mode;
+        String[] argv #= ctx.serverArgv(who, mode, s.port);
+        Command c = heap Command(#argv);
+        Process p #= c.start();
+        if (!p.launched()) {
+            throw heap Exception(who.name + ": could not start the " + mode + " server");
+        }
+        s.pid = p.pid();
+        s.proc #= p;
+        s.live = true;
+        ctx.recordPid(s.pid);
+        String how = "h1";
+        String scheme = "http";
+        if (mode.equals("h2c")) {
+            how = "tcp";
+        }
+        if (mode.equals("tls")) {
+            scheme = "https";
+        }
+        String url = scheme + "://127.0.0.1:" + s.port + "/plaintext";
+        if (!ctx.waitReady(url, how)) {
+            s.stop();
+            throw heap Exception(who.name + ": the " + mode + " server did not answer on port " + s.port);
+        }
+        return s;
+    }
+
+    /** True while the process is still running (it has not exited or been reaped). */
+    public boolean alive() {
+        if (!this.live) {
+            return false;
+        }
+        String st #= Sys.readText("/proc/" + this.pid + "/stat");
+        if (st.isEmpty()) {
+            return false;
+        }
+        int64 close = st.indexOf(") ");
+        if (close < 0) {
+            return false;
+        }
+        int8 state = st.byteAt((int32) close + 2);
+        return state != 90 && state != 88;   // 'Z' zombie, 'X' dead
+    }
+
+    /** Peak resident set (VmHWM) in KiB, or -1. */
+    public int64 hwmKb() {
+        return this.statusKb("VmHWM:");
+    }
+
+    /** Current resident set (VmRSS) in KiB, or -1. */
+    public int64 rssKb() {
+        return this.statusKb("VmRSS:");
+    }
+
+    public int64 statusKb(String label) {
+        if (!this.live) {
+            return (int64) -1;
+        }
+        String text #= Sys.readText("/proc/" + this.pid + "/status");
+        String v #= Sys.tokenAfter(text, label);
+        return Num.parse(v, (int64) -1);
+    }
+
+    /** SIGKILL this PID and reap it. Idempotent. */
+    public void stop() {
+        if (!this.live) {
+            return;
+        }
+        this.live = false;
+        this.proc.kill();
+        this.proc.close();
+    }
+}

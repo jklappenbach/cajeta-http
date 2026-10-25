@@ -1,0 +1,11 @@
+{
+  "name": "cajeta-http-bench-node-http",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Node.js node:http / node:http2 / node:https + ws server and undici client for the cajeta-http benchmark",
+  "license": "UNLICENSED",
+  "dependencies": {
+    "undici": "6.24.1",
+    "ws": "8.18.3"
+  }
+}

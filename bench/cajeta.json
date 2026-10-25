@@ -1,0 +1,92 @@
+{
+    // cajeta-http's benchmark project (cajeta specs/benchmark-reference-spec.md
+    // §7.3, plan unit 18), on the shared harness dev.cajeta.bench. The pages it
+    // measures are the compiler repo's bench/http/*.md; every id there is one
+    // Benchmark here, run on cajeta-http and on the competitor stacks under
+    // competitors/<stack>/. See README.md.
+    //
+    //   cajeta bench   build build/http-bench, then measure every row into
+    //                  results/<machine>/<run-id>/results.csv (+ env.csv)
+    //   ./bench.sh     the same, after building loadgen and the competitors
+    //
+    // BUILD FLAVOR: debug. cajeta 0.46.3 cannot link anything that uses
+    // cajeta-http at O1 or above: the optimizer drops the stdlib module's
+    // linkonce copy of `__cajeta_stack_cajeta_lang_Optional_dev_cajeta_http_server_Dispatch__drop`
+    // while DispatchPool.worker still calls it (undefined reference at link,
+    // with --release, --debug-release, --debug --opt=O1/O2/O3, --link-mode=full,
+    // --tree-shake=off, with the Olla archive and with the sources compiled in).
+    // Measured 2026-10-25. When the compiler links it, the flavor below goes to
+    // { "base": "release", "opt": "O3", "cpu": "native" } and CAJETA_BENCH_FLAGS
+    // in HttpBench with it. Until then every cajeta-http row says `--debug (O0)`
+    // in its flags column.
+
+    "details": {
+        "name":                "dev.cajeta.http.bench",
+        "version":             "0.1.0",
+        "description":         "cajeta-http benchmarks against Go net/http, axum, Netty, Node http and uvicorn",
+        "license":             "Apache-2.0",
+        "authors":             ["Julian Klappenbach"],
+        "cajeta-lang-version": "1.0"
+    },
+
+    "settings": {
+        // The harness's four (clock, filesystem, env, process: it times trials,
+        // writes the CSVs, reads CAJETA_BENCH_*, runs oha, wrk, loadgen and the
+        // competitors) plus network for cajeta-http's own server and client.
+        "capabilities": ["filesystem", "clock", "env", "process", "network"],
+
+        // Keep dev.cajeta.http and dev.cajeta.crypto in step with Versions.cajeta
+        // (bench.sh refuses to run when they disagree).
+        "dependencies": {
+            "dev.cajeta.bench": "0.1.1",
+            "dev.cajeta.http":  "0.9.1"
+        },
+
+        "repositories": [
+            { "name": "central", "url": "https://olla.cajeta.dev", "priority": 0 }
+        ],
+
+        "build": {
+            "source-root":  "src/main/cajeta",
+            "target":       "host",
+            "entry-method": "dev.cajeta.http.bench.HttpBench::main"
+        }
+    },
+
+    "tasks": {
+
+        "build": {
+            "description": "Build the bench binary (build/http-bench)",
+            "actions": [
+                { "action": "build", "flavor": "debug",
+                  "output-path": "build/http-bench", "id": "art" }
+            ],
+            "outputs": { "path": "${art.path}", "sha256": "${art.sha256}" }
+        },
+
+        "bench": {
+            "description": "Build build/http-bench and measure every row into results/<machine>/<run-id>/",
+            "actions": [
+                { "action": "build", "flavor": "debug",
+                  "output-path": "build/http-bench", "id": "art" },
+                // exec does not split its command string: arguments go in args.
+                { "action": "exec", "command": "${art.path}",
+                  "args": ["--run", "--cajeta-version", "${cajeta.version}"] }
+            ]
+        },
+
+        "list": {
+            "description": "List every benchmark id",
+            "actions": [
+                { "action": "build", "flavor": "debug",
+                  "output-path": "build/http-bench", "id": "art" },
+                { "action": "exec", "command": "${art.path}", "args": ["--list"] }
+            ]
+        },
+
+        "clean": {
+            "description": "Wipe build outputs",
+            "actions": [ { "action": "clean" } ]
+        }
+    }
+}

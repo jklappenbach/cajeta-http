@@ -1,0 +1,132 @@
+package dev.cajeta.http.bench;
+
+import cajeta.collection.ArrayList;
+import dev.cajeta.bench.Benchmark;
+import dev.cajeta.bench.BenchMain;
+import dev.cajeta.bench.Machine;
+import dev.cajeta.bench.detect.Sys;
+
+/**
+ * The cajeta-http benchmark project (benchmark-reference spec §7.3, plan
+ * unit 18): one Benchmark per page id in the compiler repo's bench/http/
+ * pages, each measured on cajeta-http and on every competitor stack selected
+ * by HTTP_BENCH_STACKS. `area()` is `http` and `name()` the slug, so a row's
+ * id is `http/plaintext-h1`.
+ *
+ *   http-bench --list | --run [--area http] [--bench <slug>] [--out <results.csv>]
+ *              [--cajeta-version <v>]
+ *   http-bench --serve <h1|h2c|tls> <port> [<cert> <key>]      cajeta-http under the contract
+ *   http-bench --client get <url> <total> <conns> <keepalive>  its client under the contract
+ *
+ * `--run` without `--out` writes results/<machine>/<run-id>/results.csv, the
+ * run id being CAJETA_BENCH_RUN_ID or `<UTC yyyymmddThhmmZ>-<cajeta version>`.
+ * After the harness writes the CSV, RowFacts fills the columns its contract
+ * cannot (language, library, throughput on a competitor row).
+ */
+public final class HttpBench {
+
+    public static int32 main(String[] args) {
+        int32 argc = (int32) args.count();
+        if (argc > 0 && args[0].equals("--serve")) {
+            return Serve.main(args);
+        }
+        if (argc > 0 && args[0].equals("--client")) {
+            return ClientLoad.main(args);
+        }
+
+        // Our own flags out; the rest is the harness's command line.
+        String cajetaVersion = "";
+        String envVer = System.env.get("CAJETA_BENCH_CAJETA_VERSION");
+        if (envVer != null) {
+            cajetaVersion = "" + envVer;
+        }
+        ArrayList<String> rest = heap ArrayList<String>();
+        boolean runMode = false;
+        String outPath = "";
+        int32 i = 0;
+        while (i < argc) {
+            String a = args[i];
+            if (a.equals("--cajeta-version") && i + 1 < argc) {
+                if (cajetaVersion.isEmpty()) {
+                    cajetaVersion = "" + args[i + 1];
+                }
+                i = i + 2;
+            } else {
+                if (a.equals("--run")) {
+                    runMode = true;
+                }
+                if (a.equals("--out") && i + 1 < argc) {
+                    outPath = "" + args[i + 1];
+                }
+                rest.add(a + "");
+                i = i + 1;
+            }
+        }
+        if (cajetaVersion.isEmpty() || cajetaVersion.startsWith("$")) {
+            cajetaVersion = "unknown";
+        }
+        if (System.env.get("CAJETA_BENCH_CAJETA_VERSION") == null) {
+            System.env.set("CAJETA_BENCH_CAJETA_VERSION", cajetaVersion);
+        }
+        if (System.env.get("CAJETA_BENCH_FLAGS") == null) {
+            // The build this binary is (cajeta.json's bench task): see README "Build flavor".
+            System.env.set("CAJETA_BENCH_FLAGS", "--debug (O0)");
+        }
+        if (runMode && outPath.isEmpty()) {
+            String runId = "";
+            String rid = System.env.get("CAJETA_BENCH_RUN_ID");
+            if (rid != null) {
+                runId = "" + rid;
+            } else {
+                String stamp #= Sys.run2("date", "-u", "+%Y%m%dT%H%MZ");
+                runId = stamp.trim() + "-" + cajetaVersion;
+                System.env.set("CAJETA_BENCH_RUN_ID", runId);
+            }
+            String machine #= Machine.resolve();
+            outPath = "results/" + machine + "/" + runId + "/results.csv";
+            rest.add("--out");
+            rest.add(outPath + "");
+        }
+        int32 rn = rest.count();
+        String[] harnessArgs = heap String[rn];
+        int32 k = 0;
+        while (k < rn) {
+            harnessArgs[k] = rest.get(k) + "";
+            k = k + 1;
+        }
+
+        Ctx ctx #= Ctx.create(cajetaVersion);
+        ArrayList<Benchmark> b = heap ArrayList<Benchmark>();
+        // Server.md
+        b.add(heap OhaBench(ctx, "plaintext-h1", "server", "req/s", "64,512,64-wrk", "/plaintext", "h1"));
+        b.add(heap OhaBench(ctx, "json-h1", "server", "req/s", "64", "/json", "h1"));
+        b.add(heap OhaBench(ctx, "plaintext-h2", "h2", "req/s", "64", "/plaintext", "h2c"));
+        b.add(heap OhaBench(ctx, "json-h2", "h2", "req/s", "64", "/json", "h2c"));
+        // WebSocket.md
+        b.add(heap WsBench(ctx, "ws-echo", false));
+        b.add(heap WsBench(ctx, "ws-echo-deflate", true));
+        // Sse.md
+        b.add(heap SseBench(ctx, "sse-fanout-1k"));
+        // Tls.md
+        String tlsConns = "64";
+        String tc = System.env.get("HTTP_BENCH_TLS_CONNS");
+        if (tc != null) {
+            tlsConns = "" + tc;
+        }
+        b.add(heap OhaBench(ctx, "tls-handshake-rate", "tls", "handshakes/s", tlsConns, "/plaintext", "tls"));
+        // Client.md
+        b.add(heap ClientBench(ctx, "client-get-throughput", false));
+        b.add(heap ClientBench(ctx, "client-connection-reuse", true));
+        // Startup.md
+        b.add(heap LaunchBench(ctx, "startup-time", false));
+        b.add(heap LaunchBench(ctx, "idle-rss", true));
+
+        int32 rc = BenchMain.run(harnessArgs, b);
+        if (runMode && rc != 2) {
+            int32 n = RowFacts.apply(outPath, ctx);
+            System.stdout.println("bench: filled language, library and throughput on " + n + " row(s) of " + outPath);
+            System.stdout.println("bench: results " + outPath);
+        }
+        return rc;
+    }
+}

@@ -1,0 +1,78 @@
+package dev.cajeta.http.bench;
+
+/**
+ * WebSocket echo (`http/ws-echo`, `http/ws-echo-deflate`): loadgen's 64
+ * gorilla/websocket clients each send a 1 KB binary message, read the echo
+ * and compare it byte for byte, for the trial's seconds. The deflate row
+ * offers permessage-deflate and requires every client to have negotiated it.
+ * The row's throughput is echoed messages per second; a mismatch, a failed
+ * connection or an un-negotiated extension is an error.
+ */
+public class WsBench extends StackBench {
+    public boolean deflate;
+    public int32 clients;
+    public int32 size;
+
+    public WsBench(^Ctx ctx, String id, boolean deflate) {
+        super(ctx, id, "ws", "msg/s", "64");
+        this.deflate = deflate;
+        this.clients = 64;
+        this.size = 1024;
+    }
+
+    public boolean supports(Stack s) {
+        if (this.deflate && !s.wsDeflate()) {
+            this.why = s.name + ": " + s.libName("ws") + " " + s.libVersion("ws")
+                + " cannot negotiate permessage-deflate (versions.sh: ws_deflate=no)";
+            return false;
+        }
+        return true;
+    }
+
+    public void prepareStack(Stack s) {
+        this.timeoutMillis((int64) (this.ctx.seconds + 60) * 1000);
+        this.startServer("h1");
+    }
+
+    public #String[] argvFor(String label) {
+        String[] a = heap String[7];
+        a[0] = "" + this.ctx.loadgen;
+        a[1] = "ws";
+        a[2] = "ws://127.0.0.1:" + this.port() + "/ws";
+        a[3] = "" + this.clients;
+        a[4] = "" + this.ctx.seconds;
+        a[5] = "" + this.size;
+        a[6] = this.deflate ? "1" : "0";
+        return a;
+    }
+
+    public void absorb(String out) {
+        int64 connected = Num.jsonInt(out, "connected");
+        int64 negotiated = Num.jsonInt(out, "deflate_negotiated");
+        int64 messages = Num.jsonInt(out, "messages");
+        int64 mismatches = Num.jsonInt(out, "mismatches");
+        int64 errs = Num.jsonInt(out, "errors");
+        int64 elapsed = Num.jsonInt(out, "elapsed_ns");
+        int64 missing = (int64) this.clients - connected;
+        int64 undeflated = (int64) 0;
+        if (this.deflate) {
+            undeflated = (int64) this.clients - negotiated;
+        }
+        this.trialRequests = messages;
+        this.trialErrors = errs + mismatches + missing + undeflated;
+        if (elapsed > 0) {
+            this.trialValueMilli = (int64) ((float64) messages * 1000000000000.0 / (float64) elapsed);
+        }
+        this.trialNote = "connected=" + connected + " deflate_negotiated=" + negotiated
+            + " mismatches=" + mismatches + " errors=" + errs;
+        if (messages <= 0) {
+            this.trialOk = false;
+        }
+    }
+
+    public #String details() {
+        String d = this.deflate ? "permessage-deflate negotiated by every client" : "no extension";
+        return "loadgen=loadgen ws (gorilla/websocket 1.5.3); " + this.clients + " clients x "
+            + this.size + " B binary echo, byte-compared; " + d + "; " + this.ctx.seconds + "s";
+    }
+}

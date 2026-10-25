@@ -1,0 +1,24 @@
+package dev.cajeta.http.bench;
+
+/**
+ * The versions this project measures, kept in step with cajeta.json's
+ * `dependencies` (bench.sh refuses to run when they disagree).
+ */
+public final class Versions {
+    public static final String HTTP = "0.9.1";
+    public static final String CRYPTO = "0.1.0";
+
+    /** The key=value facts of the cajeta-http stack (see Stack). */
+    public static #String ours(String cajetaVersion) {
+        String h = "dev.cajeta.http " + Versions.HTTP;
+        String s = "language=cajeta\n"
+            + "language_version=" + cajetaVersion + "\n"
+            + "server=" + h + "\n"
+            + "h2=" + h + "\n"
+            + "ws=" + h + "\n"
+            + "sse=" + h + "\n"
+            + "tls=dev.cajeta.crypto " + Versions.CRYPTO + "\n"
+            + "client=" + h + "\n";
+        return s.substring(0, s.byteLength());
+    }
+}

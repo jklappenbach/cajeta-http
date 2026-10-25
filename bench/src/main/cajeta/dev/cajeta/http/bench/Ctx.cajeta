@@ -1,0 +1,474 @@
+package dev.cajeta.http.bench;
+
+import cajeta.collection.ArrayList;
+import cajeta.io.file.File;
+import cajeta.io.file.FileWriter;
+import cajeta.io.file.OpenMode;
+import cajeta.process.Command;
+import cajeta.process.ProcessResult;
+import dev.cajeta.bench.detect.Sys;
+
+/**
+ * Everything the http benchmarks share: where the tools are, the stacks
+ * selected for this run, the reference responses from cajeta-http that every
+ * competitor is byte-compared against before any load, the per-row facts
+ * RowFacts writes after the harness, ports, and the PID file.
+ *
+ * Environment:
+ *   HTTP_BENCH_ROOT     the bench project directory (default: the working directory)
+ *   HTTP_BENCH_STACKS   comma-separated stacks to run (default: all six)
+ *   HTTP_BENCH_SECONDS  seconds of load per trial (default 10; 2 in smoke mode)
+ *   HTTP_BENCH_H2_STREAMS  oha -p on the h2 rows: streams per connection (default 8)
+ *   HTTP_BENCH_TLS_CONNS   concurrent handshakes on the TLS row (default 64)
+ *   HTTP_BENCH_OHA, HTTP_BENCH_WRK, HTTP_BENCH_CURL   tool paths
+ *   CAJETA_BENCH_SMOKE, CAJETA_BENCH_CAJETA_VERSION   as the harness reads them
+ */
+public class Ctx {
+    public String root;
+    public String exe;
+    public String cajetaVersion;
+    public boolean smoke;
+    public int32 seconds;
+    public String oha;
+    public String ohaVersion;
+    public String wrk;
+    public String wrkVersion;
+    public String curl;
+    public String loadgen;
+    public String cert;
+    public String key;
+    public String pidFile;
+    public ArrayList<Stack> stacks;
+    public ArrayList<Fact> facts;
+    public ArrayList<String> refKeys;
+    public ArrayList<String> refVals;
+    public int32 portCursor;
+    public int32 h2Streams;
+
+    public Ctx() {
+        this.root = ".";
+        this.exe = "";
+        this.cajetaVersion = "";
+        this.smoke = false;
+        this.seconds = 10;
+        this.oha = "oha";
+        this.ohaVersion = "";
+        this.wrk = "wrk";
+        this.wrkVersion = "";
+        this.curl = "curl";
+        this.loadgen = "";
+        this.cert = "";
+        this.key = "";
+        this.pidFile = "";
+        this.stacks = heap ArrayList<Stack>();
+        this.facts = heap ArrayList<Fact>();
+        this.refKeys = heap ArrayList<String>();
+        this.refVals = heap ArrayList<String>();
+        this.portCursor = 0;
+        this.h2Streams = 8;
+    }
+
+    public static #Ctx create(String cajetaVersion) {
+        Ctx c = heap Ctx();
+        String root = System.env.get("HTTP_BENCH_ROOT");
+        if (root != null) {
+            c.root = "" + root;
+        } else {
+            String pwd #= Sys.run2("readlink", "-f", ".");
+            c.root #= pwd.trim();
+        }
+        // /proc/self/exe in a child names the child: ask the child for its parent's.
+        String self #= Sys.run2("sh", "-c", "readlink -f /proc/$PPID/exe");
+        c.exe #= self.trim();
+        c.cajetaVersion = "" + cajetaVersion;
+        c.smoke = Ctx.flag("CAJETA_BENCH_SMOKE");
+        c.seconds = 10;
+        if (c.smoke) {
+            c.seconds = 2;
+        }
+        String secs = System.env.get("HTTP_BENCH_SECONDS");
+        if (secs != null) {
+            c.seconds = (int32) Num.parse(secs, (int64) c.seconds);
+        }
+        String streams = System.env.get("HTTP_BENCH_H2_STREAMS");
+        if (streams != null) {
+            c.h2Streams = (int32) Num.parse(streams, (int64) 8);
+        }
+        c.oha #= Ctx.tool("HTTP_BENCH_OHA", "oha");
+        c.wrk #= Ctx.tool("HTTP_BENCH_WRK", "wrk");
+        c.curl #= Ctx.tool("HTTP_BENCH_CURL", "curl");
+        c.loadgen = c.root + "/loadgen/build/loadgen";
+        c.cert = c.root + "/fixtures/tls/cert.pem";
+        c.key = c.root + "/fixtures/tls/key.pem";
+        c.pidFile = c.root + "/build/pids";
+        String ov #= Sys.run1(c.oha, "--version");
+        c.ohaVersion #= Sys.firstLine(ov);
+        String wv #= Ctx.capture2(c.wrk, "-v");
+        String wl #= Sys.firstLine(wv);
+        // "wrk 4.2.0 [epoll] Copyright (C) 2012 Will Glozer": keep "wrk 4.2.0".
+        String wn #= Sys.tokenAfter(wl, "wrk");
+        c.wrkVersion = "wrk " + wn;
+        c.addStacks();
+        return c;
+    }
+
+    public static boolean flag(String name) {
+        String v = System.env.get(name);
+        if (v == null) {
+            return false;
+        }
+        return v.equals("1") || v.equals("true") || v.equals("yes");
+    }
+
+    public static #String tool(String env, String fallback) {
+        String v = System.env.get(env);
+        if (v != null) {
+            return "" + v;
+        }
+        return "" + fallback;
+    }
+
+    /** stdout of `prog arg` whatever the exit status (wrk -v exits 1). */
+    public static #String capture2(String prog, String arg) {
+        String[] argv = heap String[2];
+        argv[0] = "" + prog;
+        argv[1] = "" + arg;
+        Command c = heap Command(#argv);
+        c.captureStdout();
+        c.captureStderr();
+        c.timeoutMillis((int64) 10000);
+        ProcessResult r #= c.run();
+        String out #= Sys.copyText(r.stdout());
+        String err #= Sys.copyText(r.stderr());
+        return out + err;
+    }
+
+    // ---- stacks -----------------------------------------------------------
+
+    public static #String allStacks() {
+        return "cajeta-http,go-nethttp,axum,netty,node-http,uvicorn";
+    }
+
+    public boolean wanted(String sel, String name) {
+        String padded #= "," + sel + ",";
+        return padded.contains("," + name + ",");
+    }
+
+    public void addStacks() {
+        String sel = System.env.get("HTTP_BENCH_STACKS");
+        String chosen #= Ctx.allStacks();
+        if (sel != null) {
+            if (!sel.equals("all")) {
+                chosen = "" + sel;
+            }
+        }
+        if (this.wanted(chosen, "cajeta-http")) {
+            String ours #= Versions.ours(this.cajetaVersion);
+            this.stacks.add(heap Stack("cajeta-http", "", ours, true));
+        }
+        this.addCompetitor(chosen, "go-nethttp");
+        this.addCompetitor(chosen, "axum");
+        this.addCompetitor(chosen, "netty");
+        this.addCompetitor(chosen, "node-http");
+        this.addCompetitor(chosen, "uvicorn");
+    }
+
+    public void addCompetitor(String chosen, String name) {
+        if (!this.wanted(chosen, name)) {
+            return;
+        }
+        String dir = this.root + "/competitors/" + name;
+        String facts #= Sys.run0(dir + "/versions.sh");
+        this.stacks.add(heap Stack(name, dir, facts, false));
+    }
+
+    public Stack findStack(String name) {
+        int32 i = 0;
+        int32 n = this.stacks.count();
+        while (i < n) {
+            Stack s = this.stacks.get(i);
+            if (s.name.equals(name)) {
+                return s;
+            }
+            i = i + 1;
+        }
+        return null;
+    }
+
+    /** One `<stack>|<variant>` label per selected stack and variant. */
+    public #ArrayList<String> labels(String variantsCsv) {
+        ArrayList<String> out = heap ArrayList<String>();
+        int32 i = 0;
+        int32 n = this.stacks.count();
+        while (i < n) {
+            Stack s = this.stacks.get(i);
+            String rest = "" + variantsCsv;
+            boolean more = true;
+            while (more) {
+                int64 comma = rest.indexOf(",");
+                if (comma < 0) {
+                    out.add(s.name + "|" + rest);
+                    more = false;
+                } else {
+                    String head #= rest.substring(0, (int32) comma);
+                    out.add(s.name + "|" + head);
+                    rest #= rest.substring((int32) comma + 1, rest.byteLength());
+                }
+            }
+            i = i + 1;
+        }
+        return out;
+    }
+
+    // ---- commands ---------------------------------------------------------
+
+    public #String[] serverArgv(Stack s, String mode, int32 port) {
+        if (s.ours) {
+            String[] a = heap String[6];
+            a[0] = "" + this.exe;
+            a[1] = "--serve";
+            a[2] = "" + mode;
+            a[3] = "" + port;
+            a[4] = "" + this.cert;
+            a[5] = "" + this.key;
+            return a;
+        }
+        String[] b = heap String[5];
+        b[0] = s.dir + "/run-server.sh";
+        b[1] = "" + mode;
+        b[2] = "" + port;
+        b[3] = "" + this.cert;
+        b[4] = "" + this.key;
+        return b;
+    }
+
+    public #String[] clientArgv(Stack s, String url, int32 total, int32 conns, int32 keepAlive) {
+        if (s.ours) {
+            String[] a = heap String[7];
+            a[0] = "" + this.exe;
+            a[1] = "--client";
+            a[2] = "get";
+            a[3] = "" + url;
+            a[4] = "" + total;
+            a[5] = "" + conns;
+            a[6] = "" + keepAlive;
+            return a;
+        }
+        String[] b = heap String[6];
+        b[0] = s.dir + "/run-client.sh";
+        b[1] = "get";
+        b[2] = "" + url;
+        b[3] = "" + total;
+        b[4] = "" + conns;
+        b[5] = "" + keepAlive;
+        return b;
+    }
+
+    /** Run `argv`, capture stdout and stderr; the result is the caller's. */
+    public #ProcessResult run(#String[] argv, int64 timeoutMs) {
+        Command c = heap Command(#argv);
+        c.captureStdout();
+        c.captureStderr();
+        if (timeoutMs > 0) {
+            c.timeoutMillis(timeoutMs);
+        }
+        return c.run();
+    }
+
+    /** Poll `url` (h1: a 200; tcp: a connect) through loadgen for up to 30 s. */
+    public boolean waitReady(String url, String how) {
+        String[] argv = heap String[5];
+        argv[0] = "" + this.loadgen;
+        argv[1] = "wait";
+        argv[2] = "" + url;
+        argv[3] = "30000";
+        argv[4] = "" + how;
+        ProcessResult r #= this.run(#argv, (int64) 40000);
+        return r.launched() && r.exitCode() == 0;
+    }
+
+    /**
+     * The next port in 20100..20199 that nothing is listening on. The range is
+     * below Linux's ephemeral range (32768..60999): a port inside it can be
+     * held by a client socket in TIME_WAIT, and then a server's bind fails
+     * with EADDRINUSE although nothing listens there (measured 2026-10-25).
+     */
+    public int32 freePort() {
+        int32 tries = 0;
+        while (tries < 100) {
+            int32 p = 20100 + this.portCursor;
+            this.portCursor = (this.portCursor + 1) % 100;
+            String[] argv = heap String[3];
+            argv[0] = "" + this.loadgen;
+            argv[1] = "free";
+            argv[2] = "" + p;
+            ProcessResult r #= this.run(#argv, (int64) 10000);
+            if (r.launched() && r.exitCode() == 0) {
+                return p;
+            }
+            tries = tries + 1;
+        }
+        throw heap Exception("no free port in 20100..20199");
+    }
+
+    public void recordPid(int32 pid) {
+        FileWriter w #= File.openWrite(this.pidFile, OpenMode.APPEND);
+        if (w.fd < 0) {
+            return;
+        }
+        w.writeString("" + pid + "\n");
+        w.close();
+    }
+
+    // ---- byte comparison --------------------------------------------------
+
+    /**
+     * `status \n content-type \n body` of one GET through curl. flavor: h1,
+     * h2c (prior knowledge) or tls (TLS 1.3 only, the test certificate).
+     */
+    public #String fetch(String flavor, String url) {
+        String bodyPath = this.root + "/build/fetch.body";
+        int32 n = 9;
+        if (flavor.equals("h2c")) {
+            n = 10;
+        }
+        if (flavor.equals("tls")) {
+            n = 13;
+        }
+        String[] a = heap String[n];
+        a[0] = "" + this.curl;
+        a[1] = "-s";
+        a[2] = "--max-time";
+        a[3] = "10";
+        a[4] = "-o";
+        a[5] = "" + bodyPath;
+        a[6] = "-w";
+        a[7] = "%{http_code}\n%{content_type}\n";
+        if (flavor.equals("h2c")) {
+            a[8] = "--http2-prior-knowledge";
+            a[9] = "" + url;
+        } else if (flavor.equals("tls")) {
+            a[8] = "-k";
+            a[9] = "--tlsv1.3";
+            a[10] = "--tls-max";
+            a[11] = "1.3";
+            a[12] = "" + url;
+        } else {
+            a[8] = "" + url;
+        }
+        ProcessResult r #= this.run(#a, (int64) 20000);
+        String meta #= Sys.copyText(r.stdout());
+        if (!r.launched() || r.exitCode() != 0) {
+            return "curl failed (exit " + r.exitCode() + ") for " + url;
+        }
+        int8[] body #= File.readAllBytes(bodyPath);
+        int32 bn = (int32) body.count();
+        String bs = heap String(#body, bn);
+        return meta + bs;
+    }
+
+    /** cajeta-http's response for (flavor, target), from a short-lived server of ours. */
+    public #String reference(String flavor, String target) {
+        String key #= flavor + " " + target;
+        int32 i = 0;
+        int32 n = this.refKeys.count();
+        while (i < n) {
+            String k = this.refKeys.get(i);
+            if (k.equals(key)) {
+                String v = this.refVals.get(i);
+                return "" + v;
+            }
+            i = i + 1;
+        }
+        String mode = "h1";
+        String scheme = "http";
+        if (flavor.equals("h2c")) {
+            mode = "h2c";
+        }
+        if (flavor.equals("tls")) {
+            mode = "tls";
+            scheme = "https";
+        }
+        String ourFacts #= Versions.ours(this.cajetaVersion);
+        Stack ours = heap Stack("cajeta-http", "", ourFacts, true);
+        ServerProc s #= ServerProc.start(this, ours, mode);
+        String got #= this.fetch(flavor, scheme + "://127.0.0.1:" + s.port + target);
+        s.stop();
+        this.refKeys.add(key + "");
+        this.refVals.add(got + "");
+        return got;
+    }
+
+    /**
+     * Compare `stack`'s response at `port` with ours; throws (a failed row,
+     * before any load) when they differ. Returns the note `body-equal`.
+     */
+    public #String byteCheck(Stack who, String flavor, int32 port, String target) {
+        String ref #= this.reference(flavor, target);
+        String scheme = "http";
+        if (flavor.equals("tls")) {
+            scheme = "https";
+        }
+        String got #= this.fetch(flavor, scheme + "://127.0.0.1:" + port + target);
+        if (!got.equals(ref)) {
+            throw heap Exception(who.name + " " + flavor + " " + target
+                + " differs from cajeta-http: got [" + Ctx.visible(got) + "] want [" + Ctx.visible(ref) + "]");
+        }
+        return "body-equal";
+    }
+
+    /** `s` with CR, LF and tabs spelled out, cut to 160 bytes, for a notes cell. */
+    public static #String visible(String s) {
+        String out = "";
+        int32 n = s.byteLength();
+        if (n > 160) {
+            n = 160;
+        }
+        int32 i = 0;
+        while (i < n) {
+            int8 c = s.byteAt(i);
+            if (c == 10) {
+                out = out + "\\n";
+            } else if (c == 13) {
+                out = out + "\\r";
+            } else if (c == 9) {
+                out = out + "\\t";
+            } else {
+                out = out + s.substring(i, i + 1);
+            }
+            i = i + 1;
+        }
+        return out;
+    }
+
+    // ---- facts ------------------------------------------------------------
+
+    /** The Fact for (benchmark, label), or null. A view: valid while this Ctx lives. */
+    public Fact findFact(String benchmark, String label) {
+        int32 i = 0;
+        int32 n = this.facts.count();
+        while (i < n) {
+            Fact f = this.facts.get(i);
+            if (f.benchmark.equals(benchmark) && f.label.equals(label)) {
+                return f;
+            }
+            i = i + 1;
+        }
+        return null;
+    }
+
+    /** The Fact for (benchmark, label), created on first use. A view: valid while this Ctx lives. */
+    public Fact fact(String benchmark, String label) {
+        int32 i = 0;
+        int32 n = this.facts.count();
+        while (i < n) {
+            Fact f = this.facts.get(i);
+            if (f.benchmark.equals(benchmark) && f.label.equals(label)) {
+                return f;
+            }
+            i = i + 1;
+        }
+        this.facts.add(heap Fact(benchmark, label));
+        return this.facts.get(n);
+    }
+}

@@ -1,0 +1,131 @@
+package dev.cajeta.http.bench;
+
+/** Small number helpers: parsing, a flat-JSON integer lookup, fixed-point text, medians. */
+public final class Num {
+
+    /** The decimal int64 at the start of `s` (after spaces), or `fallback`. */
+    public static int64 parse(String s, int64 fallback) {
+        if (s == null) {
+            return fallback;
+        }
+        int32 n = s.byteLength();
+        int32 i = 0;
+        while (i < n && (s.byteAt(i) == 32 || s.byteAt(i) == 9)) {
+            i = i + 1;
+        }
+        boolean neg = false;
+        if (i < n && s.byteAt(i) == 45) {
+            neg = true;
+            i = i + 1;
+        }
+        int32 start = i;
+        int64 v = (int64) 0;
+        while (i < n) {
+            int8 c = s.byteAt(i);
+            if (c < 48 || c > 57) {
+                break;
+            }
+            v = v * 10 + (int64) (c - 48);
+            i = i + 1;
+        }
+        if (i == start) {
+            return fallback;
+        }
+        if (neg) {
+            return 0 - v;
+        }
+        return v;
+    }
+
+    /** A float at the start of `s` (digits, optional fraction), or -1. */
+    public static float64 parseFloat(String s) {
+        int32 n = s.byteLength();
+        int32 i = 0;
+        while (i < n && s.byteAt(i) == 32) {
+            i = i + 1;
+        }
+        float64 v = 0.0;
+        boolean any = false;
+        while (i < n && s.byteAt(i) >= 48 && s.byteAt(i) <= 57) {
+            v = v * 10.0 + (float64) (s.byteAt(i) - 48);
+            i = i + 1;
+            any = true;
+        }
+        if (i < n && s.byteAt(i) == 46) {
+            i = i + 1;
+            float64 scale = 0.1;
+            while (i < n && s.byteAt(i) >= 48 && s.byteAt(i) <= 57) {
+                v = v + scale * (float64) (s.byteAt(i) - 48);
+                scale = scale / 10.0;
+                i = i + 1;
+                any = true;
+            }
+        }
+        if (!any) {
+            return -1.0;
+        }
+        return v;
+    }
+
+    /** The integer value of `"key":` in a one-line JSON object, or -1. */
+    public static int64 jsonInt(String text, String key) {
+        String needle #= "\"" + key + "\":";
+        int64 at = text.indexOf(needle);
+        if (at < 0) {
+            return (int64) -1;
+        }
+        int32 from = (int32) at + needle.byteLength();
+        String rest #= text.substring(from, text.byteLength());
+        return Num.parse(rest, (int64) -1);
+    }
+
+    /** True when the one-line JSON object has `"key":true`. */
+    public static boolean jsonTrue(String text, String key) {
+        String needle #= "\"" + key + "\":true";
+        return text.contains(needle);
+    }
+
+    /** `v` with `places` decimals (0 to 3), rounded half up; v must be >= 0. */
+    public static #String fixed(float64 v, int32 places) {
+        int64 scale = (int64) 1;
+        int32 k = 0;
+        while (k < places) {
+            scale = scale * 10;
+            k = k + 1;
+        }
+        int64 t = (int64) (v * (float64) scale + 0.5);
+        int64 whole = t / scale;
+        if (places == 0) {
+            return "" + whole;
+        }
+        String frac = "" + (t % scale);
+        while (frac.byteLength() < places) {
+            frac = "0" + frac;
+        }
+        return "" + whole + "." + frac;
+    }
+
+    /** Sort a[0..n) ascending (insertion sort; n is a trial count). */
+    public static void sort(int64[] a, int32 n) {
+        int32 i = 1;
+        while (i < n) {
+            int64 key = a[i];
+            int32 j = i - 1;
+            while (j >= 0 && a[j] > key) {
+                a[j + 1] = a[j];
+                j = j - 1;
+            }
+            a[j + 1] = key;
+            i = i + 1;
+        }
+    }
+
+    /** The median of a[0..n) (upper median, as the harness takes it); sorts a. */
+    public static int64 median(int64[] a, int32 n) {
+        if (n <= 0) {
+            return (int64) -1;
+        }
+        Num.sort(a, n);
+        return a[n / 2];
+    }
+}

@@ -1,0 +1,123 @@
+package dev.cajeta.http.bench;
+
+/**
+ * The client rows. Every stack's own client library runs against one fixed
+ * local server, cajeta-http's (started once in setup), on `GET /plaintext`,
+ * and reports `{"requests","errors","elapsed_ns"}` for its own timed loop.
+ *
+ *   http/client-get-throughput   1e5 GETs (1e4 in smoke mode) over 16 reused connections; req/s
+ *   http/client-connection-reuse 1e4 GETs (1e3) on one connection with keep-alive, then the
+ *                                same with a fresh connection per request; the row is the
+ *                                ratio of the two elapsed times (no keep-alive / keep-alive)
+ */
+public class ClientBench extends StackBench {
+    public boolean reuse;
+    public ServerProc fixed;
+    public int64 kaNs;
+    public int64 freshNs;
+
+    public ClientBench(^Ctx ctx, String id, boolean reuse) {
+        super(ctx, id, "client", reuse ? "x" : "req/s", reuse ? "1" : "16");
+        this.reuse = reuse;
+        this.fixed = null;
+        this.kaNs = (int64) 0;
+        this.freshNs = (int64) 0;
+        this.timeoutMillis((int64) 300000);
+    }
+
+    // The fixed server starts with the first variant, so a failure to start
+    // it is that variant's failed row (with its platform), not a setup row.
+    public void prepareStack(Stack s) {
+        if (this.fixed == null) {
+            this.startFixed();
+        }
+    }
+
+    public void startFixed() {
+        Stack ours = this.ctx.findStack("cajeta-http");
+        if (ours == null) {
+            String f #= Versions.ours(this.ctx.cajetaVersion);
+            Stack tmp = heap Stack("cajeta-http", "", f, true);
+            this.fixed #= ServerProc.start(this.ctx, tmp, "h1");
+            return;
+        }
+        this.fixed #= ServerProc.start(this.ctx, ours, "h1");
+    }
+
+    public void teardown() {
+        this.stopServer();
+        if (this.fixed != null) {
+            this.fixed.stop();
+            this.fixed = null;
+        }
+    }
+
+    public int32 total() {
+        if (this.reuse) {
+            return this.ctx.smoke ? 1000 : 10000;
+        }
+        return this.ctx.smoke ? 10000 : 100000;
+    }
+
+    public int32 stepsPerTrial() {
+        return this.reuse ? 2 : 1;
+    }
+
+    public #String[] argvFor(String label) {
+        Stack s = this.current();
+        String url = "http://127.0.0.1:" + this.fixed.port + "/plaintext";
+        int32 ka = 1;
+        if (this.reuse && this.step == 1) {
+            ka = 0;
+        }
+        return this.ctx.clientArgv(s, url, this.total(), this.variantInt(16), ka);
+    }
+
+    public void absorb(String out) {
+        int64 req = Num.jsonInt(out, "requests");
+        int64 errs = Num.jsonInt(out, "errors");
+        int64 elapsed = Num.jsonInt(out, "elapsed_ns");
+        this.trialRequests = this.trialRequests + req;
+        this.trialErrors = this.trialErrors + errs;
+        if (req != (int64) this.total() || elapsed <= 0) {
+            this.trialOk = false;
+            this.trialNote = this.trialNote + " step " + this.step + ": " + out;
+        }
+        if (this.step == 0) {
+            this.kaNs = elapsed;
+            if (!this.reuse && elapsed > 0) {
+                this.trialValueMilli = (int64) ((float64) req * 1000000000000.0 / (float64) elapsed);
+            }
+        } else {
+            this.freshNs = elapsed;
+        }
+    }
+
+    public void endTrial() {
+        if (this.reuse && this.kaNs > 0) {
+            this.trialValueMilli = (int64) ((float64) this.freshNs * 1000.0 / (float64) this.kaNs);
+        }
+    }
+
+    public void recordValue(Fact f, int64 medianMilli) {
+        int32 places = this.reuse ? 2 : 1;
+        f.throughput #= Num.fixed((float64) medianMilli / 1000.0, places);
+    }
+
+    public #String details() {
+        Stack s = this.current();
+        String lib = s.libName("client") + " " + s.libVersion("client");
+        if (this.reuse) {
+            return "client=" + lib + "; " + this.total() + " GETs keep-alive then " + this.total()
+                + " fresh connections, one worker; ratio=elapsed(fresh)/elapsed(keep-alive); server=cajeta-http";
+        }
+        return "client=" + lib + "; " + this.total() + " GETs over " + this.variantInt(16)
+            + " reused connections, status and body checked; server=cajeta-http";
+    }
+
+    // The client's peak RSS: one untimed run under /usr/bin/time (ExternalBenchmark).
+    public int64 measuredPeakRssKb() {
+        this.step = 0;
+        return super.measuredPeakRssKb();
+    }
+}

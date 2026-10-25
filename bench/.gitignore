@@ -1,0 +1,11 @@
+# Build outputs: the bench binary, logs, the PID file, curl scratch.
+build/
+cajeta.lock
+.cajeta/
+# Competitor and load-generator build artifacts (each build.sh regenerates them).
+competitors/*/build/
+competitors/*/target/
+competitors/*/node_modules/
+competitors/*/.venv/
+competitors/**/__pycache__/
+loadgen/build/

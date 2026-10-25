@@ -1,0 +1,140 @@
+package dev.cajeta.http.bench;
+
+import cajeta.codec.json.Json;
+import cajeta.io.file.File;
+import dev.cajeta.http.Bytes;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.server.HttpServer;
+import dev.cajeta.http.server.HttpServerBuilder;
+import dev.cajeta.http.sse.SseEvent;
+import dev.cajeta.http.sse.SseResponse;
+import dev.cajeta.http.ws.WebSocketConnection;
+import dev.cajeta.http.ws.WebSocketHandler;
+import dev.cajeta.http.ws.WsMessage;
+import dev.cajeta.http.ws.WsUpgrade;
+
+/** The JSON row's object, serialized per request (the TechEmpower rule). */
+final class Message {
+    public String message;
+
+    public Message() {
+        this.message = "";
+    }
+}
+
+/** WebSocket echo: every message back unchanged, with its opcode. */
+final class Echo implements WebSocketHandler {
+    Echo() {
+    }
+
+    public void onConnect(WebSocketConnection conn) {
+    }
+
+    public void onMessage(WebSocketConnection conn, WsMessage m) {
+        if (m.isText()) {
+            conn.sendText(m.bytes(), 0, m.length());
+        } else {
+            conn.sendBinary(m.bytes(), 0, m.length());
+        }
+    }
+
+    public void onClose(WebSocketConnection conn, int32 code) {
+    }
+}
+
+/**
+ * cajeta-http serving the competitor contract (README "The contract"), as
+ * `http-bench --serve <h1|h2c|tls> <port> [<cert.pem> <key.pem>]`:
+ *
+ *   GET /plaintext   200 text/plain        Hello, World!
+ *   GET /json        200 application/json  {"message":"Hello, World!"}
+ *   GET /ws          WebSocket echo, permessage-deflate when offered
+ *   GET /sse?n=N     200 text/event-stream `data: <i>\n\n` for i < N (default 1000)
+ *
+ * h1 and h2c run the same server; h2c adds HTTP/2 prior knowledge on the same
+ * port. tls terminates TLS through dev.cajeta.crypto (as cajeta-http does)
+ * with the PEM pair.
+ */
+public final class Serve {
+    static Echo ECHO = null;
+
+    public static void handle(HttpRequest q, HttpResponse r) {
+        if (Bytes.equals(q.path(), "/plaintext")) {
+            r.header("Content-Type", "text/plain");
+            r.body("Hello, World!");
+            return;
+        }
+        if (Bytes.equals(q.path(), "/json")) {
+            Message m = heap Message();
+            m.message = "Hello, World!";
+            int8[] b #= Json.toBytes<Message>(m);
+            r.header("Content-Type", "application/json");
+            r.body(b, (int32) b.count());
+            return;
+        }
+        if (Bytes.equals(q.path(), "/ws")) {
+            WsUpgrade.accept(q, r, Serve.ECHO, true);
+            return;
+        }
+        if (Bytes.equals(q.path(), "/sse")) {
+            int32 n = Serve.queryN(q);
+            SseEvent[] events = heap SseEvent[n];
+            int32 i = 0;
+            while (i < n) {
+                events[i] #= SseEvent.of("" + i);
+                i = i + 1;
+            }
+            SseResponse.stream(r, #events, n);
+            return;
+        }
+        r.status(404);
+    }
+
+    /** `n` from the query `n=<N>`, else 1000. */
+    public static int32 queryN(HttpRequest q) {
+        if (!q.hasQuery()) {
+            return 1000;
+        }
+        String qs #= Bytes.toString(q.query());
+        if (!qs.startsWith("n=")) {
+            return 1000;
+        }
+        String v #= qs.substring(2, qs.byteLength());
+        int64 n = Num.parse(v, (int64) 1000);
+        if (n < 0 || n > 1000000) {
+            return 1000;
+        }
+        return (int32) n;
+    }
+
+    public static int32 main(String[] args) {
+        if (args.count() < 3) {
+            System.stdout.println("usage: http-bench --serve <h1|h2c|tls> <port> [<cert.pem> <key.pem>]");
+            return 2;
+        }
+        String mode = args[1];
+        String addr = "127.0.0.1:" + args[2];
+        Serve.ECHO = heap Echo();
+        HttpServerBuilder b #= HttpServer.builder();
+        b.bind(addr);
+        b.handler((HttpRequest q, HttpResponse r) -> Serve.handle(q, r));
+        if (mode.equals("h2c")) {
+            b.h2PriorKnowledge();
+        } else if (mode.equals("tls")) {
+            if (args.count() < 5) {
+                System.stdout.println("http-bench --serve tls needs <cert.pem> <key.pem>");
+                return 2;
+            }
+            int8[] cert #= File.readAllBytes(args[3]);
+            int8[] key #= File.readAllBytes(args[4]);
+            b.tls(cert, (int32) cert.count(), key, (int32) key.count());
+        } else if (!mode.equals("h1")) {
+            System.stdout.println("http-bench --serve: unknown mode " + mode);
+            return 2;
+        }
+        HttpServer srv #= b.build();
+        srv.serve();
+        return 0;
+    }
+}

@@ -1,0 +1,15 @@
+# uvicorn competitor stack. Exact pins, full closure (pip freeze of the venv).
+# uvicorn's fast extras chosen explicitly: uvloop (event loop), httptools (HTTP/1.1 parser),
+# websockets (the `--ws websockets` implementation). httpx is the client.
+uvicorn==0.54.0
+uvloop==0.23.0
+httptools==0.9.0
+websockets==17.3
+httpx==0.28.1
+anyio==4.15.1
+certifi==2026.10.23
+click==8.5.0
+h11==0.16.0
+httpcore==1.0.9
+idna==3.20
+typing_extensions==4.16.0

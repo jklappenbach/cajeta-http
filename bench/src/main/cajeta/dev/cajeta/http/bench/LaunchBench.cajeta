@@ -1,0 +1,147 @@
+package dev.cajeta.http.bench;
+
+/**
+ * Start-up and footprint, both through loadgen, which launches the stack's
+ * h1 server in its own process group, polls `GET /plaintext` every
+ * millisecond, and kills the group afterwards.
+ *
+ *   http/startup-time  `loadgen startup`: exec to the first 200, one launch per trial
+ *                      (20 trials; 3 in smoke mode). The row's timing columns are the
+ *                      launches' own exec-to-200 times, not the harness's wall time.
+ *   http/idle-rss      `loadgen idle-rss`: the server's resident set after start-up and
+ *                      a settle with no load (peak_rss_kb), the process still alive.
+ */
+public class LaunchBench extends StackBench {
+    public boolean rss;
+    public int64[] samples;
+    public int32 sampleN;
+    public int32 portNow;
+
+    public LaunchBench(^Ctx ctx, String id, boolean rss) {
+        super(ctx, id, "server", "", "");
+        this.rss = rss;
+        this.samples = heap int64[64];
+        this.sampleN = 0;
+        this.portNow = 0;
+        this.timeoutMillis((int64) 90000);
+        if (rss) {
+            this.iterations(1, 5);
+        } else {
+            this.iterations(1, 20);
+        }
+    }
+
+    public void prepareStack(Stack s) {
+        this.sampleN = 0;
+        this.portNow = this.ctx.freePort();
+    }
+
+    public int32 settleMs() {
+        return this.ctx.smoke ? 500 : 2000;
+    }
+
+    public #String[] argvFor(String label) {
+        Stack s = this.current();
+        String[] server #= this.ctx.serverArgv(s, "h1", this.portNow);
+        int32 extra = this.rss ? 6 : 5;
+        int32 n = (int32) server.count();
+        String[] a = heap String[extra + n];
+        a[0] = "" + this.ctx.loadgen;
+        a[1] = this.rss ? "idle-rss" : "startup";
+        a[2] = "http://127.0.0.1:" + this.portNow + "/plaintext";
+        a[3] = "60000";
+        if (this.rss) {
+            a[4] = "" + this.settleMs();
+            a[5] = "--";
+        } else {
+            a[4] = "--";
+        }
+        int32 i = 0;
+        while (i < n) {
+            a[extra + i] = "" + server[i];
+            i = i + 1;
+        }
+        return a;
+    }
+
+    public void absorb(String out) {
+        this.trialRequests = (int64) 1;
+        if (this.rss) {
+            int64 kb = Num.jsonInt(out, "rss_kb");
+            if (kb <= 0 || !Num.jsonTrue(out, "alive")) {
+                this.trialOk = false;
+                this.trialNote = "idle-rss: " + out;
+            }
+            this.trialValueMilli = kb * 1000;
+            this.keep(kb);
+            return;
+        }
+        int64 ns = Num.jsonInt(out, "startup_ns");
+        if (ns <= 0) {
+            this.trialOk = false;
+            this.trialNote = "startup: " + out;
+        }
+        this.trialValueMilli = ns * 1000;
+        this.keep(ns);
+    }
+
+    // Only measured trials count: warmups are the first warmCount() calls.
+    public void keep(int64 v) {
+        if (this.calls < this.warmCount()) {
+            return;
+        }
+        if (this.sampleN < 64) {
+            this.samples[this.sampleN] = v;
+            this.sampleN = this.sampleN + 1;
+        }
+    }
+
+    public void recordValue(Fact f, int64 medianMilli) {
+        if (this.rss) {
+            return;
+        }
+        // The launches' own times replace the harness's wall-clock columns.
+        int32 n = this.sampleN;
+        int64[] a = heap int64[n];
+        int64 sum = (int64) 0;
+        int32 i = 0;
+        while (i < n) {
+            a[i] = this.samples[i];
+            sum = sum + a[i];
+            i = i + 1;
+        }
+        Num.sort(a, n);
+        f.timed = true;
+        f.minNs = a[0];
+        f.medianNs = a[n / 2];
+        f.meanNs = sum / (int64) n;
+        int32 p = (n * 95) / 100;
+        if (p >= n) {
+            p = n - 1;
+        }
+        f.p95Ns = a[p];
+    }
+
+    public int64 measuredPeakRssKb() {
+        if (!this.rss || this.sampleN == 0) {
+            return (int64) -1;
+        }
+        int32 n = this.sampleN;
+        int64[] a = heap int64[n];
+        int32 i = 0;
+        while (i < n) {
+            a[i] = this.samples[i];
+            i = i + 1;
+        }
+        return Num.median(a, n);
+    }
+
+    public #String composeNote() {
+        if (this.rss) {
+            return "launches=" + this.sampleN + "; settle=" + this.settleMs()
+                + "ms; peak_rss_kb is the idle VmRSS (median), process alive; loadgen=loadgen idle-rss";
+        }
+        return "launches=" + this.sampleN
+            + "; timing columns are exec-to-first-200 per launch; loadgen=loadgen startup (1 ms poll)";
+    }
+}

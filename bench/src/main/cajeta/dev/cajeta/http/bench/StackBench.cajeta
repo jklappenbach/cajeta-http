@@ -1,0 +1,313 @@
+package dev.cajeta.http.bench;
+
+import cajeta.collection.ArrayList;
+import dev.cajeta.bench.ExternalBenchmark;
+
+/**
+ * One page id measured on every selected stack. The harness sees one
+ * Benchmark whose variants are `<stack>|<variant>` labels (cajeta-http
+ * first); each variant is one row, with `platform` the stack. Each trial is
+ * one external command (oha, wrk, loadgen, or a stack's client), timed by the
+ * harness through ExternalBenchmark.
+ *
+ * Per variant, in the harness's order:
+ *   supportsVariant  select the stack; a stack without the feature is a skipped row with its reason
+ *   prepare          start the stack's server and byte-compare it with cajeta-http (subclass)
+ *   runVariant       warmups, then trials: run the command, absorb its output; errors fail the row
+ *   checkResult      the trials' checks; the median throughput goes to the row's Fact
+ *   measuredPeakRssKb  the server's VmHWM (or the child's, for a client row)
+ *   competitorNote   requests, errors, the load generator's version, the byte check
+ */
+public class StackBench extends ExternalBenchmark {
+    public Ctx ctx;
+    public String id;
+    public String feature;
+    public String unitText;
+    public String variantsCsv;
+    public String curLabel;
+    public String curStack;
+    public String curVariant;
+    public String why;
+    public String note;
+    public String trialNote;
+    public ServerProc server;
+    public int32 calls;
+    public int64[] trialMilli;
+    public int32 trialN;
+    public int64 requests;
+    public int64 errors;
+    public int64 warmErrors;
+    public int64 trialRequests;
+    public int64 trialErrors;
+    public int64 trialValueMilli;
+    public boolean trialOk;
+    public boolean allOk;
+    public int32 step;
+
+    public StackBench(^Ctx ctx, String id, String feature, String unitText, String variantsCsv) {
+        this.ctx = ctx;
+        this.id = "" + id;
+        this.feature = "" + feature;
+        this.unitText = "" + unitText;
+        this.variantsCsv = "" + variantsCsv;
+        this.curLabel = "";
+        this.curStack = "";
+        this.curVariant = "";
+        this.why = "";
+        this.note = "";
+        this.trialNote = "";
+        this.server = null;
+        this.calls = 0;
+        this.trialMilli = heap int64[64];
+        this.trialN = 0;
+        this.requests = (int64) 0;
+        this.errors = (int64) 0;
+        this.warmErrors = (int64) 0;
+        this.trialRequests = (int64) 0;
+        this.trialErrors = (int64) 0;
+        this.trialValueMilli = (int64) 0;
+        this.trialOk = true;
+        this.allOk = true;
+        this.step = 0;
+        this.describe(id, "http");
+        this.iterations(1, 5);
+    }
+
+    // ---- identity ---------------------------------------------------------
+
+    public #ArrayList<String> variants() {
+        return this.ctx.labels(this.variantsCsv);
+    }
+
+    public String platform() {
+        return this.curStack;
+    }
+
+    public String unit() {
+        return this.unitText;
+    }
+
+    public String competitorNote() {
+        return this.note;
+    }
+
+    public String skipReason() {
+        return this.why;
+    }
+
+    public Stack current() {
+        return this.ctx.findStack(this.curStack);
+    }
+
+    /** Point at `label` and write the row's identity facts. */
+    public void select(String label) {
+        if (label.equals(this.curLabel)) {
+            return;
+        }
+        this.curLabel = "" + label;
+        int64 bar = label.indexOf("|");
+        this.curStack #= label.substring(0, (int32) bar);
+        this.curVariant #= label.substring((int32) bar + 1, label.byteLength());
+        this.note = "";
+        this.why = "";
+        Stack s = this.current();
+        Fact f = this.ctx.fact(this.id, label);
+        f.variant = "" + this.curVariant;
+        String lang #= s.language();
+        String lv #= s.languageVersion();
+        String ln #= s.libName(this.feature);
+        String lver #= s.libVersion(this.feature);
+        f.language #= lang;
+        f.languageVersion #= lv;
+        f.library #= ln;
+        f.libraryVersion #= lver;
+    }
+
+    public boolean supportsVariant(String label) {
+        this.select(label);
+        Stack s = this.current();
+        if (s.facts.isEmpty()) {
+            this.why = s.name + ": competitors/" + s.name + "/versions.sh printed nothing (run competitors/build.sh)";
+            return false;
+        }
+        if (!s.has(this.feature)) {
+            this.why = s.name + " has no " + this.feature + " implementation (versions.sh: " + this.feature + "=none)";
+            return false;
+        }
+        return this.supports(s);
+    }
+
+    /** Subclass hook: false (with this.why set) to skip this stack. */
+    public boolean supports(Stack s) {
+        return true;
+    }
+
+    // ---- lifecycle --------------------------------------------------------
+
+    public void prepare(String label) {
+        this.select(label);
+        this.stopServer();
+        this.calls = 0;
+        this.trialN = 0;
+        this.requests = (int64) 0;
+        this.errors = (int64) 0;
+        this.warmErrors = (int64) 0;
+        this.allOk = true;
+        this.note = "";
+        this.prepareStack(this.current());
+    }
+
+    /** Subclass hook: start the server, byte-compare. */
+    public void prepareStack(Stack s) {
+    }
+
+    public void startServer(String mode) {
+        Stack s = this.current();
+        this.server #= ServerProc.start(this.ctx, s, mode);
+    }
+
+    public void stopServer() {
+        if (this.server != null) {
+            this.server.stop();
+            this.server = null;
+        }
+    }
+
+    public void teardown() {
+        this.stopServer();
+    }
+
+    public int32 warmCount() {
+        if (this.ctx.smoke) {
+            return 1;
+        }
+        return this.warm;
+    }
+
+    /** How many commands make one trial (client-connection-reuse runs two). */
+    public int32 stepsPerTrial() {
+        return 1;
+    }
+
+    public void runVariant(String label, int32 iterations) {
+        int32 i = 0;
+        while (i < iterations) {
+            this.trialRequests = (int64) 0;
+            this.trialErrors = (int64) 0;
+            this.trialValueMilli = (int64) 0;
+            this.trialOk = true;
+            this.trialNote = "";
+            int32 k = 0;
+            int32 steps = this.stepsPerTrial();
+            while (k < steps) {
+                this.step = k;
+                this.execute(label);
+                this.absorb(this.stdout());
+                k = k + 1;
+            }
+            this.endTrial();
+            boolean warmup = this.calls < this.warmCount();
+            this.calls = this.calls + 1;
+            if (warmup) {
+                this.warmErrors = this.warmErrors + this.trialErrors;
+            } else {
+                this.requests = this.requests + this.trialRequests;
+                this.errors = this.errors + this.trialErrors;
+                if (this.trialN < 64) {
+                    this.trialMilli[this.trialN] = this.trialValueMilli;
+                    this.trialN = this.trialN + 1;
+                }
+                if (!this.trialOk) {
+                    this.allOk = false;
+                }
+                this.note #= this.composeNote();
+                if (this.trialErrors > 0) {
+                    throw heap Exception(this.curStack + ": " + this.trialErrors + " error(s) in a trial; "
+                        + this.trialNote);
+                }
+                if (!this.trialOk) {
+                    throw heap Exception(this.curStack + ": trial check failed; " + this.trialNote);
+                }
+            }
+            if (this.server != null && !this.server.alive()) {
+                throw heap Exception(this.curStack + ": the server (pid " + this.server.pid + ") died under load");
+            }
+            i = i + 1;
+        }
+    }
+
+    /** Subclass hook: read one command's stdout into trialRequests/Errors/ValueMilli/Ok/Note. */
+    public void absorb(String out) {
+    }
+
+    /** Subclass hook: after all steps of a trial. */
+    public void endTrial() {
+    }
+
+    public boolean checkResult() {
+        if (this.lastExitCode != 0 || this.trialN == 0 || this.errors != 0 || !this.allOk) {
+            return false;
+        }
+        int64[] copy = heap int64[this.trialN];
+        int32 i = 0;
+        while (i < this.trialN) {
+            copy[i] = this.trialMilli[i];
+            i = i + 1;
+        }
+        int64 med = Num.median(copy, this.trialN);
+        Fact f = this.ctx.fact(this.id, this.curLabel);
+        this.recordValue(f, med);
+        this.note #= this.composeNote();
+        return this.extraCheck();
+    }
+
+    /** Subclass hook: put the median trial value (thousandths) on the row's Fact. Default: throughput. */
+    public void recordValue(Fact f, int64 medianMilli) {
+        f.throughput #= Num.fixed((float64) medianMilli / 1000.0, 1);
+    }
+
+    public boolean extraCheck() {
+        return true;
+    }
+
+    /** The row's notes: requests, errors, the subclass's details. */
+    public #String composeNote() {
+        String s = "requests=" + this.requests + "; errors=" + this.errors;
+        if (this.warmErrors > 0) {
+            s = s + "; warmup-errors=" + this.warmErrors;
+        }
+        String extra #= this.details();
+        if (!extra.isEmpty()) {
+            s = s + "; " + extra;
+        }
+        return s;
+    }
+
+    /** Subclass hook: the rest of the notes (load generator, byte check, parameters). */
+    public #String details() {
+        return "";
+    }
+
+    // A server row reports the server's VmHWM after its trials; a row with no
+    // server of its own (a client) the child's, from ExternalBenchmark's
+    // untimed run under /usr/bin/time.
+    public int64 measuredPeakRssKb() {
+        if (this.server != null) {
+            return this.server.hwmKb();
+        }
+        return super.measuredPeakRssKb();
+    }
+
+    // ---- helpers ----------------------------------------------------------
+
+    public int32 port() {
+        if (this.server == null) {
+            return 0;
+        }
+        return this.server.port;
+    }
+
+    public int32 variantInt(int32 fallback) {
+        return (int32) Num.parse(this.curVariant, (int64) fallback);
+    }
+}

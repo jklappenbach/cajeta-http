@@ -1,0 +1,15 @@
+package dev.cajeta.http.bench;
+
+/** Byte-array helpers. */
+public final class Bytes0 {
+    /** An owned copy of a[0..n): for a borrow of another object's interior (JsonObject.keyAt). */
+    public static #int8[] copy(int8[] a, int32 n) {
+        int8[] out = heap int8[n];
+        int32 i = 0;
+        while (i < n) {
+            out[i] = a[i];
+            i = i + 1;
+        }
+        return out;
+    }
+}
