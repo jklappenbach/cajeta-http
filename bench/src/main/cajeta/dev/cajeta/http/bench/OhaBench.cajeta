@@ -33,22 +33,21 @@ public class OhaBench extends StackBench {
         this.wrkRow = false;
         this.bodyNote = "";
         this.deadlineAborts = (int64) 0;
+        this.serverMode = "" + mode;
         this.timeoutMillis((int64) 120000);
     }
 
-    public boolean supports(Stack s) {
-        if (this.curVariant.endsWith("-wrk") && !s.ours) {
-            this.why = "the wrk cross-check runs on cajeta-http only";
-            return false;
+    public #String unsupported(Stack s, String variant) {
+        if (variant.endsWith("-wrk") && !s.ours) {
+            return "the wrk cross-check runs on cajeta-http only";
         }
-        return true;
+        return "";
     }
 
     public void prepareStack(Stack s) {
         this.wrkRow = this.curVariant.endsWith("-wrk");
         this.deadlineAborts = (int64) 0;
         this.timeoutMillis((int64) (this.ctx.seconds + 60) * 1000);
-        this.startServer(this.mode);
         this.bodyNote #= this.ctx.byteCheck(s, this.fetchFlavor, this.port(), this.target);
     }
 
@@ -234,10 +233,8 @@ public class OhaBench extends StackBench {
         }
         // The cross-check: wrk's rate against oha's on the same server and connection count.
         String base = "cajeta-http|" + this.curVariant.substring(0, this.curVariant.byteLength() - 4);
-        Fact oha = this.ctx.fact(this.id, base);
-        Fact mine = this.ctx.fact(this.id, this.curLabel);
-        float64 o = Num.parseFloat(oha.throughput);
-        float64 w = Num.parseFloat(mine.throughput);
+        float64 o = (float64) this.medianOf(base);
+        float64 w = (float64) this.medianOf(this.curLabel);
         if (o <= 0.0 || w <= 0.0) {
             this.note = this.note + "; crosscheck=unavailable (no oha row)";
             return false;

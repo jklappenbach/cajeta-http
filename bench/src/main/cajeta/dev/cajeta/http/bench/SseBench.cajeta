@@ -16,11 +16,11 @@ public class SseBench extends StackBench {
         super(ctx, id, "sse", "events/s", ctx.smoke ? "100" : "1000");
         this.events = 1000;
         this.bodyNote = "";
+        this.serverMode = "h1";
         this.timeoutMillis((int64) 180000);
     }
 
     public void prepareStack(Stack s) {
-        this.startServer("h1");
         this.bodyNote #= this.ctx.byteCheck(s, "h1", this.port(), "/sse?n=3");
     }
 

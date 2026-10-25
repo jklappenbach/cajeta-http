@@ -18,20 +18,19 @@ public class WsBench extends StackBench {
         this.deflate = deflate;
         this.clients = 64;
         this.size = 1024;
+        this.serverMode = "h1";
     }
 
-    public boolean supports(Stack s) {
+    public #String unsupported(Stack s, String variant) {
         if (this.deflate && !s.wsDeflate()) {
-            this.why = s.name + ": " + s.libName("ws") + " " + s.libVersion("ws")
+            return s.name + ": " + s.libName("ws") + " " + s.libVersion("ws")
                 + " cannot negotiate permessage-deflate (versions.sh: ws_deflate=no)";
-            return false;
         }
-        return true;
+        return "";
     }
 
     public void prepareStack(Stack s) {
         this.timeoutMillis((int64) (this.ctx.seconds + 60) * 1000);
-        this.startServer("h1");
     }
 
     public #String[] argvFor(String label) {

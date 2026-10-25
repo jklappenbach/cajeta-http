@@ -1,37 +1,47 @@
 package dev.cajeta.http.bench;
 
 import cajeta.collection.ArrayList;
+import cajeta.io.file.Path;
+import cajeta.process.ProcessResult;
 import dev.cajeta.bench.ExternalBenchmark;
+import dev.cajeta.bench.ServiceBenchmark;
+import dev.cajeta.bench.detect.Sys;
 
 /**
- * One page id measured on every selected stack. The harness sees one
- * Benchmark whose variants are `<stack>|<variant>` labels (cajeta-http
- * first); each variant is one row, with `platform` the stack. Each trial is
- * one external command (oha, wrk, loadgen, or a stack's client), timed by the
- * harness through ExternalBenchmark.
+ * One page id measured on every selected stack, on dev.cajeta.bench's
+ * ServiceBenchmark. The harness sees one Benchmark whose variant keys are
+ * `<stack>|<variant>` (cajeta-http first); each is one row. Every column is
+ * the harness's: the identity hooks answer per variant from the stack's
+ * facts (platform the stack, language and its version, library and version
+ * of the feature the row measures, the variant column the page's variant),
+ * each trial reports its throughput (reportedThroughput, the row's figure the
+ * median trial), and peak_rss_kb is the server's VmHWM sampled by
+ * ServiceBenchmark after every trial and before the stop.
  *
  * Per variant, in the harness's order:
- *   supportsVariant  select the stack; a stack without the feature is a skipped row with its reason
- *   prepare          start the stack's server and byte-compare it with cajeta-http (subclass)
- *   runVariant       warmups, then trials: run the command, absorb its output; errors fail the row
- *   checkResult      the trials' checks; the median throughput goes to the row's Fact
- *   measuredPeakRssKb  the server's VmHWM (or the child's, for a client row)
- *   competitorNote   requests, errors, the load generator's version, the byte check
+ *   supportsVariant  a stack without the feature is a skipped row with its reason (skipReasonFor)
+ *   prepare          start the stack's server (ServiceBenchmark: a free port, ready, PID recorded)
+ *                    and byte-compare it with cajeta-http (subclass)
+ *   runPhase         one trial: run the command(s), absorb their output; errors fail the row
+ *   checkResult      the trials' checks
+ *   finishVariant    stop the server by its PID (ServiceBenchmark)
+ *
+ * A subclass names its server with serverMode (h1, h2c, tls) or "" for a row
+ * with no server of its own (start-up, idle RSS: loadgen launches those).
  */
-public class StackBench extends ExternalBenchmark {
+public class StackBench extends ServiceBenchmark {
     public Ctx ctx;
     public String id;
     public String feature;
     public String unitText;
     public String variantsCsv;
+    public String serverMode;
     public String curLabel;
     public String curStack;
     public String curVariant;
-    public String why;
     public String note;
     public String trialNote;
-    public ServerProc server;
-    public int32 calls;
+    public int32 svcPort;
     public int64[] trialMilli;
     public int32 trialN;
     public int64 requests;
@@ -43,21 +53,23 @@ public class StackBench extends ExternalBenchmark {
     public boolean trialOk;
     public boolean allOk;
     public int32 step;
+    public ArrayList<String> medLabels;
+    public ArrayList<int64> medMilli;
 
     public StackBench(^Ctx ctx, String id, String feature, String unitText, String variantsCsv) {
+        super();
         this.ctx = ctx;
         this.id = "" + id;
         this.feature = "" + feature;
         this.unitText = "" + unitText;
         this.variantsCsv = "" + variantsCsv;
+        this.serverMode = "";
         this.curLabel = "";
         this.curStack = "";
         this.curVariant = "";
-        this.why = "";
         this.note = "";
         this.trialNote = "";
-        this.server = null;
-        this.calls = 0;
+        this.svcPort = 0;
         this.trialMilli = heap int64[64];
         this.trialN = 0;
         this.requests = (int64) 0;
@@ -69,119 +81,153 @@ public class StackBench extends ExternalBenchmark {
         this.trialOk = true;
         this.allOk = true;
         this.step = 0;
+        this.medLabels = heap ArrayList<String>();
+        this.medMilli = heap ArrayList<int64>();
         this.describe(id, "http");
         this.iterations(1, 5);
+        this.readyTimeoutMillis((int64) 30000);
+        this.readyPollMillis(1);
     }
 
-    // ---- identity ---------------------------------------------------------
+    // ---- identity (dev.cajeta.bench's per-variant hooks) -------------------
 
     public #ArrayList<String> variants() {
         return this.ctx.labels(this.variantsCsv);
     }
 
-    public String platform() {
-        return this.curStack;
+    public static #String stackOf(String label) {
+        int64 bar = label.indexOf("|");
+        return label.substring(0, (int32) bar);
+    }
+
+    public static #String variantOf(String label) {
+        int64 bar = label.indexOf("|");
+        return label.substring((int32) bar + 1, label.byteLength());
+    }
+
+    public Stack stackFor(String label) {
+        String name #= StackBench.stackOf(label);
+        return this.ctx.findStack(name);
+    }
+
+    public String platformFor(String label) {
+        return StackBench.stackOf(label);
+    }
+
+    public String languageFor(String label) {
+        Stack s = this.stackFor(label);
+        return s.language();
+    }
+
+    public String languageVersionFor(String label) {
+        Stack s = this.stackFor(label);
+        return s.languageVersion();
+    }
+
+    public String libraryFor(String label) {
+        Stack s = this.stackFor(label);
+        return s.libName(this.feature);
+    }
+
+    public String libraryVersionFor(String label) {
+        Stack s = this.stackFor(label);
+        return s.libVersion(this.feature);
+    }
+
+    public String variantLabel(String label) {
+        return StackBench.variantOf(label);
     }
 
     public String unit() {
         return this.unitText;
     }
 
-    public String competitorNote() {
-        return this.note;
+    /** The row's notes: this variant's, never another's. */
+    public String noteFor(String label) {
+        if (label.equals(this.curLabel)) {
+            return this.note;
+        }
+        return "";
     }
 
-    public String skipReason() {
-        return this.why;
+    // ---- skips -------------------------------------------------------------
+
+    /** Why `label` cannot run here, or "" when it can. */
+    public #String whyNot(String label) {
+        Stack s = this.stackFor(label);
+        if (s.facts.isEmpty()) {
+            return s.name + ": competitors/" + s.name + "/versions.sh printed nothing (run competitors/build.sh)";
+        }
+        if (!s.has(this.feature)) {
+            return s.name + " has no " + this.feature + " implementation (versions.sh: " + this.feature + "=none)";
+        }
+        String v #= StackBench.variantOf(label);
+        return this.unsupported(s, v);
+    }
+
+    /** Subclass hook: why stack `s` cannot run `variant`, or "". */
+    public #String unsupported(Stack s, String variant) {
+        return "";
+    }
+
+    public boolean supportsVariant(String label) {
+        String why #= this.whyNot(label);
+        return why.isEmpty();
+    }
+
+    public String skipReasonFor(String label) {
+        return this.whyNot(label);
     }
 
     public Stack current() {
         return this.ctx.findStack(this.curStack);
     }
 
-    /** Point at `label` and write the row's identity facts. */
-    public void select(String label) {
-        if (label.equals(this.curLabel)) {
-            return;
-        }
-        this.curLabel = "" + label;
-        int64 bar = label.indexOf("|");
-        this.curStack #= label.substring(0, (int32) bar);
-        this.curVariant #= label.substring((int32) bar + 1, label.byteLength());
-        this.note = "";
-        this.why = "";
-        Stack s = this.current();
-        Fact f = this.ctx.fact(this.id, label);
-        f.variant = "" + this.curVariant;
-        String lang #= s.language();
-        String lv #= s.languageVersion();
-        String ln #= s.libName(this.feature);
-        String lver #= s.libVersion(this.feature);
-        f.language #= lang;
-        f.languageVersion #= lv;
-        f.library #= ln;
-        f.libraryVersion #= lver;
+    // ---- the server (ServiceBenchmark) ----------------------------------------
+
+    public #String[] serviceArgvFor(String label) {
+        Stack s = this.stackFor(label);
+        return this.ctx.serverArgv(s, this.serverMode, this.svcPort);
     }
 
-    public boolean supportsVariant(String label) {
-        this.select(label);
-        Stack s = this.current();
-        if (s.facts.isEmpty()) {
-            this.why = s.name + ": competitors/" + s.name + "/versions.sh printed nothing (run competitors/build.sh)";
-            return false;
+    /** A free port in 20100..20199, readiness for the mode, then the start; the PID goes to build/pids. */
+    public void startService(String label) {
+        this.svcPort = this.ctx.freePort();
+        if (this.serverMode.equals("h1")) {
+            this.readyOnUrl(this.svcPort, "/plaintext", 200);
+        } else {
+            this.readyOnPort(this.svcPort);
         }
-        if (!s.has(this.feature)) {
-            this.why = s.name + " has no " + this.feature + " implementation (versions.sh: " + this.feature + "=none)";
-            return false;
-        }
-        return this.supports(s);
-    }
-
-    /** Subclass hook: false (with this.why set) to skip this stack. */
-    public boolean supports(Stack s) {
-        return true;
+        this.serviceLog(this.ctx.root + "/build/servers.log");
+        super.startService(label);
+        this.ctx.recordPid(this.lastServicePid);
     }
 
     // ---- lifecycle --------------------------------------------------------
 
     public void prepare(String label) {
-        this.select(label);
-        this.stopServer();
-        this.calls = 0;
+        this.curLabel = "" + label;
+        this.curStack #= StackBench.stackOf(label);
+        this.curVariant #= StackBench.variantOf(label);
         this.trialN = 0;
         this.requests = (int64) 0;
         this.errors = (int64) 0;
         this.warmErrors = (int64) 0;
         this.allOk = true;
         this.note = "";
+        this.svcPort = 0;
+        if (this.serverMode.isEmpty()) {
+            this.peakKb = (int64) -1;
+            this.lastExitCode = -1;
+            this.lastStdout = "";
+        } else {
+            super.prepare(label);
+        }
         this.prepareStack(this.current());
     }
 
-    /** Subclass hook: start the server, byte-compare. */
+    /** Subclass hook: after the server is up (byte comparison, parameters). */
     public void prepareStack(Stack s) {
-    }
-
-    public void startServer(String mode) {
-        Stack s = this.current();
-        this.server #= ServerProc.start(this.ctx, s, mode);
-    }
-
-    public void stopServer() {
-        if (this.server != null) {
-            this.server.stop();
-            this.server = null;
-        }
-    }
-
-    public void teardown() {
-        this.stopServer();
-    }
-
-    public int32 warmCount() {
-        if (this.ctx.smoke) {
-            return 1;
-        }
-        return this.warm;
     }
 
     /** How many commands make one trial (client-connection-reuse runs two). */
@@ -189,51 +235,53 @@ public class StackBench extends ExternalBenchmark {
         return 1;
     }
 
-    public void runVariant(String label, int32 iterations) {
-        int32 i = 0;
-        while (i < iterations) {
-            this.trialRequests = (int64) 0;
-            this.trialErrors = (int64) 0;
-            this.trialValueMilli = (int64) 0;
-            this.trialOk = true;
-            this.trialNote = "";
-            int32 k = 0;
-            int32 steps = this.stepsPerTrial();
-            while (k < steps) {
-                this.step = k;
-                this.execute(label);
-                this.absorb(this.stdout());
-                k = k + 1;
-            }
-            this.endTrial();
-            boolean warmup = this.calls < this.warmCount();
-            this.calls = this.calls + 1;
-            if (warmup) {
-                this.warmErrors = this.warmErrors + this.trialErrors;
-            } else {
-                this.requests = this.requests + this.trialRequests;
-                this.errors = this.errors + this.trialErrors;
-                if (this.trialN < 64) {
-                    this.trialMilli[this.trialN] = this.trialValueMilli;
-                    this.trialN = this.trialN + 1;
-                }
-                if (!this.trialOk) {
-                    this.allOk = false;
-                }
-                this.note #= this.composeNote();
-                if (this.trialErrors > 0) {
-                    throw heap Exception(this.curStack + ": " + this.trialErrors + " error(s) in a trial; "
-                        + this.trialNote);
-                }
-                if (!this.trialOk) {
-                    throw heap Exception(this.curStack + ": trial check failed; " + this.trialNote);
-                }
-            }
-            if (this.server != null && !this.server.alive()) {
-                throw heap Exception(this.curStack + ": the server (pid " + this.server.pid + ") died under load");
-            }
-            i = i + 1;
+    /** One trial: the commands, their output absorbed; an error fails the row. */
+    public void runPhase(String label) {
+        this.lastVariant = "" + label;
+        this.trialRequests = (int64) 0;
+        this.trialErrors = (int64) 0;
+        this.trialValueMilli = (int64) 0;
+        this.trialOk = true;
+        this.trialNote = "";
+        int32 k = 0;
+        int32 steps = this.stepsPerTrial();
+        while (k < steps) {
+            this.step = k;
+            this.execute(label);
+            this.absorb(this.stdout());
+            k = k + 1;
         }
+        this.endTrial();
+        if (this.isWarmup()) {
+            this.warmErrors = this.warmErrors + this.trialErrors;
+        } else {
+            this.requests = this.requests + this.trialRequests;
+            this.errors = this.errors + this.trialErrors;
+            if (this.trialN < 64) {
+                this.trialMilli[this.trialN] = this.trialValueMilli;
+                this.trialN = this.trialN + 1;
+            }
+            if (!this.trialOk) {
+                this.allOk = false;
+            }
+            this.note #= this.composeNote();
+            if (this.trialErrors > 0) {
+                throw heap Exception(this.curStack + ": " + this.trialErrors + " error(s) in a trial; "
+                    + this.trialNote);
+            }
+            if (!this.trialOk) {
+                throw heap Exception(this.curStack + ": trial check failed; " + this.trialNote);
+            }
+            this.reportTrial();
+        }
+        if (this.svc != null && !StackBench.pidAlive(this.lastServicePid)) {
+            throw heap Exception(this.curStack + ": the server (pid " + this.lastServicePid + ") died under load");
+        }
+    }
+
+    /** Subclass hook: a measured trial's figure to the harness. Default: its throughput. */
+    public void reportTrial() {
+        this.reportedThroughput((float64) this.trialValueMilli / 1000.0, this.unitText);
     }
 
     /** Subclass hook: read one command's stdout into trialRequests/Errors/ValueMilli/Ok/Note. */
@@ -255,15 +303,23 @@ public class StackBench extends ExternalBenchmark {
             i = i + 1;
         }
         int64 med = Num.median(copy, this.trialN);
-        Fact f = this.ctx.fact(this.id, this.curLabel);
-        this.recordValue(f, med);
+        this.medLabels.add(this.curLabel + "");
+        this.medMilli.add(med);
         this.note #= this.composeNote();
         return this.extraCheck();
     }
 
-    /** Subclass hook: put the median trial value (thousandths) on the row's Fact. Default: throughput. */
-    public void recordValue(Fact f, int64 medianMilli) {
-        f.throughput #= Num.fixed((float64) medianMilli / 1000.0, 1);
+    /** The median trial value (thousandths) a row of this benchmark recorded, or -1. */
+    public int64 medianOf(String label) {
+        int32 i = 0;
+        while (i < this.medLabels.count()) {
+            String l = this.medLabels.get(i);
+            if (l.equals(label)) {
+                return this.medMilli.get(i);
+            }
+            i = i + 1;
+        }
+        return (int64) -1;
     }
 
     public boolean extraCheck() {
@@ -288,26 +344,60 @@ public class StackBench extends ExternalBenchmark {
         return "";
     }
 
-    // A server row reports the server's VmHWM after its trials; a row with no
-    // server of its own (a client) the child's, from ExternalBenchmark's
-    // untimed run under /usr/bin/time.
-    public int64 measuredPeakRssKb() {
-        if (this.server != null) {
-            return this.server.hwmKb();
-        }
-        return super.measuredPeakRssKb();
-    }
-
     // ---- helpers ----------------------------------------------------------
 
     public int32 port() {
-        if (this.server == null) {
-            return 0;
-        }
-        return this.server.port;
+        return this.svcPort;
     }
 
     public int32 variantInt(int32 fallback) {
         return (int32) Num.parse(this.curVariant, (int64) fallback);
+    }
+
+    /** True while `pid` is a running process (not gone, not a zombie). */
+    public static boolean pidAlive(int32 pid) {
+        String st #= Sys.readText("/proc/" + pid + "/stat");
+        if (st.isEmpty()) {
+            return false;
+        }
+        int64 close = st.indexOf(") ");
+        if (close < 0) {
+            return false;
+        }
+        int8 state = st.byteAt((int32) close + 2);
+        return state != 90 && state != 88;   // 'Z' zombie, 'X' dead
+    }
+
+    /**
+     * The phase command's own peak RSS in KiB from one untimed run under GNU
+     * time, or -1: ExternalBenchmark's measurement, for a row whose figure is
+     * the client's (ServiceBenchmark's measuredPeakRssKb is the service's).
+     */
+    public int64 childPeakKb() {
+        Path gt #= Path.of("/usr/bin/time");
+        if (!gt.exists()) {
+            return (int64) -1;
+        }
+        String[] inner #= this.argvFor(this.lastVariant);
+        int32 n = (int32) inner.count();
+        if (n == 0) {
+            return (int64) -1;
+        }
+        String[] argv = heap String[n + 3];
+        argv[0] = "/usr/bin/time";
+        argv[1] = "-f";
+        argv[2] = "CAJETA_BENCH_MAXRSS=%M";
+        int32 i = 0;
+        while (i < n) {
+            argv[i + 3] = "" + inner[i];
+            i = i + 1;
+        }
+        ProcessResult r #= this.launch(#argv);
+        if (!r.launched()) {
+            return (int64) -1;
+        }
+        String err #= Sys.copyText(r.stderr());
+        String v #= Sys.tokenAfter(err, "CAJETA_BENCH_MAXRSS=");
+        return ExternalBenchmark.parseKb(v);
     }
 }

@@ -2,54 +2,36 @@ package dev.cajeta.http.bench;
 
 /**
  * The client rows. Every stack's own client library runs against one fixed
- * local server, cajeta-http's (started once in setup), on `GET /plaintext`,
- * and reports `{"requests","errors","elapsed_ns"}` for its own timed loop.
+ * local server, cajeta-http's (the variant's service, started for each
+ * variant and stopped after it), on `GET /plaintext`, and reports
+ * `{"requests","errors","elapsed_ns"}` for its own timed loop.
  *
  *   http/client-get-throughput   1e5 GETs (1e4 in smoke mode) over 16 reused connections; req/s
  *   http/client-connection-reuse 1e4 GETs (1e3) on one connection with keep-alive, then the
  *                                same with a fresh connection per request; the row is the
  *                                ratio of the two elapsed times (no keep-alive / keep-alive)
+ *
+ * peak_rss_kb is the client's own, from one untimed run under GNU time.
  */
 public class ClientBench extends StackBench {
     public boolean reuse;
-    public ServerProc fixed;
     public int64 kaNs;
     public int64 freshNs;
 
     public ClientBench(^Ctx ctx, String id, boolean reuse) {
         super(ctx, id, "client", reuse ? "x" : "req/s", reuse ? "1" : "16");
         this.reuse = reuse;
-        this.fixed = null;
         this.kaNs = (int64) 0;
         this.freshNs = (int64) 0;
+        this.serverMode = "h1";
         this.timeoutMillis((int64) 300000);
     }
 
-    // The fixed server starts with the first variant, so a failure to start
-    // it is that variant's failed row (with its platform), not a setup row.
-    public void prepareStack(Stack s) {
-        if (this.fixed == null) {
-            this.startFixed();
-        }
-    }
-
-    public void startFixed() {
-        Stack ours = this.ctx.findStack("cajeta-http");
-        if (ours == null) {
-            String f #= Versions.ours(this.ctx.cajetaVersion);
-            Stack tmp = heap Stack("cajeta-http", "", f, true);
-            this.fixed #= ServerProc.start(this.ctx, tmp, "h1");
-            return;
-        }
-        this.fixed #= ServerProc.start(this.ctx, ours, "h1");
-    }
-
-    public void teardown() {
-        this.stopServer();
-        if (this.fixed != null) {
-            this.fixed.stop();
-            this.fixed = null;
-        }
+    /** The service is cajeta-http's h1 server whatever the row's client stack. */
+    public #String[] serviceArgvFor(String label) {
+        String f #= Versions.ours(this.ctx.cajetaVersion);
+        Stack ours = heap Stack("cajeta-http", "", f, true);
+        return this.ctx.serverArgv(ours, "h1", this.svcPort);
     }
 
     public int32 total() {
@@ -65,7 +47,7 @@ public class ClientBench extends StackBench {
 
     public #String[] argvFor(String label) {
         Stack s = this.current();
-        String url = "http://127.0.0.1:" + this.fixed.port + "/plaintext";
+        String url = "http://127.0.0.1:" + this.port() + "/plaintext";
         int32 ka = 1;
         if (this.reuse && this.step == 1) {
             ka = 0;
@@ -99,11 +81,6 @@ public class ClientBench extends StackBench {
         }
     }
 
-    public void recordValue(Fact f, int64 medianMilli) {
-        int32 places = this.reuse ? 2 : 1;
-        f.throughput #= Num.fixed((float64) medianMilli / 1000.0, places);
-    }
-
     public #String details() {
         Stack s = this.current();
         String lib = s.libName("client") + " " + s.libVersion("client");
@@ -115,9 +92,9 @@ public class ClientBench extends StackBench {
             + " reused connections, status and body checked; server=cajeta-http";
     }
 
-    // The client's peak RSS: one untimed run under /usr/bin/time (ExternalBenchmark).
+    // The client's peak RSS: one untimed run under /usr/bin/time, while the server still runs.
     public int64 measuredPeakRssKb() {
         this.step = 0;
-        return super.measuredPeakRssKb();
+        return this.childPeakKb();
     }
 }

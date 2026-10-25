@@ -6,13 +6,14 @@ import cajeta.io.file.FileWriter;
 import cajeta.io.file.OpenMode;
 import cajeta.process.Command;
 import cajeta.process.ProcessResult;
+import dev.cajeta.bench.Ports;
 import dev.cajeta.bench.detect.Sys;
 
 /**
  * Everything the http benchmarks share: where the tools are, the stacks
  * selected for this run, the reference responses from cajeta-http that every
- * competitor is byte-compared against before any load, the per-row facts
- * RowFacts writes after the harness, ports, and the PID file.
+ * competitor is byte-compared against before any load, ports, and the PID
+ * file.
  *
  * Environment:
  *   HTTP_BENCH_ROOT     the bench project directory (default: the working directory)
@@ -39,7 +40,6 @@ public class Ctx {
     public String key;
     public String pidFile;
     public ArrayList<Stack> stacks;
-    public ArrayList<Fact> facts;
     public ArrayList<String> refKeys;
     public ArrayList<String> refVals;
     public int32 portCursor;
@@ -61,7 +61,6 @@ public class Ctx {
         this.key = "";
         this.pidFile = "";
         this.stacks = heap ArrayList<Stack>();
-        this.facts = heap ArrayList<Fact>();
         this.refKeys = heap ArrayList<String>();
         this.refVals = heap ArrayList<String>();
         this.portCursor = 0;
@@ -298,12 +297,7 @@ public class Ctx {
         while (tries < 100) {
             int32 p = 20100 + this.portCursor;
             this.portCursor = (this.portCursor + 1) % 100;
-            String[] argv = heap String[3];
-            argv[0] = "" + this.loadgen;
-            argv[1] = "free";
-            argv[2] = "" + p;
-            ProcessResult r #= this.run(#argv, (int64) 10000);
-            if (r.launched() && r.exitCode() == 0) {
+            if (Ports.isFree(p)) {
                 return p;
             }
             tries = tries + 1;
@@ -439,36 +433,5 @@ public class Ctx {
             i = i + 1;
         }
         return out;
-    }
-
-    // ---- facts ------------------------------------------------------------
-
-    /** The Fact for (benchmark, label), or null. A view: valid while this Ctx lives. */
-    public Fact findFact(String benchmark, String label) {
-        int32 i = 0;
-        int32 n = this.facts.count();
-        while (i < n) {
-            Fact f = this.facts.get(i);
-            if (f.benchmark.equals(benchmark) && f.label.equals(label)) {
-                return f;
-            }
-            i = i + 1;
-        }
-        return null;
-    }
-
-    /** The Fact for (benchmark, label), created on first use. A view: valid while this Ctx lives. */
-    public Fact fact(String benchmark, String label) {
-        int32 i = 0;
-        int32 n = this.facts.count();
-        while (i < n) {
-            Fact f = this.facts.get(i);
-            if (f.benchmark.equals(benchmark) && f.label.equals(label)) {
-                return f;
-            }
-            i = i + 1;
-        }
-        this.facts.add(heap Fact(benchmark, label));
-        return this.facts.get(n);
     }
 }

@@ -57,10 +57,17 @@ slug, so ids look like `http/plaintext-h1`. Its harness variants are
 - `library` and `library_version`: the library that serves the row. Server rows use the HTTP server library; ws, h2, tls and client rows use the library for that feature.
 - `throughput` / `throughput_unit`: the median of the trials (`req/s`, `msg/s`, `events/s`, `handshakes/s`; `x` for the reuse ratio).
 - `notes`: `requests=N; errors=E` (E must be 0), the load generator and its version (`loadgen=oha 1.16.0`), the parameters, and `body-equal` once the stack's response has been byte-compared with cajeta-http's.
-- `peak_rss_kb`: the server's VmHWM after the trials. On client rows it is the client's own peak RSS, taken from an untimed run under `/usr/bin/time`. On `idle-rss` it is the idle VmRSS.
+- `peak_rss_kb`: the server's VmHWM, summed over it and its children, sampled by the harness after every trial and before the stop. On client rows it is the client's own peak RSS, taken from an untimed run under `/usr/bin/time`. On `idle-rss` it is the idle VmRSS.
+- `flags`: on cajeta-http rows the build of this binary (`--debug (O0)`, below); empty on competitor rows.
 
-Each trial runs one external command through the harness's `ExternalBenchmark`
-(dev.cajeta.bench 0.1.1), and the harness times it. A trial that reports any
+Every column is the harness's (dev.cajeta.bench 0.1.5): each id is a
+`ServiceBenchmark`, whose per-variant hooks give the row its identity, and
+which starts the stack's server for each variant (a free port in
+20100..20199, ready when `GET /plaintext` answers 200, or on a TCP connect
+for h2c and TLS, polled every 1 ms), samples its resident set, and stops it
+by its PID (TERM, then KILL after 5 s). Each trial runs one external
+command and reports its throughput (`reportedThroughput`); a start-up trial
+reports its launch's exec-to-200 (`reportedNanos`). A trial that reports any
 error, or a server that dies under load, fails the row (`status=failed`, with
 the reason in `notes`). A stack that lacks a feature gets a `skipped` row with
 the reason: uvicorn has no HTTP/2, and axum's tokio-tungstenite has no
@@ -79,10 +86,6 @@ permessage-deflate.
 | `client-connection-reuse` | 1e4 GETs on one keep-alive connection, then 1e4 on fresh connections; the row is elapsed(fresh)/elapsed(keep-alive) | `1` |
 | `startup-time` | `loadgen startup`: exec to the first 200 on `/plaintext`, one launch per trial, 20 trials. The timing columns are the launches' own times | - |
 | `idle-rss` | `loadgen idle-rss`: start, first 200, 2 s idle, VmRSS of the process tree | - |
-
-The harness's own columns can't carry language, library or throughput on a
-cpu row. After `BenchMain.run` returns, `HttpBench` rewrites those cells of the
-CSV from per-row facts (`RowFacts`); every other column is the harness's.
 
 ## Byte comparison
 
@@ -154,7 +157,7 @@ published against `-O3` competitors.
 bench/
 ├── cajeta.json, bench.sh, README.md
 ├── src/main/cajeta/dev/cajeta/http/bench/   HttpBench (entry), StackBench and its
-│                                            subclasses, Serve, ClientLoad, Ctx, RowFacts
+│                                            subclasses, Serve, ClientLoad, Ctx
 ├── competitors/<stack>/                     the five competitor stacks
 ├── loadgen/                                 Go: ws, sse, startup, idle-rss, wait, free
 ├── fixtures/tls/                            the P-256 test certificate and key

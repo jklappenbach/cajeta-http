@@ -38,7 +38,7 @@
         // Keep dev.cajeta.http and dev.cajeta.crypto in step with Versions.cajeta
         // (bench.sh refuses to run when they disagree).
         "dependencies": {
-            "dev.cajeta.bench": "0.1.1",
+            "dev.cajeta.bench": "0.1.5",
             "dev.cajeta.http":  "0.9.1"
         },
 

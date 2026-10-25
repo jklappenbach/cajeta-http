@@ -6,9 +6,11 @@ import cajeta.process.ProcessResult;
 import dev.cajeta.bench.detect.Sys;
 
 /**
- * A server process the bench started: its port, its PID (recorded in
- * build/pids so a crashed run can be cleaned up by PID), readiness, its
- * resident set, and the kill. Nothing is ever killed by name.
+ * A short-lived cajeta-http server for the reference responses the byte
+ * comparison reads (Ctx.reference): its port, its PID (recorded in build/pids
+ * so a crashed run can be cleaned up by PID), readiness, and the kill. The
+ * measured servers are ServiceBenchmark's (StackBench). Nothing is ever
+ * killed by name.
  */
 public class ServerProc {
     public Process proc;
@@ -74,25 +76,6 @@ public class ServerProc {
         }
         int8 state = st.byteAt((int32) close + 2);
         return state != 90 && state != 88;   // 'Z' zombie, 'X' dead
-    }
-
-    /** Peak resident set (VmHWM) in KiB, or -1. */
-    public int64 hwmKb() {
-        return this.statusKb("VmHWM:");
-    }
-
-    /** Current resident set (VmRSS) in KiB, or -1. */
-    public int64 rssKb() {
-        return this.statusKb("VmRSS:");
-    }
-
-    public int64 statusKb(String label) {
-        if (!this.live) {
-            return (int64) -1;
-        }
-        String text #= Sys.readText("/proc/" + this.pid + "/status");
-        String v #= Sys.tokenAfter(text, label);
-        return Num.parse(v, (int64) -1);
     }
 
     /** SIGKILL this PID and reap it. Idempotent. */

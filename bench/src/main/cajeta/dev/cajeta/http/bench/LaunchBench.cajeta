@@ -6,8 +6,8 @@ package dev.cajeta.http.bench;
  * millisecond, and kills the group afterwards.
  *
  *   http/startup-time  `loadgen startup`: exec to the first 200, one launch per trial
- *                      (20 trials; 3 in smoke mode). The row's timing columns are the
- *                      launches' own exec-to-200 times, not the harness's wall time.
+ *                      (20 trials; 3 in smoke mode). Each trial reports its launch's own
+ *                      exec-to-200 time (reportedNanos), so the time columns are those.
  *   http/idle-rss      `loadgen idle-rss`: the server's resident set after start-up and
  *                      a settle with no load (peak_rss_kb), the process still alive.
  */
@@ -85,9 +85,9 @@ public class LaunchBench extends StackBench {
         this.keep(ns);
     }
 
-    // Only measured trials count: warmups are the first warmCount() calls.
+    // Only measured trials count.
     public void keep(int64 v) {
-        if (this.calls < this.warmCount()) {
+        if (this.isWarmup()) {
             return;
         }
         if (this.sampleN < 64) {
@@ -96,30 +96,11 @@ public class LaunchBench extends StackBench {
         }
     }
 
-    public void recordValue(Fact f, int64 medianMilli) {
-        if (this.rss) {
-            return;
+    // A start-up trial's figure is its launch's exec-to-200; idle-rss reports none.
+    public void reportTrial() {
+        if (!this.rss) {
+            this.reportedNanos(this.trialValueMilli / 1000);
         }
-        // The launches' own times replace the harness's wall-clock columns.
-        int32 n = this.sampleN;
-        int64[] a = heap int64[n];
-        int64 sum = (int64) 0;
-        int32 i = 0;
-        while (i < n) {
-            a[i] = this.samples[i];
-            sum = sum + a[i];
-            i = i + 1;
-        }
-        Num.sort(a, n);
-        f.timed = true;
-        f.minNs = a[0];
-        f.medianNs = a[n / 2];
-        f.meanNs = sum / (int64) n;
-        int32 p = (n * 95) / 100;
-        if (p >= n) {
-            p = n - 1;
-        }
-        f.p95Ns = a[p];
     }
 
     public int64 measuredPeakRssKb() {
